@@ -212,6 +212,78 @@ Android 12 introduced `PhantomProcessKiller` which kills child processes of apps
 
 Since tawc's relay exits after fd handoff, it only needs to survive briefly. But users should be aware of this for other Termux processes.
 
+### 11. Termux:X11 GPU Acceleration: How Buffer Sharing Actually Works (2026-03-27)
+
+**Summary: Termux:X11 does NOT do cross-driver buffer import. There are two distinct GPU acceleration paths, both avoiding the need for the stock Android EGL driver to import Mesa Turnip-allocated buffers.**
+
+#### The Two Paths in Termux:X11
+
+**Path 1: MESA_VK_WSI_DEBUG=sw (the common/default path)**
+
+When `MESA_VK_WSI_DEBUG=sw` is set, Mesa's Vulkan WSI layer uses **software presentation** even though GPU rendering still happens on the GPU. The flow is:
+1. Client app renders with Mesa Turnip (Vulkan) to GPU memory
+2. Mesa's WSI layer reads the rendered image back to CPU memory (`cpu_map`)
+3. WSI sends pixel data to the X server via `xcb_put_image()` (raw pixel copy over the X11 protocol) or via MIT-SHM shared memory + `xcb_shm_create_pixmap()` + `xcb_present_pixmap()`
+4. Termux:X11's Lorie X server receives the pixels into its own pixmap/buffer
+5. Lorie's renderer (OpenGL ES 2 on the stock Android EGL driver) uploads the pixel data as a texture and renders it to the `ANativeWindow`/`SurfaceView`
+
+**Key insight:** The GPU renders the frame, but the frame is then **read back to CPU** and **re-uploaded to a different GPU driver's texture**. There is no zero-copy GPU buffer sharing. The stock driver never imports a Turnip-allocated buffer.
+
+**Path 2: DRI3 (mesa-vulkan-icd-freedreno-dri3 package)**
+
+The `mesa-vulkan-icd-freedreno-dri3` package patches Turnip/Mesa to enable DRI3-based buffer passing:
+1. `tu_kgsl_export_dmabuf.patch`: Makes Turnip export GPU buffer memory as a dmabuf fd via KGSL (the Qualcomm kernel graphics driver)
+2. `wsi-termux-x11.patch`: Modifies Mesa's Vulkan WSI to use DRI3 `pixmap_from_buffer` to send the dmabuf fd to the X server
+3. Termux:X11's DRI3 implementation (`loriePixmapFromFds()`) receives the fd and does `mmap(fd, PROT_READ, MAP_SHARED)` -- **a CPU mmap, NOT a GPU import**
+4. The mapped memory becomes the backing store of an X11 pixmap
+5. The Lorie renderer then uploads this pixmap's pixel data as a GL texture for display
+
+**Critical finding from the DRI3 server code:** The server validates `modifier == RAW_MMAPPABLE_FD` (value 1274) and does a plain `mmap()`. It does NOT create an `AHardwareBuffer`, does NOT call `eglCreateImageKHR`, and does NOT import the dmabuf into EGL/GLES. It reads the pixels via CPU.
+
+The DRI3 path is slightly faster than the SHM path because it avoids the X protocol copy (the buffer is shared via mmap instead of sent over the socket), but **both paths involve CPU readback of the GPU-rendered frame**.
+
+The issue tracker (#23003) notes plans to "make turnip import dmabuf from AHardwareBuffer instead of creating new DMA/ION memory fragment" and "allow drawing frontbuffer directly to ANativeWindow instead of shadow copying" -- but as of 2026 this appears to remain future work.
+
+#### Virgl/VirPipe: The Other GPU Acceleration Path
+
+Virglrenderer-android is a completely different approach that avoids the buffer sharing problem entirely:
+1. `virgl_test_server` runs in Termux using the **stock Android GLES driver** (accessed via Android's EGL)
+2. Client apps in proot/chroot use Mesa's `virpipe` Gallium driver
+3. The client serializes OpenGL commands (as TGSI shader instructions + draw calls) and sends them to the virgl server over a Unix socket
+4. The server replays the commands on the stock GLES driver
+5. The rendered result is then transferred to the display
+
+**There is no cross-driver buffer sharing in virgl.** Everything goes through the stock driver. The cost is high overhead from command serialization/deserialization, and practical performance is reportedly ~10% of native GPU.
+
+#### Zink+Turnip: The Best Performing Path
+
+For Qualcomm (Adreno 610+), the preferred approach is:
+- `MESA_LOADER_DRIVER_OVERRIDE=zink` + Turnip
+- Zink translates OpenGL calls to Vulkan, Turnip provides the Vulkan driver
+- Turnip accesses the GPU directly via `/dev/kgsl-3d0` (the Qualcomm kernel driver)
+- Buffer presentation to Termux:X11 still goes through one of the two paths above (sw or DRI3)
+
+#### Implications for tawc
+
+1. **Cross-driver buffer import (Mesa Turnip buffer imported by stock Adreno EGL) has NOT been demonstrated in practice.** Nobody in the Termux ecosystem has achieved this. Termux:X11 works around it entirely by using CPU readback.
+
+2. **EGL_EXT_image_dma_buf_import on stock Android drivers:** This extension is NOT commonly advertised by stock Android EGL drivers (Qualcomm Adreno, ARM Mali). Android's graphics stack is designed around `AHardwareBuffer` and `EGL_ANDROID_image_native_buffer`, not dmabuf import. Some Mali drivers support it but don't advertise it; Qualcomm's stock driver status is unclear.
+
+3. **The plan's "Path A" (stock EGL dmabuf import via `ImportDma`)** is likely not viable on most Android devices because the stock EGL driver probably does not support `EGL_EXT_image_dma_buf_import`.
+
+4. **The plan's "Path B" (dmabuf -> AHardwareBuffer -> EGL import)** is theoretically sounder because AHardwareBuffer is the native Android buffer type and all stock drivers support it. But the critical question is: can a dmabuf fd allocated by Mesa Turnip (via KGSL) be wrapped into an `AHardwareBuffer` that the stock Adreno EGL driver can then import? This requires that the underlying gralloc/ion/dma-heap memory is compatible between the two drivers. Nobody has publicly demonstrated this working.
+
+5. **AHardwareBuffer as the allocator (our plan) sidesteps the problem.** If the compositor allocates `AHardwareBuffer`s and clients render into them (by importing the AHB as a Vulkan/GL resource on the Turnip side), then the stock driver imports an AHB it recognizes because the AHB was allocated through Android's standard gralloc. This is the approach proposed in termux-packages issue #22292 and used by wlroots-android-bridge. The key question becomes: can Mesa Turnip **import** an AHardwareBuffer allocated by gralloc?
+
+6. **Turnip AHardwareBuffer import:** Turnip supports `VK_ANDROID_external_memory_android_hardware_buffer` (required for Android Vulkan conformance). This extension allows importing AHardwareBuffers as VkDeviceMemory. So the flow would be:
+   - Compositor allocates AHardwareBuffer via NDK
+   - Compositor passes AHB fd to client (via Wayland protocol, as a dmabuf fd extracted from the AHB)
+   - Client (using Turnip) imports the AHB and renders into it
+   - Compositor imports the same AHB into stock EGL via `eglGetNativeClientBufferANDROID` + `eglCreateImageKHR`
+   - Zero-copy: both drivers see the same gralloc buffer
+
+7. **This is exactly what the plan already describes in the Architecture section.** The viability hinges on AHardwareBuffer being the common allocation currency. This avoids cross-driver dmabuf import entirely -- both sides import/export via AHardwareBuffer, which is the Android-native mechanism that all drivers must support.
+
 ### 11. Frame Scheduling: AChoreographer NDK API (2026-03-27)
 
 Android NDK provides `AChoreographer` for vsync callbacks from native code:
