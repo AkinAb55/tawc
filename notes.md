@@ -182,3 +182,93 @@ This avoids all Linux-specific backends (DRM, GBM, libinput, udev, libseat) and 
 - **EGL integration with Rust backend:** The wayland-rs Rust backend does not provide C-compatible `wl_display*` pointers. Some EGL/Mesa interactions on Linux expect these. On Android this is less of a concern since we use Android's EGL directly, not Mesa.
 - **Smithay's EGL module:** `smithay::backend::egl` wraps EGL using `khronos-egl` and expects to create its own EGL display. On Android, we may need `EGLDisplay::from_raw()` to wrap an Android-created display, or create one from an `ANativeWindow`.
 - **Build system:** Cross-compiling requires the Android NDK toolchain. The `cc` crate and `pkg-config` crate need to be configured to find NDK sysroot headers and libraries. `PKG_CONFIG_SYSROOT_DIR` and `PKG_CONFIG_PATH` must point to cross-compiled dependency prefixes.
+
+### 9. app_process Relay: Binder Flow and Context Problem (2026-03-27)
+
+**Summary: `app_process` does NOT provide an Android `Context`. The relay cannot call `bindService()`. The Binder flow must be reversed from the original plan.**
+
+- When `app_process` is launched from Termux, it runs under **Termux's UID** (not tawc's). It inherits Termux's SELinux context (`untrusted_app`). It CAN access Termux's filesystem and CAN use Binder IPC — but it does NOT have an Android `Context`.
+
+- **How wlroots-android-bridge solves this:** The `app_process` side creates its own Binder stub objects and passes them TO the Android app by launching an Activity via direct `IActivityManager.startActivityAsUser()` Binder calls (reflection, bypassing Context). The Binder objects are embedded in the Intent's Bundle. The Android app then calls back to the `app_process` via those received Binders.
+
+- **How Termux:X11 solves this:** Uses `sun.misc.Unsafe` to allocate an `ActivityThread` without calling its constructor, then calls `getSystemContext()` on it. This gives a limited system Context. Falls back to direct `IActivityManager` calls via reflection when the Context approach fails.
+
+- **Recommended approach for tawc:** Use the TermuxAm/wlroots-android-bridge pattern:
+  1. Relay creates the listening socket at `$XDG_RUNTIME_DIR/wayland-0`
+  2. Relay wraps the socket fd in a `ParcelFileDescriptor` inside a Binder-compatible object
+  3. Relay sends the Binder to tawc's app via `IActivityManager.startActivity()` (reflection)
+  4. Tawc's Activity/BroadcastReceiver extracts the fd and passes it to the compositor via JNI
+  5. Relay exits
+
+- **`ParcelFileDescriptor` can transfer any fd type** including listening sockets. Binder's kernel-level fd passing (`BINDER_TYPE_FD`) is type-agnostic — it uses `fget()`/`task_fd_install()` which work on any file descriptor.
+
+### 10. Phantom Process Killer (Android 12+) (2026-03-27)
+
+Android 12 introduced `PhantomProcessKiller` which kills child processes of apps when more than 32 exist. An `app_process` launched from Termux counts as a phantom process.
+
+- **Android 12-13:** Workaround: `adb shell device_config put activity_manager max_phantom_processes 2147483647`
+- **Android 14+:** Developer Options toggle "Disable child process restrictions"
+- **Android 15 (OnePlus):** Reports of aggressive process killing (termux/termux-app#4219)
+
+Since tawc's relay exits after fd handoff, it only needs to survive briefly. But users should be aware of this for other Termux processes.
+
+### 11. Frame Scheduling: AChoreographer NDK API (2026-03-27)
+
+Android NDK provides `AChoreographer` for vsync callbacks from native code:
+- **API 24:** `AChoreographer_getInstance()` + `AChoreographer_postFrameCallback()` (deprecated — timestamp overflow bug)
+- **API 29:** `AChoreographer_postFrameCallback64()` — fixed version, use this
+- **API 30:** `AChoreographer_registerRefreshRateCallback()` — notifies of refresh rate changes
+- **API 33:** `AChoreographer_postVsyncCallback()` with `AChoreographerFrameCallbackData` — multi-timeline frame pacing
+
+**Requirement:** AChoreographer needs a thread with an `ALooper`. The compositor thread must call `ALooper_prepare()` before using AChoreographer.
+
+### 12. Surface Mapping Strategy: ASurfaceControl per Wayland Surface (2026-03-27)
+
+**Key insight: avoid redundant composition.** On Linux, a Wayland compositor must composite all client surfaces into an output framebuffer because it's the final display server. On Android, we're nested under SurfaceFlinger, which is already a compositor. We can map each Wayland surface to a separate `ASurfaceControl` child layer and let SurfaceFlinger handle composition — eliminating GPU work in the compositor.
+
+**ASurfaceControl API (API 29+):**
+- `ASurfaceControl_createFromWindow(ANativeWindow*, name)` — child from SurfaceView's window
+- `ASurfaceControl_create(ASurfaceControl*, name)` — child from existing SC
+- `ASurfaceTransaction_setBuffer(txn, sc, AHardwareBuffer*, fence_fd)` — submit buffer directly, no EGLSurface needed
+- `ASurfaceTransaction_setPosition(txn, sc, x, y)` — position relative to parent
+- `ASurfaceTransaction_setZOrder(txn, sc, z)` — stacking order among siblings
+- `ASurfaceTransaction_apply(txn)` — atomic batch commit
+
+**Java vs NDK API:** The Java `SurfaceControl` API (API 29+) is a superset of the NDK `ASurfaceControl` API. Notably, `SurfaceControl.Transaction.reparent(sc, newParent)` is Java-only — not exposed in NDK. This could be useful for dynamically reparenting popup surfaces. `SurfaceView.getSurfaceControl()` returns a Java `SurfaceControl` (API 29+). For the NDK path, use `ASurfaceControl_createFromWindow()` with the `ANativeWindow` from the SurfaceView.
+
+**Parent clipping problem:** Child ASurfaceControls are clipped to their parent's bounds. The Android docs explicitly state: "Child surfaces are constrained to the onscreen region of their parent." This means if a popup (dropdown menu) extends outside the parent toplevel window's rectangle, it gets clipped.
+
+**Solution: flat sibling hierarchy.** Within each Activity's SurfaceView, get the root `SurfaceControl` via `SurfaceView.getSurfaceControl()`. Create ALL Wayland surfaces (toplevel, popups, subsurfaces) as direct children of this root — NOT mirroring the Wayland parent-child tree. Manage z-order and position manually. This avoids the clipping issue because siblings are not clipped by each other, only by the root (which is the full SurfaceView area).
+
+**SurfaceFlinger layer limits:** Android devices typically have ~4 hardware overlay planes. Beyond that, SurfaceFlinger falls back to GPU composition (its own GLES renderer). For 5-10 Wayland surfaces, this is fine — the system routinely handles 10+ layers. The cost is power efficiency (GPU composition vs HW overlay), not functionality.
+
+**wl_shm surfaces:** Clients using `wl_shm` (CPU-rendered) provide shared memory buffers, not `AHardwareBuffer`s. The compositor must copy into an AHB (`AHardwareBuffer_lock` / memcpy / `AHardwareBuffer_unlock`) before submitting to SurfaceFlinger. One extra copy, but unavoidable for CPU content.
+
+**wlroots-android-bridge validates this approach** — it creates a separate `ASurfaceControl` per Wayland window and submits `AHardwareBuffer`s directly to SurfaceFlinger.
+
+**Termux:X11 does NOT do this** — it composites everything into a single surface. Simpler but slower (redundant GPU composition).
+
+**Two-phase implementation:**
+- Phases 1-4 (bringup): eglSwapBuffers path. One EGLSurface per Activity, compositor does GPU composition of all surfaces. Simpler to implement and debug.
+- Phase 5 (production): ASurfaceControl path. One ASurfaceControl per Wayland surface, direct buffer submission. Compositor does no GPU rendering (except wl_shm → AHB copy).
+
+### 13. Freeform Windowing Availability (2026-03-27)
+
+The "one Activity per toplevel" design gives full multi-window only on devices with freeform windowing:
+- Samsung DeX
+- ChromeOS (Android apps)
+- Android 15+ desktop mode (when connected to external display)
+- Some custom ROMs
+
+On standard phones/tablets, each Activity is fullscreen. The user experience becomes "one Wayland window visible at a time, switch via Android recents." This is still useful but should be documented.
+
+### 14. Smithay API Verification (2026-03-27)
+
+Confirmed against Smithay 0.7.0 (published 2025-06-24):
+
+- **`EGLDisplay::from_raw(display, config_id)`** — exists at `src/backend/egl/display.rs:335`. Takes raw `*const c_void` for EGLDisplay and EGLConfig. Skips `eglTerminate` on drop.
+- **`DisplayHandle::insert_client(stream, data)`** — exists in `wayland-server`. Takes `UnixStream` + `Arc<dyn ClientData>`.
+- **`UnusedEvent`** — exists at `src/backend/input/mod.rs:~85`. Uninhabited enum implementing all event traits.
+- **`InputBackend`** — requires exactly 25 associated types (24 event types + Device).
+- **`GlesRenderer`** — implements `ImportDma`, `ImportDmaWl`, `ImportMem`, `ImportMemWl`, `ImportEgl`, `ExportMem`, `Bind`, `Blit`, `Offscreen`.
+- **Features** `wayland_frontend` and `renderer_gl` exist. `renderer_gl` pulls in `backend_egl` automatically.

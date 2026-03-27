@@ -55,18 +55,34 @@ expect Termux clients to connect.
    ```
    (or a wrapper shell script we provide). This works because `app_process` with the APK's
    classpath gives the relay process both Android framework access (Binder, can talk to the
-   tawc app) AND Termux filesystem access (launched from Termux's shell). The relay:
+   tawc app) AND Termux filesystem access (launched from Termux's shell).
+
+   **Important: `app_process` does NOT provide an Android `Context`.** This means the relay
+   **cannot** call `bindService()` or use other Context-dependent APIs. The wlroots-android-bridge
+   and Termux:X11 solve this by reversing the Binder flow: the relay creates its own Binder
+   objects and sends them *to* the app via a direct `IActivityManager.startActivity()` call
+   (using reflection to bypass the need for a Context). Specifically:
+
+   The relay:
    - Creates `$XDG_RUNTIME_DIR/wayland-0` listening socket in Termux's filesystem
-   - Connects to the tawc app's bound AIDL service via Binder
-   - Hands off the listening socket fd to the compositor via `ParcelFileDescriptor`
+   - Wraps the listening fd in a `ParcelFileDescriptor` inside a Binder-compatible object
+   - Sends the Binder object to the tawc app by launching an Activity or sending a broadcast
+     via direct `IActivityManager` Binder calls (TermuxAm pattern — reflection on hidden APIs)
+   - The tawc app receives the fd from the relay's Binder object
+
+   This is the **reverse** of the original plan's "relay calls bindService()" flow. The relay
+   pushes to the app, not the other way around. Both wlroots-android-bridge and Termux:X11
+   use this pattern. Alternatively, the relay can set up a `Looper` and use
+   `ActivityThread.systemMain()` (via reflection/`sun.misc.Unsafe`) to obtain a system
+   Context, but this is fragile across Android versions.
 
    **Relay data path — listening socket handoff (preferred):**
 
    The relay creates the listening socket at `$XDG_RUNTIME_DIR/wayland-0`, then passes
-   the *listening fd* to the compositor via Binder (`ParcelFileDescriptor`). The compositor
-   calls `accept()` directly on the fd and uses `DisplayHandle::insert_client()` to add
-   each new connection to the Wayland display. After the handoff, the relay can exit — it
-   is only needed at startup.
+   the *listening fd* to the compositor via the Binder mechanism above
+   (`ParcelFileDescriptor`). The compositor calls `accept()` directly on the fd and uses
+   `DisplayHandle::insert_client()` to add each new connection to the Wayland display.
+   After the handoff, the relay can exit — it is only needed at startup.
 
    This works because SELinux checks apply to `connect()`/`bind()` syscalls, not to
    `read()`/`write()`/`accept()` on inherited file descriptors. Once the compositor holds
@@ -80,13 +96,22 @@ expect Termux clients to connect.
    **Last resort — byte proxy:** Relay sits in the middle, forwarding all Wayland protocol
    bytes. Simple but adds latency and CPU overhead. Only use if fd passing doesn't work.
 
-   This is how wlroots-android-bridge works. (Termux:X11 uses `sharedUserId` instead,
-   which only works for Termux plugins signed with the same key.) Adds one lightweight
-   process but no Binder IPC for rendering/input — only connection bootstrapping.
+   Termux:X11 uses `sharedUserId` instead, which only works for Termux plugins signed
+   with the same key. wlroots-android-bridge avoids the problem entirely because its
+   compositor runs in Termux. Our relay approach adds one lightweight process but no
+   Binder IPC for rendering/input — only connection bootstrapping.
 
-   **Note:** The relay requires a small AIDL interface (or equivalent) for the initial fd
-   handoff between the relay and the app. This is the *only* use of Binder in the
-   architecture — all rendering and input are Binder-free.
+   **Android 12+ caveat: Phantom Process Killer.** Android 12 introduced
+   `PhantomProcessKiller` which kills child processes of apps when more than 32 exist.
+   An `app_process` launched from Termux counts as a phantom process. Mitigations:
+   - Android 12-13: `adb shell device_config put activity_manager max_phantom_processes 2147483647`
+   - Android 14+: Developer Options → "Disable child process restrictions"
+   Since the relay can exit after fd handoff, it only needs to survive long enough for
+   the handoff — but users should still be aware of this restriction for other Termux
+   processes.
+
+   **Note:** The Binder interaction (relay → app fd handoff) is the *only* use of Binder
+   in the architecture — all rendering and input are Binder-free.
 
 2. **`socketpair()` + fd passing:** The app creates `socketpair()` fds and passes one end
    to Termux via a ContentProvider or bound Service using `ParcelFileDescriptor`. Termux
@@ -140,16 +165,21 @@ the compositor via a one-shot Binder call — after that, the relay can exit.
 │  │  ├─ AndroidEglBackend (EGL on ANativeWindow)               │  │
 │  │  ├─ AndroidInputBackend (events from Kotlin via channel)   │  │
 │  │  ├─ AndroidOutputBackend (ASurfaceTransaction / eglSwap)   │  │
+│  │  ├─ FrameClock (AChoreographer vsync → calloop)            │  │
 │  │  └─ Wayland state (xdg-shell, wl_seat, wl_output, etc)    │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │         │                                                        │
-│    Unix domain socket (see "Socket sharing" above)               │
+│    Unix domain socket (listening fd received from relay)          │
 │         │                                                        │
-│  app_process relay (creates socket in Termux's XDG_RUNTIME_DIR)  │
-│         │                                                        │
-│  Termux / proot / chroot (separate process, same device)         │
-│    └─ Wayland clients (GTK, Qt, wlroots apps, etc)               │
-└──────────────────────────────────────────────────────────────────┘
+└─────────┼────────────────────────────────────────────────────────┘
+          │
+  app_process relay (separate process, Termux's UID)
+    ├─ Creates socket at $XDG_RUNTIME_DIR/wayland-0
+    ├─ Passes listening fd to app via Intent + Binder object
+    └─ Exits after handoff
+          │
+  Termux / proot / chroot (separate process, same device)
+    └─ Wayland clients (GTK, Qt, wlroots apps, etc)
 ```
 
 Communication between Kotlin UI thread and Rust compositor thread:
@@ -166,8 +196,8 @@ Communication between Kotlin UI thread and Rust compositor thread:
 
 ### 1. Kotlin App Shell (`app/`)
 
-Standard Android app. Includes a small AIDL service for the `app_process` relay to hand
-off the Wayland listening socket fd. No Binder IPC for rendering or input.
+Standard Android app. Receives the Wayland listening socket fd from the `app_process`
+relay via a Binder object passed through an Intent. No Binder IPC for rendering or input.
 
 - **`MainActivity`** — entry point. Loads `libsmithay_android.so` via `System.loadLibrary()`.
   Starts the compositor thread via JNI (`nativeStartCompositor(socketPath)`).
@@ -194,9 +224,11 @@ JNI callbacks (Rust → Kotlin):
 
 Bootstrapping: app starts → loads native lib → spawns compositor thread. Separately, user
 launches `app_process` relay from Termux which creates `$XDG_RUNTIME_DIR/wayland-0` and
-passes the listening socket fd to the compositor via a bound AIDL service. The compositor
-calls `accept()` on the fd directly. After handoff, the relay can exit. No AIDL for
-rendering/input — only for this one-shot socket bootstrap.
+passes the listening socket fd to the app via a Binder object sent through an Intent
+(TermuxAm pattern — direct `IActivityManager` calls, no Context needed). The app extracts
+the fd and passes it to the compositor via JNI. The compositor calls `accept()` on the fd
+directly. After handoff, the relay can exit. No Binder for rendering/input — only for this
+one-shot socket bootstrap.
 
 ### 2. Android EGL Backend (`smithay-android/src/egl.rs`)
 
@@ -236,8 +268,9 @@ Smithay EGL integration (researched — no GBM assumption):
 
 **Not needed for MVP.** During Phases 1-4 (eglSwapBuffers), the compositor renders directly
 to EGLSurfaces backed by ANativeWindows — no separate buffer allocation needed. The
-allocator is only required for Phase 5 (ASurfaceTransaction zero-copy path), where we need
-to render to AHardwareBuffers and submit them directly to SurfaceFlinger.
+allocator is required for Phase 5 (ASurfaceControl zero-copy path): for wl_shm clients
+whose CPU buffers must be copied into AHardwareBuffers before submission to SurfaceFlinger,
+and potentially for compositor-allocated buffers if needed.
 
 Implements Smithay's `Allocator` trait using AHardwareBuffer.
 
@@ -330,32 +363,58 @@ creates a GL view of the same memory.
 
 ### 5. Presentation Backend (`smithay-android/src/output.rs`)
 
-Two options, in order of preference:
+Two presentation paths, in order of preference:
 
-**Option A: ASurfaceTransaction (preferred, zero-copy)**
+**Path A: ASurfaceControl per Wayland surface (preferred, zero-copy)**
+
+Each Wayland surface gets its own `ASurfaceControl` child layer under the Activity's
+SurfaceView. Client buffers (as `AHardwareBuffer`s) are submitted directly to
+SurfaceFlinger — the compositor does no GPU rendering for this path.
+
 ```rust
-pub fn present(surface_control: *mut ASurfaceControl, buffer: &AndroidBuffer) {
+pub struct SurfaceLayer {
+    surface_control: *mut ASurfaceControl, // child of root SurfaceView's SC
+}
+
+pub fn present_surface(layer: &SurfaceLayer, buffer: &AHardwareBuffer,
+                       x: i32, y: i32, z: i32, fence_fd: i32) {
     // ASurfaceTransaction_create()
-    // ASurfaceTransaction_setBuffer(transaction, surface_control, buffer.raw())
-    // ASurfaceTransaction_setVisibility(transaction, surface_control, VISIBLE)
-    // ASurfaceTransaction_apply(transaction)
+    // ASurfaceTransaction_setBuffer(txn, layer.surface_control, buffer, fence_fd)
+    // ASurfaceTransaction_setPosition(txn, layer.surface_control, x, y)
+    // ASurfaceTransaction_setZOrder(txn, layer.surface_control, z)
+    // ASurfaceTransaction_setVisibility(txn, layer.surface_control, VISIBLE)
+    // ASurfaceTransaction_apply(txn)
 }
 ```
-Submits the AHardwareBuffer directly to SurfaceFlinger. Supports hardware overlays
-(direct scanout) if the device supports it. Available since API 29.
+
+All Wayland surfaces (toplevels, popups, subsurfaces) within one Activity are created as
+**flat siblings** under the root SurfaceControl (not mirroring the Wayland parent-child
+tree) to avoid Android's parent-clipping behavior on popups. Z-order and position are
+managed manually. Batch all updates into a single `ASurfaceTransaction_apply()` for
+atomicity.
+
+SurfaceFlinger composites the layers using hardware overlays (up to ~4 per device) or
+its own GPU composition (beyond that). Either way, the compositor's CPU/GPU is not
+involved in composition.
 
 **Caveat:** `ASurfaceControl_createFromWindow` returns NULL for the root `ANativeWindow`
 before API 35 (confirmed bug: https://issuetracker.google.com/issues/320706287). Must use
-a child SurfaceView's `ANativeWindow`, not the Activity's root window. The wlroots-android-bridge
-hit this exact issue.
+a child SurfaceView's `ANativeWindow`, not the Activity's root window. Our architecture
+already uses SurfaceView, so this is not an issue.
 
-**Option B: eglSwapBuffers (simpler, one extra copy)**
-- Render onto the EGLSurface bound to the ANativeWindow
-- Call `eglSwapBuffers()` — SurfaceFlinger gets the buffer via its own triple-buffering
-- Simpler but involves the EGL buffer queue (producer-consumer), not true zero-copy
-  from the allocator's buffer.
+**wl_shm surfaces:** For clients using `wl_shm` (CPU-rendered buffers), the compositor
+must copy the shared-memory data into an `AHardwareBuffer` (`AHardwareBuffer_lock` /
+memcpy / `AHardwareBuffer_unlock`) before submitting to SurfaceFlinger. One copy, but
+unavoidable for CPU content.
 
-Start with Option B for bringup, migrate to Option A for production.
+**Path B: eglSwapBuffers (simpler, for bringup)**
+- Compositor has one EGLSurface per Activity (backed by its ANativeWindow)
+- Reads client buffers as GL textures, draws them onto the EGLSurface via GlesRenderer
+- Calls `eglSwapBuffers()` — SurfaceFlinger gets the composited result
+- One extra GPU composition step, but simpler to implement and debug
+- All popups/subsurfaces are composited by the compositor in this path
+
+Start with Path B for bringup (Phases 1-4), migrate to Path A for production (Phase 5).
 
 ### 6. Input Backend (`smithay-android/src/input.rs`)
 
@@ -415,6 +474,82 @@ Use Smithay's protocol handling (this is where it shines — no custom work need
 - `wl_data_device_manager` — clipboard (bridge to Android clipboard)
 - `wp-cursor-shape-v1` — cursor theming
 
+**Surface mapping — ASurfaceControl per Wayland surface (zero-copy):**
+
+Rather than compositing all of a client's surfaces into a single output buffer (the standard
+Linux compositor approach), we map each Wayland surface to its own `ASurfaceControl` child
+layer and let SurfaceFlinger do the final composition. This eliminates GPU composition in
+the compositor entirely for the common case — client buffers go straight to SurfaceFlinger.
+
+**Hierarchy:** Within each Activity's SurfaceView, obtain the root `SurfaceControl` via
+`SurfaceView.getSurfaceControl()` (API 29+). Create all Wayland surfaces (toplevel,
+popups, subsurfaces) as **flat siblings** — direct children of this root SurfaceControl.
+Do NOT mirror the Wayland parent-child tree, because Android clips child surfaces to their
+parent's bounds, which would clip dropdown menus that extend outside the toplevel window.
+
+For each Wayland surface:
+1. `ASurfaceControl_create(root_sc, debug_name)` — create a child layer
+2. `ASurfaceTransaction_setPosition(txn, sc, x, y)` — position relative to root
+3. `ASurfaceTransaction_setZOrder(txn, sc, z)` — manage stacking manually
+4. `ASurfaceTransaction_setBuffer(txn, sc, ahb, fence)` — submit client's AHardwareBuffer
+5. `ASurfaceTransaction_apply(txn)` — atomic batch update
+
+No EGLSurface per child is needed. No GPU composition by the compositor. SurfaceFlinger
+composites the layers using hardware overlays (up to ~4 layers) or its own GPU composition
+(beyond that). This is the same approach used by wlroots-android-bridge.
+
+**wl_shm fallback:** For clients using `wl_shm` (software rendering), the compositor must
+copy the shared-memory buffer into an `AHardwareBuffer` (via `AHardwareBuffer_lock` /
+memcpy / `AHardwareBuffer_unlock`) before submitting to SurfaceFlinger. This is one extra
+copy but unavoidable for CPU-rendered content.
+
+**Cross-Activity popups:** Popups that must extend beyond an Activity's bounds (rare — only
+relevant in freeform windowing mode) cannot use child ASurfaceControls of that Activity's
+SurfaceView. For MVP, clip them. For polish, consider `SYSTEM_ALERT_WINDOW` permission or
+an overlay SurfaceView.
+
+**Fallback (Phase 1-4):** Before the ASurfaceControl path is implemented, use the simpler
+approach: one EGLSurface per Activity, compositor reads client textures and renders them
+onto the EGLSurface via the GLES renderer, then calls `eglSwapBuffers`. This is one
+extra composition step but is simpler to implement and debug. Migrate to the zero-copy
+ASurfaceControl path in Phase 5.
+
+**`wl_output` configuration:** Report Android display metrics to Wayland clients:
+- Resolution: from `DisplayMetrics.widthPixels` / `heightPixels` (passed to Rust via JNI)
+- Physical size: from `DisplayMetrics.xdpi` / `ydpi` (compute mm from pixels/dpi)
+- Refresh rate: from `Display.getRefreshRate()` (or `Display.getSupportedModes()`)
+- Scale factor: derive Wayland scale from `DisplayMetrics.density`. Android density 1.0 =
+  160dpi ≈ Wayland scale 1. density 2.0 = 320dpi ≈ scale 2. Use `wp-fractional-scale-v1`
+  for non-integer scales (common on Android: 2.625, 3.5, etc.)
+
+### 8. Frame Scheduling (`smithay-android/src/frame_clock.rs`)
+
+The compositor needs vsync-driven frame scheduling to avoid unnecessary rendering and
+screen tearing.
+
+**Approach: `AChoreographer` (NDK API, available since API 24)**
+
+Use `AChoreographer_postFrameCallback64()` (API 29+) for vsync callbacks from native code.
+The callback fires once per vsync; re-register after each frame.
+
+Integration with calloop event loop:
+1. The compositor thread runs a calloop `EventLoop`
+2. Register an `ALooper`-backed event source (AChoreographer requires a thread with an
+   `ALooper` — use `ALooper_prepare()` on the compositor thread)
+3. On vsync callback: post a "render frame" event into calloop
+4. Calloop dispatches: drain input channel, process Wayland events, render all dirty
+   surfaces, call `eglSwapBuffers` (or `ASurfaceTransaction_apply`)
+5. Re-register for next vsync via `AChoreographer_postFrameCallback64()`
+
+Only render when there's actual damage (new client commits, input state changes, etc.).
+Skip the vsync callback re-registration when idle to save power.
+
+**calloop integration:** The compositor's event loop (calloop) needs these event sources:
+- Wayland client connections (from the listening socket fd)
+- Input events (crossbeam channel from JNI, wrapped as a calloop `Channel` source)
+- Surface lifecycle events (JNI callbacks for surface created/destroyed/resized)
+- Frame vsync (from AChoreographer, bridged into calloop via a pipe or eventfd)
+
 ---
 
 ## Crate Structure
@@ -431,7 +566,8 @@ smithay-android/
 │   ├── input.rs            # AndroidInputBackend (InputBackend impl)
 │   ├── keymap.rs           # AKEYCODE → Linux scancode mapping
 │   ├── compositor.rs       # Wayland state machine, protocol handling
-│   └── window.rs           # Per-toplevel state (surface, geometry, etc.)
+│   ├── window.rs           # Per-toplevel state (surface, geometry, etc.)
+│   └── frame_clock.rs      # AChoreographer vsync + calloop integration
 └── build.rs                # bindgen for NDK APIs
 ```
 
@@ -452,16 +588,14 @@ app/
 │   │   ├── MainActivity.kt
 │   │   ├── SurfaceViewActivity.kt
 │   │   ├── NativeBridge.kt           # JNI extern declarations
-│   │   ├── RelayService.kt           # Bound AIDL service for socket fd handoff
+│   │   ├── RelayReceiver.kt          # Receives fd from relay via Intent + Binder
 │   │   └── Relay.kt                  # app_process entry point (runs in Termux)
-│   ├── aidl/com/tawc/
-│   │   └── IRelayService.aidl        # Single method: handoffListeningSocket(fd)
 │   └── res/
 └── build.gradle.kts                   # invokes cargo-ndk, copies .so to jniLibs
 ```
 
-No C++ glue. AIDL is only for the one-shot relay socket handoff. The entire native layer
-is the Rust .so.
+No C++ glue. No AIDL — the relay passes the socket fd to the app via a Binder object
+embedded in an Intent (TermuxAm pattern). The entire native layer is the Rust .so.
 
 ---
 
@@ -470,7 +604,6 @@ is the Rust .so.
 - Rust library cross-compiled for `aarch64-linux-android` via `cargo-ndk`
 - Outputs `libsmithay_android.so` loaded by the Kotlin app via `System.loadLibrary()`
 - Gradle build invokes cargo-ndk as a custom task, copies .so into `jniLibs/arm64-v8a/`
-- Small AIDL interface for relay socket handoff (compiled by Gradle automatically)
 - Target API level: 29 (Android 10) minimum for ASurfaceTransaction + AHardwareBuffer.
   API 35 recommended for `ASurfaceControl_createFromWindow` on root ANativeWindow.
 
@@ -508,7 +641,7 @@ AHardwareBuffer/ANativeWindow/ASurfaceControl). These are all in the NDK sysroot
 
 ### Phase 2: Wayland Server (weeks 3-4)
 6. Initialize Smithay's Wayland state (Display, compositor, xdg_shell)
-7. Build `app_process` relay + AIDL service for listening socket handoff. Test that
+7. Build `app_process` relay (TermuxAm pattern) for listening socket handoff. Test that
    Termux clients can connect to `$XDG_RUNTIME_DIR/wayland-0` and the compositor
    receives the connections via `DisplayHandle::insert_client()`.
 8. Handle wl_shm clients: ImportMemWl → GlesRenderer → eglSwapBuffers
@@ -527,16 +660,20 @@ AHardwareBuffer/ANativeWindow/ASurfaceControl). These are all in the NDK sysroot
 17. MainActivity spawns SurfaceViewActivity per window
 18. Each window gets its own Surface → EGL context → render target
 19. Window lifecycle (map, unmap, close, resize)
-20. **Milestone: multiple Wayland windows as separate Android Activities**
+20. Popups and subsurfaces composited into parent's EGLSurface by GlesRenderer
+    (Phase 5 migrates these to individual ASurfaceControl layers)
+21. **Milestone: multiple Wayland windows as separate Android Activities**
 
-### Phase 5: Zero-Copy Presentation (weeks 9-10)
-21. Implement AndroidAllocator (AHardwareBuffer) — only needed now, for rendering to
-    AHardwareBuffers instead of EGLSurfaces
-22. Replace eglSwapBuffers with ASurfaceTransaction_setBuffer: compositor renders to
-    AHardwareBuffer, submits directly to SurfaceFlinger
-23. Fence synchronization via EGL_ANDROID_native_fence_sync
-24. Benchmark: measure latency and throughput vs eglSwapBuffers path
-25. **Milestone: zero-copy buffer path, no eglSwapBuffers overhead**
+### Phase 5: Zero-Copy Presentation via ASurfaceControl (weeks 9-10)
+21. Create child `ASurfaceControl` per Wayland surface (flat siblings under root SC)
+22. For wl_shm clients: copy shm buffer into AHardwareBuffer, submit via
+    `ASurfaceTransaction_setBuffer`. For dmabuf/AHB clients: submit buffer directly.
+23. Manage z-order and position of child ASurfaceControls to match Wayland surface tree
+24. Fence synchronization via `EGL_ANDROID_native_fence_sync` / acquire fence fd
+25. Remove eglSwapBuffers composition path — compositor no longer does GPU rendering
+    for the common case (only wl_shm → AHB copy remains)
+26. Benchmark: measure latency and throughput vs eglSwapBuffers path
+27. **Milestone: zero-copy surface-per-layer path, SurfaceFlinger does all composition**
 
 ### Phase 6: Polish & Protocols (ongoing)
 26. Server-side decorations (xdg-decoration)
@@ -564,6 +701,10 @@ AHardwareBuffer/ANativeWindow/ASurfaceControl). These are all in the NDK sysroot
 | Activity launch latency (100-300ms per window) | Sluggish window creation | Suppress animations (`overridePendingTransition(0, 0)`), consider pre-creating a pool of Activities, or evaluate single-Activity multi-SurfaceView approach as alternative. |
 | libxkbcommon not in Android NDK | Build fails | Cross-compile libxkbcommon from source with NDK toolchain; or shim the pure-Rust `xkbcommon-rs` crate. |
 | Smithay has never been built for Android | Unknown build failures | Use `default-features = false`, only enable needed features. wayland-rs pure Rust backend avoids libwayland dependency. May need to patch platform-specific code paths. |
+| Phantom Process Killer (Android 12+) | Relay process killed by OS | Relay exits after fd handoff (short-lived). Users may need `device_config put activity_manager max_phantom_processes 2147483647` or Developer Options toggle (Android 14+). |
+| `app_process` relay lacks Android Context | Can't call `bindService()` | Use TermuxAm pattern: relay creates Binder objects and sends them to app via direct `IActivityManager` calls (reflection). Both wlroots-android-bridge and Termux:X11 use this. |
+| Hidden API reflection breaks across Android versions | Relay stops working | The `IActivityManager` / `ActivityThread` reflection used by TermuxAm has worked through Android 15. Monitor for breakage; consider Shizuku as alternative mechanism. |
+| Freeform windowing not universally available | Multi-window = fullscreen only on phones | On standard phones, each Activity is fullscreen (switch via recents). True freeform windows only on Samsung DeX, ChromeOS, Android 15+ desktop mode. Document this limitation. |
 
 ---
 
