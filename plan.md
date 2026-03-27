@@ -28,10 +28,59 @@ It also depends on Mesa for the GLES/Vulkan renderer and GBM, which don't exist 
 
 **Why we don't need two processes:** The wlroots-android-bridge uses two processes because
 labwc is a standalone C program with heavy native dependencies (Mesa, wlroots, etc.) that
-must run inside Termux. We're building a Rust library loaded via JNI — the compositor runs
-as a background thread inside the Android app itself. This eliminates all Binder IPC for
-surfaces and input, meaning zero serialization overhead and direct access to ANativeWindow
-and AInputQueue from the compositor thread.
+must run inside Termux. It uses `app_process` from Termux to get a hybrid process with both
+Android framework access and Termux's native library environment. We're building a Rust
+library loaded via JNI — the compositor runs as a background thread inside the Android app
+itself. This eliminates all Binder IPC for surfaces and input, meaning zero serialization
+overhead and direct access to ANativeWindow from the compositor thread.
+
+**Critical constraint: Wayland socket sharing.** The wlroots-android-bridge avoids the
+cross-app socket problem because its compositor runs *inside Termux* (via `app_process`),
+so the Wayland socket lives in Termux's own filesystem. In our single-process design, the
+compositor runs in the Android app (different UID/SELinux domain from Termux). On Android
+9+, SELinux blocks Unix domain socket `connect()` between different `untrusted_app` domains
+— both abstract and filesystem sockets. This means we **cannot** simply create a socket and
+expect Termux clients to connect.
+
+**Socket sharing solutions (in order of preference):**
+
+1. **`app_process` relay (proven approach):** Ship a small Kotlin class (e.g.,
+   `com.tawc.Relay`) in the APK. Termux users launch it via:
+   ```
+   /system/bin/app_process -Djava.class.path="$(pm path com.tawc | cut -d: -f2)" / com.tawc.Relay
+   ```
+   (or a wrapper shell script we provide). This works because `app_process` with the APK's
+   classpath gives the relay process both Android framework access (Binder, can talk to the
+   tawc app) AND Termux filesystem access (launched from Termux's shell). The relay:
+   - Connects to the compositor inside the Android app (via Binder or local socket)
+   - Creates `$XDG_RUNTIME_DIR/wayland-0` in Termux's filesystem
+   - Listens for Wayland client connections and bridges them to the compositor
+
+   **Open design question — relay data path options (investigate during implementation):**
+   - **Byte proxy:** Relay sits in the middle, forwarding all Wayland protocol bytes between
+     client and compositor. Simple but adds latency and CPU overhead for every message.
+   - **Fd handoff via `SCM_RIGHTS`:** Relay accepts a client connection, then passes the
+     client's socket fd to the compositor over a pre-established Unix control channel. After
+     handoff, the relay is out of the data path — bytes flow directly between client and
+     compositor. Zero ongoing overhead. Needs testing: will SELinux allow the compositor
+     (app process) to `read`/`write` on a socket fd that originated in the relay process?
+   - **Listening socket handoff:** Relay creates the listening socket, passes the *listening
+     fd* to the compositor via Binder. Compositor calls `accept()` directly. Relay is only
+     needed at startup. Needs testing: will SELinux allow `accept()` on a socket with a
+     different label than the accepting process?
+
+   This is how wlroots-android-bridge and Termux:X11 work. Adds one process but no Binder
+   IPC for rendering/input — only connection bootstrapping (or ongoing proxy, depending on
+   which data path option works).
+
+2. **`socketpair()` + fd passing:** The app creates `socketpair()` fds and passes one end
+   to Termux via a ContentProvider or bound Service using `ParcelFileDescriptor`. Termux
+   clients would need a wrapper that obtains the fd before starting the Wayland client.
+   More complex, but fully in-process for established connections.
+
+3. **Shared writable directory (fragile):** Place the socket in a world-accessible location
+   (e.g., `/data/local/tmp/`). May work on some devices/Android versions but SELinux
+   enforcement varies by OEM. Not reliable for production.
 
 ## Our Approach: Smithay + Android EGL (works on all GPUs)
 
@@ -77,7 +126,9 @@ on a dedicated background thread. No Binder IPC for surfaces or input.
 │  │  └─ Wayland state (xdg-shell, wl_seat, wl_output, etc)    │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │         │                                                        │
-│    Unix domain socket ($PREFIX/tmp/wayland-0)                    │
+│    Unix domain socket (see "Socket sharing" above)               │
+│         │                                                        │
+│  app_process relay (creates socket in Termux's XDG_RUNTIME_DIR)  │
 │         │                                                        │
 │  Termux / proot / chroot (separate process, same device)         │
 │    └─ Wayland clients (GTK, Qt, wlroots apps, etc)               │
@@ -123,8 +174,10 @@ JNI callbacks (Rust → Kotlin):
 - `requestCloseActivity(windowId: Long)`
 - `requestResizeActivity(windowId: Long, w: Int, h: Int)`
 
-Bootstrapping: app starts → loads native lib → spawns compositor thread → creates Wayland
-socket → clients connect from Termux. No `app_process`, no TermuxAm.
+Bootstrapping: app starts → loads native lib → spawns compositor thread → creates internal
+compositor socket. Separately, user launches `app_process` relay from Termux which creates
+`$XDG_RUNTIME_DIR/wayland-0` and bridges connections to the compositor (see "Socket sharing"
+above). No AIDL for rendering/input — relay only handles connection bootstrapping.
 
 ### 2. Android EGL Backend (`smithay-android/src/egl.rs`)
 
@@ -144,13 +197,21 @@ pub struct AndroidEglSurface {
 
 Key considerations:
 - Use `EGL_ANDROID_native_fence_sync` for fence-based synchronization with SurfaceFlinger.
-- Query `EGL_ANDROID_image_native_buffer` to confirm AHardwareBuffer → EGLImage import is available.
-- Smithay's `GlesRenderer::new()` takes an `EGLContext` — we create one from our Android EGLDisplay
-  and pass it in. The renderer itself doesn't need modification.
+- Query `EGL_ANDROID_image_native_buffer` to confirm AHardwareBuffer → EGLImage import is
+  available. This is a **driver extension**, not API-level gated — must be queried at runtime
+  via `eglQueryString` + `eglGetProcAddress`. Widely available on Android 8+ but not guaranteed.
+- Smithay's `GlesRenderer::new()` takes a Smithay `EGLContext` (not raw EGL handles). We must
+  use Smithay's EGL wrappers.
 
-Risk: Smithay's EGL module may assume GBM-backed initialization internally. If so, we either
-patch Smithay's `EGLDisplay` to accept an Android native display, or bypass Smithay's EGL
-wrapper and create raw EGL objects ourselves, then construct `GlesRenderer` from the raw context.
+Smithay EGL integration (researched — no GBM assumption):
+- `EGLDisplay::from_raw(display, config_id)` accepts pre-initialized raw `EGLDisplay` and
+  `EGLConfig` pointers. This is the escape hatch. We create the EGL display ourselves via
+  `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize`, then wrap it. `from_raw` skips
+  `eglTerminate` on drop (we manage lifetime externally).
+- Alternatively, implement the `EGLNativeDisplay` trait with `EGL_PLATFORM_ANDROID_KHR`
+  (0x3141) to go through Smithay's platform display path.
+- From the wrapped `EGLDisplay`, create an `EGLContext`, then pass to `GlesRenderer::new()`.
+- No Smithay fork needed for this.
 
 ### 3. Android Allocator (`smithay-android/src/allocator.rs`)
 
@@ -188,18 +249,41 @@ impl Buffer for AndroidBuffer {
 ```
 
 Format mapping (DRM fourcc → AHardwareBuffer format):
-- `ARGB8888` → `AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM`
-- `XRGB8888` → `AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM`
-- `RGB565` → `AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM`
-- Others as needed
+
+**IMPORTANT:** DRM fourcc names describe MSB-to-LSB channel order, which is the *reverse*
+of memory byte order on little-endian. AHardwareBuffer format names describe memory byte order.
+So `DRM_FORMAT_ARGB8888` = BGRA in memory ≠ `R8G8B8A8_UNORM` = RGBA in memory.
+
+Correct mappings:
+- `DRM_FORMAT_ABGR8888` → `AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM` (RGBA in memory)
+- `DRM_FORMAT_XBGR8888` → `AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM` (RGBX in memory)
+- `DRM_FORMAT_RGB565`   → `AHARDWAREBUFFER_FORMAT_R5G6B5_UNORM`
+- `DRM_FORMAT_ARGB8888` → no direct AHB constant; use `HAL_PIXEL_FORMAT_BGRA_8888` (value 5)
+  if vendor supports it, otherwise convert/avoid
+- Others as needed; query supported formats at runtime
 
 ### 4. Buffer Import: AHardwareBuffer → GL Texture (`smithay-android/src/import.rs`)
 
 For Wayland clients using `wl_shm`, Smithay's `ImportMem` / `ImportMemWl` handles it
 (CPU memcpy → `glTexImage2D`). This works out of the box.
 
-For GPU-accelerated clients and for the compositor's own render targets, implement
-AHardwareBuffer → EGLImage → GL texture import:
+For GPU-accelerated clients and for the compositor's own render targets, two options:
+
+**Option A: Dmabuf export (preferred — leverages existing Smithay code)**
+
+On Android 10+, `AHardwareBuffer` can be exported to a dmabuf fd via NDK. Smithay's
+`GlesRenderer` already implements `ImportDma`. This avoids writing custom GL import code:
+
+```rust
+// Export AHardwareBuffer → dmabuf fd (NDK function, Android 10+)
+// Wrap fd as Smithay Dmabuf
+// Use GlesRenderer::import_dmabuf() — already implemented
+```
+
+Needs testing to confirm Android dmabuf fds work with Smithay's desktop-oriented dmabuf
+import path (same EGL extensions under the hood, but edge cases possible).
+
+**Option B: Direct EGLImage import (fallback)**
 
 ```rust
 impl ImportAndroidBuffer for GlesRenderer {
@@ -217,8 +301,8 @@ impl ImportAndroidBuffer for GlesRenderer {
 }
 ```
 
-This is the zero-copy path. The AHardwareBuffer is GPU memory; importing it as a GL
-texture does not copy — it just creates a GL view of the same memory.
+Both are zero-copy: the AHardwareBuffer is GPU memory; importing it as a GL texture just
+creates a GL view of the same memory.
 
 ### 5. Presentation Backend (`smithay-android/src/output.rs`)
 
@@ -234,7 +318,12 @@ pub fn present(surface_control: *mut ASurfaceControl, buffer: &AndroidBuffer) {
 }
 ```
 Submits the AHardwareBuffer directly to SurfaceFlinger. Supports hardware overlays
-(direct scanout) if the device supports it. Requires API 29+ (basic) / 34+ (setBuffer with AHB).
+(direct scanout) if the device supports it. Available since API 29.
+
+**Caveat:** `ASurfaceControl_createFromWindow` returns NULL for the root `ANativeWindow`
+before API 35 (confirmed bug: https://issuetracker.google.com/issues/320706287). Must use
+a child SurfaceView's `ANativeWindow`, not the Activity's root window. The wlroots-android-bridge
+hit this exact issue.
 
 **Option B: eglSwapBuffers (simpler, one extra copy)**
 - Render onto the EGLSurface bound to the ANativeWindow
@@ -248,12 +337,26 @@ Start with Option B for bringup, migrate to Option A for production.
 
 Implements Smithay's `InputBackend` trait. Translates Android events to Smithay event types.
 
-Required associated type implementations:
+Smithay's `InputBackend` trait requires ~25 associated types (keyboard, pointer, touch,
+gesture, tablet, switch events). For MVP, we implement the ones we need and use Smithay's
+`UnusedEvent` (uninhabited type) for the rest:
+
+**Implemented:**
 - `KeyboardKeyEvent` — from Android `KeyEvent` (AKEYCODE_* → Linux KEY_* via mapping table)
 - `PointerMotionAbsoluteEvent` — from Android `MotionEvent` (SOURCE_MOUSE)
 - `PointerButtonEvent` — from Android `MotionEvent` button state changes
 - `PointerAxisEvent` — from Android `MotionEvent` scroll events
-- `TouchDownEvent`, `TouchUpEvent`, `TouchMotionEvent` — from Android `MotionEvent` (SOURCE_TOUCHSCREEN)
+- `TouchDownEvent`, `TouchUpEvent`, `TouchMotionEvent`, `TouchCancelEvent`, `TouchFrameEvent`
+
+**Stubbed with `UnusedEvent`:**
+- `GestureSwipeBeginEvent`, `GestureSwipeUpdateEvent`, `GestureSwipeEndEvent`
+- `GesturePinchBeginEvent`, `GesturePinchUpdateEvent`, `GesturePinchEndEvent`
+- `GestureHoldBeginEvent`, `GestureHoldEndEvent`
+- `TabletToolAxisEvent`, `TabletToolProximityEvent`, `TabletToolTipEvent`, `TabletToolButtonEvent`
+- `SwitchToggleEvent`, `PointerMotionEvent` (relative motion — not applicable to touchscreen)
+- `SpecialEvent`
+
+Also requires a `Device` type implementing `id()`, `name()`, `has_capability()`, `usb_id()`, `syspath()`.
 
 Input flow:
 1. `SurfaceViewActivity.onTouchEvent()` / `onKeyEvent()` fires on UI thread
@@ -337,7 +440,8 @@ No AIDL, no C++ glue, no separate process. The entire native layer is the Rust .
 - Outputs `libsmithay_android.so` loaded by the Kotlin app via `System.loadLibrary()`
 - Gradle build invokes cargo-ndk as a custom task, copies .so into `jniLibs/arm64-v8a/`
 - No C++ code, no AIDL compilation — everything is Rust + Kotlin
-- Target API level: 34 (Android 14) minimum for `ASurfaceTransaction_setBuffer` with AHardwareBuffer
+- Target API level: 29 (Android 10) minimum for ASurfaceTransaction + AHardwareBuffer.
+  API 35 recommended for `ASurfaceControl_createFromWindow` on root ANativeWindow.
 
 ---
 
@@ -352,7 +456,8 @@ No AIDL, no C++ glue, no separate process. The entire native layer is the Rust .
 
 ### Phase 2: Wayland Server (weeks 3-4)
 6. Initialize Smithay's Wayland state (Display, compositor, xdg_shell)
-7. Create Unix socket, expose as WAYLAND_DISPLAY
+7. Create compositor socket; build `app_process` relay to bridge socket into Termux's
+   `$XDG_RUNTIME_DIR`. Test that Termux clients can connect.
 8. Handle wl_shm clients: ImportMemWl → GlesRenderer → eglSwapBuffers
 9. Test with `weston-simple-shm` or `wlr-randr` from Termux
 10. **Milestone: wl_shm Wayland client renders on screen**
@@ -391,13 +496,16 @@ No AIDL, no C++ glue, no separate process. The entire native layer is the Rust .
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Smithay's EGL module assumes GBM | Blocks renderer init | Bypass Smithay's EGL wrapper, use raw EGL, construct GlesRenderer from raw GL context |
-| AHardwareBuffer format support varies by vendor | Some fourcc formats unavailable | Query supported formats at runtime, fall back to RGBA8888 |
-| ASurfaceTransaction_setBuffer requires API 34+ | Limits device support | Fall back to eglSwapBuffers on older APIs |
+| SELinux blocks cross-app Unix sockets | **Clients can't connect** | `app_process` relay in Termux (proven by wlroots-android-bridge and Termux:X11); or fd passing via ContentProvider |
+| Smithay's EGL module assumes GBM | Blocks renderer init | Use `EGLDisplay::from_raw()` with pre-initialized Android EGL display — confirmed to exist in Smithay API. No fork needed. |
+| AHardwareBuffer format support varies by vendor | Some fourcc formats unavailable | Query supported formats at runtime, fall back to ABGR8888 (RGBA). Note: DRM↔AHB format mapping has byte-order subtleties. |
+| `eglGetNativeClientBufferANDROID` not available | Can't import AHB as texture | Runtime extension check; fall back to dmabuf export path or CPU readback. Widely available on Android 8+ but not guaranteed. |
+| `ASurfaceControl_createFromWindow` returns NULL pre-API 35 | Zero-copy path broken | Use child SurfaceView's ANativeWindow (not root window); or fall back to eglSwapBuffers |
 | JNI call overhead for input events | Input lag | Lock-free MPSC channel (crossbeam), batch drain per frame; JNI overhead is ~nanoseconds so unlikely to be an issue |
-| Smithay GlesRenderer internals assume Linux desktop EGL | Texture import fails | May need to fork/patch GlesRenderer for AHardwareBuffer import path |
+| Smithay GlesRenderer internals assume Linux desktop EGL | Texture import fails | Try dmabuf export path first (leverages existing ImportDma); fall back to custom EGLImage import |
 | Android kills background Activities | Windows disappear | Use foreground service, SYSTEM_ALERT_WINDOW, or freeform multi-window mode |
 | XKB keymap mismatch with Android keycodes | Wrong characters | Ship curated keymap, allow user override |
+| EGL context thread affinity | Rendering fails from wrong thread | EGL context must be current on the compositor thread. Can render to multiple EGLSurfaces from one thread via `eglMakeCurrent` switching (has overhead per switch). |
 
 ---
 
