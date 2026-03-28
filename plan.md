@@ -9,10 +9,11 @@ GPU -- zero-copy between client and compositor because both sides use the same s
 Android GPU driver.
 
 **Key insight:** Clients use **libhybris** to load the stock Android GPU driver (e.g.
-Qualcomm Adreno) into their glibc environment. A custom **Wayland WSI layer** (Vulkan
-implicit layer + EGL wrapper library) bridges the gap between the stock driver and
-Wayland protocol. The compositor is a normal Android app using the stock driver natively.
-Same driver on both sides = buffer sharing just works.
+Qualcomm Adreno) into their glibc environment. A custom **Wayland WSI layer** (EGL
+wrapper library, with Vulkan implicit layer as stretch goal) bridges the gap between the
+stock driver and Wayland protocol. The compositor is a normal Android app using the stock
+driver natively. Same driver on both sides = buffer sharing via **AHardwareBuffer**
+(Android's cross-process GPU buffer primitive).
 
 ---
 
@@ -42,8 +43,16 @@ architecture.
 
 ### ARM vulkan-wsi-layer
 [ArmSoM/vulkan-wsi-layer](https://github.com/ArmSoM/vulkan-wsi-layer) -- open-source
-Vulkan layer implementing Wayland/X11 WSI independently of the GPU driver. Prior art for
-our Vulkan WSI layer approach.
+Vulkan layer implementing Wayland/X11 WSI independently of the GPU driver. **Not directly
+usable for our architecture** -- it requires `VK_EXT_external_memory_dma_buf` which stock
+Android drivers don't support. But useful as structural reference for how to write a
+Vulkan implicit layer.
+
+### libhybris Vulkan WSI
+libhybris itself has a built-in Vulkan WSI that swaps `VK_KHR_android_surface` for
+`VK_KHR_wayland_surface` and presents via the `android_wlegl` protocol (Sailfish OS
+ecosystem). Prior art for the client-side WSI approach. Uses `WaylandNativeWindow`
+(inherits `ANativeWindow`) + gralloc for buffer allocation. See notes.md for deep dive.
 
 ---
 
@@ -65,8 +74,9 @@ driver:
   Android GPU driver's bionic `.so` files into the glibc process. A custom **WSI layer**
   implements Wayland surface/swapchain support on top of the stock driver's Vulkan/EGL.
 
-Same driver on both sides means buffer fds are natively compatible. No cross-driver
-import hacks, no AHB wrapping tricks, no CPU readback.
+Same driver on both sides means AHardwareBuffers are natively compatible across
+processes. No cross-driver import hacks, no CPU readback. Buffer sharing uses
+`AHardwareBuffer_sendHandleToUnixSocket` / `recvHandleFromUnixSocket` (NDK API 26+).
 
 ### How libhybris Fits In
 
@@ -89,31 +99,55 @@ The stock driver's dependencies (vendor libs in `/vendor/lib64/`) and kernel int
 context are unchanged, so GPU access and Binder calls to gralloc work as they would
 from any Android app.
 
+### Buffer Sharing via AHardwareBuffer
+
+On desktop Linux, Wayland buffer sharing uses dmabufs (`zwp_linux_dmabuf_v1`). Stock
+Android GPU drivers don't support the dmabuf Vulkan/EGL extensions
+(`VK_EXT_external_memory_dma_buf`, `EGL_EXT_image_dma_buf_import`). Android's native
+cross-process GPU buffer primitive is **AHardwareBuffer**.
+
+Buffer sharing path:
+1. Client allocates `AHardwareBuffer` with GPU usage flags (via NDK API through libhybris)
+2. Client creates `EGLImage` from AHB, attaches to FBO, renders with GLES
+3. Client sends AHB to compositor via `AHardwareBuffer_sendHandleToUnixSocket()` on a
+   **side-channel socket** (AHB serialization uses its own wire format, not Wayland's)
+4. Compositor receives via `AHardwareBuffer_recvHandleFromUnixSocket()`
+5. Compositor imports: `eglGetNativeClientBufferANDROID(ahb)` -> `eglCreateImageKHR`
+   with `EGL_NATIVE_BUFFER_ANDROID` -> GL texture
+6. Compositor composites and presents
+
+A custom Wayland protocol extension (`tawc_buffer_v1`) coordinates buffer lifecycle
+(attach, commit, release) while the actual AHB data flows over the side channel. Prior
+art: Sailfish OS's `android_wlegl` protocol does exactly this kind of Android-specific
+buffer passing over Wayland.
+
 ### The WSI Layer
 
-Standard Linux apps expect `VK_KHR_wayland_surface` (Vulkan) or
-`eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND, ...)` (EGL). The stock Android driver
-doesn't have these -- it has `VK_KHR_android_surface` / `EGL_PLATFORM_ANDROID`. Our
-WSI layer bridges this gap.
+Standard Linux apps expect `eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND, ...)` (EGL) or
+`VK_KHR_wayland_surface` (Vulkan). The stock Android driver doesn't have these -- it has
+`EGL_PLATFORM_ANDROID` / `VK_KHR_android_surface`. Our WSI layer bridges this gap.
 
-**Vulkan: Implicit layer** (clean, standard Khronos mechanism)
-- Advertises `VK_KHR_wayland_surface` + `VK_KHR_swapchain` in extension enumeration
-- Intercepts `vkCreateWaylandSurfaceKHR`, `vkCreateSwapchainKHR`,
-  `vkAcquireNextImageKHR`, `vkQueuePresentKHR`
-- Implements swapchain by allocating VkImages via the stock driver, exporting as fds
-  via `VK_KHR_external_memory_fd`, sending to compositor via `zwp_linux_dmabuf_v1`
-- Passes through all rendering calls untouched
-- Activated via env var (`VK_INSTANCE_LAYERS`) or implicit layer manifest -- zero app
-  changes needed
-
-**EGL/GLES: Wrapper `libEGL.so`** (covers GTK3, Qt, SDL, most Linux apps)
+**EGL/GLES: Wrapper `libEGL.so`** (primary path -- covers GTK3, Qt, SDL, most Linux apps)
 - Named `libEGL.so`, placed first in `LD_LIBRARY_PATH`
-- Intercepts `eglGetPlatformDisplay(WAYLAND)` -- creates surfaceless/pbuffer display on
-  stock driver, stores `wl_display` for protocol work
-- Intercepts `eglCreateWindowSurface` -- wraps `wl_surface` in our buffer management
-- Intercepts `eglSwapBuffers` -- does present (send buffer to compositor via Wayland)
+- Uses libhybris to load the real stock EGL/GLES driver
+- Intercepts `eglGetPlatformDisplay(WAYLAND)` -- initializes stock driver in surfaceless
+  mode, stores `wl_display` for protocol work, opens side-channel socket for AHB transfer
+- Intercepts `eglCreateWindowSurface` -- allocates AHardwareBuffer pool (double/triple
+  buffered), creates EGLImages from AHBs, wraps in FBOs for rendering
+- Intercepts `eglSwapBuffers` -- sends current AHB to compositor via side channel +
+  Wayland buffer commit, rotates to next buffer in pool
 - Passes through everything else (all GL calls, `eglMakeCurrent`, etc.) to stock driver
 - Apps load it without modification
+
+**Vulkan: Implicit layer** (stretch goal -- libhybris Vulkan on Adreno is immature)
+- Standard Khronos layer mechanism -- zero app changes needed
+- Advertises `VK_KHR_wayland_surface` + `VK_KHR_swapchain`
+- Allocates swapchain images backed by AHardwareBuffers via
+  `VK_ANDROID_external_memory_android_hardware_buffer`
+- Sends AHBs to compositor via same side-channel mechanism as EGL path
+- Passes through all rendering calls untouched
+- **Risk:** libhybris Vulkan has poor Adreno compatibility and unmerged fixes (PRs #604,
+  #607). EGL/GLES path should be proven first.
 
 ### System Diagram
 
@@ -135,7 +169,7 @@ WSI layer bridges this gap.
 |  |  +-- GlesRenderer (stock Smithay, stock GLES driver)              | |
 |  |  +-- AndroidEglBackend (EGL on ANativeWindow)                     | |
 |  |  +-- AndroidInputBackend (events from Kotlin via channel)         | |
-|  |  +-- buffer import (same driver = trivial EGLImage/texture)       | |
+|  |  +-- AHB import (recv AHB -> EGLImage -> GL texture)              | |
 |  |  +-- Wayland state (xdg-shell, wl_seat, wl_output, etc)          | |
 |  +-------------------------------------------------------------------+ |
 |         |                                                             |
@@ -151,19 +185,21 @@ WSI layer bridges this gap.
   Termux / chroot
     +-- Wayland clients (GTK, Qt, SDL, etc.)
     +-- libhybris loads stock GPU driver (bionic .so in glibc process)
-    +-- Our WSI layer (Vulkan implicit layer + EGL wrapper)
+    +-- Our WSI layer (EGL wrapper; Vulkan layer as stretch goal)
+    +-- AHardwareBuffer shared via side-channel socket
     +-- GPU access via /dev/kgsl-3d0 (stock driver, same as compositor)
 ```
 
 ### Buffer Sharing Flow
 
-1. Client allocates GPU buffer via stock driver (through libhybris)
-2. Client exports buffer fd via `VK_KHR_external_memory_fd` (Vulkan) or equivalent
-3. WSI layer sends fd + metadata to compositor via `zwp_linux_dmabuf_v1` over Wayland
-   socket
-4. Compositor imports fd -- same driver, so import is straightforward
-5. Compositor composites as GL texture via GlesRenderer
-6. `eglSwapBuffers()` -> SurfaceFlinger presents
+1. Client allocates `AHardwareBuffer` via NDK API (through libhybris)
+2. Client creates `EGLImage` from AHB, attaches to FBO, renders with GLES
+3. WSI layer sends AHB via `AHardwareBuffer_sendHandleToUnixSocket()` on side channel
+4. WSI layer sends buffer-commit message via `tawc_buffer_v1` on Wayland socket
+5. Compositor receives AHB via `AHardwareBuffer_recvHandleFromUnixSocket()`
+6. Compositor imports as EGLImage via `eglGetNativeClientBufferANDROID` + `eglCreateImageKHR`
+7. Compositor composites as GL texture via GlesRenderer
+8. `eglSwapBuffers()` -> SurfaceFlinger presents
 
 Zero-copy from client to compositor. One GPU composition pass for display.
 
@@ -222,11 +258,14 @@ The core compositor, running as a background thread in the Android app process.
 or implement `EGLNativeDisplay` with `EGL_PLATFORM_ANDROID_KHR`. Create one EGLSurface
 per Activity's ANativeWindow.
 
-**Buffer import** (`import.rs`): Since both client and compositor use the same stock
-driver, buffer import should be straightforward. The compositor imports client buffer
-fds as EGLImages / GL textures via the stock driver's standard import mechanisms. The
-exact import path (direct fd import, or via AHardwareBuffer wrapping) depends on what
-the stock driver supports -- but same-driver import is a solved problem. Test early.
+**Buffer import** (`import.rs`): Imports client AHardwareBuffers as GL textures.
+Smithay has no built-in AHB support, so this is custom code:
+1. `AHardwareBuffer_recvHandleFromUnixSocket()` on side-channel socket
+2. `eglGetNativeClientBufferANDROID(ahb)` -> `EGLClientBuffer`
+3. `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ...)` -> `EGLImage`
+4. `glEGLImageTargetTexture2DOES(image)` -> GL texture for compositing
+Requires `EGL_ANDROID_get_native_client_buffer` extension (widely available, must
+runtime-check). Smithay's `GlesRenderer` can composite the resulting texture.
 
 **Presentation** (`output.rs`): GlesRenderer composites all surfaces for a toplevel
 onto the Activity's EGLSurface, then `eglSwapBuffers()`. One EGLSurface per Activity.
@@ -236,27 +275,33 @@ arrive via JNI -> crossbeam channel -> Smithay `wl_seat`. AKEYCODE -> Linux KEY_
 mapping + XKB keymap.
 
 **Wayland protocols** (`compositor.rs`): Standard Smithay protocol handling:
-- MVP: `wl_compositor`, `zwp_linux_dmabuf_v1`, `xdg_shell`, `wl_seat`, `wl_output`,
-  `wp-viewporter`
-- Later: `wl_shm`, `xdg-decoration`, `wp-fractional-scale-v1`, `zwp_text_input_v3`,
-  `wl_data_device_manager`, Xwayland
+- MVP: `wl_compositor`, `xdg_shell`, `wl_seat`, `wl_output`, `wp-viewporter`,
+  `tawc_buffer_v1` (custom AHB buffer sharing protocol)
+- Later: `wl_shm` (software rendering fallback), `xdg-decoration`,
+  `wp-fractional-scale-v1`, `zwp_text_input_v3`, `wl_data_device_manager`,
+  `xdg_popup` handling (composited onto parent surface, NOT separate Activities),
+  Xwayland
 
 ### 3. Client WSI Layer (`tawc-wsi/`)
 
-Installed in the Termux chroot. Two components:
+Installed in the Termux chroot. EGL wrapper is the primary component; Vulkan layer is
+a stretch goal.
 
-**Vulkan implicit layer** (`tawc_wsi_vulkan.so` + manifest JSON):
-- Intercepts WSI calls, passes through everything else
-- Implements `VK_KHR_wayland_surface` and `VK_KHR_swapchain` on top of
-  `VK_KHR_external_memory_fd`
-- Talks `zwp_linux_dmabuf_v1` to our compositor
-- Activated automatically via implicit layer manifest
-
-**EGL wrapper** (`libEGL.so`):
+**EGL wrapper** (`libEGL.so`) -- primary path:
 - Wrapper around stock EGL loaded via libhybris
-- Intercepts Wayland platform calls, implements buffer management + present
+- Intercepts Wayland platform calls, implements AHB-based buffer management
+- Allocates AHardwareBuffer pool, creates EGLImages, wraps in FBOs
+- On `eglSwapBuffers`: sends AHB via side-channel socket, commits via `tawc_buffer_v1`
 - Passes through all GL/EGL rendering calls to stock driver
 - First in `LD_LIBRARY_PATH` so apps find it before any system libEGL
+
+**Vulkan implicit layer** (`tawc_wsi_vulkan.so` + manifest JSON) -- stretch goal:
+- Intercepts WSI calls, passes through everything else
+- Implements `VK_KHR_wayland_surface` and `VK_KHR_swapchain` on top of
+  `VK_ANDROID_external_memory_android_hardware_buffer`
+- Same AHB side-channel mechanism as EGL wrapper
+- Activated automatically via implicit layer manifest
+- **Depends on libhybris Vulkan maturity** -- Adreno compatibility is currently poor
 
 ### 4. app_process Relay (`app/src/.../Relay.kt`)
 
@@ -269,24 +314,27 @@ hands listening fd to compositor app via Binder, exits. Uses TermuxAm pattern (d
 ## Crate Structure
 
 ```
+tawc-protocol/
++-- tawc_buffer_v1.xml     # Custom Wayland protocol for AHB buffer sharing
+
 smithay-android/
 +-- Cargo.toml
 +-- src/
     +-- lib.rs              # JNI entry points
     +-- egl.rs              # Android EGL display/context/surface
-    +-- import.rs           # Buffer import (same-driver, straightforward)
+    +-- import.rs           # AHB import (recv + eglGetNativeClientBufferANDROID)
     +-- output.rs           # eglSwapBuffers presentation
     +-- input.rs            # AndroidInputBackend
     +-- keymap.rs           # AKEYCODE -> Linux scancode mapping
-    +-- compositor.rs       # Wayland state machine
+    +-- compositor.rs       # Wayland state machine + tawc_buffer_v1 protocol
     +-- window.rs           # Per-toplevel state
 
 tawc-wsi/
-+-- vulkan-layer/
-|   +-- tawc_wsi_layer.c   # Vulkan implicit layer (or Rust)
-|   +-- tawc_wsi_layer.json # Layer manifest
 +-- egl-wrapper/
-    +-- egl_wrapper.c       # EGL wrapper using libhybris (or Rust + FFI)
+|   +-- egl_wrapper.c       # EGL wrapper using libhybris (or Rust + FFI)
++-- vulkan-layer/            # Stretch goal
+    +-- tawc_wsi_layer.c     # Vulkan implicit layer
+    +-- tawc_wsi_layer.json  # Layer manifest
 ```
 
 Android app:
@@ -305,11 +353,13 @@ app/
 
 Dependencies:
 - `smithay` (`default-features = false`, features: `wayland_frontend`, `renderer_gl`)
-  Avoids libdrm, libgbm, libinput, libudev, libseat, X11.
+  Avoids libdrm, libgbm, libinput, libudev, libseat, X11. **Requires patching
+  `libEGL.so.1` -> `libEGL.so` for Android** (see notes.md).
 - `ndk` -- AHardwareBuffer, ANativeWindow bindings
 - `jni` -- JNI interop
 - `crossbeam-channel` -- lock-free MPSC for input events
 - `xkbcommon` -- keymap handling (requires cross-compiled libxkbcommon.so)
+- `wayland-scanner` -- generate Rust bindings for `tawc_buffer_v1` custom protocol
 
 ---
 
@@ -337,45 +387,59 @@ Client-side WSI layer:
 4. Render solid color to EGLSurface via GlesRenderer + `eglSwapBuffers`
 5. **Milestone: GlesRenderer renders to Android Surface**
 
-### Phase 2: libhybris + WSI Proof of Concept
-6. Set up libhybris in Termux chroot, verify stock Adreno Vulkan/EGL loads
-7. Write minimal Vulkan WSI layer: allocate VkImage, export fd, send over
-   socket, verify compositor can import it
-8. Write minimal EGL wrapper: surfaceless display via libhybris, render to
-   buffer, export, send
+### Phase 2: libhybris + AHB Buffer Sharing Proof of Concept
+6. Set up libhybris in Termux chroot, verify stock Adreno EGL/GLES loads
+7. Write minimal test: allocate AHardwareBuffer, create EGLImage, render to
+   FBO, send AHB over Unix socket via `AHardwareBuffer_sendHandleToUnixSocket`
+8. Write minimal compositor-side test: receive AHB, import via
+   `eglGetNativeClientBufferANDROID` + `eglCreateImageKHR`, display as texture
 9. Test buffer round-trip: client renders with stock driver via libhybris,
-   compositor imports and displays
+   compositor imports AHB and displays
 10. **Milestone: zero-copy GPU buffer sharing proven end-to-end**
 
 ### Phase 3: Wayland Server + Socket Relay
-11. Initialize Smithay Wayland state (Display, compositor, xdg_shell,
-    `zwp_linux_dmabuf_v1`, wl_output)
-12. Build `app_process` relay for listening socket handoff
-13. Test: Termux client connects to `$XDG_RUNTIME_DIR/wayland-0`
-14. Handle client buffer commit: import fd -> GL texture -> composite -> present
-15. Test with a simple Wayland EGL client from chroot
-16. **Milestone: GPU-accelerated Wayland client visible on screen**
+11. Patch Smithay: `libEGL.so.1` -> `libEGL.so` for Android (compositor side --
+    Smithay needs to load Android's system EGL in the app process; see notes.md)
+12. Define `tawc_buffer_v1` Wayland protocol extension (AHB buffer lifecycle)
+13. Initialize Smithay Wayland state (Display, compositor, xdg_shell, wl_output,
+    tawc_buffer_v1)
+14. Build `app_process` relay for listening socket handoff
+15. Test: Termux client connects to `$XDG_RUNTIME_DIR/wayland-0`
+16. Handle client buffer commit: receive AHB -> EGLImage -> GL texture ->
+    composite -> present
+17. Test with a simple Wayland EGL client from chroot
+18. **Milestone: GPU-accelerated Wayland client visible on screen**
 
 ### Phase 4: Input
-17. Implement AndroidInputBackend (touch + pointer first, keyboard second)
-18. Wire Kotlin events -> JNI -> crossbeam channel -> Smithay wl_seat
-19. AKEYCODE -> Linux scancode mapping + XKB keymap
-20. **Milestone: can interact with a Wayland client**
+19. Implement AndroidInputBackend (touch + pointer first, keyboard second)
+20. Wire Kotlin events -> JNI -> crossbeam channel -> Smithay wl_seat
+21. AKEYCODE -> Linux scancode mapping + XKB keymap
+22. **Milestone: can interact with a Wayland client**
 
 ### Phase 5: Multi-Window
-21. JNI callback: compositor notifies Kotlin of new xdg_toplevels
-22. MainActivity spawns SurfaceViewActivity per toplevel
-23. Each Activity's SurfaceView gets its own EGLSurface
-24. Window lifecycle (map, unmap, close, resize)
-25. **Milestone: multiple Wayland windows as separate Android Activities**
+23. JNI callback: compositor notifies Kotlin of new xdg_toplevels
+24. MainActivity spawns SurfaceViewActivity per toplevel
+25. Each Activity's SurfaceView gets its own EGLSurface
+26. Window lifecycle (map, unmap, close, resize)
+27. Popups (`xdg_popup`) composited onto parent Activity surface (NOT separate Activities)
+28. **Milestone: multiple Wayland windows as separate Android Activities**
 
 ### Phase 6: Polish & Protocols
-26. Frame callbacks (`wl_surface.frame`)
-27. Server-side decorations (xdg-decoration)
-28. Fractional scaling (wp-fractional-scale) for high-DPI Android screens
-29. `wl_shm` support (software rendering fallback)
-30. Clipboard bridge (wl_data_device <-> Android ClipboardManager)
-31. IME bridge (zwp_text_input_v3 <-> Android InputMethodManager)
+29. Frame callbacks (`wl_surface.frame`)
+30. Server-side decorations (xdg-decoration)
+31. Cursor handling (compositor-side cursor rendering)
+32. Fractional scaling (wp-fractional-scale) for high-DPI Android screens
+33. Clipboard bridge (wl_data_device <-> Android ClipboardManager)
+34. IME bridge (zwp_text_input_v3 <-> Android InputMethodManager)
+35. `wl_shm` support (software rendering fallback -- deliberately last so that
+    absence of `wl_shm` serves as proof that AHB hardware path is actually working)
+
+### Phase 7: Vulkan WSI (stretch goal)
+36. Verify libhybris Vulkan loads stock Adreno driver (may need unmerged PRs)
+37. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
+38. Same AHB side-channel mechanism as EGL wrapper
+39. Test with vkcube, vkmark
+40. **Milestone: Vulkan apps work via libhybris + our WSI layer**
 
 ---
 
@@ -383,15 +447,17 @@ Client-side WSI layer:
 
 | Risk | Mitigation |
 |---|---|
-| libhybris can't load stock Adreno Vulkan driver from chroot | EGL/GLES path is proven (Sailfish OS). Vulkan support is actively developed (PRs #604, #607). Test early in Phase 2. |
+| libhybris can't load stock Adreno EGL/GLES from chroot | EGL/GLES via libhybris is battle-tested (Sailfish OS, Ubuntu Touch). Test early in Phase 2. |
+| libhybris Vulkan on Adreno has poor compatibility | Vulkan is a stretch goal. EGL/GLES covers most Linux desktop apps. android-vulkan-bridge project has proven Mali path. |
 | Stock driver needs Binder/gralloc from chroot | Process UID/SELinux context is unchanged. Normal Android apps use gralloc under same SELinux domain. `/dev/kgsl-3d0` is 0666. Bind-mount `/vendor` and `/system`. |
-| WSI layer complexity | The protocol work is simple. ARM's vulkan-wsi-layer is prior art. The Vulkan layer mechanism is a stable Khronos standard. |
+| `eglGetNativeClientBufferANDROID` not available | Widely available on Android 8+ but is a driver extension, not guaranteed. Runtime-check required. No known alternative for AHB -> EGLImage import. |
+| AHB side-channel socket adds complexity | Necessary because AHB serialization has its own wire format (`sendHandleToUnixSocket` uses multiple fds + metadata). Alternative: implement AHB serialization directly in the Wayland protocol layer (complex but eliminates side channel). |
+| Custom Wayland protocol (`tawc_buffer_v1`) breaks standard clients | Clients must use our WSI layer anyway (stock driver via libhybris). The WSI layer handles the protocol. Standard `wl_shm` provides software rendering fallback. |
 | SELinux blocks cross-app Wayland socket | `app_process` relay with fd handoff (proven by wlroots-android-bridge, Termux:X11). |
-| Smithay has never been built for Android | `default-features = false` avoids Linux deps. wayland-rs pure Rust backend. `EGLDisplay::from_raw()` avoids GBM. Test early. |
-| Buffer fd type (opaque vs dmabuf) between same-driver instances | Same driver = understands its own fd format. Not a cross-driver problem. |
+| Smithay has never been built for Android | `default-features = false` avoids Linux deps. wayland-rs pure Rust backend. `EGLDisplay::from_raw()` avoids GBM. Must patch Smithay's EGL loader to find Android's system `libEGL.so` (it hardcodes `libEGL.so.1`). Test early. |
 | Hidden API reflection in relay breaks across Android versions | TermuxAm pattern has worked through Android 15. Monitor for breakage. |
 | Phantom Process Killer (Android 12+) | Relay exits after fd handoff. Users need Developer Options toggle for other Termux processes. |
-| Qualcomm-only GPU support | This architecture works for any device where libhybris can load the stock GPU driver. Non-Qualcomm needs testing. `wl_shm` fallback for unsupported devices. |
+| Qualcomm-only GPU support | Architecture works for any device where libhybris can load the stock GPU driver. Non-Qualcomm needs testing. `wl_shm` fallback for unsupported devices. |
 | Freeform windowing not universal | On phones, each Activity is fullscreen (switch via recents). True freeform on Samsung DeX, ChromeOS, Android 15+ desktop mode. |
 
 ---
