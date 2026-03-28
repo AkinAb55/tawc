@@ -1,0 +1,41 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Enter the Arch Linux ARM chroot. Sets up bind mounts if not already mounted.
+# Run from Termux. Requires root (su).
+#
+# Usage:
+#   ./arch-chroot              # interactive shell
+#   ./arch-chroot "command"    # run a command and exit
+
+set -euo pipefail
+
+CHROOT_DIR="/data/local/arch-chroot"
+
+if ! su -c "[ -d '$CHROOT_DIR/usr' ]"; then
+    echo "Chroot not found at $CHROOT_DIR"
+    echo "Run arch-chroot-create first."
+    exit 1
+fi
+
+# Set up bind mounts (idempotent -- skips if already mounted)
+mount_if_needed() {
+    local src="$1" dst="$2"
+    su -c "mountpoint -q '$dst' 2>/dev/null || mount --bind '$src' '$dst'"
+}
+
+su -c "mkdir -p '$CHROOT_DIR/dev' '$CHROOT_DIR/proc' '$CHROOT_DIR/sys' \
+    '$CHROOT_DIR/vendor' '$CHROOT_DIR/system' '$CHROOT_DIR/dev/pts'"
+
+mount_if_needed /dev "$CHROOT_DIR/dev"
+mount_if_needed /dev/pts "$CHROOT_DIR/dev/pts"
+mount_if_needed /proc "$CHROOT_DIR/proc"
+mount_if_needed /sys "$CHROOT_DIR/sys"
+mount_if_needed /vendor "$CHROOT_DIR/vendor"
+mount_if_needed /system "$CHROOT_DIR/system"
+
+if [ $# -gt 0 ]; then
+    # Run a command
+    su -c "chroot '$CHROOT_DIR' /bin/bash -c '$*'"
+else
+    # Interactive shell
+    su -c "chroot '$CHROOT_DIR' /bin/bash -l"
+fi

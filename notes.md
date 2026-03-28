@@ -507,6 +507,64 @@ On standard phones: each Activity is fullscreen, switch via recents.
 
 ---
 
+## Client Environment: proot vs chroot (2026-03-28)
+
+Linux Wayland clients need a glibc-based Linux environment (because libhybris requires
+glibc). This means a full Linux distribution (Arch Linux ARM, Ubuntu, Debian, etc.)
+running on the Android device. There are two ways to do this:
+
+### proot (no root required)
+
+Termux's `proot-distro` installs aarch64 Linux distros under proot. This is what most
+Termux users already use for desktop Linux apps (via Termux:X11).
+
+- **No root required** -- works on any device
+- **Existing ecosystem** -- users already have distros set up, standard package managers
+  (`pacman`, `apt`) provide GTK/Qt/SDL apps out of the box
+- **Syscall overhead** -- proot uses ptrace to intercept every syscall (~5-10x slower
+  for syscall-heavy operations). GPU rendering calls go through the kernel driver
+  directly (no ptrace interception on the hot path), but file I/O, process creation,
+  network operations, etc. are affected
+- **Path translation concerns** -- proot translates filesystem paths, which may
+  interfere with libhybris trying to open vendor libraries under `/vendor/lib64/`.
+  Needs testing to confirm paths are visible and not mangled
+- **Some syscalls unsupported** -- proot can't fully emulate `chroot()`, and some
+  `/proc` entries behave differently. Most desktop apps don't care, but edge cases exist
+
+### Real chroot (requires root)
+
+Same distro packages, mounted in a real chroot. Requires root (e.g., Magisk).
+
+- **Native performance** -- no ptrace overhead, syscalls execute at full speed
+- **Same distro packages** as proot-distro -- `pacman`, `apt`, etc.
+- **Requires root** -- limits the user base to rooted devices
+- **Must bind-mount** `/dev`, `/proc`, `/sys`, `/vendor`, `/system`, and GPU device
+  nodes (e.g. `/dev/kgsl-3d0`, `/dev/mali0`) into the chroot
+- **Simpler path semantics** -- no path translation layer, libhybris sees real
+  filesystem paths
+
+### Which to target
+
+Both should work. The WSI layer and libhybris are the same in either case -- the
+difference is only in how the root filesystem is set up and whether syscalls go through
+ptrace. **proot is the higher-priority target** because it doesn't require root and has
+a much larger user base. If proot + libhybris interaction proves problematic (path
+translation issues, ptrace interference with bionic linker), chroot is the fallback.
+
+### What apps are available
+
+In either case, apps come from **standard aarch64 Linux distro repositories**. No
+custom compilation needed for the apps themselves. For example:
+- Arch Linux ARM: `pacman -S firefox gtk3 mpv`
+- Ubuntu/Debian: `apt install firefox libgtk-3-0 mpv`
+
+What IS custom and must be installed into the distro:
+- **libhybris** -- must be compiled for the target distro (not in standard repos)
+- **Our WSI layer** (`libEGL.so` wrapper) -- placed first in `LD_LIBRARY_PATH`
+- **Environment variables** -- `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`
+
+---
+
 ## Phantom Process Killer (Android 12+)
 
 Android 12 introduced `PhantomProcessKiller` -- kills child processes of apps when >32
