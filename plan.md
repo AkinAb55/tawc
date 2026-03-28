@@ -466,6 +466,16 @@ Client-side WSI layer:
 
 ---
 
+## Out of Scope
+
+- **Audio.** Linux desktop apps typically expect PulseAudio or PipeWire. Audio forwarding
+  from the chroot to Android is not addressed in this plan. This will likely be needed
+  eventually -- options include running PulseAudio over a Unix socket (Termux already
+  packages `pulseaudio`) or bridging PipeWire to Android's audio HAL. For now, apps that
+  require audio will either run silently or fail to start.
+
+---
+
 ## References
 
 - [libhybris/libhybris](https://github.com/libhybris/libhybris) -- bionic compatibility layer
