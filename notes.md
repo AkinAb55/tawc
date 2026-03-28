@@ -145,13 +145,13 @@ stock Android drivers lack `VK_EXT_external_memory_dma_buf` and
 - Allocates VkImages backed by AHBs via
   `VK_ANDROID_external_memory_android_hardware_buffer`
 - Same AHB side-channel mechanism as EGL wrapper
-- **Risk:** libhybris Vulkan has poor Adreno compatibility (unmerged PRs #604, #607)
+- **Risk:** libhybris Vulkan compatibility varies by vendor; unmerged PRs (#604, #607) needed for some
 
 ### Open Questions for This Strategy
 
 1. **libhybris Vulkan maturity.** EGL/GLES is proven. Vulkan has active PRs but may
-   not be fully baked. Adreno compatibility reported as poor. EGL/GLES covers most
-   Linux desktop apps.
+   not be fully baked; compatibility varies by vendor. EGL/GLES covers most Linux
+   desktop apps.
 
 2. **Stock driver dependencies from chroot.** Need `/vendor/lib64/` bind-mounted.
    Binder access to gralloc needed for AHardwareBuffer allocation -- should work since
@@ -163,8 +163,9 @@ stock Android drivers lack `VK_EXT_external_memory_dma_buf` and
    coordinate. Alternative: implement AHB serialization directly in the Wayland
    protocol layer (more complex but eliminates side channel).
 
-4. **Device breadth.** libhybris + stock driver should work beyond just Qualcomm
-   (unlike Mesa Turnip). Needs testing on Mali, MediaTek, etc.
+4. **Device breadth.** libhybris + stock driver is vendor-neutral by design (Adreno,
+   Mali, PowerVR, etc.), unlike GPU-specific solutions like Mesa Turnip. Needs
+   testing across vendors to confirm.
 
 ---
 

@@ -8,8 +8,8 @@ and get GPU-accelerated rendering onto Android Surfaces. All buffer handling sta
 GPU -- zero-copy between client and compositor because both sides use the same stock
 Android GPU driver.
 
-**Key insight:** Clients use **libhybris** to load the stock Android GPU driver (e.g.
-Qualcomm Adreno) into their glibc environment. A custom **Wayland WSI layer** (EGL
+**Key insight:** Clients use **libhybris** to load the stock Android GPU driver into
+their glibc environment. A custom **Wayland WSI layer** (EGL
 wrapper library, with Vulkan implicit layer as stretch goal) bridges the gap between the
 stock driver and Wayland protocol. The compositor is a normal Android app using the stock
 driver natively. Same driver on both sides = buffer sharing via **AHardwareBuffer**
@@ -88,16 +88,18 @@ equivalents. The loading chain in a client:
 App (glibc-linked)
   -> dlopen("libEGL.so")  -- finds OUR wrapper (glibc-linked, in LD_LIBRARY_PATH)
     -> our wrapper calls libhybris
-      -> libhybris loads /vendor/lib64/egl/libEGL_adreno.so (bionic-linked)
-      -> libhybris loads /vendor/lib64/egl/libGLESv2_adreno.so (bionic-linked)
+      -> libhybris loads /vendor/lib64/egl/libEGL_<vendor>.so (bionic-linked)
+      -> libhybris loads /vendor/lib64/egl/libGLESv2_<vendor>.so (bionic-linked)
 ```
+(e.g. `libEGL_adreno.so` on Qualcomm, `libEGL_mali.so` on ARM Mali, etc.)
 
-For Vulkan, the implicit layer loads `libvulkan_adreno.so` via libhybris similarly.
+For Vulkan, the implicit layer loads the vendor's `libvulkan_<vendor>.so` via libhybris
+similarly.
 
-The stock driver's dependencies (vendor libs in `/vendor/lib64/`) and kernel interface
-(`/dev/kgsl-3d0`) are all accessible from the chroot. The process UID and SELinux
-context are unchanged, so GPU access and Binder calls to gralloc work as they would
-from any Android app.
+The stock driver's dependencies (vendor libs, typically under `/vendor/lib64/`) and
+kernel GPU device node (e.g. `/dev/kgsl-3d0` on Qualcomm, `/dev/mali0` on ARM Mali)
+are accessible from the chroot. The process UID and SELinux context are unchanged, so
+GPU access and Binder calls to gralloc work as they would from any Android app.
 
 ### Buffer Sharing via AHardwareBuffer
 
@@ -139,15 +141,15 @@ Standard Linux apps expect `eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND, ...)` (E
 - Passes through everything else (all GL calls, `eglMakeCurrent`, etc.) to stock driver
 - Apps load it without modification
 
-**Vulkan: Implicit layer** (stretch goal -- libhybris Vulkan on Adreno is immature)
+**Vulkan: Implicit layer** (stretch goal -- libhybris Vulkan compatibility varies by GPU vendor)
 - Standard Khronos layer mechanism -- zero app changes needed
 - Advertises `VK_KHR_wayland_surface` + `VK_KHR_swapchain`
 - Allocates swapchain images backed by AHardwareBuffers via
   `VK_ANDROID_external_memory_android_hardware_buffer`
 - Sends AHBs to compositor via same side-channel mechanism as EGL path
 - Passes through all rendering calls untouched
-- **Risk:** libhybris Vulkan has poor Adreno compatibility and unmerged fixes (PRs #604,
-  #607). EGL/GLES path should be proven first.
+- **Risk:** libhybris Vulkan compatibility varies by GPU vendor, with unmerged fixes
+  (PRs #604, #607). EGL/GLES path should be proven first.
 
 ### System Diagram
 
@@ -187,7 +189,7 @@ Standard Linux apps expect `eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND, ...)` (E
     +-- libhybris loads stock GPU driver (bionic .so in glibc process)
     +-- Our WSI layer (EGL wrapper; Vulkan layer as stretch goal)
     +-- AHardwareBuffer shared via side-channel socket
-    +-- GPU access via /dev/kgsl-3d0 (stock driver, same as compositor)
+    +-- GPU access via vendor kernel device (stock driver, same as compositor)
 ```
 
 ### Buffer Sharing Flow
@@ -301,7 +303,7 @@ a stretch goal.
   `VK_ANDROID_external_memory_android_hardware_buffer`
 - Same AHB side-channel mechanism as EGL wrapper
 - Activated automatically via implicit layer manifest
-- **Depends on libhybris Vulkan maturity** -- Adreno compatibility is currently poor
+- **Depends on libhybris Vulkan maturity** -- compatibility varies by GPU vendor
 
 ### 4. app_process Relay (`app/src/.../Relay.kt`)
 
@@ -388,7 +390,7 @@ Client-side WSI layer:
 5. **Milestone: GlesRenderer renders to Android Surface**
 
 ### Phase 2: libhybris + AHB Buffer Sharing Proof of Concept
-6. Set up libhybris in Termux chroot, verify stock Adreno EGL/GLES loads
+6. Set up libhybris in Termux chroot, verify stock EGL/GLES loads via libhybris
 7. Write minimal test: allocate AHardwareBuffer, create EGLImage, render to
    FBO, send AHB over Unix socket via `AHardwareBuffer_sendHandleToUnixSocket`
 8. Write minimal compositor-side test: receive AHB, import via
@@ -435,7 +437,7 @@ Client-side WSI layer:
     absence of `wl_shm` serves as proof that AHB hardware path is actually working)
 
 ### Phase 7: Vulkan WSI (stretch goal)
-36. Verify libhybris Vulkan loads stock Adreno driver (may need unmerged PRs)
+36. Verify libhybris Vulkan loads stock GPU driver (may need unmerged PRs)
 37. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
 38. Same AHB side-channel mechanism as EGL wrapper
 39. Test with vkcube, vkmark
@@ -447,9 +449,9 @@ Client-side WSI layer:
 
 | Risk | Mitigation |
 |---|---|
-| libhybris can't load stock Adreno EGL/GLES from chroot | EGL/GLES via libhybris is battle-tested (Sailfish OS, Ubuntu Touch). Test early in Phase 2. |
-| libhybris Vulkan on Adreno has poor compatibility | Vulkan is a stretch goal. EGL/GLES covers most Linux desktop apps. android-vulkan-bridge project has proven Mali path. |
-| Stock driver needs Binder/gralloc from chroot | Process UID/SELinux context is unchanged. Normal Android apps use gralloc under same SELinux domain. `/dev/kgsl-3d0` is 0666. Bind-mount `/vendor` and `/system`. |
+| libhybris can't load stock EGL/GLES from chroot | EGL/GLES via libhybris is battle-tested (Sailfish OS, Ubuntu Touch). Test early in Phase 2. |
+| libhybris Vulkan compatibility varies by vendor | Vulkan is a stretch goal. EGL/GLES covers most Linux desktop apps. android-vulkan-bridge project has proven Mali path. |
+| Stock driver needs Binder/gralloc from chroot | Process UID/SELinux context is unchanged. Normal Android apps use gralloc under same SELinux domain. GPU device nodes are typically world-accessible (e.g. `/dev/kgsl-3d0` on Qualcomm, `/dev/mali0` on ARM Mali). Bind-mount `/vendor` and `/system`. |
 | `eglGetNativeClientBufferANDROID` not available | Widely available on Android 8+ but is a driver extension, not guaranteed. Runtime-check required. No known alternative for AHB -> EGLImage import. |
 | AHB side-channel socket adds complexity | Necessary because AHB serialization has its own wire format (`sendHandleToUnixSocket` uses multiple fds + metadata). Alternative: implement AHB serialization directly in the Wayland protocol layer (complex but eliminates side channel). |
 | Custom Wayland protocol (`tawc_buffer_v1`) breaks standard clients | Clients must use our WSI layer anyway (stock driver via libhybris). The WSI layer handles the protocol. Standard `wl_shm` provides software rendering fallback. |
@@ -457,7 +459,7 @@ Client-side WSI layer:
 | Smithay has never been built for Android | `default-features = false` avoids Linux deps. wayland-rs pure Rust backend. `EGLDisplay::from_raw()` avoids GBM. Must patch Smithay's EGL loader to find Android's system `libEGL.so` (it hardcodes `libEGL.so.1`). Test early. |
 | Hidden API reflection in relay breaks across Android versions | TermuxAm pattern has worked through Android 15. Monitor for breakage. |
 | Phantom Process Killer (Android 12+) | Relay exits after fd handoff. Users need Developer Options toggle for other Termux processes. |
-| Qualcomm-only GPU support | Architecture works for any device where libhybris can load the stock GPU driver. Non-Qualcomm needs testing. `wl_shm` fallback for unsupported devices. |
+| Vendor-specific GPU quirks | Architecture is vendor-neutral -- works for any device where libhybris can load the stock GPU driver (Adreno, Mali, PowerVR, etc.). Each vendor needs testing for driver-specific quirks. `wl_shm` fallback for unsupported devices. |
 | Freeform windowing not universal | On phones, each Activity is fullscreen (switch via recents). True freeform on Samsung DeX, ChromeOS, Android 15+ desktop mode. |
 
 ---
