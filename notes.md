@@ -97,6 +97,96 @@ because binderfs is a separate filesystem that doesn't propagate through bind mo
 Without this, EGL init may work (accesses GPU directly via `/dev/kgsl-3d0`) but
 AHB operations fail (need `/dev/binderfs/hwbinder` for HAL access).
 
+## Phase 3: Wayland Compositor (2026-03-31)
+
+### Architecture
+
+The compositor is now a proper Smithay-based Wayland server running inside the Android
+app process. Key components:
+
+**Wayland protocols:** `wl_compositor`, `xdg_wm_base` (v6), `wl_shm`, `wl_seat`,
+`wl_output`, and custom `tawc_buffer_manager_v1` / `tawc_ahb_channel_v1`.
+
+**tawc_buffer_v1 protocol design:**
+- `tawc_buffer_manager_v1` (global): client binds, calls `get_channel(surface)` to
+  create a per-surface AHB channel
+- `tawc_ahb_channel_v1`: compositor sends `channel_fd` event with a socketpair fd for
+  AHB transfer. Client calls `attach(width, height)` after sending an AHB on the side
+  channel. Standard `wl_surface.commit` triggers presentation.
+- Side channel uses `AHardwareBuffer_sendHandleToUnixSocket` /
+  `recvHandleFromUnixSocket` (multi-fd serialization that doesn't fit Wayland's wire format)
+
+**Socket path:** `/data/data/me.phie.tawc/wayland-0` -- app's own data dir ensures write
+access. Chroot clients access via root. Uses `ListeningSocket::bind_absolute()`.
+
+**Render loop:** Poll-based (no calloop), ~60fps. Each iteration:
+1. `listener.accept()` for new clients
+2. `display.dispatch_clients()` + `flush_clients()`
+3. Import pending AHBs (recv from side channel -> EGLImage -> GL texture)
+4. GlesRenderer: clear + render each toplevel's AHB texture
+5. `eglSwapBuffers()`
+6. Send frame callbacks
+
+### libhybris + libwayland-client Compatibility
+
+**HYBRIS_PATCH_TLS=1** is required for libhybris to work on stock Android (TLS thunk
+patching). When linking libhybris-common.so at compile time alongside libwayland-client,
+`HYBRIS_PATCH_TLS=1` must be set. The order matters: libhybris' `android_dlopen` can
+be called before or after `wl_display_connect` -- both work. However, the TLS patcher's
+constructor must run before any bionic library is loaded.
+
+**dlopen approach:** Loading libhybris-common.so via `dlopen()` requires the binary to
+be compiled with `-z execstack` (libhybris needs executable stack). Without this, the
+kernel blocks the dlopen with "cannot enable executable stack".
+
+### Verified Working Flow
+
+1. Client (glibc, chroot): loads AHB functions via libhybris `android_dlopen`
+2. Client: connects to Wayland, binds globals, creates xdg_toplevel
+3. Client: gets `tawc_ahb_channel_v1`, receives side-channel socket fd
+4. Client: allocates AHB (CPU write), fills with pattern
+5. Client: sends AHB via `AHardwareBuffer_sendHandleToUnixSocket` on side channel
+6. Client: calls `tawc_ahb_channel_v1.attach(256, 256)` + `wl_surface.commit()`
+7. Compositor: receives AHB, imports as GL texture (EXTERNAL_OES)
+8. Compositor: renders texture centered on screen via GlesRenderer
+9. Visual: green/yellow checkerboard visible on Android phone screen
+
+### EGL WSI Layer (2026-03-31)
+
+Drop-in `libEGL.so` wrapper that makes unmodified Wayland EGL apps work with tawc.
+Located at `client/tawc-wsi/tawc-egl.c`, built as a shared library placed first in
+`LD_LIBRARY_PATH`.
+
+**Intercepted EGL calls:**
+- `eglGetDisplay(wl_display)` → stores wl_display, binds tawc_buffer_manager_v1 (non-blocking),
+  loads stock EGL via `dlopen("/usr/local/lib/libEGL.so.1.0.0")` (libhybris's EGL)
+- `eglCreateWindowSurface(wl_egl_window)` → allocates AHB pool (double-buffered),
+  creates EGLImage→texture→FBO per buffer, gets tawc side channel
+- `eglSwapBuffers` → `glFinish()`, sends AHB via side channel, calls
+  `tawc_ahb_channel_v1.attach` + `wl_surface.commit`, rotates to next buffer
+- `eglChooseConfig` → rewrites `EGL_SURFACE_TYPE` from WINDOW to PBUFFER
+- Everything else → passed through to stock driver
+
+**Key design decisions:**
+- Non-blocking protocol binding in `eglGetDisplay` -- apps call this from within
+  `wl_display_dispatch` callbacks, so a blocking roundtrip deadlocks. Protocol globals
+  arrive via the app's own event loop dispatch.
+- Lazy AHB function loading -- `android_dlopen` for libnativewindow.so deferred to
+  first buffer allocation (after EGL context is active).
+- Real 1x1 pbuffer surface created for `eglMakeCurrent` context binding, then FBO
+  redirect to AHB-backed renderbuffer.
+- Depth/stencil renderbuffer attached to FBO for 3D apps.
+- `libEGL.so.1` symlink required since apps link against soname.
+
+**Verified:** `weston-simple-egl` (250x250 animated RGB triangle) renders correctly
+via the WSI layer on Pixel 4a (Adreno 618). Zero-copy GPU path confirmed.
+
+**Remaining issues:**
+- No `wl_shm` global → cursor loading fails silently (harmless for EGL apps)
+- No frame callback throttling → client renders as fast as possible
+- No resize handling yet
+- Toplevel lifecycle tracking needs work (using surface_ahb as source of truth)
+
 ### libhybris Vulkan Deep Dive (researched 2026-03-28)
 
 **Can it load stock Android Vulkan drivers?** YES, with caveats. The code

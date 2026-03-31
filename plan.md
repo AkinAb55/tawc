@@ -403,18 +403,18 @@ Client-side WSI layer:
    Both produce correct visual output (checkerboard patterns on screen)
 10. **Milestone: zero-copy GPU buffer sharing proven end-to-end** ✅
 
-### Phase 3: Wayland Server
+### Phase 3: Wayland Server ✅ COMPLETE (2026-03-31)
 11. ✅ Patch Smithay: `libEGL.so.1` -> `libEGL.so` for Android (done in Phase 1)
-12. Define `tawc_buffer_v1` Wayland protocol extension (AHB buffer lifecycle)
-13. Initialize Smithay Wayland state (Display, compositor, xdg_shell, wl_output,
+12. ✅ Define `tawc_buffer_v1` Wayland protocol extension (AHB buffer lifecycle)
+13. ✅ Initialize Smithay Wayland state (Display, compositor, xdg_shell, wl_output,
     tawc_buffer_v1)
-14. Compositor creates Wayland listening socket at a known path (direct connection,
+14. ✅ Compositor creates Wayland listening socket at a known path (direct connection,
     requires root/chroot — same approach proven in Phase 2)
-15. Test: chroot client connects via `WAYLAND_DISPLAY=<socket-path>`
-16. Handle client buffer commit: receive AHB -> EGLImage -> GL texture ->
+15. ✅ Test: chroot client connects via `WAYLAND_DISPLAY=<socket-path>`
+16. ✅ Handle client buffer commit: receive AHB -> EGLImage -> GL texture ->
     composite -> present
-17. Test with a simple Wayland EGL client from chroot
-18. **Milestone: GPU-accelerated Wayland client visible on screen**
+17. ✅ Test with a simple Wayland EGL client from chroot
+18. **Milestone: GPU-accelerated Wayland client visible on screen** ✅
 
 ### Phase 4: Input
 19. Implement AndroidInputBackend (touch + pointer first, keyboard second)

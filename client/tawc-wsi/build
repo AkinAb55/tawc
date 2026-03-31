@@ -1,0 +1,44 @@
+#!/bin/bash
+# Build the tawc EGL wrapper (libEGL.so) inside the chroot.
+set -e
+
+CHROOT="/data/local/arch-chroot"
+BUILD="/tmp/tawc-wsi"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "=== Pushing source ==="
+TMP="/data/local/tmp/tawc-build"
+adb shell "mkdir -p $TMP"
+adb push "$SCRIPT_DIR/tawc-egl.c" "$TMP/"
+adb push "$SCRIPT_DIR/../../server/compositor/protocols/tawc_buffer_v1.xml" "$TMP/"
+adb shell "su -c 'mkdir -p $CHROOT$BUILD && cp $TMP/* $CHROOT$BUILD/'"
+
+echo "=== Generating protocol + building ==="
+adb shell "su -c 'chroot $CHROOT /bin/bash -c \"
+export PATH=/usr/local/bin:/usr/bin:/bin
+cd $BUILD
+
+# Generate tawc protocol client code
+wayland-scanner client-header tawc_buffer_v1.xml tawc-buffer-v1-client.h
+wayland-scanner private-code tawc_buffer_v1.xml tawc-buffer-v1-client.c
+
+# Build shared library
+gcc -shared -fPIC -o libEGL.so \
+    tawc-egl.c \
+    tawc-buffer-v1-client.c \
+    -lwayland-client \
+    -lhybris-common \
+    -lGLESv2 \
+    -ldl \
+    -I. \
+    -Wall -g
+
+# Create soname symlink
+ln -sf libEGL.so libEGL.so.1
+
+echo Build successful
+ls -la libEGL.so
+\"'"
+
+echo "=== Done ==="
+echo "To use: LD_LIBRARY_PATH=$BUILD:\$LD_LIBRARY_PATH HYBRIS_PATCH_TLS=1 <app>"
