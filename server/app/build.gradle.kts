@@ -40,7 +40,7 @@ android {
 
 // Task to build the Rust native library via cargo-ndk
 tasks.register<Exec>("buildRustLibrary") {
-    workingDir = file("${rootProject.projectDir}/smithay-android")
+    workingDir = file("${rootProject.projectDir}/compositor")
     environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
     commandLine(
         "cargo", "ndk",
@@ -54,7 +54,7 @@ tasks.register<Exec>("buildRustLibrary") {
 // Copy the built .so into jniLibs
 tasks.register<Copy>("copyRustLibrary") {
     dependsOn("buildRustLibrary")
-    from("${rootProject.projectDir}/smithay-android/target/aarch64-linux-android/release/libsmithay_android.so")
+    from("${rootProject.projectDir}/compositor/target/aarch64-linux-android/release/libcompositor.so")
     into("src/main/jniLibs/arm64-v8a/")
 }
 

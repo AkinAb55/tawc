@@ -4,7 +4,7 @@ import android.view.Surface
 
 object NativeBridge {
     init {
-        System.loadLibrary("smithay_android")
+        System.loadLibrary("compositor")
     }
 
     /** Start the compositor render loop. Called once with the initial surface. */

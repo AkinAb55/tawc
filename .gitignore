@@ -1,15 +1,14 @@
 # Gradle
 .gradle/
 build/
-app/build/
 local.properties
-gradle/libs.versions.toml
+**/libs.versions.toml
 
 # Rust
-smithay-android/target/
+target/
 
 # JNI libs (built artifacts, not source)
-app/src/main/jniLibs/
+**/jniLibs/
 
 # IDE
 .idea/

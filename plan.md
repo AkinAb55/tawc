@@ -166,7 +166,7 @@ Standard Linux apps expect `eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND, ...)` (E
 |                                    JNI calls ||                       |
 |  Compositor Thread (Rust)                    ||                       |
 |  +-------------------------------------------vv---------------------+ |
-|  |  smithay-android                                                  | |
+|  |  compositor (Rust)                                                 | |
 |  |                                                                   | |
 |  |  +-- GlesRenderer (stock Smithay, stock GLES driver)              | |
 |  |  +-- AndroidEglBackend (EGL on ANativeWindow)                     | |
@@ -228,7 +228,7 @@ wlroots-android-bridge and Termux:X11.
 Standard Android app. Receives the Wayland listening socket fd from the `app_process`
 relay via a Binder object passed through an Intent.
 
-- **`MainActivity`** -- entry point. Loads `libsmithay_android.so` via
+- **`MainActivity`** -- entry point. Loads `libcompositor.so` via
   `System.loadLibrary()`. Starts compositor thread via JNI. Listens for callbacks from
   Rust to create/destroy window Activities.
 - **`SurfaceViewActivity`** -- one per Wayland toplevel. Uses `SurfaceView` for a
@@ -251,7 +251,7 @@ JNI callbacks (Rust -> Kotlin):
 - `requestCloseActivity(windowId: Long)`
 - `requestResizeActivity(windowId: Long, w: Int, h: Int)`
 
-### 2. Compositor Rust Library (`smithay-android/`)
+### 2. Compositor Rust Library (`server/compositor/`)
 
 The core compositor, running as a background thread in the Android app process.
 
@@ -319,7 +319,7 @@ hands listening fd to compositor app via Binder, exits. Uses TermuxAm pattern (d
 tawc-protocol/
 +-- tawc_buffer_v1.xml     # Custom Wayland protocol for AHB buffer sharing
 
-smithay-android/
+server/compositor/
 +-- Cargo.toml
 +-- src/
     +-- lib.rs              # JNI entry points

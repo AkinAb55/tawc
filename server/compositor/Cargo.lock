@@ -138,6 +138,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "compositor"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "jni",
+ "libloading",
+ "log",
+ "ndk",
+ "ndk-sys",
+ "rustix 0.38.44",
+ "smithay",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -831,20 +845,6 @@ dependencies = [
  "wayland-protocols-wlr",
  "wayland-server",
  "xkbcommon",
-]
-
-[[package]]
-name = "smithay-android"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "jni",
- "libloading",
- "log",
- "ndk",
- "ndk-sys",
- "rustix 0.38.44",
- "smithay",
 ]
 
 [[package]]

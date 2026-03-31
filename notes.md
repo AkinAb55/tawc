@@ -645,7 +645,7 @@ Our relay exits after fd handoff so only needs to survive briefly.
 
 ### Working chroot at `/data/local/arch-chroot/`
 
-Arch Linux ARM chroot created via `chroot-scripts/arch-chroot-create`. ~5.5GB with
+Arch Linux ARM chroot created via `client/arch-chroot-create`. ~5.5GB with
 base-devel, git, gdb, wayland, libtool, pkg-config installed via pacman.
 
 ### Running commands via adb
@@ -679,7 +679,7 @@ The `/apex` recursive bind creates ~80 submounts (one per APEX module).
 - **libhybris (lindroid fork):** Built from `Linux-on-droid/libhybris` branch `lindroid-21`
   with TLS thunk patcher + our bionic_tls allocation fix + `android_get_exported_namespace`
   NULL return (for gralloc debugging). Installed to `/usr/local/lib/`.
-  Source at `/root/libhybris-lindroid/`, build script: `chroot-scripts/build-libhybris-lindroid`.
+  Source at `/root/libhybris-lindroid/`, build script: `client/build-libhybris-lindroid`.
 
 ### libhybris TLS problem -- SOLVED (2026-03-31)
 
@@ -739,7 +739,7 @@ version-bumped to 16 with GCC compatibility fixes.
 
 ### What was built
 - Android app scaffold (Kotlin, single Activity + SurfaceView)
-- Rust JNI library (`smithay-android` crate, cdylib targeting `aarch64-linux-android`)
+- Rust JNI library (`server/compositor` crate, cdylib targeting `aarch64-linux-android`)
 - GlesRenderer rendering animated solid colors to Android Surface at ~60fps
 
 ### Device: OnePlus (Qualcomm Adreno GPU)
@@ -783,9 +783,9 @@ version-bumped to 16 with GCC compatibility fixes.
 - AHB import as GL texture via EGL extensions (`gl_import.rs`)
 - Same-process AHB round-trip: allocate -> fill -> send over socketpair -> receive ->
   import as EGLImage -> render as GL texture via Smithay GlesRenderer
-- Cross-process AHB round-trip: standalone `ahb-test-client` binary sends AHB from
-  separate process, compositor receives and displays it
-- External mode: compositor can listen on a Unix socket for cross-process clients
+- Cross-process AHB round-trip: chroot client allocates AHB, renders with GPU,
+  sends via `AHardwareBuffer_sendHandleToUnixSocket`, compositor receives and displays
+- External mode: compositor listens on a Unix socket for cross-process clients
   (flag file `/data/data/me.phie.tawc/external-mode` triggers this)
 
 ### AHB Import Pipeline (proven on Pixel 4a, Adreno 618)
@@ -821,41 +821,12 @@ Two patches required to `/home/ai/smithay-patched/`:
 2. **`GlesTexture::from_raw_with_flags()`** in `src/backend/renderer/gles/texture.rs`
    (Phase 2) -- adds `is_external` and `y_inverted` parameters for AHB texture import
 
-### Cross-process test (Android native client)
-The `ahb-test-client` binary (`ahb-test-client/` crate) is a standalone Android native
-binary that allocates an AHB, fills with a green/yellow checkerboard, and sends it over
-a Unix socket. To test cross-process:
-```bash
-# Push and set up
-adb push ahb-test-client/target/aarch64-linux-android/release/ahb-test-client /data/local/tmp/
-adb shell "run-as me.phie.tawc cp /data/local/tmp/ahb-test-client . && chmod 755 ahb-test-client"
-adb shell "run-as me.phie.tawc touch /data/data/me.phie.tawc/external-mode"
+### Cross-process test (chroot GPU client)
 
-# Restart app (now in external mode, waits for client)
-adb shell am force-stop me.phie.tawc
-adb shell am start -n me.phie.tawc/.MainActivity
+In external mode, the chroot client allocates an AHB, renders with GPU, and sends
+it to the compositor using the standard `AHardwareBuffer_sendHandleToUnixSocket` API.
 
-# Run external client
-adb shell "run-as me.phie.tawc ./ahb-test-client /data/data/me.phie.tawc/ahb-test.sock"
-
-# Clean up after testing
-adb shell "run-as me.phie.tawc rm external-mode ahb-test.sock ahb-test-client"
-```
-
-### Cross-process test (chroot libhybris client) -- 2026-03-31
-
-In external mode, the compositor now allocates the AHB and sends the raw native
-handle to the client (because AHB APIs don't work from the chroot — see
-`gralloc-problem.md`). The client constructs `ANativeWindowBuffer` manually and
-creates `EGLImage` directly.
-
-The flow: compositor allocates AHB → `AHardwareBuffer_getNativeHandle` → sends fds
-via `SCM_RIGHTS` + int data + descriptor over socket → client receives → constructs
-`ANativeWindowBuffer` (168 bytes, layout from `nativebase.h`) → `eglCreateImageKHR`
-→ attach to FBO → GPU render → send 1-byte "done" signal → compositor imports same
-AHB and displays it.
-
-To test from the chroot:
+To test:
 ```bash
 # Ensure bind mounts include app data dir (for socket access)
 adb shell "su -c 'mkdir -p /data/local/arch-chroot/data/data/me.phie.tawc && \
@@ -868,9 +839,9 @@ adb shell am force-stop me.phie.tawc
 adb shell am start -n me.phie.tawc/.MainActivity
 sleep 3
 
-# Run chroot client (compile first if needed — see test source in chroot /tmp/)
-adb shell "su -c 'HYBRIS_PATCH_TLS=1 chroot /data/local/arch-chroot \
-  /tmp/hybris-gpu-client /data/data/me.phie.tawc/ahb-test.sock'"
+# Run chroot client
+adb shell "su -c 'chroot /data/local/arch-chroot /bin/bash -lc \
+  \"HYBRIS_PATCH_TLS=1 /tmp/test-ahb-gpu-client /data/data/me.phie.tawc/ahb-test.sock\"'"
 ```
 
 ---
@@ -890,36 +861,34 @@ adb shell "su -c 'HYBRIS_PATCH_TLS=1 chroot /data/local/arch-chroot \
 **1. Build Rust native library:**
 ```bash
 export ANDROID_NDK_HOME=/home/ai/android-sdk/ndk/27.2.12479018
-cd smithay-android
+cd server/compositor
 cargo ndk --target arm64-v8a --platform 29 -- build --release
 ```
-Output: `smithay-android/target/aarch64-linux-android/release/libsmithay_android.so`
+Output: `server/compositor/target/aarch64-linux-android/release/libcompositor.so`
 
 **2. Copy .so and build APK:**
 ```bash
-cp smithay-android/target/aarch64-linux-android/release/libsmithay_android.so \
-   app/src/main/jniLibs/arm64-v8a/
+cp server/compositor/target/aarch64-linux-android/release/libcompositor.so \
+   server/app/src/main/jniLibs/arm64-v8a/
 export ANDROID_HOME=/home/ai/android-sdk
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
-./gradlew assembleDebug
+server/gradlew -p server assembleDebug
 ```
-Output: `app/build/outputs/apk/debug/app-debug.apk`
+Output: `server/app/build/outputs/apk/debug/app-debug.apk`
 
 **3. Deploy and run:**
 ```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r server/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n me.phie.tawc/.MainActivity
 ```
 
-### Quick rebuild cycle (Rust changes only)
+### Quick rebuild cycle (Rust changes only, run from repo root)
 ```bash
 export ANDROID_NDK_HOME=/home/ai/android-sdk/ndk/27.2.12479018
-cd smithay-android && cargo ndk --target arm64-v8a --platform 29 -- build --release && \
-cp target/aarch64-linux-android/release/libsmithay_android.so \
-   ../app/src/main/jniLibs/arm64-v8a/ && \
-cd .. && ANDROID_HOME=/home/ai/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
-./gradlew assembleDebug && \
-adb install -r app/build/outputs/apk/debug/app-debug.apk && \
+cd server/compositor && cargo ndk --target arm64-v8a --platform 29 -- build --release && cd ../.. && \
+ANDROID_HOME=/home/ai/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk \
+server/gradlew -p server assembleDebug && \
+adb install -r server/app/build/outputs/apk/debug/app-debug.apk && \
 adb shell am force-stop me.phie.tawc && \
 adb shell am start -n me.phie.tawc/.MainActivity
 ```

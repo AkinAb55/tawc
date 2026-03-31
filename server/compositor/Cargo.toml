@@ -1,5 +1,5 @@
 [package]
-name = "smithay-android"
+name = "compositor"
 version = "0.1.0"
 edition = "2021"
 
