@@ -615,11 +615,12 @@ EGLBoolean eglTerminate(EGLDisplay dpy)
 EGLBoolean eglBindAPI(EGLenum api)
 {
     /* Android GPU drivers only support GLES, not desktop GL.
-     * Map desktop GL to GLES. Apps using GDK_DEBUG=gles will call
-     * eglBindAPI(EGL_OPENGL_ES_API) directly and get the right path. */
+     * Reject EGL_OPENGL_API so callers know desktop GL is unavailable.
+     * GTK3 with GDK_GL=gles calls eglBindAPI(EGL_OPENGL_ES_API) directly.
+     * GTK3 3.24.35+ gracefully falls back to SHM on this failure. */
     if (api == EGL_OPENGL_API) {
-        log_msg("eglBindAPI: mapping EGL_OPENGL_API -> EGL_OPENGL_ES_API");
-        api = EGL_OPENGL_ES_API;
+        log_msg("eglBindAPI: rejecting EGL_OPENGL_API (no desktop GL)");
+        return EGL_FALSE;
     }
     if (initialized)
         return real_eglBindAPI(api);

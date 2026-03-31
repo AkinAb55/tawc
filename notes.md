@@ -223,7 +223,7 @@ via the WSI layer on Pixel 4a (Adreno 618). Zero-copy GPU path confirmed.
 - ~~No resize handling yet~~ → Phase 4: `eglSwapBuffers` detects `wl_egl_window` size changes
 - No frame callback throttling → client renders as fast as possible
 - Toplevel lifecycle tracking needs work (using surface_ahb as source of truth)
-- GTK3 GL path requires desktop-GL-to-GLES shader fix (see `gtk-gles.md`)
+- ~~GTK3 GL path requires desktop-GL-to-GLES shader fix~~ → Fixed: `GDK_GL=gles:always`
 
 ### Phase 4 Implementation (2026-03-31)
 
@@ -275,9 +275,9 @@ via the WSI layer on Pixel 4a (Adreno 618). Zero-copy GPU path confirmed.
   must return platform extensions for libepoxy to detect Wayland support.
   Returns `EGL_EXT_platform_base EGL_KHR_platform_wayland EGL_EXT_platform_wayland
   EGL_EXT_client_extensions`.
-- `eglBindAPI(EGL_OPENGL_API)`: Android drivers lack desktop GL. Mapped to
-  `EGL_OPENGL_ES_API` so GTK3's init doesn't abort. Side effect: GTK3 thinks
-  it has desktop GL and compiles wrong shaders (see gtk-gles.md).
+- `eglBindAPI(EGL_OPENGL_API)`: Android drivers lack desktop GL. Returns
+  `EGL_FALSE` so callers know desktop GL is unavailable. GTK3 with
+  `GDK_GL=gles` calls `eglBindAPI(EGL_OPENGL_ES_API)` directly, which works.
 - `eglCreateContext` attribute filtering: strips `EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR`,
   `EGL_CONTEXT_MINOR_VERSION_KHR`, and forward-compatible flags. Converts
   `EGL_CONTEXT_MAJOR_VERSION_KHR` to `EGL_CONTEXT_CLIENT_VERSION` for GLES.
@@ -292,9 +292,16 @@ via the WSI layer on Pixel 4a (Adreno 618). Zero-copy GPU path confirmed.
 - `weston-simple-egl`: GPU-accelerated rendering works end-to-end. RGB triangle
   visible on phone screen via AHB zero-copy path.
 - `gtk3-widget-factory` (SHM): renders correctly via wl_shm fallback (magenta tint).
-- `gtk3-widget-factory` (GL, `GDK_GL=always`): full EGL pipeline works (context
-  creation, window surface, AHB allocation) but shader compilation fails due to
-  desktop-GL-vs-GLES mismatch. See `gtk-gles.md` for detailed analysis.
+- `gtk3-widget-factory` (GL, `GDK_GL=gles:always`): GPU-accelerated GLES rendering
+  works. Normal GTK colors (no magenta tint).
+
+**GTK3 GLES env var gotcha:** The correct GTK3 env var for GLES is `GDK_GL=gles`
+(parsed in `gdk/gdk.c`, sets `GDK_GL_GLES` flag). `GDK_DEBUG=gl-gles` is a GTK4
+thing and does nothing in GTK3. Combine with `always` to force GL: `GDK_GL=gles:always`.
+With `GDK_GL=gles`, GTK3 calls `eglBindAPI(EGL_OPENGL_ES_API)` directly, sets
+`use_gles=TRUE`, and compiles GLES shaders (`#version 300 es`). The GLES-aware
+codepath in `gdk_wayland_display_init_gl()` was fixed in GTK 3.24.35 (commit
+`0e5fe45ea2`), so 3.24.52 has it.
 
 ### Phase 4 Design Notes: Robust EGL WSI
 
