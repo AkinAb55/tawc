@@ -5,13 +5,16 @@ Hi Claude, this project is Tess's Android Wayland Compositor (tawc)
 
 This is an agent-written project. Existing code/notes may be wrong in all sorts of ways. Stay vigilant, and always be prepared to surface/fix problems (even when working on something else).
 
-## Testing
-Complex code should be tested, and testing should be as general as possible (integration tests more than unit tests). An integration test means thinking about the system as a whole, and getting as much of it as practical into each test setup. Tests should only be written if they can test meaningful nontrivial properties of the components and/or how they work together. Invalid/nonuseful tests can always be improved or removed as needed.
+## Workflow
+- You often need to debug against a real Android phone, which is provided via adb
+- Try to work autonomously when possible, figure out how to close the debugging loop. If you need one-off human help to get your dev loop set up, just ask
+- When analyzing screenshots, use a sub-agent so the image doesn't end up in main context.
+- If `su` is available on a phone you're testing on, use it instead of `adb root`
+- When there's a script to do something (eg create/destroy the chroot) always use it instead of oneshotting commands
+- If there's a problem with a script (or any file in the repo), feel free to edit it
 
-## Iteration
-Getting a good workflow for debugging/iterating is often nontrivial. For example you may need access to a real Android phone to test hardware acceleration and other features. The goal is always to enable as much autonomy as possible, without needing repeated human involvement for iteration. Feel free to ask for whatever one-time setup you need to make this possible.
-
-When analyzing screenshots, use a sub-agent so the image doesn't end up in main context.
+## Wayland buffers
+We support both hardware buffers and SHM buffers, but the goal is to make hardware buffers work for most apps in most cases without their pixels ever having to touch the CPU. To this end, we tint SHM buffers magenta so it's obvious when they're being used (which may or may not be what we want in a given context). Do not remove this magenta tinting unless explicitly asked to.
 
 ## Device Support
 The goal of this project is to run on all modern Android phones without requiring firmware modifications. This means requiring open source GPU drivers or bionic patches is not viable. Requiring root is viable (especially for testing), but ideally it could even be run without root.
@@ -20,4 +23,4 @@ The goal of this project is to run on all modern Android phones without requirin
 I'm letting you play with my phone, try not to fuck it up.
 
 ## Organization
-Avoid junking up devices (eg delete screenshots you take when you're done with them). On the phone things should generally stay in `/data/local/arch-chroot/`, `/data/local/claude-debug` and the termux home directory
+Avoid junking up devices (eg delete screenshots you take when you're done with them). On the phone things should generally stay in `/data/local/arch-chroot/`, `/data/local/claude-debug` (**NOT** `/data/local/tmp`)

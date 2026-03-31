@@ -32,22 +32,34 @@ SHM buffers (`wl_shm`) are supported alongside the AHB path. SHM matters even fo
 GPU-accelerated clients because cursor themes (`wl_cursor_theme_load`), toolkit
 subsurfaces/popups (GTK3/4), and EGL fallback paths all use `wl_shm`.
 
-**SELinux problem:** On Android, the compositor runs as `untrusted_app`. Chroot clients'
-memfds get SELinux label `tmpfs`, which `untrusted_app` can't mmap. The failure is silent:
-the fd is consumed from SCM_RIGHTS, the protocol parser gets out of sync, and all
-subsequent messages from that client are dropped.
+**SELinux problem (investigated 2026-03-31):** On Android, the compositor runs as
+`untrusted_app`. The issue is **SELinux type enforcement** (not MLS as previously thought).
+When root processes in the chroot create memfds, they get label `u:object_r:tmpfs:s0`.
+The `untrusted_app` domain lacks `{ read write map }` permission on the `tmpfs` type, so
+the compositor can't mmap them. The failure manifests as `recvmsg` failing to deliver the
+fd (SELinux denies access during fd transfer), which causes the Wayland protocol parser
+to get out of sync and drop all subsequent messages from that client.
 
-**Solution:** An ashmem LD_PRELOAD shim (`client/ashmem-shim/`) transparently redirects
-shared memory allocation to `/dev/ashmem`. Ashmem fds are in SELinux's `mlstrustedobject`
-set, so the compositor can mmap them freely. The shim intercepts `memfd_create()`,
-`ftruncate()`, `posix_fallocate()`, `fallocate()`, and `close()`. Build with
-`cd client/ashmem-shim && ./build`.
+When app processes create memfds, they get label `u:object_r:appdomain_tmpfs:s0:cXXX,...`
+(with MLS categories matching the app). The `untrusted_app` domain has `{ read write map }`
+on `appdomain_tmpfs`. MLS categories are **not enforced** for `appdomain_tmpfs` fd access —
+any app can access any `appdomain_tmpfs` file regardless of category mismatch. Confirmed
+experimentally with `client/shm-test/`.
 
-Usage: `LD_PRELOAD=/tmp/ashmem-shim/libashmem-shim.so weston-simple-shm`
+Permissive mode (`setenforce 0`) also fixes memfd sharing. The earlier claim that
+"permissive mode doesn't help" was incorrect — it was likely tested improperly.
 
-**ashmem deprecation note:** ashmem is deprecated upstream in favor of `memfd_create`, but
-remains on all shipping Android devices. If removed, either Android will have loosened
-SELinux for memfd (making the shim unnecessary) or the shim can swap its backend.
+**Solution (with root):** An LD_PRELOAD shim (`client/memfd-selinux-shim/`) intercepts
+`memfd_create()` and calls `fsetxattr(fd, "security.selinux",
+"u:object_r:appdomain_tmpfs:s0", ...)` to relabel the memfd. This is a single syscall
+that makes the memfd shareable with any app, with full normal memfd semantics preserved.
+Requires root for `fsetxattr`. Build with `cd client/memfd-selinux-shim && ./build`.
+
+Usage: `LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so weston-simple-shm`
+
+**Without root:** Run client processes as the same app/UID as the compositor. Their memfds
+natively get `appdomain_tmpfs` label. No shim needed. This is the path to proot from
+within the compositor app.
 
 **Magenta tint**: SHM surfaces are rendered with a distinct magenta tint via a custom
 `GlesTexProgram` shader. This is intentional -- it makes it visually obvious when a client
@@ -896,6 +908,10 @@ Same distro packages, mounted in a real chroot. Requires root (e.g., Magisk).
   everything. Add `/etc/profile.d/00-path.sh` to set PATH explicitly
 - **Simpler path semantics** -- no path translation layer, libhybris sees real
   filesystem paths
+- **Teardown: MUST use `client/arch-chroot-destroy` to remove the chroot.** It unmounts
+  all bind mounts before deleting. Never `rm -rf` the chroot directory directly — the
+  `--rbind` of `/apex` pulls in dozens of system loop mounts, and removing or
+  lazy-unmounting them can destabilize system services and cause a reboot.
 
 ### Which to target
 

@@ -24,19 +24,10 @@ Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **successful
 
 ## Changes Made
 
-### 1. ashmem-shim: Over-allocation for resize support (`client/ashmem-shim/ashmem-shim.c`)
+### 1. memfd SELinux relabeling shim (`client/memfd-selinux-shim/`)
 
-**Problem:** Android's ashmem driver only allows `ASHMEM_SET_SIZE` once before the first mmap. Wayland cursor pools start small (2304 bytes) and grow (to 587520+) via `posix_fallocate`/`ftruncate`. The original shim called `ASHMEM_SET_SIZE` on every resize, which failed on all but the first call, causing an infinite retry loop that blocked Firefox startup.
-
-**Fix:** On first `ASHMEM_SET_SIZE`, over-allocate to at least 4MB (`ASHMEM_MIN_ALLOC`). Track per-fd `allocated_size` and `logical_size`. Subsequent resize calls check if the requested size fits within the pre-allocated space and return success without calling the ioctl again. Also intercept `fstat` to report the logical size.
-
-### 2. ashmem-shim: Selective memfd interception (`client/ashmem-shim/ashmem-shim.c`)
-
-**Problem:** The original shim intercepted ALL `memfd_create` calls. Firefox uses memfds internally for IPC between its processes (`mozilla-ipc`, `mozilla-ipc-test`). Redirecting these to ashmem caused Firefox's IPC mechanism to crash with a SIGSEGV (null pointer dereference in the content process).
-
-**Root cause:** ashmem has different semantics from memfd - it can't be resized after first mmap, sealing doesn't work, and behavior with shared mappings may differ. Firefox's IPC relies on memfd semantics that ashmem doesn't support.
-
-**Fix:** Changed from intercepting everything to a denylist approach. Only `memfd_create` calls with names matching `mozilla-ipc*` are passed through to the real `memfd_create` syscall. All other memfds (including `wayland-cursor`, `wayland-shm`, `gdk-wayland`, `weston-shared`, etc.) are redirected to ashmem for cross-process SELinux compatibility.
+The shim intercepts `memfd_create()` and calls `fsetxattr()` to relabel the fd from
+`tmpfs` to `appdomain_tmpfs`, which `untrusted_app` can access. See notes.md for details.
 
 ### 3. libhybris execstack fix (re-applied)
 
@@ -45,16 +36,6 @@ Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **successful
 **Fix:** Fixed symlink: `ln -sf libhybris-common.so.1.0.0 libhybris-common.so.1`, then `patchelf --clear-execstack libhybris-common.so.1.0.0`.
 
 ## Confirmed Findings
-
-### SHM buffer data is all zeros for real (non-ashmem) memfds
-
-When a client creates a real memfd (not intercepted by the ashmem shim), the compositor can mmap the fd but reads all zeros. Confirmed by logging buffer contents:
-- **ashmem-backed (weston-shared):** `total_nonzero=244352` out of 250000 bytes - WORKS
-- **real memfd (gdk-wayland):** `total_nonzero=0` - ALL ZEROS even with `setenforce 0`
-
-This is NOT an SELinux type-enforcement issue (permissive mode doesn't help). It appears to be an Android kernel MLS/category restriction on tmpfs. The ashmem path works because ashmem fds have the `mlstrustedobject` SELinux label which bypasses MLS checks.
-
-**Conclusion:** The ashmem shim is REQUIRED for all cross-process shared memory buffers. The denylist approach (intercept everything except `mozilla-ipc*`) is the correct design.
 
 ### Firefox doesn't use our EGL wrapper
 
@@ -83,7 +64,7 @@ All Firefox sandbox must be disabled (`MOZ_DISABLE_CONTENT_SANDBOX=1` etc.). The
 ```bash
 export WAYLAND_DISPLAY=/data/data/me.phie.tawc/wayland-0
 export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
-export LD_PRELOAD=/tmp/ashmem-shim/libashmem-shim.so
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
 export HYBRIS_PATCH_TLS=1
 export HOME=/root
 export XDG_RUNTIME_DIR=/tmp
@@ -95,7 +76,7 @@ gtk3-widget-factory
 ```bash
 export WAYLAND_DISPLAY=/data/data/me.phie.tawc/wayland-0
 export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
-export LD_PRELOAD=/tmp/ashmem-shim/libashmem-shim.so
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
 export HYBRIS_PATCH_TLS=1
 export MOZ_ENABLE_WAYLAND=1
 export HOME=/root
@@ -119,4 +100,4 @@ firefox --no-remote
 
 2. **Add keyboard support** - Needed for any interactive use of Firefox
 
-3. **Consider SHM fallback for Firefox** - As a temporary measure, if we can make the SHM path work (all ashmem), Firefox could render via software while we work on GPU support
+3. **Consider SHM fallback for Firefox** - As a temporary measure, Firefox could render via software (SHM) while we work on GPU support
