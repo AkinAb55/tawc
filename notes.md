@@ -5,16 +5,26 @@ and for LLM agents.
 
 ## SHM Buffer Support (2026-03-31)
 
-SHM buffers (`wl_shm`) are supported alongside the AHB path. See [shm.md](shm.md) for
-detailed notes on the SELinux issue and potential solutions.
+SHM buffers (`wl_shm`) are supported alongside the AHB path. SHM matters even for
+GPU-accelerated clients because cursor themes (`wl_cursor_theme_load`), toolkit
+subsurfaces/popups (GTK3/4), and EGL fallback paths all use `wl_shm`.
 
-**Current status:** SHM works without any SELinux workaround, thanks to an ashmem
-LD_PRELOAD shim (`client/ashmem-shim/`). The shim intercepts `memfd_create()`,
-`ftruncate()`, and `posix_fallocate()` in chroot clients, redirecting shared memory
-allocation to Android's `/dev/ashmem` driver. Ashmem fds are in SELinux's
-`mlstrustedobject` set, so the compositor (untrusted_app) can mmap them freely.
+**SELinux problem:** On Android, the compositor runs as `untrusted_app`. Chroot clients'
+memfds get SELinux label `tmpfs`, which `untrusted_app` can't mmap. The failure is silent:
+the fd is consumed from SCM_RIGHTS, the protocol parser gets out of sync, and all
+subsequent messages from that client are dropped.
+
+**Solution:** An ashmem LD_PRELOAD shim (`client/ashmem-shim/`) transparently redirects
+shared memory allocation to `/dev/ashmem`. Ashmem fds are in SELinux's `mlstrustedobject`
+set, so the compositor can mmap them freely. The shim intercepts `memfd_create()`,
+`ftruncate()`, `posix_fallocate()`, `fallocate()`, and `close()`. Build with
+`cd client/ashmem-shim && ./build`.
 
 Usage: `LD_PRELOAD=/tmp/ashmem-shim/libashmem-shim.so weston-simple-shm`
+
+**ashmem deprecation note:** ashmem is deprecated upstream in favor of `memfd_create`, but
+remains on all shipping Android devices. If removed, either Android will have loosened
+SELinux for memfd (making the shim unnecessary) or the shim can swap its backend.
 
 **Magenta tint**: SHM surfaces are rendered with a distinct magenta tint via a custom
 `GlesTexProgram` shader. This is intentional -- it makes it visually obvious when a client
