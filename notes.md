@@ -334,7 +334,7 @@ Mesa Turnip and the stock Android driver.
 
 ---
 
-## Unix Domain Socket Access (2026-03-27)
+## Unix Domain Socket Access (2026-03-27, updated 2026-03-31)
 
 Cross-app Unix socket communication is blocked by SELinux on Android 9+.
 
@@ -342,30 +342,21 @@ Cross-app Unix socket communication is blocked by SELinux on Android 9+.
 - Abstract namespace sockets also blocked by SELinux MAC checks
 - Filesystem sockets face both DAC (app dirs are 0700) and MAC barriers
 
-**How Termux works around it:** Termux and plugins share `sharedUserId="com.termux"` =
-same UID = bypasses both DAC and SELinux.
+**With root (chroot):** Root bypasses SELinux MAC checks on `connect()`. The compositor
+creates a socket at a known path, chmod 777s it, and chroot clients connect directly.
+This is the current development approach (proven in Phase 2 cross-process AHB tests).
 
-**Our solution:** `app_process` relay creates socket in Termux's `$XDG_RUNTIME_DIR`,
-passes **listening fd** to compositor app via Binder/Intent. SELinux checks apply to
-`connect()`/`bind()`, not to `accept()`/`read()`/`write()` on inherited fds.
+**Without root (proot, future):** Two options:
 
----
+1. **Binder fd passing (preferred):** Compositor creates `socketpair()`, passes one end
+   to Termux via a ContentProvider or bound Service as `ParcelFileDescriptor`. No
+   `connect()` syscall ever happens, so SELinux `connectto` check is never triggered.
+   Cleaner than `app_process` relay — no hidden API reflection, no dependency on
+   `app_process` internals.
 
-## app_process Relay (2026-03-27)
-
-`app_process` does NOT provide an Android `Context`. The relay cannot call
-`bindService()`. Solution: reverse the Binder flow.
-
-The relay creates Binder objects and sends them TO the app by launching an Activity via
-direct `IActivityManager.startActivityAsUser()` calls (reflection, bypassing Context).
-The TermuxAm and wlroots-android-bridge projects both use this pattern.
-
-Flow:
-1. Relay creates `$XDG_RUNTIME_DIR/wayland-0` listening socket
-2. Wraps fd in `ParcelFileDescriptor` inside Binder-compatible object
-3. Sends to tawc app via `IActivityManager.startActivity()` reflection
-4. Tawc Activity extracts fd, passes to compositor via JNI
-5. Relay exits
+2. **Shared UID:** `sharedUserId="com.termux"` makes both apps run as same UID/SELinux
+   domain. Used by Termux plugins. Deprecated since API 33 but still functional.
+   Limits distribution (must sign with Termux's key).
 
 ---
 

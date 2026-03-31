@@ -207,17 +207,24 @@ Zero-copy from client to compositor. One GPU composition pass for display.
 
 ### Wayland Socket Sharing
 
-Cross-app Unix sockets are blocked by SELinux on Android 9+. Solution: `app_process`
-relay launched from Termux.
+**With root (chroot):** The compositor creates a Unix socket at a known path and the
+chroot client connects directly. Root bypasses SELinux MAC checks on `connect()`.
+The client sets `WAYLAND_DISPLAY` to the socket path. This is the current development
+approach.
 
-The relay creates `$XDG_RUNTIME_DIR/wayland-0`, passes the **listening fd** to the
-compositor app via Binder (Intent + ParcelFileDescriptor, using the TermuxAm pattern
-of direct `IActivityManager` calls). The compositor calls `accept()` on the fd. After
-handoff, the relay exits.
+**Without root (proot, future goal):** SELinux blocks cross-app `connect()` between
+`untrusted_app` domains on Android 9+, regardless of filesystem permissions. Two
+viable solutions:
 
-This works because SELinux checks apply to `connect()`/`bind()`, not to
-`read()`/`write()`/`accept()` on inherited fds. Proven pattern -- used by
-wlroots-android-bridge and Termux:X11.
+1. **Binder fd passing:** Compositor creates a `socketpair()`, passes one end to
+   Termux via a ContentProvider or bound Service as a `ParcelFileDescriptor`. No
+   `connect()` syscall occurs, so SELinux is never triggered. Cleaner than the
+   `app_process` relay pattern and doesn't depend on hidden API reflection.
+
+2. **Shared UID:** If the compositor app uses `sharedUserId="com.termux"` and is
+   signed with the same key, both processes run as the same UID and SELinux domain,
+   allowing direct socket access. Limits distribution flexibility.
+   (`sharedUserId` is deprecated since API 33 but still functional.)
 
 ---
 
@@ -225,8 +232,9 @@ wlroots-android-bridge and Termux:X11.
 
 ### 1. Kotlin App Shell (`app/`)
 
-Standard Android app. Receives the Wayland listening socket fd from the `app_process`
-relay via a Binder object passed through an Intent.
+Standard Android app. Creates the Wayland listening socket and accepts client
+connections directly (with root/chroot). For non-root, a Binder-based fd passing
+mechanism can be added later (see "Wayland Socket Sharing").
 
 - **`MainActivity`** -- entry point. Loads `libcompositor.so` via
   `System.loadLibrary()`. Starts compositor thread via JNI. Listens for callbacks from
@@ -234,11 +242,9 @@ relay via a Binder object passed through an Intent.
 - **`SurfaceViewActivity`** -- one per Wayland toplevel. Uses `SurfaceView` for a
   dedicated SurfaceFlinger layer. On surface ready: calls JNI to give compositor direct
   access to ANativeWindow. Forwards touch/key events to Rust via JNI.
-- **`Relay.kt`** -- `app_process` entry point (runs in Termux). Creates Wayland socket,
-  passes fd to app, exits.
 
 JNI interface (Kotlin -> Rust):
-- `nativeStartCompositor(socketFd: Int)` -- start compositor event loop
+- `nativeStartCompositor()` -- start compositor event loop (creates Wayland socket)
 - `nativeStopCompositor()`
 - `nativeOnSurfaceCreated(windowId: Long, surface: Surface)`
 - `nativeOnSurfaceChanged(windowId: Long, width: Int, height: Int)`
@@ -305,12 +311,6 @@ a stretch goal.
 - Activated automatically via implicit layer manifest
 - **Depends on libhybris Vulkan maturity** -- compatibility varies by GPU vendor
 
-### 4. app_process Relay (`app/src/.../Relay.kt`)
-
-Lightweight Kotlin class run via `app_process` from Termux. Creates Wayland socket,
-hands listening fd to compositor app via Binder, exits. Uses TermuxAm pattern (direct
-`IActivityManager` calls via reflection) since `app_process` has no Android Context.
-
 ---
 
 ## Crate Structure
@@ -347,8 +347,6 @@ app/
     |   +-- MainActivity.kt
     |   +-- SurfaceViewActivity.kt
     |   +-- NativeBridge.kt           # JNI extern declarations
-    |   +-- RelayReceiver.kt          # Receives fd from relay
-    |   +-- Relay.kt                  # app_process entry point
     +-- res/
 +-- build.gradle.kts
 ```
@@ -405,18 +403,16 @@ Client-side WSI layer:
    Both produce correct visual output (checkerboard patterns on screen)
 10. **Milestone: zero-copy GPU buffer sharing proven end-to-end** ✅
 
-### Phase 3: Wayland Server + Socket Relay
+### Phase 3: Wayland Server
 11. ✅ Patch Smithay: `libEGL.so.1` -> `libEGL.so` for Android (done in Phase 1)
 12. Define `tawc_buffer_v1` Wayland protocol extension (AHB buffer lifecycle)
 13. Initialize Smithay Wayland state (Display, compositor, xdg_shell, wl_output,
     tawc_buffer_v1)
-14. Build `app_process` relay for listening socket handoff
-15. Test: Termux client connects to `$XDG_RUNTIME_DIR/wayland-0`
+14. Compositor creates Wayland listening socket at a known path (direct connection,
+    requires root/chroot — same approach proven in Phase 2)
+15. Test: chroot client connects via `WAYLAND_DISPLAY=<socket-path>`
 16. Handle client buffer commit: receive AHB -> EGLImage -> GL texture ->
     composite -> present
-    **Note:** AHB allocation from the chroot doesn't work (see `gralloc-problem.md`).
-    Current workaround: compositor allocates AHBs and sends raw native handles to
-    clients. The WSI layer / buffer protocol needs to account for this.
 17. Test with a simple Wayland EGL client from chroot
 18. **Milestone: GPU-accelerated Wayland client visible on screen**
 
@@ -443,13 +439,15 @@ Client-side WSI layer:
 34. IME bridge (zwp_text_input_v3 <-> Android InputMethodManager)
 35. `wl_shm` support (software rendering fallback -- deliberately last so that
     absence of `wl_shm` serves as proof that AHB hardware path is actually working)
+36. Non-root socket sharing: Binder fd passing (ContentProvider/Service) so
+    proot clients can connect without root (see "Wayland Socket Sharing")
 
 ### Phase 7: Vulkan WSI (stretch goal)
-36. Verify libhybris Vulkan loads stock GPU driver (may need unmerged PRs)
-37. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
-38. Same AHB side-channel mechanism as EGL wrapper
-39. Test with vkcube, vkmark
-40. **Milestone: Vulkan apps work via libhybris + our WSI layer**
+37. Verify libhybris Vulkan loads stock GPU driver (may need unmerged PRs)
+38. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
+39. Same AHB side-channel mechanism as EGL wrapper
+40. Test with vkcube, vkmark
+41. **Milestone: Vulkan apps work via libhybris + our WSI layer**
 
 ---
 
@@ -463,10 +461,9 @@ Client-side WSI layer:
 | `eglGetNativeClientBufferANDROID` not available | Widely available on Android 8+ but is a driver extension, not guaranteed. Runtime-check required. No known alternative for AHB -> EGLImage import. |
 | AHB side-channel socket adds complexity | Necessary because AHB serialization has its own wire format (`sendHandleToUnixSocket` uses multiple fds + metadata). Alternative: implement AHB serialization directly in the Wayland protocol layer (complex but eliminates side channel). |
 | Custom Wayland protocol (`tawc_buffer_v1`) breaks standard clients | Clients must use our WSI layer anyway (stock driver via libhybris). The WSI layer handles the protocol. Standard `wl_shm` provides software rendering fallback. |
-| SELinux blocks cross-app Wayland socket | `app_process` relay with fd handoff (proven by wlroots-android-bridge, Termux:X11). |
+| SELinux blocks cross-app Wayland socket without root | With root/chroot, direct connection works (root bypasses MAC). For non-root: Binder fd passing via ContentProvider avoids `connect()` entirely. |
 | Smithay has never been built for Android | `default-features = false` avoids Linux deps. wayland-rs pure Rust backend. `EGLDisplay::from_raw()` avoids GBM. Must patch Smithay's EGL loader to find Android's system `libEGL.so` (it hardcodes `libEGL.so.1`). Test early. |
-| Hidden API reflection in relay breaks across Android versions | TermuxAm pattern has worked through Android 15. Monitor for breakage. |
-| Phantom Process Killer (Android 12+) | Relay exits after fd handoff. Users need Developer Options toggle for other Termux processes. |
+| Phantom Process Killer (Android 12+) | Users need Developer Options toggle for Termux processes. |
 | Vendor-specific GPU quirks | Architecture is vendor-neutral -- works for any device where libhybris can load the stock GPU driver (Adreno, Mali, PowerVR, etc.). Each vendor needs testing for driver-specific quirks. `wl_shm` fallback for unsupported devices. |
 | Freeform windowing not universal | On phones, each Activity is fullscreen (switch via recents). True freeform on Samsung DeX, ChromeOS, Android 15+ desktop mode. |
 
