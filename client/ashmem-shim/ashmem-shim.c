@@ -6,7 +6,11 @@
  * ashmem fds are in the mlstrustedobject set, so they bypass MLS checks
  * and can be freely shared between processes via Unix sockets.
  *
- * Usage: LD_PRELOAD=/path/to/libashmem-shim.so weston-simple-shm
+ * Handles Wayland SHM pool resize by over-allocating the ashmem buffer on
+ * first SET_SIZE (ashmem only allows one SET_SIZE before first mmap).
+ * Subsequent "resizes" within the pre-allocated space succeed silently.
+ *
+ * Usage: LD_PRELOAD=/path/to/libashmem-shim.so firefox
  */
 
 #define _GNU_SOURCE
@@ -20,6 +24,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -28,19 +33,36 @@
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 #define ASHMEM_SET_SIZE _IOW(__ASHMEMIOC, 3, size_t)
+#define ASHMEM_GET_SIZE _IO(__ASHMEMIOC, 4)
 
 /*
- * Track which fds are ashmem so we can intercept ftruncate on them.
- * Simple bitset - fds above MAX_FD_TRACK fall through to real ftruncate.
+ * Minimum allocation size for ashmem buffers. Wayland SHM pools start small
+ * (e.g. 2304 bytes for cursors) then grow (to 6912+). Since ashmem only
+ * allows one SET_SIZE before first mmap, we over-allocate to handle resizes.
+ * 4MB is generous enough for cursor pools and small SHM buffers.
+ */
+#define ASHMEM_MIN_ALLOC (4 * 1024 * 1024)
+
+/*
+ * Track which fds are ashmem and their allocated/logical sizes.
  */
 #define MAX_FD_TRACK 1024
-static uint64_t ashmem_fds[MAX_FD_TRACK / 64];
+
+struct ashmem_fd_info {
+    int is_ashmem;
+    size_t allocated_size;  /* actual ashmem allocation (over-allocated) */
+    size_t logical_size;    /* size the caller thinks the buffer is */
+};
+
+static struct ashmem_fd_info fd_info[MAX_FD_TRACK];
 static pthread_mutex_t fd_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void fd_set_ashmem(int fd) {
     if (fd >= 0 && fd < MAX_FD_TRACK) {
         pthread_mutex_lock(&fd_lock);
-        ashmem_fds[fd / 64] |= (1ULL << (fd % 64));
+        fd_info[fd].is_ashmem = 1;
+        fd_info[fd].allocated_size = 0;
+        fd_info[fd].logical_size = 0;
         pthread_mutex_unlock(&fd_lock);
     }
 }
@@ -48,7 +70,9 @@ static void fd_set_ashmem(int fd) {
 static void fd_clear_ashmem(int fd) {
     if (fd >= 0 && fd < MAX_FD_TRACK) {
         pthread_mutex_lock(&fd_lock);
-        ashmem_fds[fd / 64] &= ~(1ULL << (fd % 64));
+        fd_info[fd].is_ashmem = 0;
+        fd_info[fd].allocated_size = 0;
+        fd_info[fd].logical_size = 0;
         pthread_mutex_unlock(&fd_lock);
     }
 }
@@ -57,17 +81,92 @@ static int fd_is_ashmem(int fd) {
     if (fd < 0 || fd >= MAX_FD_TRACK)
         return 0;
     pthread_mutex_lock(&fd_lock);
-    int result = (ashmem_fds[fd / 64] >> (fd % 64)) & 1;
+    int result = fd_info[fd].is_ashmem;
     pthread_mutex_unlock(&fd_lock);
     return result;
 }
 
 /*
- * Replace memfd_create with ashmem.
- * libwayland-client calls memfd_create() via the syscall wrapper in glibc
- * to create SHM pools. We intercept it here.
+ * Set or "resize" an ashmem fd. On first call, does the real ASHMEM_SET_SIZE
+ * with an over-allocated size. On subsequent calls, if the requested size
+ * fits within the allocation, just updates the logical size.
+ * Returns 0 on success, -1 on failure (sets errno).
+ */
+static int ashmem_set_logical_size(int fd, size_t requested_size) {
+    if (fd < 0 || fd >= MAX_FD_TRACK)
+        return -1;
+
+    pthread_mutex_lock(&fd_lock);
+
+    if (fd_info[fd].allocated_size == 0) {
+        /* First SET_SIZE - do the real ioctl with over-allocation */
+        size_t alloc = requested_size;
+        if (alloc < ASHMEM_MIN_ALLOC)
+            alloc = ASHMEM_MIN_ALLOC;
+
+        int ret = ioctl(fd, ASHMEM_SET_SIZE, alloc);
+        if (ret < 0) {
+            int err = errno;
+            pthread_mutex_unlock(&fd_lock);
+            errno = err;
+            return -1;
+        }
+        fd_info[fd].allocated_size = alloc;
+        fd_info[fd].logical_size = requested_size;
+        pthread_mutex_unlock(&fd_lock);
+
+        fprintf(stderr, "ashmem-shim: SET_SIZE(%d, %zu) allocated %zu\n",
+                fd, requested_size, alloc);
+        return 0;
+    }
+
+    /* Subsequent call - check if it fits */
+    if (requested_size <= fd_info[fd].allocated_size) {
+        fd_info[fd].logical_size = requested_size;
+        pthread_mutex_unlock(&fd_lock);
+
+        fprintf(stderr, "ashmem-shim: resize(%d, %zu) fits in %zu - ok\n",
+                fd, requested_size, fd_info[fd].allocated_size);
+        return 0;
+    }
+
+    /* Doesn't fit - can't resize ashmem after first mmap */
+    pthread_mutex_unlock(&fd_lock);
+    fprintf(stderr,
+            "ashmem-shim: resize(%d, %zu) exceeds allocation %zu - FAIL\n",
+            fd, requested_size, fd_info[fd].allocated_size);
+    errno = EINVAL;
+    return -1;
+}
+
+/*
+ * Check if a memfd should skip ashmem redirection (use real memfd instead).
+ * Most memfds need ashmem for cross-process SELinux compatibility, but
+ * some application-internal memfds (like Firefox's IPC) break with ashmem
+ * semantics and don't need cross-process sharing with the compositor.
+ */
+static int skip_ashmem(const char *name) {
+    if (!name)
+        return 0;
+    /* Firefox IPC memfds - used between Firefox's own processes, not shared
+     * with the compositor. Ashmem breaks Firefox's IPC mechanism. */
+    if (strncmp(name, "mozilla-ipc", 11) == 0)
+        return 1;
+    return 0;
+}
+
+/*
+ * Replace memfd_create with ashmem, but ONLY for Wayland-related memfds.
+ * Other memfds (like Firefox's mozilla-ipc) are left as real memfds since
+ * they don't cross the SELinux boundary.
  */
 int memfd_create(const char *name, unsigned int flags) {
+    if (skip_ashmem(name)) {
+        /* Pass through to real memfd_create via syscall */
+        long ret = syscall(SYS_memfd_create, name, flags);
+        return (int)ret;
+    }
+
     (void)flags;
 
     int fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
@@ -95,19 +194,17 @@ int memfd_create(const char *name, unsigned int flags) {
 /*
  * Intercept ftruncate to translate to ASHMEM_SET_SIZE for ashmem fds.
  * libwayland calls ftruncate() to set the pool size after memfd_create().
- * ashmem requires ASHMEM_SET_SIZE ioctl instead.
+ * Uses over-allocation + logical size tracking to handle resizes.
  */
 int ftruncate(int fd, off_t length) {
     if (fd_is_ashmem(fd)) {
-        int ret = ioctl(fd, ASHMEM_SET_SIZE, (size_t)length);
+        int ret = ashmem_set_logical_size(fd, (size_t)length);
         if (ret < 0) {
             fprintf(stderr,
-                    "ashmem-shim: ASHMEM_SET_SIZE(%d, %ld) failed: %s\n", fd,
+                    "ashmem-shim: ftruncate(%d, %ld) failed: %s\n", fd,
                     (long)length, strerror(errno));
             return -1;
         }
-        fprintf(stderr, "ashmem-shim: ftruncate(%d, %ld) -> ASHMEM_SET_SIZE\n",
-                fd, (long)length);
         return 0;
     }
 
@@ -122,24 +219,20 @@ int ftruncate64(int fd, off_t length) {
 
 /*
  * Intercept posix_fallocate - weston's os_create_anonymous_file() uses this
- * instead of ftruncate to size the buffer. fallocate doesn't work on device
- * fds, so we translate to ASHMEM_SET_SIZE for ashmem fds.
+ * instead of ftruncate to size the buffer. Uses over-allocation to handle
+ * Wayland SHM pool resizes.
  */
 int posix_fallocate(int fd, off_t offset, off_t len) {
     if (fd_is_ashmem(fd)) {
-        int ret = ioctl(fd, ASHMEM_SET_SIZE, (size_t)(offset + len));
+        size_t total = (size_t)(offset + len);
+        int ret = ashmem_set_logical_size(fd, total);
         if (ret < 0) {
             int err = errno;
             fprintf(stderr,
-                    "ashmem-shim: posix_fallocate(%d, %ld, %ld) "
-                    "-> ASHMEM_SET_SIZE failed: %s\n",
+                    "ashmem-shim: posix_fallocate(%d, %ld, %ld) failed: %s\n",
                     fd, (long)offset, (long)len, strerror(err));
             return err;
         }
-        fprintf(stderr,
-                "ashmem-shim: posix_fallocate(%d, %ld, %ld) "
-                "-> ASHMEM_SET_SIZE\n",
-                fd, (long)offset, (long)len);
         return 0;
     }
 
@@ -160,23 +253,52 @@ int posix_fallocate64(int fd, off_t offset, off_t len) {
  */
 int fallocate(int fd, int mode, off_t offset, off_t len) {
     if (fd_is_ashmem(fd)) {
-        int ret = ioctl(fd, ASHMEM_SET_SIZE, (size_t)(offset + len));
+        size_t total = (size_t)(offset + len);
+        int ret = ashmem_set_logical_size(fd, total);
         if (ret < 0) {
             int err = errno;
             fprintf(stderr,
-                    "ashmem-shim: fallocate(%d, ..., %ld, %ld) "
-                    "-> ASHMEM_SET_SIZE failed: %s\n",
+                    "ashmem-shim: fallocate(%d, ..., %ld, %ld) failed: %s\n",
                     fd, (long)offset, (long)len, strerror(err));
             return -1;
         }
-        fprintf(stderr,
-                "ashmem-shim: fallocate(%d, ..., %ld, %ld) "
-                "-> ASHMEM_SET_SIZE\n",
-                fd, (long)offset, (long)len);
         return 0;
     }
 
     return syscall(SYS_fallocate, fd, mode, offset, len);
+}
+
+/*
+ * Intercept fstat to report the logical size for ashmem fds.
+ * Some Wayland clients check the buffer size via fstat after resize.
+ */
+int __fxstat(int ver, int fd, struct stat *buf) {
+    static int (*real_fxstat)(int, int, struct stat *) = NULL;
+    if (!real_fxstat)
+        real_fxstat = dlsym(RTLD_NEXT, "__fxstat");
+
+    int ret = real_fxstat ? real_fxstat(ver, fd, buf) : syscall(SYS_fstat, fd, buf);
+
+    if (ret == 0 && fd >= 0 && fd < MAX_FD_TRACK) {
+        pthread_mutex_lock(&fd_lock);
+        if (fd_info[fd].is_ashmem && fd_info[fd].logical_size > 0)
+            buf->st_size = fd_info[fd].logical_size;
+        pthread_mutex_unlock(&fd_lock);
+    }
+    return ret;
+}
+
+int fstat(int fd, struct stat *buf) {
+    /* Try syscall directly (aarch64 glibc may not use __fxstat) */
+    int ret = syscall(SYS_fstat, fd, buf);
+
+    if (ret == 0 && fd >= 0 && fd < MAX_FD_TRACK) {
+        pthread_mutex_lock(&fd_lock);
+        if (fd_info[fd].is_ashmem && fd_info[fd].logical_size > 0)
+            buf->st_size = fd_info[fd].logical_size;
+        pthread_mutex_unlock(&fd_lock);
+    }
+    return ret;
 }
 
 /*

@@ -3,6 +3,29 @@
 This file contains design, architecture and implementation notes, primarily written by
 and for LLM agents.
 
+## Building and Deploying (2026-03-31)
+
+**Required environment variables for building:**
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk  # Java 26 is NOT compatible with AGP 8.5.1
+export ANDROID_NDK_HOME=/home/ai/android-sdk/ndk/27.2.12479018
+export ANDROID_HOME=/home/ai/android-sdk
+```
+
+**Full build and deploy one-liner:**
+```bash
+cd /home/ai/tawc/server/compositor && \
+cargo ndk --target arm64-v8a --platform 29 -- build --release && \
+cd ../.. && \
+server/gradlew -p server assembleDebug && \
+adb install -r server/app/build/outputs/apk/debug/app-debug.apk && \
+adb shell am force-stop me.phie.tawc && \
+adb shell am start -n me.phie.tawc/.MainActivity
+```
+
+**Important:** The system default Java is 26, but the Android Gradle Plugin (8.5.1) doesn't
+support it. You must set `JAVA_HOME` to Java 21 before running `gradlew`.
+
 ## SHM Buffer Support (2026-03-31)
 
 SHM buffers (`wl_shm`) are supported alongside the AHB path. SHM matters even for
