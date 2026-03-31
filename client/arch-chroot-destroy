@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/system_ext/bin/bash
 # Unmount and delete the Arch Linux ARM chroot.
 # Run from Termux. Requires root (su).
 # Usage: ./arch-chroot-destroy

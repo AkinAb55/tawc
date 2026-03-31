@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/system_ext/bin/bash
 # Enter the Arch Linux ARM chroot. Sets up bind mounts if not already mounted.
 # Run from Termux. Requires root (su).
 #

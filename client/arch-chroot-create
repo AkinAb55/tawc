@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/system_ext/bin/bash
 # Create an Arch Linux ARM chroot on a rooted Android device.
 # Run from Termux. Requires root (su) and an internet connection.
 # Safe to re-run -- skips completed steps.
@@ -17,7 +17,7 @@ trap cleanup INT
 
 CHROOT_DIR="/data/local/arch-chroot"
 TARBALL_URL="http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
-TARBALL="/data/data/com.termux/files/home/archlinux-aarch64.tar.gz"
+TARBALL="/data/local/tmp/archlinux-aarch64.tar.gz"
 
 # Ensure curl is available in Termux
 if ! command -v curl &>/dev/null; then

@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/system_ext/bin/bash
 # Build and install the lindroid fork of libhybris with tawc patches:
 #   - bionic_tls allocation (stock Android TLS fix)
 #   - pthread_create thread wrapping (bionic_tls on new threads)
