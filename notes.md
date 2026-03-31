@@ -3,6 +3,32 @@
 This file contains design, architecture and implementation notes, primarily written by
 and for LLM agents.
 
+## SHM Buffer Support (2026-03-31)
+
+SHM buffers (`wl_shm`) are supported alongside the AHB path. See [shm.md](shm.md) for
+detailed notes on the SELinux issue and potential solutions.
+
+**Current status:** SHM works but requires a one-time-per-boot SELinux workaround:
+```
+su -c 'supolicy --live "permissive untrusted_app"'
+```
+This must be run before any SHM client connects to the compositor. Without it, SELinux
+blocks the compositor from mmapping memfds created by chroot clients, which silently
+corrupts the Wayland protocol stream and hangs the client.
+
+**Magenta tint**: SHM surfaces are rendered with a distinct magenta tint via a custom
+`GlesTexProgram` shader. This is intentional -- it makes it visually obvious when a client
+falls back to SHM instead of using hardware-accelerated AHB buffers. The tint should be
+removed or made optional once the AHB path is mature.
+
+The SHM path is tracked separately from AHB: `surface_shm` HashMap holds `SurfaceShmState`
+per surface. Surfaces using the AHB channel protocol are never checked for SHM buffers.
+
+**Toplevel lifecycle:** Toplevels are retained as long as `ToplevelSurface::alive()` returns
+true (not based on whether they have buffers). SHM state is cleaned up when the toplevel
+dies. This is important because SHM clients don't create buffer state until after the first
+configure event, so buffer-based retain logic would immediately remove new toplevels.
+
 ## GPU Driver Strategy (2026-03-28)
 
 ### The Problem
@@ -123,9 +149,11 @@ access. Chroot clients access via root. Uses `ListeningSocket::bind_absolute()`.
 1. `listener.accept()` for new clients
 2. `display.dispatch_clients()` + `flush_clients()`
 3. Import pending AHBs (recv from side channel -> EGLImage -> GL texture)
-4. GlesRenderer: clear + render each toplevel's AHB texture
-5. `eglSwapBuffers()`
-6. Send frame callbacks
+4. Import pending SHM buffers (from toplevel surfaces not using AHB)
+5. GlesRenderer: clear + render AHB textures + render SHM textures (magenta tint)
+6. `eglSwapBuffers()`
+7. Send frame callbacks for all toplevel surfaces
+8. Retain toplevels based on `alive()`, clean up dead SHM state
 
 ### libhybris + libwayland-client Compatibility
 

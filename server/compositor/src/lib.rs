@@ -11,7 +11,7 @@ use log::info;
 
 use smithay::backend::egl::EGLContext;
 use smithay::backend::egl::EGLSurface;
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, Uniform, UniformName, UniformType, UniformValue};
 use smithay::backend::renderer::{Bind, Color32F, Frame, Renderer};
 use smithay::utils::{Point, Rectangle, Size, Transform};
 use smithay::wayland::compositor::{
@@ -132,10 +132,71 @@ fn run_compositor(
         .map_err(|e| format!("Failed to load AHB importer: {}", e))?;
     info!("EGL + GlesRenderer + AHB importer ready");
 
+    // Compile the magenta tint shader for SHM buffers (must be done before
+    // renderer is borrowed mutably for other things, and after EGL context exists)
+    let shm_tint_shader = match renderer.compile_custom_texture_shader(
+        r#"
+#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision mediump float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+uniform float magenta_mix;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0) * alpha;
+#else
+    color = color * alpha;
+#endif
+
+    // Apply magenta tint: boost red and blue, reduce green
+    vec3 magenta = vec3(color.r * 1.0 + 0.3, color.g * 0.4, color.b * 1.0 + 0.3);
+    color.rgb = mix(color.rgb, magenta, magenta_mix);
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+#endif
+
+    gl_FragColor = color;
+}
+"#,
+        &[UniformName::new("magenta_mix", UniformType::_1f)],
+    ) {
+        Ok(program) => {
+            info!("SHM magenta tint shader compiled successfully");
+            Some(program)
+        }
+        Err(e) => {
+            log::error!("Failed to compile SHM tint shader: {:?}", e);
+            None
+        }
+    };
+
     // --- Wayland display setup ---
     let mut wl_display: Display<TawcState> = Display::new()?;
     let mut state = TawcState::new(&mut wl_display);
     state.importer = Some(importer);
+    state.shm_tint_shader = shm_tint_shader;
     state.raw_egl_display = raw_display;
     state.raw_egl_context = raw_context;
 
@@ -215,6 +276,16 @@ fn run_compositor(
             state.import_pending_ahb(&surface, &renderer);
         }
 
+        // Import any pending SHM buffers from toplevel surfaces
+        // (surfaces not using AHB channels that have wl_shm buffers attached)
+        let toplevel_surfaces: Vec<_> = state.toplevels.iter()
+            .map(|t| t.wl_surface().clone())
+            .filter(|s| !state.surface_ahb.contains_key(s))
+            .collect();
+        for surface in toplevel_surfaces {
+            state.import_pending_shm(&surface, &mut renderer);
+        }
+
         // --- Render ---
         let t = (frame_count as f32) / 240.0;
         let gray = (t.sin() * 0.15 + 0.2).clamp(0.0, 1.0);
@@ -224,7 +295,7 @@ fn run_compositor(
         let mut frame = renderer.render(&mut target, output_size, Transform::Normal)?;
         frame.clear(bg_color, &[Rectangle::from_size(output_size)])?;
 
-        // Render ALL surfaces that have AHB textures (don't rely on toplevels list)
+        // Render ALL surfaces that have AHB textures
         let surfaces_to_render: Vec<_> = state
             .surface_ahb
             .values()
@@ -257,32 +328,70 @@ fn run_compositor(
             )?;
         }
 
+        // Render SHM surfaces with magenta tint
+        let shm_surfaces_to_render: Vec<_> = state
+            .surface_shm
+            .values()
+            .filter_map(|shm_state| {
+                shm_state.texture.as_ref().map(|tex| {
+                    (tex.clone(), shm_state.committed_width, shm_state.committed_height)
+                })
+            })
+            .collect();
+
+        let shm_shader = state.shm_tint_shader.clone();
+        for (texture, tex_w, tex_h) in &shm_surfaces_to_render {
+            let tex_x = (width - tex_w) / 2;
+            let tex_y = (height - tex_h) / 2;
+            let texture_size = Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h));
+            let src_rect = Rectangle::from_size(texture_size.to_f64());
+            let dst_rect = Rectangle::new(
+                Point::from((tex_x, tex_y)),
+                Size::from((*tex_w, *tex_h)),
+            );
+            let damage_rect = Rectangle::from_size(Size::from((*tex_w, *tex_h)));
+            frame.render_texture_from_to(
+                texture,
+                src_rect,
+                dst_rect,
+                &[damage_rect],
+                &[],
+                Transform::Normal,
+                1.0,
+                shm_shader.as_ref(),
+                &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))],
+            )?;
+        }
+
         let _ = frame.finish()?;
         drop(target);
         egl_surface.swap_buffers(None)?;
 
-        // Send frame callbacks to all surfaces with AHB channels
+        // Send frame callbacks to all toplevel surfaces
         let time = start_time.elapsed().as_millis() as u32;
-        let ahb_surfaces: Vec<_> = state.surface_ahb.keys().cloned().collect();
-        for surface in &ahb_surfaces {
-            send_frames_surface_tree(surface, time);
+        for toplevel in &state.toplevels {
+            send_frames_surface_tree(toplevel.wl_surface(), time);
         }
 
-        // Only remove toplevels whose underlying wl_surface is gone
-        // (client disconnected). Don't use alive() which is too aggressive.
-        // Keep toplevels that still have an active AHB channel
-        // (i.e., the surface is still tracked in surface_ahb)
+        // Remove toplevels whose xdg surface is no longer alive,
+        // and clean up associated SHM state
         state.toplevels.retain(|t| {
-            state.surface_ahb.contains_key(t.wl_surface())
+            if t.alive() {
+                true
+            } else {
+                state.surface_shm.remove(t.wl_surface());
+                false
+            }
         });
 
         frame_count += 1;
         if frame_count % 300 == 0 {
             info!(
-                "Compositor: {} frames, {} toplevels, {} ahb channels",
+                "Compositor: {} frames, {} toplevels, {} ahb channels, {} shm surfaces",
                 frame_count,
                 state.toplevels.len(),
                 state.surface_ahb.len(),
+                state.surface_shm.len(),
             );
         }
 

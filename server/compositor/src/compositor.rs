@@ -4,10 +4,12 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use log::{error, info};
 
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexProgram, GlesTexture};
+use smithay::backend::renderer::{buffer_type, BufferType, ImportMemWl};
 use smithay::delegate_compositor;
 use smithay::delegate_output;
 use smithay::delegate_seat;
+use smithay::delegate_shm;
 use smithay::delegate_xdg_shell;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_seat;
@@ -18,15 +20,17 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::Serial;
+use smithay::utils::{Rectangle, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    CompositorClientState, CompositorHandler, CompositorState,
+    CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+    with_states,
 };
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::output::OutputHandler;
+use smithay::wayland::shm::{ShmHandler, ShmState};
 
 use crate::ahb::AhbBuffer;
 use crate::gl_import::AhbTextureImporter;
@@ -51,6 +55,15 @@ pub struct SurfaceAhbState {
     pub committed_height: i32,
 }
 
+/// Per-surface SHM buffer state.
+pub struct SurfaceShmState {
+    /// The currently committed (imported) texture for this surface.
+    pub texture: Option<GlesTexture>,
+    /// Width/height of the committed buffer.
+    pub committed_width: i32,
+    pub committed_height: i32,
+}
+
 /// Data stored per tawc_ahb_channel_v1 resource.
 pub struct ChannelData {
     pub surface: WlSurface,
@@ -60,12 +73,19 @@ pub struct ChannelData {
 pub struct TawcState {
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
+    pub shm_state: ShmState,
     pub xdg_shell_state: XdgShellState,
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
 
     /// Per-surface AHB channel state, keyed by WlSurface id.
     pub surface_ahb: HashMap<WlSurface, SurfaceAhbState>,
+
+    /// Per-surface SHM buffer state (for surfaces using wl_shm).
+    pub surface_shm: HashMap<WlSurface, SurfaceShmState>,
+
+    /// Custom shader for rendering SHM buffers with magenta tint.
+    pub shm_tint_shader: Option<GlesTexProgram>,
 
     /// Toplevel surfaces (for rendering).
     pub toplevels: Vec<ToplevelSurface>,
@@ -87,9 +107,7 @@ impl TawcState {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
-        // No ShmState -- we deliberately don't support wl_shm.
-        // All rendering goes through AHB (tawc_buffer_v1 protocol).
-        // This also avoids SELinux denials on memfd from chroot clients.
+        let shm_state = ShmState::new::<Self>(&dh, []);
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "tawc");
 
@@ -99,10 +117,13 @@ impl TawcState {
         Self {
             display_handle: dh,
             compositor_state,
+            shm_state,
             xdg_shell_state,
             seat_state,
             seat,
             surface_ahb: HashMap::new(),
+            surface_shm: HashMap::new(),
+            shm_tint_shader: None,
             toplevels: Vec::new(),
             importer: None,
             raw_egl_display: std::ptr::null(),
@@ -176,12 +197,81 @@ impl TawcState {
             }
         }
     }
+
+    /// Import a pending SHM buffer for a surface.
+    /// Must be called with the renderer available (from the render loop).
+    /// Returns true if a new buffer was imported.
+    pub fn import_pending_shm(&mut self, surface: &WlSurface, renderer: &mut GlesRenderer) -> bool {
+        // Check if there's a pending SHM buffer on this surface
+        let buffer = with_states(surface, |states| {
+            let mut guard = states.cached_state.get::<SurfaceAttributes>();
+            let attrs = guard.current();
+            match &attrs.buffer {
+                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(buf)) => {
+                    Some(buf.clone())
+                }
+                _ => None,
+            }
+        });
+
+        let Some(buffer) = buffer else { return false };
+
+        // Check if it's actually an SHM buffer
+        if !matches!(buffer_type(&buffer), Some(BufferType::Shm)) {
+            return false;
+        }
+
+        // Get buffer dimensions
+        let dims = smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
+            (data.width, data.height)
+        });
+        let (width, height) = match dims {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Failed to get SHM buffer contents: {}", e);
+                return false;
+            }
+        };
+
+        // Use full buffer as damage region
+        let damage = [Rectangle::from_size(Size::from((width, height)))];
+        match renderer.import_shm_buffer(&buffer, None, &damage) {
+            Ok(texture) => {
+                let is_new = !self.surface_shm.contains_key(surface);
+                let shm_state = self.surface_shm.entry(surface.clone()).or_insert(SurfaceShmState {
+                    texture: None,
+                    committed_width: 0,
+                    committed_height: 0,
+                });
+                shm_state.texture = Some(texture);
+                shm_state.committed_width = width;
+                shm_state.committed_height = height;
+                if is_new {
+                    info!("SHM buffer imported as texture {}x{} for surface {:?}", width, height, surface.id());
+                }
+                true
+            }
+            Err(e) => {
+                error!("Failed to import SHM buffer: {}", e);
+                false
+            }
+        }
+    }
+
 }
 
 // --- BufferHandler ---
 
 impl BufferHandler for TawcState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+}
+
+// --- ShmHandler ---
+
+impl ShmHandler for TawcState {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
+    }
 }
 
 // --- CompositorHandler ---
@@ -196,7 +286,7 @@ impl CompositorHandler for TawcState {
     }
 
     fn commit(&mut self, _surface: &WlSurface) {
-        // AHB import is handled in the render loop to avoid borrow issues
+        // Buffer import is handled in the render loop to avoid borrow issues
         // with renderer access. We just note that a commit happened.
     }
 }
@@ -374,5 +464,6 @@ impl ClientData for ClientState {
 
 delegate_compositor!(TawcState);
 delegate_output!(TawcState);
+delegate_shm!(TawcState);
 delegate_xdg_shell!(TawcState);
 delegate_seat!(TawcState);
