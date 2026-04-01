@@ -453,35 +453,94 @@ Client-side WSI layer:
     **Milestone: EGL WSI layer is robust for GLES apps. GTK3 GL requires
     a small GTK3 patch or shader rewriting (documented separately).**
 
-### Phase 5: Input
-29. Implement AndroidInputBackend (touch + pointer first, keyboard second)
-30. Wire Kotlin events -> JNI -> crossbeam channel -> Smithay wl_seat
-31. AKEYCODE -> Linux scancode mapping + XKB keymap
-32. **Milestone: can interact with a Wayland client**
+### Phase 5: Touch Input ✅ COMPLETE (2026-04-01)
+29. ✅ Touch events: Android `MotionEvent` → JNI → calloop channel → Smithay
+    `TouchHandle` → `wl_touch` protocol events
+30. ✅ Multi-touch: each Android pointer ID maps to a Smithay `TouchSlot`
+31. ✅ Coordinate transform: physical pixels ÷ scale factor → logical Wayland coords
+32. ✅ Immersive fullscreen: no status bar/nav bar dead zones
+33. **Milestone: can interact with Wayland clients via touch** ✅
 
-### Phase 6: Multi-Window
-33. JNI callback: compositor notifies Kotlin of new xdg_toplevels
-34. MainActivity spawns SurfaceViewActivity per toplevel
-35. Each Activity's SurfaceView gets its own EGLSurface
-36. Window lifecycle (map, unmap, close, resize)
-37. Popups (`xdg_popup`) composited onto parent Activity surface (NOT separate Activities)
-38. **Milestone: multiple Wayland windows as separate Android Activities**
+### Phase 6: Text Input
+Text input bridges Android's `InputConnection` (soft keyboard) to Wayland's
+`zwp_text_input_v3` protocol. See [text-input.md](text-input.md) for design rationale,
+protocol details, and the Smithay compatibility issue.
 
-### Phase 7: Polish & Protocols
-39. Server-side decorations (xdg-decoration)
-40. Cursor rendering (compositor-side, using SHM cursor images from clients)
-41. Fractional scaling (wp-fractional-scale) for high-DPI Android screens
-42. Clipboard bridge (wl_data_device <-> Android ClipboardManager)
-43. IME bridge (zwp_text_input_v3 <-> Android InputMethodManager)
-44. Non-root socket sharing: Binder fd passing (ContentProvider/Service) so
+**6a. Custom text-input-v3 protocol handler**
+34. Implement `zwp_text_input_manager_v3` global and `zwp_text_input_v3` per-seat
+    object handling directly (Smithay's built-in implementation can't be used — it
+    requires an input-method Wayland client, but our IME is Android's Gboard).
+35. Track text-input instances per client, manage focus (enter/leave).
+36. Handle client requests: `enable`, `disable`, `set_surrounding_text`,
+    `set_content_type`, `set_cursor_rectangle`, `commit`.
+37. Store state (surrounding text, content type, cursor rect, enabled/disabled).
+38. Test: protocol advertised, Firefox binds to it without errors.
+
+**6b. Android InputConnection**
+39. Create `TawcInputConnection` extending `BaseInputConnection`.
+40. Override `commitText()` → JNI → compositor → `commit_string` + `done`.
+41. Override `setComposingText()` → JNI → compositor → `preedit_string` + `done`.
+42. Override `deleteSurroundingText()` → JNI → compositor →
+    `delete_surrounding_text` + `done`.
+43. Override `sendKeyEvent()` → JNI → compositor → map backspace/enter to
+    text-input-v3 operations (e.g. backspace → `delete_surrounding_text(1,0)`).
+44. Make SurfaceView focusable, return `TawcInputConnection` from
+    `onCreateInputConnection()`.
+45. Test: typing in Firefox via Gboard, characters appearing.
+
+**6c. Keyboard show/hide + bidirectional state**
+46. Implement reverse JNI channel (compositor → Android).
+47. On client `enable` + `commit`: show Android keyboard
+    (`InputMethodManager.showSoftInput()`).
+48. On client `disable` + `commit`: hide Android keyboard
+    (`InputMethodManager.hideSoftInputFromWindow()`).
+49. Map `set_content_type` → `EditorInfo.inputType` (password, email, number, etc.).
+50. Feed client's `set_surrounding_text` back to
+    `InputConnection.getTextBeforeCursor()` etc.
+51. Test: tapping a text field in Firefox shows the keyboard, tapping away hides it.
+
+**6d. Polish**
+52. Handle edge cases: focus changes during composition, rapid enable/disable,
+    multiple text-input instances.
+53. IME composition (preedit) with autocomplete/suggestions working correctly.
+54. Test with multiple apps (Firefox, foot terminal, GTK apps).
+55. **Milestone: full text input via Android soft keyboard into Wayland clients**
+
+### Phase 7: wl_keyboard (non-text keys)
+Arrow keys, escape, tab, Ctrl+C/V/Z, and other keyboard shortcuts have no
+text-input-v3 equivalent. wl_keyboard fills this gap.
+
+56. Solve xkbcommon on Android: point `XKB_CONFIG_ROOT` to chroot's XKB data
+    (`/data/local/arch-chroot/usr/share/X11/xkb`), or embed a pre-built keymap
+    string (requires patching Smithay fork's `add_keyboard()`).
+57. Call `seat.add_keyboard()` with a US QWERTY layout.
+58. Map Android key events for non-text keys to wl_keyboard scancodes.
+59. Handle modifier state (shift, ctrl, alt) for keyboard shortcuts.
+60. Handle Bluetooth/hardware keyboard input (Android `dispatchKeyEvent`).
+61. **Milestone: keyboard shortcuts and navigation keys work**
+
+### Phase 8: Multi-Window
+62. JNI callback: compositor notifies Kotlin of new xdg_toplevels
+63. MainActivity spawns SurfaceViewActivity per toplevel
+64. Each Activity's SurfaceView gets its own EGLSurface
+65. Window lifecycle (map, unmap, close, resize)
+66. Popups (`xdg_popup`) composited onto parent Activity surface (NOT separate Activities)
+67. **Milestone: multiple Wayland windows as separate Android Activities**
+
+### Phase 9: Polish & Protocols
+68. Server-side decorations (xdg-decoration)
+69. Cursor rendering (compositor-side, using SHM cursor images from clients)
+70. Fractional scaling (wp-fractional-scale) for high-DPI Android screens
+71. Clipboard bridge (wl_data_device <-> Android ClipboardManager)
+72. Non-root socket sharing: Binder fd passing (ContentProvider/Service) so
     proot clients can connect without root (see "Wayland Socket Sharing")
 
-### Phase 8: Vulkan WSI (stretch goal)
-45. Verify libhybris Vulkan loads stock GPU driver (may need unmerged PRs)
-46. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
-47. Same AHB side-channel mechanism as EGL wrapper
-48. Test with vkcube, vkmark
-49. **Milestone: Vulkan apps work via libhybris + our WSI layer**
+### Phase 10: Vulkan WSI (stretch goal)
+73. Verify libhybris Vulkan loads stock GPU driver (may need unmerged PRs)
+74. Write Vulkan implicit layer using `VK_ANDROID_external_memory_android_hardware_buffer`
+75. Same AHB side-channel mechanism as EGL wrapper
+76. Test with vkcube, vkmark
+77. **Milestone: Vulkan apps work via libhybris + our WSI layer**
 
 ---
 
