@@ -67,13 +67,64 @@ memfd sharing, not the event loop.
 
 LD_DEBUG tracing confirmed: **Firefox never dlopen's libEGL.so at all** in our environment. It only loads `libwayland-egl.so.1`. Firefox normally uses GL/Vulkan via WebRender on most systems, but something in our environment causes its GPU detection to fail, so it falls back to SHM (software) rendering.
 
-Possible reasons Firefox doesn't attempt EGL:
-- Our tawc-egl wrapper may not be detected during Firefox's GPU capability probing
-- Firefox may probe EGL before `LD_LIBRARY_PATH` takes effect (e.g., during early startup)
-- The libhybris EGL may report capabilities that Firefox considers unsupported
-- Firefox's `about:support` Graphics section would reveal the exact reason, but we can't access it without a working interactive session
-
 Getting Firefox to use GPU rendering via our tawc-egl wrapper remains a goal -- SHM is a stepping stone.
+
+### Firefox WebRender architecture (source code research, 2026-04-01)
+
+Research into Firefox source code (`gfx/webrender_bindings/`, `widget/gtk/`,
+`gfx/gl/GLLibraryEGL.cpp`) clarifies how Firefox's rendering pipeline works on Wayland
+and what we need to make GPU rendering work.
+
+**EGL loading:** Firefox calls `dlopen("libEGL.so")` (bare name) via `PR_LoadLibrary()`
+in `GLLibraryEGL.cpp` ~line 515, falling back to `"libEGL.so.1"`. Bare names follow
+standard `LD_LIBRARY_PATH` resolution. There is no Firefox-specific env var to override
+the EGL library path. The earlier theory that Firefox's `libmozwayland.so` has its own
+EGL loading that bypasses `LD_LIBRARY_PATH` was incorrect — `libmozwayland.so` is just a
+stub library with no-op Wayland/XKB function placeholders for build-time linking.
+
+**Default rendering path:** `RenderCompositorEGL` (selected in
+`RenderCompositor::Create()` in `gfx/webrender_bindings/RenderCompositor.cpp`). This is
+the standard Wayland path and works like any GTK3 app:
+1. `eglGetDisplay` / `eglGetPlatformDisplay` with the Wayland display
+2. `eglBindAPI(EGL_OPENGL_API)` — tries desktop GL first, falls back to GLES
+3. `eglChooseConfig`, `eglCreateContext`
+4. Gets a `wl_egl_window` from the GTK widget via `WaylandSurface::GetEGLWindow()`
+5. `eglCreateWindowSurface` with the `wl_egl_window`
+6. Render loop: WebRender draws, calls `eglSwapBuffers`
+
+This does NOT require `wl_subcompositor`, `zwp_linux_dmabuf_v1`, or any exotic protocols.
+It is the same mechanism as gtk3-widget-factory.
+
+**Alternative "native compositor" path** (`RenderCompositorNativeOGL`): Uses
+`wl_subsurface` + DMABUF for per-layer compositing. This IS disabled by default and
+requires opt-in via `gfx.webrender.compositor.force-enabled`. We do not need it.
+
+**Software fallback** (`RenderCompositorSWGL` / `RenderCompositorLayersSWGL`): When
+hardware WebRender fails, Firefox uses SWGL (software WebRender). It sends pixels via
+`wl_shm` buffers (`WaylandBufferSHM` in `widget/gtk/WaylandBuffer.cpp`). This is what
+we're seeing now.
+
+**Why Firefox never tries to dlopen libEGL.so:** The LD_DEBUG trace showing no libEGL.so
+load means Firefox's GPU initialization fails before reaching the EGL loading code. The
+most likely cause is the `GDK_GL=gles` env var. With this set, GTK probes EGL early during
+display initialization. If GTK's EGL probe creates a `wl_egl_window` + EGL surface for the
+main window, WebRender can't create a second `wl_egl_window` for the same `wl_surface`
+(undefined behavior). WebRender's GPU capability check may detect this conflict and skip
+EGL entirely, never reaching the `dlopen("libEGL.so")` call in `GLLibraryEGL::Init()`.
+
+Alternatively, Firefox's GPU feature detection in `gfxPlatformGtk.cpp` may disable
+hardware WebRender based on driver/environment probing before EGL is loaded. The
+`EGL_CLIENT_APIS` string from our wrapper returns `"OpenGL_ES"` (no desktop GL), which
+Firefox should handle (it falls back to GLES), but other probes may fail.
+
+**Key env vars for debugging:**
+- `MOZ_LOG=widget:5,gfx:5` — verbose logging of GPU/widget initialization
+- `MOZ_ACCELERATED=1` — force hardware acceleration
+- `GDK_GL=disabled` — prevent GTK from initializing GL (let WebRender handle it)
+- `MOZ_X11_EGL=1` — force EGL (X11 only, not applicable here)
+
+**No `MOZ_GFX_BACKEND` exists** — contrary to speculation in earlier notes, this env var
+does not exist in Firefox source.
 
 ### Firefox Wayland Proxy
 
@@ -125,6 +176,26 @@ export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
 export DISPLAY=
 # Symlink must exist: ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0
 # Flush shim must be built: see client/wayland-flush-shim/
+firefox --no-remote
+```
+
+### Firefox (GPU rendering, UNTESTED):
+```bash
+# Same as SHM but with GDK_GL disabled so WebRender can own EGL:
+export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/tmp
+export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
+export HYBRIS_PATCH_TLS=1
+export MOZ_ENABLE_WAYLAND=1
+export HOME=/root
+export GDK_GL=disabled
+export MOZ_ACCELERATED=1
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+export DISPLAY=
 firefox --no-remote
 ```
 
@@ -204,4 +275,18 @@ The SHM buffer import pipeline now works correctly (verified with test client):
 
 2. **Continuous rendering** — Firefox currently renders initial frames but may stop. Need to verify frame callback flow keeps Firefox's rendering pipeline active.
 
-3. **GPU rendering** — Getting Firefox WebRender to use our tawc-egl wrapper. GTK3 GPU rendering already works via AHB. Firefox currently falls back to software/SHM because it never opens libEGL.so.
+3. **GPU rendering** — Getting Firefox WebRender to use our tawc-egl wrapper. GTK3 GPU rendering already works via AHB. Firefox currently falls back to software/SHM because it never opens libEGL.so. Concrete steps:
+   - **First try:** Launch Firefox with `GDK_GL=disabled` (or unset `GDK_GL`). This
+     prevents GTK from creating a competing EGL surface, letting WebRender be the sole
+     EGL consumer. GTK's EGL probe may be what prevents Firefox from even attempting
+     to load libEGL.so.
+   - **If that doesn't work:** Add `MOZ_LOG=widget:5,gfx:5` to get verbose logs from
+     Firefox's GPU initialization. This will reveal exactly why WebRender skips EGL.
+   - **Also try:** `MOZ_ACCELERATED=1` to force hardware acceleration past Firefox's
+     driver blocklist.
+   - **Wrapper fix:** Add a warning log to `tawc-egl.c` when `eglSwapBuffers` silently
+     skips sending (when `side_fd < 0 || !channel || !ahb_send` at line ~937).
+   - **Compositor fix:** The compositor should check SHM buffers as a fallback even on
+     surfaces with AHB channels. Currently "surfaces using the AHB channel protocol are
+     never checked for SHM buffers" (notes.md), which creates a deadlock if GTK creates
+     an AHB channel but WebRender sends SHM.
