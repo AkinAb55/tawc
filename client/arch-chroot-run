@@ -52,6 +52,14 @@ mount_if_needed /linkerconfig "$CHROOT_DIR/linkerconfig"
 # rslave is critical here to prevent propagation storms (~40 submounts).
 is_mounted "$CHROOT_DIR/apex" || su -c "mount -o rbind,rslave /apex '$CHROOT_DIR/apex'"
 
+# Individual APEX loop mounts may not propagate into the rbind (they're private,
+# not shared). /system/lib64/libc.so symlinks into com.android.runtime, so if
+# that APEX didn't propagate, libhybris can't resolve bionic dependencies.
+# Explicitly bind-mount the runtime APEX if it's empty in the chroot.
+if su -c "[ -d /apex/com.android.runtime/lib64 ]" && ! su -c "[ -d '$CHROOT_DIR/apex/com.android.runtime/lib64' ]"; then
+    su -c "mount --rbind /apex/com.android.runtime '$CHROOT_DIR/apex/com.android.runtime'"
+fi
+
 # On some devices (e.g. OnePlus 9 / Android 14), vendor's libbinder.so is
 # older and missing symbols that system's libbinder_ndk.so expects
 # (openDeclaredPassthroughHal). Overlay with system's copy.

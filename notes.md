@@ -225,15 +225,8 @@ app process. Key components:
 **Socket path:** `/data/data/me.phie.tawc/wayland-0` -- app's own data dir ensures write
 access. Chroot clients access via root. Uses `ListeningSocket::bind_absolute()`.
 
-**Render loop:** Poll-based (no calloop), ~60fps. Each iteration:
-1. `listener.accept()` for new clients
-2. `display.dispatch_clients()` + `flush_clients()`
-3. Import pending AHBs (recv from side channel -> EGLImage -> GL texture)
-4. Import pending SHM buffers (from toplevel surfaces not using AHB)
-5. GlesRenderer: clear + render AHB textures + render SHM textures (magenta tint)
-6. `eglSwapBuffers()`
-7. Send frame callbacks for all toplevel surfaces
-8. Retain toplevels based on `alive()`, clean up dead SHM state
+**Render loop:** Calloop-based, ~60fps frame timer. See "Compositor Architecture" at
+top of this file for the full event loop structure.
 
 ### libhybris + libwayland-client Compatibility
 
@@ -937,7 +930,11 @@ Same distro packages, mounted in a real chroot. Requires root (e.g., Magisk).
   come in via the `/dev` bind mount.
 - **`/apex` requires `mount --rbind`** -- each APEX is a separate loop mount, so plain
   `mount --bind` gives empty directories. Without `/apex`, bionic `libc.so` can't be
-  found (it's symlinked from `/system/lib64/` to `/apex/com.android.runtime/lib64/bionic/`)
+  found (it's symlinked from `/system/lib64/` to `/apex/com.android.runtime/lib64/bionic/`).
+  **Caveat (2026-04-01):** Even with `rbind,rslave`, individual APEX loop mounts may not
+  propagate into the chroot (they're private, not shared). `arch-chroot-run` explicitly
+  bind-mounts `com.android.runtime` if its contents are missing. Without this, libhybris
+  fails with `library "libc.so" not found` because the symlink target doesn't exist.
 - **`/linkerconfig`** must be mounted for Android 11+ linker namespace config
 - **PATH fix needed** -- `/system/bin` leaks into PATH via login shell and breaks
   everything. Add `/etc/profile.d/00-path.sh` to set PATH explicitly
