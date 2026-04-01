@@ -54,6 +54,14 @@ adb shell am start -n me.phie.tawc/.MainActivity
 **Important:** The system default Java is 26, but the Android Gradle Plugin (8.5.1) doesn't
 support it. You must set `JAVA_HOME` to Java 21 before running `gradlew`.
 
+## Window Management (2026-04-01)
+
+All toplevels are configured as maximized at the full logical output size (physical pixels /
+scale factor). The output scale is 2x, so on a 1080x2400 display, apps see a 540x1200
+logical surface. The xdg-decoration protocol is implemented, always requesting server-side
+decorations (which we don't draw, so clients get no decorations). Surfaces are rendered at
+(0,0) instead of centered.
+
 ## SHM Buffer Support (2026-03-31)
 
 SHM buffers (`wl_shm`) are supported alongside the AHB path. SHM matters even for

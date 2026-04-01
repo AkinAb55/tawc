@@ -135,7 +135,9 @@ fn run_compositor(
 
     // --- Wayland display + protocol state ---
     let mut wl_display: Display<TawcState> = Display::new()?;
-    let state = TawcState::new(&mut wl_display);
+    let scale = 2;
+    let logical_size = (width / scale, height / scale);
+    let state = TawcState::new(&mut wl_display, logical_size);
 
     // --- Output ---
     let output = smithay::output::Output::new(
@@ -154,7 +156,7 @@ fn run_compositor(
     output.change_current_state(
         Some(mode),
         Some(Transform::Normal),
-        Some(smithay::output::Scale::Integer(1)),
+        Some(smithay::output::Scale::Integer(2)),
         Some((0, 0).into()),
     );
     output.set_preferred(mode);

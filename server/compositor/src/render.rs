@@ -303,7 +303,7 @@ pub fn render_frame(
     let screen_w = output_size.w;
     let screen_h = output_size.h;
 
-    // Draw AHB surfaces (centered on screen)
+    // Draw AHB surfaces (fullscreen at origin)
     for ahb_state in state.surface_ahb.values() {
         let Some(ref texture) = ahb_state.texture else { continue };
         let w = ahb_state.committed_width;
@@ -311,7 +311,7 @@ pub fn render_frame(
 
         let src = Rectangle::from_size(Size::<i32, smithay::utils::Buffer>::from((w, h)).to_f64());
         let dst = Rectangle::new(
-            Point::from(((screen_w - w) / 2, (screen_h - h) / 2)),
+            Point::from((0, 0)),
             Size::from((w, h)),
         );
         let damage = Rectangle::from_size(Size::from((w, h)));
@@ -385,26 +385,12 @@ fn draw_shm_surfaces(
     }
 
     for (texture, surf_x, surf_y, tex_w, tex_h) in &to_render {
-        // Center the first toplevel on screen, apply subsurface offsets from there.
-        // TODO: proper window positioning when we support multiple toplevels.
-        let window_w = toplevel_surfaces
-            .first()
-            .and_then(|s| state.surface_shm.get(s))
-            .map(|s| s.committed_width)
-            .unwrap_or(*tex_w);
-        let window_h = toplevel_surfaces
-            .first()
-            .and_then(|s| state.surface_shm.get(s))
-            .map(|s| s.committed_height)
-            .unwrap_or(*tex_h);
-        let base_x = (screen_w - window_w) / 2;
-        let base_y = (screen_h - window_h) / 2;
-
+        // Toplevels are maximized at origin, subsurface offsets relative to that.
         let src = Rectangle::from_size(
             Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h)).to_f64(),
         );
         let dst = Rectangle::new(
-            Point::from((base_x + surf_x, base_y + surf_y)),
+            Point::from((*surf_x, *surf_y)),
             Size::from((*tex_w, *tex_h)),
         );
         let damage = Rectangle::from_size(Size::from((*tex_w, *tex_h)));

@@ -21,6 +21,7 @@ use smithay::delegate_data_device;
 use smithay::delegate_output;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
+use smithay::delegate_xdg_decoration;
 use smithay::delegate_xdg_shell;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_seat;
@@ -43,6 +44,7 @@ use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 
@@ -103,6 +105,7 @@ pub struct TawcState {
     pub compositor_state: CompositorState,
     pub shm_state: ShmState,
     pub xdg_shell_state: XdgShellState,
+    pub xdg_decoration_state: XdgDecorationState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
@@ -114,14 +117,18 @@ pub struct TawcState {
 
     /// Toplevel surfaces tracked for rendering and lifecycle.
     pub toplevels: Vec<ToplevelSurface>,
+
+    /// Logical output size (physical pixels / scale), used to configure toplevels.
+    pub output_logical_size: (i32, i32),
 }
 
 impl TawcState {
-    pub fn new(display: &mut Display<Self>) -> Self {
+    pub fn new(display: &mut Display<Self>, output_logical_size: (i32, i32)) -> Self {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, []);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -136,12 +143,14 @@ impl TawcState {
             compositor_state,
             shm_state,
             xdg_shell_state,
+            xdg_decoration_state,
             data_device_state,
             seat_state,
             seat,
             surface_ahb: HashMap::new(),
             surface_shm: HashMap::new(),
             toplevels: Vec::new(),
+            output_logical_size,
         }
     }
 }
@@ -180,10 +189,15 @@ impl XdgShellHandler for TawcState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         info!("New toplevel surface: {:?}", surface.wl_surface().id());
+        let (w, h) = self.output_logical_size;
         surface.with_pending_state(|state| {
             state.states.set(
                 wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
             );
+            state.states.set(
+                wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+            );
+            state.size = Some((w, h).into());
         });
         surface.send_configure();
         self.toplevels.push(surface);
@@ -201,6 +215,37 @@ impl XdgShellHandler for TawcState {
 }
 
 impl OutputHandler for TawcState {}
+
+impl XdgDecorationHandler for TawcState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(
+        &mut self,
+        toplevel: ToplevelSurface,
+        _mode: wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+    ) {
+        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        // Always force server-side (no decorations since we don't draw any)
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
 
 impl SeatHandler for TawcState {
     type KeyboardFocus = WlSurface;
@@ -350,5 +395,6 @@ delegate_compositor!(TawcState);
 delegate_data_device!(TawcState);
 delegate_output!(TawcState);
 delegate_shm!(TawcState);
+delegate_xdg_decoration!(TawcState);
 delegate_xdg_shell!(TawcState);
 delegate_seat!(TawcState);
