@@ -14,8 +14,10 @@ use smithay::backend::renderer::gles::{
     Uniform, UniformName, UniformType, UniformValue,
 };
 use smithay::backend::renderer::{Bind, Color32F, Frame, ImportMemWl, Renderer};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Point, Rectangle, Size, Transform};
+use smithay::desktop::PopupManager;
 use smithay::wayland::compositor::{
     with_surface_tree_downward, SubsurfaceCachedState, SurfaceAttributes, TraversalAction,
 };
@@ -194,8 +196,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
     use smithay::backend::renderer::buffer_type;
     use smithay::backend::renderer::BufferType;
     use smithay::wayland::compositor::BufferAssignment;
-    use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_surface::WlSurface};
-    use smithay::reexports::wayland_server::Resource;
+    use smithay::reexports::wayland_server::protocol::wl_buffer;
 
     let toplevel_surfaces: Vec<_> = state
         .toplevels
@@ -203,10 +204,18 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
         .map(|t| t.wl_surface().clone())
         .collect();
 
+    // Collect all root surfaces to walk: toplevels + their popup surfaces
+    let mut all_roots: Vec<_> = toplevel_surfaces.clone();
+    for toplevel_wl in &toplevel_surfaces {
+        for (popup, _) in PopupManager::popups_for_surface(toplevel_wl) {
+            all_roots.push(popup.wl_surface().clone());
+        }
+    }
+
     // Collect (surface, buffer) pairs that need importing.
     let mut to_import: Vec<(WlSurface, wl_buffer::WlBuffer)> = Vec::new();
 
-    for root in &toplevel_surfaces {
+    for root in &all_roots {
         with_surface_tree_downward(
             root,
             (),
@@ -300,10 +309,9 @@ pub fn render_frame(
     let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
     frame.clear(bg_color, &[Rectangle::from_size(output_size)])?;
 
-    let screen_w = output_size.w;
     let screen_h = output_size.h;
 
-    // Draw AHB surfaces (fullscreen at origin)
+    // Draw AHB surfaces (fullscreen at origin — no coordinate transform needed)
     for ahb_state in state.surface_ahb.values() {
         let Some(ref texture) = ahb_state.texture else { continue };
         let w = ahb_state.committed_width;
@@ -322,7 +330,7 @@ pub fn render_frame(
     }
 
     // Draw SHM surfaces from toplevel surface trees with subsurface positioning
-    draw_shm_surfaces(state, &mut frame, screen_w, screen_h, &render.shm_tint_shader)?;
+    draw_shm_surfaces(state, &mut frame, screen_h, &render.shm_tint_shader)?;
 
     let _ = frame.finish()?;
     drop(target);
@@ -330,27 +338,41 @@ pub fn render_frame(
     Ok(())
 }
 
-/// Collect and draw all SHM-backed surfaces from the toplevel tree.
+/// Collect and draw all SHM-backed surfaces from toplevel and popup trees.
+///
+/// Coordinate transform: subsurface positions are in logical (surface-local)
+/// coords, but smithay's GlesRenderer uses a GL projection where Y=0 is at
+/// the screen bottom (not top). So we must both scale logical→physical AND
+/// flip Y. The formula for each surface is:
+///
+///   physical_x = logical_x * scale
+///   physical_y = screen_h - logical_y * scale - texture_h
+///
+/// AHB surfaces (drawn in render_frame) skip this because they're always
+/// fullscreen at the origin — the transform is a no-op at (0, 0, full size).
 fn draw_shm_surfaces(
     state: &TawcState,
     frame: &mut GlesFrame<'_, '_>,
-    screen_w: i32,
     screen_h: i32,
     shm_shader: &Option<GlesTexProgram>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let scale = state.output_scale;
     let toplevel_surfaces: Vec<_> = state
         .toplevels
         .iter()
         .map(|t| t.wl_surface().clone())
         .collect();
 
-    // Gather surfaces with their absolute position relative to their toplevel root.
+    // Gather (texture, logical_x, logical_y, buf_w, buf_h) for every SHM surface.
     let mut to_render: Vec<(GlesTexture, i32, i32, i32, i32)> = Vec::new();
 
-    for root in &toplevel_surfaces {
+    // Walk a surface tree rooted at `root`, accumulating subsurface offsets
+    // starting from (offset_x, offset_y) in logical coords.
+    let collect_tree = |root: &WlSurface, offset_x: i32, offset_y: i32,
+                        to_render: &mut Vec<(GlesTexture, i32, i32, i32, i32)>| {
         with_surface_tree_downward(
             root,
-            (0i32, 0i32),
+            (offset_x, offset_y),
             |_surf, states, &(px, py)| {
                 let loc = states
                     .cached_state
@@ -382,15 +404,25 @@ fn draw_shm_surfaces(
             },
             |_, _, _| true,
         );
+    };
+
+    for root in &toplevel_surfaces {
+        collect_tree(root, 0, 0, &mut to_render);
+
+        for (popup, location) in PopupManager::popups_for_surface(root) {
+            collect_tree(popup.wl_surface(), location.x, location.y, &mut to_render);
+        }
     }
 
-    for (texture, surf_x, surf_y, tex_w, tex_h) in &to_render {
-        // Toplevels are maximized at origin, subsurface offsets relative to that.
+    for (texture, logical_x, logical_y, tex_w, tex_h) in &to_render {
         let src = Rectangle::from_size(
             Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h)).to_f64(),
         );
         let dst = Rectangle::new(
-            Point::from((*surf_x, *surf_y)),
+            Point::from((
+                logical_x * scale,
+                screen_h - logical_y * scale - tex_h,
+            )),
             Size::from((*tex_w, *tex_h)),
         );
         let damage = Rectangle::from_size(Size::from((*tex_w, *tex_h)));
@@ -415,11 +447,11 @@ fn draw_shm_surfaces(
 // Frame callbacks
 // ---------------------------------------------------------------------------
 
-/// Send frame-done callbacks to all surfaces in all toplevel surface trees.
+/// Send frame-done callbacks to all surfaces in all toplevel and popup surface trees.
 pub fn send_frame_callbacks(state: &TawcState, time: u32) {
-    for toplevel in &state.toplevels {
+    let send_callbacks = |root: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface| {
         with_surface_tree_downward(
-            toplevel.wl_surface(),
+            root,
             (),
             |_, _, &()| TraversalAction::DoChildren(()),
             |_surf, states, &()| {
@@ -435,5 +467,13 @@ pub fn send_frame_callbacks(state: &TawcState, time: u32) {
             },
             |_, _, &()| true,
         );
+    };
+
+    for toplevel in &state.toplevels {
+        let wl = toplevel.wl_surface();
+        send_callbacks(wl);
+        for (popup, _) in PopupManager::popups_for_surface(wl) {
+            send_callbacks(popup.wl_surface());
+        }
     }
 }

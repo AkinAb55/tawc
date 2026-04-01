@@ -165,7 +165,7 @@ fn run_compositor(
     let mut wl_display: Display<TawcState> = Display::new()?;
     let scale = 2;
     let logical_size = (width / scale, height / scale);
-    let state = TawcState::new(&mut wl_display, logical_size);
+    let state = TawcState::new(&mut wl_display, scale, logical_size);
 
     // --- Output ---
     let output = smithay::output::Output::new(

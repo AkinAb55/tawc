@@ -41,6 +41,7 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
+use smithay::desktop::PopupManager;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
@@ -118,12 +119,19 @@ pub struct TawcState {
     /// Toplevel surfaces tracked for rendering and lifecycle.
     pub toplevels: Vec<ToplevelSurface>,
 
+    /// Popup manager for tracking xdg_popup surfaces and their positions.
+    pub popup_manager: PopupManager,
+
+    /// Output scale factor (physical pixels per logical pixel). Canonical source
+    /// of truth — lib.rs sets this at startup and render.rs reads it back.
+    pub output_scale: i32,
+
     /// Logical output size (physical pixels / scale), used to configure toplevels.
     pub output_logical_size: (i32, i32),
 }
 
 impl TawcState {
-    pub fn new(display: &mut Display<Self>, output_logical_size: (i32, i32)) -> Self {
+    pub fn new(display: &mut Display<Self>, output_scale: i32, output_logical_size: (i32, i32)) -> Self {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
@@ -151,6 +159,8 @@ impl TawcState {
             surface_ahb: HashMap::new(),
             surface_shm: HashMap::new(),
             toplevels: Vec::new(),
+            popup_manager: PopupManager::default(),
+            output_scale,
             output_logical_size,
         }
     }
@@ -179,7 +189,8 @@ impl CompositorHandler for TawcState {
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
-    fn commit(&mut self, _surface: &WlSurface) {
+    fn commit(&mut self, surface: &WlSurface) {
+        self.popup_manager.commit(surface);
     }
 }
 
@@ -204,14 +215,36 @@ impl XdgShellHandler for TawcState {
         self.toplevels.push(surface);
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let (output_w, output_h) = self.output_logical_size;
+        let target = smithay::utils::Rectangle::from_size(smithay::utils::Size::from((output_w, output_h)));
+        let geometry = positioner.get_unconstrained_geometry(target);
+        surface.with_pending_state(|state| {
+            state.geometry = geometry;
+        });
+        if let Err(e) = surface.send_configure() {
+            error!("Failed to send popup configure: {:?}", e);
+        }
+        if let Err(e) = self.popup_manager.track_popup(surface.into()) {
+            error!("Failed to track popup: {:?}", e);
+        }
+    }
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        let (output_w, output_h) = self.output_logical_size;
+        let target = smithay::utils::Rectangle::from_size(smithay::utils::Size::from((output_w, output_h)));
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_unconstrained_geometry(target);
+        });
+        surface.send_repositioned(token);
+        if let Err(e) = surface.send_configure() {
+            error!("Failed to send popup reposition configure: {:?}", e);
+        }
     }
 }
 

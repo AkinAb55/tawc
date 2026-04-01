@@ -211,6 +211,7 @@ pub fn run(
                 false
             }
         });
+        data.state.popup_manager.cleanup();
 
         data.frame_count += 1;
         if data.frame_count % 300 == 0 {

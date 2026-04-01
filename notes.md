@@ -79,6 +79,29 @@ logical surface. The xdg-decoration protocol is implemented, always requesting s
 decorations (which we don't draw, so clients get no decorations). Surfaces are rendered at
 (0,0) instead of centered.
 
+## Popup and Subsurface Positioning (2026-04-01)
+
+Popup surfaces (xdg_popup) are tracked via smithay's `PopupManager`. On `new_popup`, we
+compute constrained geometry using `PositionerState::get_unconstrained_geometry()` and send
+a configure. The PopupManager handles the popup tree hierarchy and provides popup positions
+relative to their toplevel root via `PopupManager::popups_for_surface()`.
+
+**Note:** Firefox currently uses wl_subsurface (not xdg_popup) for its dropdown menus. Both
+paths go through the same rendering code in `draw_shm_surfaces`.
+
+**Coordinate system gotchas (important — do not "fix" without understanding):**
+
+1. **Logical vs physical:** Subsurface positions (from `wl_subsurface.set_position`) and
+   popup positions (from xdg_positioner) are in logical (surface-local) coordinates.
+   The renderer works in physical pixels. Multiply positions by `output_scale`.
+
+2. **Y-axis flip:** Smithay's GlesRenderer uses a GL projection where Y=0 is at the
+   **bottom** of the screen, not the top. For SHM surfaces at non-origin positions, we
+   flip Y: `physical_y = screen_h - logical_y * scale - texture_h`. AHB surfaces skip
+   this because they're always fullscreen at the origin (the flip is a no-op for them).
+
+The canonical scale factor lives in `TawcState::output_scale`. Do not hardcode `2` elsewhere.
+
 ## SHM Buffer Support (2026-03-31)
 
 SHM buffers (`wl_shm`) are supported alongside the AHB path. SHM matters even for
