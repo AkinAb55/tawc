@@ -25,7 +25,7 @@ use smithay::utils::{Rectangle, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-    with_states,
+    with_states, with_surface_tree_downward, TraversalAction,
 };
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -64,6 +64,9 @@ pub struct SurfaceAhbState {
 pub struct SurfaceShmState {
     /// The currently committed (imported) texture for this surface.
     pub texture: Option<GlesTexture>,
+    /// The wl_buffer we imported (kept so we can detect when a new buffer arrives
+    /// and release the old one — we must NOT release the same buffer twice).
+    pub current_buffer: Option<wl_buffer::WlBuffer>,
     /// Width/height of the committed buffer.
     pub committed_width: i32,
     pub committed_height: i32,
@@ -208,62 +211,100 @@ impl TawcState {
         }
     }
 
-    /// Import a pending SHM buffer for a surface.
-    /// Must be called with the renderer available (from the render loop).
-    /// Returns true if a new buffer was imported.
-    pub fn import_pending_shm(&mut self, surface: &WlSurface, renderer: &mut GlesRenderer) -> bool {
-        // Check if there's a pending SHM buffer on this surface
-        let buffer = with_states(surface, |states| {
-            let mut guard = states.cached_state.get::<SurfaceAttributes>();
-            let attrs = guard.current();
-            match &attrs.buffer {
-                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(buf)) => {
-                    Some(buf.clone())
-                }
-                _ => None,
-            }
-        });
+    /// Import SHM buffers from the surface tree of all toplevels.
+    /// Called from the render loop where we have renderer access.
+    /// Only imports NEW buffers (compares against the previously imported buffer)
+    /// and properly releases old buffers when replaced.
+    pub fn import_shm_from_surface_trees(&mut self, renderer: &mut GlesRenderer) {
+        let toplevel_surfaces: Vec<_> = self.toplevels.iter()
+            .map(|t| t.wl_surface().clone())
+            .collect();
 
-        let Some(buffer) = buffer else { return false };
+        // Collect (surface, buffer) pairs to import
+        let mut to_import: Vec<(WlSurface, wl_buffer::WlBuffer)> = Vec::new();
 
-        // Check if it's actually an SHM buffer
-        if !matches!(buffer_type(&buffer), Some(BufferType::Shm)) {
-            return false;
+        for root in &toplevel_surfaces {
+            with_surface_tree_downward(
+                root,
+                (),
+                |_, _, &()| TraversalAction::DoChildren(()),
+                |surf, surf_states, &()| {
+                    // Skip surfaces that use AHB channels
+                    if self.surface_ahb.contains_key(surf) {
+                        return;
+                    }
+                    let mut guard = surf_states.cached_state.get::<SurfaceAttributes>();
+                    let attrs = guard.current();
+
+                    // Log buffer state changes
+                    static SCAN_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let scan = SCAN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let has_buffer = attrs.buffer.is_some();
+                    if has_buffer || scan < 10 {
+                        let buf_desc = match &attrs.buffer {
+                            Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(b)) =>
+                                format!("NewBuffer({:?}, type={:?})", b.id(), buffer_type(b)),
+                            Some(smithay::wayland::compositor::BufferAssignment::Removed) => "Removed".to_string(),
+                            None => "None".to_string(),
+                        };
+                        info!("tree_scan[{}]: {:?} buffer={}", scan, surf.id(), buf_desc);
+                    }
+
+                    if let Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(ref buf)) = attrs.buffer {
+                        if matches!(buffer_type(buf), Some(BufferType::Shm)) {
+                            // Check if this is the SAME buffer we already imported
+                            if let Some(existing) = self.surface_shm.get(surf) {
+                                if let Some(ref current_buf) = existing.current_buffer {
+                                    if current_buf.id() == buf.id() {
+                                        return; // Already imported this exact buffer
+                                    }
+                                }
+                            }
+                            to_import.push((surf.clone(), buf.clone()));
+                        }
+                    }
+                },
+                |_, _, &()| true,
+            );
         }
 
-        // Get buffer dimensions
-        let dims = smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
-            (data.width, data.height)
-        });
-        let (width, height) = match dims {
-            Ok(d) => d,
-            Err(e) => {
-                error!("Failed to get SHM buffer contents: {}", e);
-                return false;
-            }
-        };
-
-        // Use full buffer as damage region
-        let damage = [Rectangle::from_size(Size::from((width, height)))];
-        match renderer.import_shm_buffer(&buffer, None, &damage) {
-            Ok(texture) => {
-                let is_new = !self.surface_shm.contains_key(surface);
-                let shm_state = self.surface_shm.entry(surface.clone()).or_insert(SurfaceShmState {
-                    texture: None,
-                    committed_width: 0,
-                    committed_height: 0,
-                });
-                shm_state.texture = Some(texture);
-                shm_state.committed_width = width;
-                shm_state.committed_height = height;
-                if is_new {
-                    info!("SHM buffer imported as texture {}x{} for surface {:?}", width, height, surface.id());
+        // Now import the collected buffers (needs &mut renderer)
+        for (surface, buf) in to_import {
+            let dims = smithay::wayland::shm::with_buffer_contents(&buf, |_, _, data| {
+                (data.width, data.height)
+            });
+            let (width, height) = match dims {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Failed to get SHM buffer contents: {}", e);
+                    continue;
                 }
-                true
-            }
-            Err(e) => {
-                error!("Failed to import SHM buffer: {}", e);
-                false
+            };
+            let damage = [Rectangle::from_size(Size::from((width, height)))];
+            match renderer.import_shm_buffer(&buf, None, &damage) {
+                Ok(texture) => {
+                    let is_new = !self.surface_shm.contains_key(&surface);
+                    let shm_state = self.surface_shm.entry(surface.clone()).or_insert(SurfaceShmState {
+                        texture: None,
+                        current_buffer: None,
+                        committed_width: 0,
+                        committed_height: 0,
+                    });
+                    // Release the OLD buffer if we had one
+                    if let Some(old_buf) = shm_state.current_buffer.take() {
+                        old_buf.release();
+                    }
+                    shm_state.texture = Some(texture);
+                    shm_state.current_buffer = Some(buf);
+                    shm_state.committed_width = width;
+                    shm_state.committed_height = height;
+                    if is_new {
+                        info!("SHM buffer imported: {}x{} for {:?}", width, height, surface.id());
+                    }
+                }
+                Err(e) => {
+                    error!("SHM import failed: {}", e);
+                }
             }
         }
     }
@@ -295,9 +336,34 @@ impl CompositorHandler for TawcState {
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
-    fn commit(&mut self, _surface: &WlSurface) {
-        // Buffer import is handled in the render loop to avoid borrow issues
-        // with renderer access. We just note that a commit happened.
+    fn commit(&mut self, surface: &WlSurface) {
+        // Check both pending and current for the buffer
+        static COMMIT_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let count = COMMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let (pending_buf, current_buf) = with_states(surface, |states| {
+            let mut guard = states.cached_state.get::<SurfaceAttributes>();
+            let p = match &guard.pending().buffer {
+                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(b)) =>
+                    Some(format!("NewBuffer({:?})", b.id())),
+                Some(smithay::wayland::compositor::BufferAssignment::Removed) => Some("Removed".to_string()),
+                None => None,
+            };
+            let c = match &guard.current().buffer {
+                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(b)) =>
+                    Some(format!("NewBuffer({:?})", b.id())),
+                Some(smithay::wayland::compositor::BufferAssignment::Removed) => Some("Removed".to_string()),
+                None => None,
+            };
+            (p, c)
+        });
+
+        if count < 20 || pending_buf.is_some() || current_buf.is_some() {
+            info!("commit[{}]: {:?} pending={} current={}",
+                count, surface.id(),
+                pending_buf.as_deref().unwrap_or("None"),
+                current_buf.as_deref().unwrap_or("None"));
+        }
     }
 }
 

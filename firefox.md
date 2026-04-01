@@ -2,7 +2,7 @@
 
 ## Current Status (2026-03-31)
 
-Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **creates an xdg_toplevel window, attaches SHM buffers, and renders a single frame** that is visible in the compositor (with magenta SHM tint). However, rendering is intermittent -- the SHM buffer import works in some builds but not others due to a Smithay cached-state timing issue that needs further investigation.
+Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **renders via SHM buffers** visible in the compositor (with magenta SHM tint). Requires the wayland-flush-shim (`client/wayland-flush-shim/`) to work around a libmozwayland flush issue.
 
 **GTK3 GPU rendering is fully working** - confirmed with gtk3-widget-factory rendering via AHB buffers through our tawc-egl wrapper.
 
@@ -30,16 +30,11 @@ Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **creates an
 
 **Fix:** Changed to (68, 150) mm in `lib.rs` (approximate for a 6.7" 1080x2400 phone).
 
-### 3. SHM buffer import via commit callback
+### 3. SHM buffer import via surface tree scan
 
-**Problem:** The render-loop approach of checking `cached_state.get::<SurfaceAttributes>().current().buffer` for `BufferAssignment::NewBuffer` was unreliable -- the buffer field was always `None` by the time the render loop ran.
+**Problem:** Reading `cached_state.get::<SurfaceAttributes>().current().buffer` in `CompositorHandler::commit()` always returned `None` due to Smithay's transaction system not having applied state yet at that point. The buffer IS visible in `current()` after `dispatch_clients()` returns.
 
-**Partial fix:** Added capture of SHM buffers in the `CompositorHandler::commit()` callback, queuing them in `pending_shm_commits` for the render loop to import with renderer access. Also added a surface tree scan fallback. This worked intermittently -- one build successfully imported a 972x1040 SHM frame, but subsequent builds showed `current=None pending=None` in the commit handler with only 3-4 commits total per Firefox session.
-
-**Root cause unknown:** Smithay's transaction system applies state before calling `commit()`, so `current().buffer` should have the buffer. But it doesn't consistently. Possible causes:
-- Firefox's Wayland proxy multiplexing multiple process connections into different compositor clients
-- Smithay transaction ordering with multiple concurrent clients
-- The buffer attach+commit arriving on a different client connection than the one owning the toplevel surface
+**Fix:** Moved SHM buffer detection to `import_shm_from_surface_trees()`, a tree scan that runs after `dispatch_clients()` in the render loop. Tracks buffer identity (`buf.id()`) to avoid double-import, releases old buffers only when replaced by new ones.
 
 ### 4. SHM texture vertical flip
 
@@ -49,9 +44,21 @@ Firefox 149 (Arch Linux ARM aarch64) is installed in the chroot and **creates an
 
 ### 5. Frame callbacks for SHM surfaces
 
-**Problem:** Firefox needs frame callbacks on its rendering surfaces to know when to submit new frames. The compositor only sent callbacks to toplevel surface trees, which might miss standalone SHM surfaces.
+**Problem:** Firefox needs frame callbacks on its rendering surfaces to know when to submit new frames.
 
-**Fix:** Added frame callback sending to all surfaces in `surface_shm` in addition to toplevel trees.
+**Fix:** Frame callbacks are sent to all toplevel surface trees (which includes subsurfaces) via `send_frames_surface_tree()`.
+
+### 6. Wayland flush shim for Firefox (CRITICAL)
+
+**Problem:** Firefox's `libmozwayland.so` manages its own Wayland output buffer but never calls `wl_display_flush()`, leaving encoded attach+commit messages stuck in client-side memory. The compositor never receives them.
+
+**Fix:** `client/wayland-flush-shim/flush-shim.c` — an LD_PRELOAD library that hooks `wl_display_connect()` to capture the display pointer, then starts a background thread calling `wl_display_flush()` (resolved via `dlsym(RTLD_DEFAULT)` to use libmozwayland.so's own implementation) every 100ms.
+
+### 7. Compositor event loop polling
+
+**Problem:** The sleep-based compositor loop didn't properly poll the wayland-server's display fd, causing `dispatch_clients()` to miss client messages.
+
+**Fix:** Replaced `sleep(16ms)` with `poll()` on both the display fd and listener fd with a 16ms timeout. Also added periodic `output.change_current_state()` to send wl_output events that wake up client event loops.
 
 ## Key Findings
 
@@ -100,12 +107,12 @@ export GDK_GL=gles:always
 gtk3-widget-factory
 ```
 
-### Firefox (SHM rendering, partially working):
+### Firefox (SHM rendering, working):
 ```bash
 export WAYLAND_DISPLAY=wayland-0
 export XDG_RUNTIME_DIR=/tmp
 export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
-export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so:/tmp/libwayland-flush-shim.so
 export HYBRIS_PATCH_TLS=1
 export MOZ_ENABLE_WAYLAND=1
 export HOME=/root
@@ -116,6 +123,7 @@ export MOZ_DISABLE_RDD_SANDBOX=1
 export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
 export DISPLAY=
 # Symlink must exist: ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0
+# Flush shim must be built: see client/wayland-flush-shim/
 firefox --no-remote
 ```
 
@@ -131,19 +139,68 @@ firefox --no-remote
 ### Firefox sandbox
 All Firefox sandbox must be disabled (`MOZ_DISABLE_CONTENT_SANDBOX=1` etc.). The chroot environment doesn't support the clone/namespace operations Firefox's sandbox requires.
 
+## Client Output Buffer Flush Deadlock (SOLVED)
+
+**Root cause identified (2026-03-31):** Firefox and GTK3 encode `wl_surface.attach()` + `wl_surface.commit()` into their Wayland output buffer, but **never flush the buffer to the server socket**. This creates a deadlock:
+
+1. Client renders and encodes attach+commit into libwayland's output buffer
+2. Client's event loop calls `poll()` waiting for server events
+3. Server's `dispatch_clients()` calls `epoll_wait()` — returns 0 (no client data)
+4. Server has no events to send (no frame callback requests pending, configure already sent)
+5. Both sides wait forever
+
+**Evidence:**
+- `strace` on compositor: `epoll_pwait(128, [], 32, 0, NULL, 8) = 0` — no client data
+- `strace` on Firefox: `ppoll([{fd=11, events=POLLIN}], ...)` — blocked waiting for server events
+- WAYLAND_DEBUG shows `-> wl_surface#16.attach(wl_buffer#35, 0, 0)` — client ENCODES attach
+- But the attach never reaches the server (Smithay's `wl_surface.attach` handler never called)
+- A test client with explicit `wl_display_flush()` works perfectly
+
+**Test client proof:** `client/test-shm-client.c` creates an SHM buffer, attaches, commits, and explicitly calls `wl_display_flush()`. The compositor successfully imports the buffer (visible in logs: `commit[6]: current=NewBuffer`).
+
+**Server-side mitigations (necessary but not sufficient alone):**
+- Sending `output.change_current_state()` periodically — generates wl_output events that keep client event loops active (prevents full deadlock on client poll)
+- Polling the Display fd with timeout — ensures `dispatch_clients()` properly picks up client data when it arrives
+- `flush_clients()` after all event sends — ensures server events reach the socket
+
+**Detailed analysis (2026-03-31):**
+
+The pure Rust wayland-backend correctly:
+- Write events to `BufferedSocket.out_data` (confirmed via `__android_log_write` instrumentation in `client.rs`)
+- Flush events to sockets via `sendto()` (confirmed via strace: 32-byte `sendto` calls happen every 0.5s for output mode events)
+- Deliver events to Firefox's Wayland proxy (confirmed via strace: Firefox reads 64-byte messages via `recvmsg(fd=12)`)
+
+Firefox's Wayland proxy then:
+- Reads compositor events (output mode changes) from fd 12
+- Forwards them to internal Firefox processes via `sendmsg(fd=72/121/142/145/147)`
+- But **NEVER sends data back to the compositor on fd 12**
+
+The proxy's event loop polls `{fd=8(eventfd), fd=12(compositor), fd=34(pipe)}`. Only fd 12 triggers (POLLIN from compositor events). The eventfd (fd 8), which should signal when internal clients have outbound data, never fires. This means internal Firefox processes encode attach+commit but the proxy never forwards them to the compositor.
+
+With `MOZ_DISABLE_WAYLAND_PROXY=1`, Firefox's main process connects directly. The compositor sends output mode events which arrive. But Firefox STILL doesn't flush its outbound buffer — it uses a non-standard Wayland dispatch mechanism that doesn't call `wl_display_flush()` after processing events.
+
+An `LD_PRELOAD` shim intercepting `wl_display_dispatch_pending()` was tried but Firefox doesn't call these standard APIs.
+
+**Solution:** `client/wayland-flush-shim/flush-shim.c` — LD_PRELOAD library that hooks `wl_display_connect()` to capture the display pointer, then starts a background thread calling `wl_display_flush()` (resolved via `dlsym(RTLD_DEFAULT)` to get `libmozwayland.so`'s own version) every 100ms. This forces Firefox's output buffer to be written to the socket. **Confirmed working.**
+
+Standard LD_PRELOAD interception of `wl_display_read_events()` / `wl_display_dispatch_pending()` does NOT work because Firefox uses `libmozwayland.so`'s internal copies of these functions, not the system `libwayland-client.so`. However, `wl_display_connect` IS interceptable (Firefox's loader resolves it from the LD_PRELOAD before libmozwayland).
+
+**Alternative approaches not pursued:**
+- Cross-compile libwayland-server for Android/bionic to use `wayland-server = { features = ["system"] }` (the chroot's glibc version can't be used in the Android app)
+- Patch wayland-backend to bypass epoll (tried, doesn't help — the root cause is client-side)
+
+## SHM Buffer Import (FIXED)
+
+The SHM buffer import pipeline now works correctly (verified with test client):
+- `import_shm_from_surface_trees()` scans toplevel surface trees via `with_surface_tree_downward`
+- Compares buffer identity (`buf.id()`) to avoid double-import
+- Releases old buffers when replaced by new ones
+- Properly handles subsurface positioning during rendering
+
 ## Next Steps (Priority Order)
 
-1. **Fix SHM buffer import reliability** - The core blocker. The `commit()` callback intermittently fails to see `BufferAssignment::NewBuffer`. Investigate:
-   - Add persistent logging (not just first N commits) to catch the buffer when it appears
-   - Check if Firefox's proxy creates multiple Wayland connections and the buffer arrives on a non-toplevel client
-   - Consider tracking ALL surfaces across ALL clients (not just toplevel surfaces) for SHM import
-   - Look at how Smithay's built-in `RendererSurfaceState` handles buffer tracking -- it uses `attrs.buffer.take()` in a surface tree traversal
+1. **Add keyboard support** — Needed for any interactive use of Firefox. `seat.add_keyboard()` currently crashes (xkbcommon needs keymap files).
 
-2. **Add keyboard support** - Needed for any interactive use of Firefox
+2. **Continuous rendering** — Firefox currently renders initial frames but may stop. Need to verify frame callback flow keeps Firefox's rendering pipeline active.
 
-3. **Investigate frame callback flow** - Firefox may need continuous frame callbacks to keep rendering. Verify that the frame callback path works correctly for both the toplevel surface and its subsurfaces.
-
-4. **Consider GPU rendering** - Long-term, getting Firefox WebRender to use our tawc-egl wrapper for hardware-accelerated rendering would be ideal. This would require either:
-   - Placing our libEGL.so where Firefox expects the system one (`/usr/lib/libEGL.so`)
-   - Or using `LD_PRELOAD` with our wrapper
-   - Firefox would need to detect a usable GLES driver (currently it falls back to software)
+3. **GPU rendering** — Getting Firefox WebRender to use our tawc-egl wrapper. GTK3 GPU rendering already works via AHB. Firefox currently falls back to software/SHM because it never opens libEGL.so.

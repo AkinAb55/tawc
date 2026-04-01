@@ -11,14 +11,14 @@ use log::info;
 
 use smithay::backend::egl::EGLContext;
 use smithay::backend::egl::EGLSurface;
-use smithay::backend::renderer::gles::{GlesRenderer, Uniform, UniformName, UniformType, UniformValue};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, Uniform, UniformName, UniformType, UniformValue};
 use smithay::backend::renderer::{Bind, Color32F, Frame, Renderer};
 use smithay::utils::{Point, Rectangle, Size, Transform};
 use smithay::wayland::compositor::{
-    with_surface_tree_downward, SurfaceAttributes, TraversalAction,
+    with_surface_tree_downward, SubsurfaceCachedState, SurfaceAttributes, TraversalAction,
 };
-
-use wayland_server::{Display, ListeningSocket};
+use std::os::unix::io::AsRawFd;
+use wayland_server::{Display, ListeningSocket, Resource};
 
 mod egl_android;
 mod ahb;
@@ -204,7 +204,8 @@ void main() {
     let output = smithay::output::Output::new(
         "tawc-0".to_string(),
         smithay::output::PhysicalProperties {
-            size: (0, 0).into(),
+            // Approximate physical size in mm (based on ~6.7" 1080x2400 phone display)
+            size: (68, 150).into(),
             subpixel: smithay::output::Subpixel::Unknown,
             make: "tawc".into(),
             model: "Android".into(),
@@ -237,30 +238,52 @@ void main() {
     info!("Wayland socket listening at {}", WAYLAND_SOCKET_PATH);
 
     // --- Main event loop ---
+    // Use poll() on the display fd to properly trigger the wayland-server
+    // backend's epoll-based client readiness tracking. Without this,
+    // dispatch_clients() misses client data.
     let output_size = Size::from((width, height));
     let start_time = Instant::now();
     let mut frame_count: u64 = 0;
 
     while RUNNING.load(Ordering::SeqCst) {
-        // Accept new client connections
-        if let Some(stream) = listener.accept()? {
+        // Accept ALL pending client connections
+        while let Some(stream) = listener.accept()? {
             info!("New Wayland client connected");
             wl_display
                 .handle()
                 .insert_client(stream, Arc::new(ClientState::default()))?;
         }
 
-        // Dispatch Wayland protocol events
-        match wl_display.dispatch_clients(&mut state) {
-            Ok(_) => {},
-            Err(e) => {
-                log::error!("dispatch_clients error: {} -- client may be broken", e);
+        // Poll the display fd with a 16ms timeout. This is critical:
+        // the wayland-server pure Rust backend uses an internal epoll fd.
+        // We must poll it so the kernel processes epoll events, which marks
+        // client sockets as "ready to read" for dispatch_clients().
+        {
+            use std::os::fd::AsFd;
+            let display_fd = wl_display.as_fd();
+            let raw_fd = std::os::fd::AsRawFd::as_raw_fd(&display_fd);
+            let listener_fd = listener.as_raw_fd();
+            #[repr(C)]
+            struct PollFd { fd: i32, events: i16, revents: i16 }
+            extern "C" { fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32; }
+            unsafe {
+                let mut pfds = [
+                    PollFd { fd: raw_fd, events: 1 /* POLLIN */, revents: 0 },
+                    PollFd { fd: listener_fd, events: 1 /* POLLIN */, revents: 0 },
+                ];
+                poll(pfds.as_mut_ptr(), 2, 16); // 16ms timeout for ~60fps
             }
         }
-        match wl_display.flush_clients() {
-            Ok(_) => {},
+
+        // Dispatch Wayland protocol events
+        match wl_display.dispatch_clients(&mut state) {
+            Ok(n) => {
+                if n > 0 {
+                    info!("dispatch_clients: processed {} events", n);
+                }
+            },
             Err(e) => {
-                log::error!("flush_clients error: {}", e);
+                log::error!("dispatch_clients error: {} -- client may be broken", e);
             }
         }
 
@@ -276,15 +299,9 @@ void main() {
             state.import_pending_ahb(&surface, &renderer);
         }
 
-        // Import any pending SHM buffers from toplevel surfaces
-        // (surfaces not using AHB channels that have wl_shm buffers attached)
-        let toplevel_surfaces: Vec<_> = state.toplevels.iter()
-            .map(|t| t.wl_surface().clone())
-            .filter(|s| !state.surface_ahb.contains_key(s))
-            .collect();
-        for surface in toplevel_surfaces {
-            state.import_pending_shm(&surface, &mut renderer);
-        }
+        // Import SHM buffers from surface trees (handles buffer lifecycle properly)
+        state.import_shm_from_surface_trees(&mut renderer);
+
 
         // --- Render ---
         let t = (frame_count as f32) / 240.0;
@@ -328,49 +345,133 @@ void main() {
             )?;
         }
 
-        // Render SHM surfaces with magenta tint
-        let shm_surfaces_to_render: Vec<_> = state
-            .surface_shm
-            .values()
-            .filter_map(|shm_state| {
-                shm_state.texture.as_ref().map(|tex| {
-                    (tex.clone(), shm_state.committed_width, shm_state.committed_height)
-                })
-            })
-            .collect();
+        // Render SHM surfaces from surface trees with proper subsurface positioning
+        {
+            let shm_shader = state.shm_tint_shader.clone();
+            let toplevel_surfaces: Vec<_> = state.toplevels.iter()
+                .map(|t| t.wl_surface().clone())
+                .collect();
 
-        let shm_shader = state.shm_tint_shader.clone();
-        for (texture, tex_w, tex_h) in &shm_surfaces_to_render {
-            let tex_x = (width - tex_w) / 2;
-            let tex_y = (height - tex_h) / 2;
-            let texture_size = Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h));
-            let src_rect = Rectangle::from_size(texture_size.to_f64());
-            let dst_rect = Rectangle::new(
-                Point::from((tex_x, tex_y)),
-                Size::from((*tex_w, *tex_h)),
-            );
-            let damage_rect = Rectangle::from_size(Size::from((*tex_w, *tex_h)));
-            frame.render_texture_from_to(
-                texture,
-                src_rect,
-                dst_rect,
-                &[damage_rect],
-                &[],
-                Transform::Normal,
-                1.0,
-                shm_shader.as_ref(),
-                &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))],
-            )?;
+            // Collect surfaces to render with their absolute positions
+            let mut shm_to_render: Vec<(GlesTexture, i32, i32, i32, i32)> = Vec::new();
+
+            for root in &toplevel_surfaces {
+                with_surface_tree_downward(
+                    root,
+                    (0i32, 0i32), // start at (0, 0) relative to toplevel
+                    |_surf, states, &(px, py)| {
+                        // Get subsurface offset for children
+                        let loc = states
+                            .cached_state
+                            .get::<SubsurfaceCachedState>()
+                            .current()
+                            .location;
+                        TraversalAction::DoChildren((px + loc.x, py + loc.y))
+                    },
+                    |surf, states, &(abs_x, abs_y)| {
+                        // Get this surface's own subsurface offset
+                        let loc = states
+                            .cached_state
+                            .get::<SubsurfaceCachedState>()
+                            .current()
+                            .location;
+                        let x = abs_x + loc.x;
+                        let y = abs_y + loc.y;
+
+                        if let Some(shm_state) = state.surface_shm.get(surf) {
+                            if let Some(ref tex) = shm_state.texture {
+                                shm_to_render.push((
+                                    tex.clone(),
+                                    x, y,
+                                    shm_state.committed_width,
+                                    shm_state.committed_height,
+                                ));
+                            }
+                        }
+                    },
+                    |_, _, _| true,
+                );
+            }
+
+            for (texture, surf_x, surf_y, tex_w, tex_h) in &shm_to_render {
+                // Center the toplevel window on screen, then apply subsurface offset
+                // The toplevel root is at (0,0), so we center that
+                let window_w = toplevel_surfaces.first()
+                    .and_then(|s| state.surface_shm.get(s))
+                    .map(|s| s.committed_width)
+                    .unwrap_or(*tex_w);
+                let window_h = toplevel_surfaces.first()
+                    .and_then(|s| state.surface_shm.get(s))
+                    .map(|s| s.committed_height)
+                    .unwrap_or(*tex_h);
+                let base_x = (width - window_w) / 2;
+                let base_y = (height - window_h) / 2;
+
+                let texture_size = Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h));
+                let src_rect = Rectangle::from_size(texture_size.to_f64());
+                let dst_rect = Rectangle::new(
+                    Point::from((base_x + surf_x, base_y + surf_y)),
+                    Size::from((*tex_w, *tex_h)),
+                );
+                let damage_rect = Rectangle::from_size(Size::from((*tex_w, *tex_h)));
+                frame.render_texture_from_to(
+                    &texture,
+                    src_rect,
+                    dst_rect,
+                    &[damage_rect],
+                    &[],
+                    Transform::Flipped180,
+                    1.0,
+                    shm_shader.as_ref(),
+                    &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))],
+                )?;
+            }
         }
 
         let _ = frame.finish()?;
         drop(target);
         egl_surface.swap_buffers(None)?;
 
-        // Send frame callbacks to all toplevel surfaces
+        // Send frame callbacks to all toplevel surface trees
         let time = start_time.elapsed().as_millis() as u32;
         for toplevel in &state.toplevels {
             send_frames_surface_tree(toplevel.wl_surface(), time);
+        }
+
+        // Send periodic xdg_wm_base pings to keep client event loops active.
+        // Without this, clients like Firefox/GTK3 can deadlock: they encode
+        // attach+commit into their output buffer but never flush because their
+        // event loop is in poll() waiting for server events.
+        // Trigger an output mode change notification to wake up client event loops.
+        // Clients that bind wl_output receive geometry+mode+done events, which
+        // causes their poll() to return and their event loop to flush pending messages.
+        // This is needed because clients like Firefox/GTK3 don't flush their output
+        // buffer until they receive an event from the server.
+        if frame_count % 30 == 0 {
+            // Toggle refresh rate slightly to force wl_output events to be sent.
+            // This wakes up client event loops, causing them to flush pending messages.
+            let refresh = if frame_count % 60 == 0 { 60_000 } else { 60_001 };
+            let wake_mode = smithay::output::Mode {
+                size: (width, height).into(),
+                refresh,
+            };
+            output.change_current_state(
+                Some(wake_mode),
+                None,
+                None,
+                None,
+            );
+        }
+
+        // Flush all pending server→client events by dispatching+flushing.
+        // The pure Rust wayland-backend may only flush during dispatch_clients,
+        // not via standalone flush_clients calls.
+        let _ = wl_display.dispatch_clients(&mut state);
+        match wl_display.flush_clients() {
+            Ok(_) => {},
+            Err(e) => {
+                log::error!("flush_clients error: {}", e);
+            }
         }
 
         // Remove toplevels whose xdg surface is no longer alive,
@@ -395,8 +496,7 @@ void main() {
             );
         }
 
-        // ~60fps
-        std::thread::sleep(Duration::from_millis(16));
+        // Note: timing is handled by the poll() at the top of the loop (16ms timeout)
     }
 
     info!("Compositor finished after {} frames", frame_count);
