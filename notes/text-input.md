@@ -208,7 +208,7 @@ This requires a reverse JNI channel: Rust compositor calls back into Kotlin. Use
 
 ## Implementation Plan
 
-See [plan.md](plan.md) phases 6-7 for the implementation steps.
+See [plan.md](../plan.md) phases 6-7 for the implementation steps.
 
 ## Open Questions
 
