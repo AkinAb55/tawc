@@ -67,6 +67,10 @@ adb shell am start -n me.phie.tawc/.MainActivity
 **Important:** The system default Java is 26, but the Android Gradle Plugin (8.5.1) doesn't
 support it. You must set `JAVA_HOME` to Java 21 before running `gradlew`.
 
+**After reinstalling the APK:** The compositor restarts with a new Wayland socket. Any
+running chroot clients (Firefox, etc.) will be connected to the old socket and show black
+screens. You must kill them and relaunch.
+
 ## Window Management (2026-04-01)
 
 All toplevels are configured as maximized at the full logical output size (physical pixels /
@@ -194,6 +198,9 @@ The wayland flush shim (`libwayland-flush-shim.so`) is no longer needed.
 - `setenforce 0` required (GDK's memfds bypass the LD_PRELOAD SELinux shim because GDK
   calls `syscall(SYS_memfd_create, ...)` directly instead of the libc wrapper).
 
+**Troubleshooting:** If Firefox connects but shows a black screen, check SELinux first:
+`adb shell su -c getenforce`. It resets to Enforcing on every device reboot.
+
 **Toplevel lifecycle:** Toplevels are retained as long as `ToplevelSurface::alive()` returns
 true (not based on whether they have buffers). SHM state is cleaned up when the toplevel
 dies. This is important because SHM clients don't create buffer state until after the first
@@ -216,6 +223,26 @@ Touch events flow: Android `onTouchEvent` → JNI `nativeOnTouchEvent` → `call
   (2) to get logical Wayland coordinates.
 - Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
 - The seat advertises both pointer and touch capabilities.
+
+**Simulating touch via adb:**
+
+`adb shell input tap X Y` injects touch events through the Android input framework, which
+dispatches them to the SurfaceView's `OnTouchListener` like a real finger tap. Coordinates
+are in screen pixels (same space as `screencap`). The app uses immersive fullscreen with
+`windowLayoutInDisplayCutoutMode=shortEdges`, so screen coordinates map 1:1 to SurfaceView
+coordinates with no status bar offset. The compositor divides by the scale factor (2) to get
+Wayland logical coordinates before forwarding to clients.
+
+**Iterating on touch-driven UI (e.g. testing popup menus):**
+1. Take a screenshot: `adb shell su -c "screencap -p /sdcard/screenshot.png" && adb pull /sdcard/screenshot.png /tmp/screenshot.png`
+2. Identify the target element's pixel coordinates in the 1080x2400 image
+3. Tap: `adb shell input tap X Y`
+4. Screenshot again to see the result
+5. Clean up: `adb shell rm /sdcard/screenshot.png && rm /tmp/screenshot.png`
+
+Be precise with coordinates — at 2x scale, UI elements are small in physical pixels. For
+example, the Firefox tab close "X" and the toolbar hamburger "≡" are only ~50-60px apart
+vertically and easy to confuse.
 
 **Known issues:**
 - Keyboard input still not working (`seat.add_keyboard()` crashes on Android).

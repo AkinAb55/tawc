@@ -44,3 +44,5 @@ More details on each of these can be found in notes.md.
 - **Check compositor logs:** `adb logcat -s tawc-native` (Rust compositor) or `adb logcat -s tawc` (Kotlin app). Filter out frame spam with `grep -v renderer_gles2_frame`.
 - **Kill Firefox:** `adb shell su -c "killall firefox"`
 - **Restart compositor:** `adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.MainActivity`
+- **Simulate touch:** `adb shell input tap X Y` where X,Y are screen pixel coordinates (same coordinate space as screencap). The app runs in true immersive fullscreen, so screen coordinates map 1:1 to SurfaceView coordinates with no status bar offset.
+- **Debug touch loop:** Screenshot → identify element coordinates → `adb shell input tap X Y` → screenshot again to verify. Be precise with coordinates — the compositor uses 2x scale, so Wayland logical coordinates are physical/2. Nearby UI elements (e.g. tab close "X" vs hamburger menu "≡") are easy to confuse.
