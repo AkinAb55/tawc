@@ -104,6 +104,68 @@ removed or made optional once the AHB path is mature.
 The SHM path is tracked separately from AHB: `surface_shm` HashMap holds `SurfaceShmState`
 per surface. Surfaces using the AHB channel protocol are never checked for SHM buffers.
 
+## Firefox GPU Rendering (2026-04-01)
+
+Firefox 149 WebRender renders via GPU: WebRender → tawc-egl → libhybris → Adreno 660.
+Main content uses AHB at 972x1040; a small SHM subsurface exists for GTK decorations.
+
+**Three problems solved in tawc-egl:**
+
+1. **glxtest probe** — Firefox's `glxtest -w` hard-requires `eglQueryDeviceStringEXT`
+   (from `EGL_EXT_device_query`), which Android drivers don't implement. Added a stub.
+
+2. **Context attributes** — Firefox requests robustness extensions
+   (`EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_KHR/EXT`,
+   `EGL_CONTEXT_OPENGL_ROBUST_ACCESS_*`) that Adreno rejects. Stripped in the attribute
+   filter alongside the existing desktop-GL attribute stripping.
+
+3. **GL symbol resolution** — Firefox resolves GL functions (`glGetString` etc.) via
+   `dlsym` on `libGL.so.1`, NOT `eglGetProcAddress`. Without intervention, `dlopen`
+   finds Mesa's software GL whose functions don't work with our EGL context. Fixed by
+   placing symlinks in `/tmp/tawc-wsi/` pointing `libGL.so.1` and `libGLESv2.so.2` to
+   libhybris's GLES. The build script creates these symlinks.
+
+**Other tawc-egl changes for Firefox:**
+- Removed `-lGLESv2` link dependency (transitive Android symbol deps caused `dlopen`
+  failures). GL functions resolved lazily via `eglGetProcAddress` at init.
+- `eglTerminate` is a no-op (Firefox terminate+reinitialize cycles invalidated the stock
+  display, since our `eglInitialize` doesn't re-init it).
+- `eglChooseConfig` ensures `EGL_RENDERABLE_TYPE` includes `EGL_OPENGL_ES2_BIT`.
+- Added `eglSetDamageRegionKHR` stub (Firefox calls it before
+  `eglSwapBuffersWithDamageKHR`).
+
+**Firefox launch:**
+```bash
+export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/tmp
+export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
+export HYBRIS_PATCH_TLS=1
+export MOZ_ENABLE_WAYLAND=1
+export HOME=/root
+export GDK_GL=disabled
+export MOZ_ACCELERATED=1
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+export DISPLAY=
+ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0
+firefox --no-remote
+```
+
+Key differences from GTK3 launch: `GDK_GL=disabled` (not `gles:always`) prevents GTK
+from creating a competing EGL surface. `MOZ_ACCELERATED=1` forces hardware acceleration.
+All sandbox vars must be disabled (chroot lacks namespace support). The wayland flush
+shim (`libwayland-flush-shim.so`) is no longer needed.
+
+**Known issues:**
+- `seat.add_keyboard()` crashes (Smithay xkbcommon needs keymap data files not present
+  on Android). Keyboard input not yet working.
+- All Firefox sandboxing disabled. The chroot doesn't support clone/namespace operations.
+- `setenforce 0` required (GDK's memfds bypass the LD_PRELOAD SELinux shim because GDK
+  calls `syscall(SYS_memfd_create, ...)` directly instead of the libc wrapper).
+
 **Toplevel lifecycle:** Toplevels are retained as long as `ToplevelSurface::alive()` returns
 true (not based on whether they have buffers). SHM state is cleaned up when the toplevel
 dies. This is important because SHM clients don't create buffer state until after the first

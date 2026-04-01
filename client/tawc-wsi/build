@@ -27,7 +27,6 @@ gcc -shared -fPIC -o libEGL.so \
     tawc-egl.c \
     tawc-buffer-v1-client.c \
     -lwayland-client \
-    -lGLESv2 \
     -ldl \
     -lpthread \
     -I. \
@@ -39,6 +38,9 @@ ln -sf libEGL.so libEGL.so.1
 echo Build successful
 ls -la libEGL.so
 \"'"
+
+echo "=== Creating GL symlinks ==="
+adb shell "su -c 'cd $CHROOT$BUILD && ln -sf /usr/local/lib/libGLESv2.so.2 libGLESv2.so.2 && ln -sf /usr/local/lib/libGLESv2.so.2 libGLESv2.so && ln -sf /usr/local/lib/libGLESv2.so.2 libGL.so.1 && ln -sf /usr/local/lib/libGLESv2.so.2 libGL.so'"
 
 echo "=== Done ==="
 echo "To use: LD_LIBRARY_PATH=$BUILD:\$LD_LIBRARY_PATH HYBRIS_PATCH_TLS=1 <app>"

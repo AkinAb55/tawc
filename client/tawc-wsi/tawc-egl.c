@@ -26,8 +26,26 @@
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
+
+/* GL types and constants -- avoid including GLES2 headers since we don't
+ * link libGLESv2 at build time (to prevent transitive Android symbol deps). */
+typedef unsigned int GLenum;
+typedef unsigned int GLuint;
+typedef int GLint;
+typedef int GLsizei;
+typedef unsigned char GLboolean;
+typedef void GLvoid;
+#define GL_FRAMEBUFFER            0x8D40
+#define GL_RENDERBUFFER           0x8D41
+#define GL_COLOR_ATTACHMENT0      0x8CE0
+#define GL_DEPTH_ATTACHMENT       0x8D00
+#define GL_STENCIL_ATTACHMENT     0x8D20
+#define GL_FRAMEBUFFER_COMPLETE   0x8CD5
+#define GL_TEXTURE_MIN_FILTER     0x2801
+#define GL_TEXTURE_MAG_FILTER     0x2800
+#define GL_LINEAR                 0x2601
+#define GL_TEXTURE_EXTERNAL_OES   0x8D65
+#define GL_DEPTH24_STENCIL8_OES   0x88F0
 
 #include <wayland-client.h>
 #include <wayland-egl-backend.h>
@@ -83,6 +101,49 @@ static fn_eglDestroyImageKHR             pfn_destroyImage;
 
 typedef void (*fn_glEGLImageTargetTexture2DOES)(GLenum, void *);
 static fn_glEGLImageTargetTexture2DOES pfn_imageTargetTex;
+
+/* GL function pointers -- resolved lazily via eglGetProcAddress to avoid
+ * linking libGLESv2.so at build time. The libhybris GLESv2 has transitive
+ * deps on Android EGL symbols that cause dlopen failures in Firefox. */
+#define GL_FUNCTIONS(X) \
+    X(void,  glGenTextures,            (GLsizei n, GLuint *textures)) \
+    X(void,  glBindTexture,            (GLenum target, GLuint texture)) \
+    X(void,  glTexParameteri,          (GLenum target, GLenum pname, GLint param)) \
+    X(void,  glDeleteTextures,         (GLsizei n, const GLuint *textures)) \
+    X(void,  glGenFramebuffers,        (GLsizei n, GLuint *framebuffers)) \
+    X(void,  glBindFramebuffer,        (GLenum target, GLuint framebuffer)) \
+    X(void,  glFramebufferTexture2D,   (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)) \
+    X(void,  glDeleteFramebuffers,     (GLsizei n, const GLuint *framebuffers)) \
+    X(void,  glGenRenderbuffers,       (GLsizei n, GLuint *renderbuffers)) \
+    X(void,  glBindRenderbuffer,       (GLenum target, GLuint renderbuffer)) \
+    X(void,  glRenderbufferStorage,    (GLenum target, GLenum internalformat, GLsizei width, GLsizei height)) \
+    X(void,  glFramebufferRenderbuffer,(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer)) \
+    X(void,  glDeleteRenderbuffers,    (GLsizei n, const GLuint *renderbuffers)) \
+    X(GLenum,glCheckFramebufferStatus, (GLenum target)) \
+    X(void,  glViewport,              (GLint x, GLint y, GLsizei width, GLsizei height)) \
+    X(void,  glFinish,                (void))
+
+#define DECLARE_GL_FN(ret, name, args) static ret (*pfn_##name) args;
+GL_FUNCTIONS(DECLARE_GL_FN)
+#undef DECLARE_GL_FN
+
+/* Redirect all gl* calls to function pointers */
+#define glGenTextures           pfn_glGenTextures
+#define glBindTexture           pfn_glBindTexture
+#define glTexParameteri         pfn_glTexParameteri
+#define glDeleteTextures        pfn_glDeleteTextures
+#define glGenFramebuffers       pfn_glGenFramebuffers
+#define glBindFramebuffer       pfn_glBindFramebuffer
+#define glFramebufferTexture2D  pfn_glFramebufferTexture2D
+#define glDeleteFramebuffers    pfn_glDeleteFramebuffers
+#define glGenRenderbuffers      pfn_glGenRenderbuffers
+#define glBindRenderbuffer      pfn_glBindRenderbuffer
+#define glRenderbufferStorage   pfn_glRenderbufferStorage
+#define glFramebufferRenderbuffer pfn_glFramebufferRenderbuffer
+#define glDeleteRenderbuffers   pfn_glDeleteRenderbuffers
+#define glCheckFramebufferStatus pfn_glCheckFramebufferStatus
+#define glViewport              pfn_glViewport
+#define glFinish                pfn_glFinish
 
 #define EGL_NATIVE_BUFFER_ANDROID 0x3140
 
@@ -382,6 +443,15 @@ static int load_extensions(void)
         log_msg("FATAL: missing EGL/GL extensions");
         return -1;
     }
+
+    /* Resolve GL function pointers via eglGetProcAddress */
+#define RESOLVE_GL_FN(ret, name, args) \
+    pfn_##name = (ret (*) args)real_eglGetProcAddress(#name); \
+    if (!pfn_##name) { log_msg("FATAL: missing GL function: " #name); return -1; }
+    GL_FUNCTIONS(RESOLVE_GL_FN)
+#undef RESOLVE_GL_FN
+    log_msg("all GL functions resolved via eglGetProcAddress");
+
     return 0;
 }
 
@@ -655,8 +725,12 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 
 EGLBoolean eglTerminate(EGLDisplay dpy)
 {
-    if (!initialized) return EGL_TRUE;
-    return real_eglTerminate(stock_display);
+    /* Do NOT forward to real driver. The stock display is managed by the
+     * wrapper and must remain alive. Firefox's WebRender calls eglTerminate
+     * then eglInitialize to retry with different config, and our eglInitialize
+     * doesn't re-init the stock display. */
+    (void)dpy;
+    return EGL_TRUE;
 }
 
 EGLBoolean eglBindAPI(EGLenum api)
@@ -679,21 +753,32 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
 {
     if (ensure_init() < 0) return EGL_FALSE;
 
-    /* Add PBUFFER_BIT to whatever surface type the app requests.
-     * We need pbuffer for our dummy surface; the app expects WINDOW. */
+    /* Modify config attributes:
+     * 1. Add PBUFFER_BIT to surface type (we use pbuffer as dummy surface)
+     * 2. Ensure EGL_RENDERABLE_TYPE includes GLES2 (default is GLES1 only) */
     EGLint modified[64];
     int i = 0, j = 0;
+    int has_renderable_type = 0;
     if (attrib_list) {
-        while (attrib_list[i] != EGL_NONE && j < 60) {
+        while (attrib_list[i] != EGL_NONE && j < 58) {
             if (attrib_list[i] == EGL_SURFACE_TYPE) {
                 modified[j++] = EGL_SURFACE_TYPE;
                 modified[j++] = attrib_list[i+1] | EGL_PBUFFER_BIT;
+                i += 2;
+            } else if (attrib_list[i] == EGL_RENDERABLE_TYPE) {
+                modified[j++] = EGL_RENDERABLE_TYPE;
+                modified[j++] = attrib_list[i+1] | EGL_OPENGL_ES2_BIT;
+                has_renderable_type = 1;
                 i += 2;
             } else {
                 modified[j++] = attrib_list[i++];
                 modified[j++] = attrib_list[i++];
             }
         }
+    }
+    if (!has_renderable_type && j < 60) {
+        modified[j++] = EGL_RENDERABLE_TYPE;
+        modified[j++] = EGL_OPENGL_ES2_BIT;
     }
     modified[j] = EGL_NONE;
 
@@ -709,6 +794,10 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
 #define EGL_CONTEXT_MAJOR_VERSION_KHR 0x30FB
 #define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FD
 #define EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR 0x00000002
+#define EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR 0x00000004
+#define EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_KHR 0x31BD
+#define EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT 0x3138
+#define EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT 0x30BF
 
 EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share,
                             const EGLint *attribs)
@@ -736,9 +825,17 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share,
             case EGL_CONTEXT_MINOR_VERSION_KHR:
                 /* GLES doesn't use minor version -- skip */
                 break;
+            case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_KHR:
+            case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT:
+            case EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT:
+                /* Robustness extensions -- Android GLES drivers don't support these.
+                 * Firefox requests them for crash resilience but they're optional. */
+                break;
             case EGL_CONTEXT_FLAGS_KHR:
                 {
-                    EGLint flags = attribs[i+1] & ~EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR;
+                    EGLint flags = attribs[i+1]
+                        & ~EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR
+                        & ~EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR;
                     if (flags && j < 28) {
                         filtered[j++] = attribs[i];
                         filtered[j++] = flags;
@@ -1009,6 +1106,15 @@ static EGLBoolean tawc_eglSwapBuffersWithDamageEXT(EGLDisplay dpy, EGLSurface su
     return eglSwapBuffers(dpy, surface);
 }
 
+static EGLBoolean tawc_eglSetDamageRegionKHR(EGLDisplay dpy, EGLSurface surface,
+                                               EGLint *rects, EGLint n_rects)
+{
+    /* No-op: we don't track damage regions. Firefox calls this before
+     * eglSwapBuffersWithDamageKHR to mark which regions will be redrawn. */
+    (void)dpy; (void)surface; (void)rects; (void)n_rects;
+    return EGL_TRUE;
+}
+
 /* ------------------------------------------------------------------ */
 /* EGL API -- query/state functions with tawc surface awareness        */
 /* ------------------------------------------------------------------ */
@@ -1047,6 +1153,21 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
     default:
         return real_eglQueryString(stock_display, name);
     }
+}
+
+/* EGL_EXT_device_query stubs for Firefox glxtest compatibility.
+ * Android drivers don't implement this extension (it's for DRM/DRI devices).
+ * glxtest null-checks the function pointers but handles NULL return values. */
+static const char *tawc_eglQueryDeviceStringEXT(void *device, EGLint name)
+{
+    (void)device; (void)name;
+    return NULL;
+}
+
+static EGLBoolean tawc_eglQueryDisplayAttribEXT(EGLDisplay dpy, EGLint attribute, intptr_t *value)
+{
+    (void)dpy; (void)attribute; (void)value;
+    return EGL_FALSE;
 }
 
 void (*eglGetProcAddress(const char *procname))(void)
@@ -1090,11 +1211,22 @@ void (*eglGetProcAddress(const char *procname))(void)
     if (strcmp(procname, "eglCreatePlatformWindowSurfaceEXT") == 0)
         return (void(*)(void))eglCreatePlatformWindowSurface;
 
-    /* Damage extension (GTK3 prefers this over plain eglSwapBuffers) */
+    /* Damage extensions (GTK3/Firefox use these) */
     if (strcmp(procname, "eglSwapBuffersWithDamageEXT") == 0)
         return (void(*)(void))tawc_eglSwapBuffersWithDamageEXT;
     if (strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)
         return (void(*)(void))tawc_eglSwapBuffersWithDamageEXT;
+    if (strcmp(procname, "eglSetDamageRegionKHR") == 0)
+        return (void(*)(void))tawc_eglSetDamageRegionKHR;
+
+    /* EGL_EXT_device_query stubs -- Firefox's glxtest hard-requires these
+     * function pointers even though Android drivers don't implement the
+     * extension (it's DRM/DRI-centric). The actual return values are
+     * informational; callers handle NULL results gracefully. */
+    if (strcmp(procname, "eglQueryDeviceStringEXT") == 0)
+        return (void(*)(void))tawc_eglQueryDeviceStringEXT;
+    if (strcmp(procname, "eglQueryDisplayAttribEXT") == 0)
+        return (void(*)(void))tawc_eglQueryDisplayAttribEXT;
 
     /* Forward everything else to real driver */
     if (ensure_init() < 0)
