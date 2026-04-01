@@ -119,7 +119,7 @@ to disable TLS usage in bionic's locale functions. We solved this for stock firm
 ~12KB `bionic_tls` struct. The lindroid TLS thunk patcher redirects `TPIDR_EL0` reads
 to `tls_hooks[]`, but slot -1 maps to `tls_hooks[-1]` which is NULL → SIGSEGV.
 
-**Fix (in lindroid fork's `hooks.c`):**
+**Fix (in our libhybris fork's `hooks.c`):**
 1. Changed `tls_hooks[16]` to `struct { void *bionic_tls_ptr; void *slots[16]; } tls_area`
    so that `slots[-1]` reads `bionic_tls_ptr` (contiguous in memory).
 2. Lazy allocation: `_hybris_hook___get_tls_hooks()` calls `calloc(1, 16384)` on first
@@ -982,11 +982,11 @@ The `/apex` recursive bind creates ~80 submounts (one per APEX module).
 - **Android headers:** Halium `halium-11.0` branch from `Halium/android-headers`,
   version-bumped to 16 in `android-version.h` and `.pc` file, with GCC compatibility
   fixes (script: `client/fix-android-headers`). Installed to `/usr/local/include/android/`.
-- **libhybris (lindroid fork):** Built from `Linux-on-droid/libhybris` branch `lindroid-21`
-  with cherry-picked TLS thunk patcher (commit `75be4aa` from `lindroid-drm` branch)
-  + our bionic_tls allocation patch (`client/libhybris-tawc.patch`) + libsync fix
-  for Android 16 (version guard relaxation). Installed to `/usr/local/lib/`.
-  Source at `/root/libhybris-lindroid/`, build script: `client/build-libhybris-lindroid`.
+- **libhybris (tawc fork):** Built from `wmww/libhybris` master. This fork is
+  based on `Linux-on-droid/libhybris` `lindroid-21` with: TLS thunk patcher
+  (cherry-picked from `lindroid-drm` branch, original author TheKit), and our
+  bionic_tls allocation fix for stock Android. Installed to `/usr/local/lib/`.
+  Source at `/root/libhybris/`, build script: `client/build-libhybris-lindroid`.
 
 ### libhybris TLS problem -- SOLVED (2026-03-31)
 
@@ -1036,9 +1036,29 @@ Both builds configured with:
 --prefix=/usr/local
 ```
 
-Source trees in chroot `/root/`: `libhybris-lindroid/` (lindroid fork, currently
-installed). Headers from `Halium/android-headers` branch `halium-11.0`,
-version-bumped to 16 with GCC compatibility fixes.
+Source trees in chroot `/root/`: `libhybris/` (tawc fork, currently installed).
+Headers from `Halium/android-headers` branch `halium-11.0`, version-bumped to 16
+with GCC compatibility fixes.
+
+### libhybris fork (wmww/libhybris)
+
+Our fork at `https://github.com/wmww/libhybris` (master branch) is based on
+`Linux-on-droid/libhybris` `lindroid-21` with two additional commits:
+
+1. **TLS thunk patcher** (`b6e3de9`): Cherry-picked from `lindroid-drm` branch
+   (original commit `75be4aa` by TheKit). Patches `MRS TPIDR_EL0` instructions
+   in loaded bionic libraries to redirect TLS access through libhybris-managed
+   slots. Enabled by `HYBRIS_PATCH_TLS=1`.
+
+2. **bionic_tls compat** (`9517311`): Our fix for stock (unpatched) Android.
+   Replaces flat `tls_hooks[16]` with a struct that has a `bionic_tls_ptr`
+   pre-slot satisfying bionic's slot -1 TLS access. Lazily allocates 16KB
+   zero-filled bionic_tls per thread. Wraps `pthread_create` to ensure
+   bionic_tls is initialized on new threads.
+
+The fork also includes lindroid-21's linker namespace bypass attempts
+(`android_dlopen_ext`, `android_get_exported_namespace`) which are investigatory
+for gralloc support.
 
 ### libsync fix for Android 16+ (2026-03-31)
 
@@ -1047,15 +1067,6 @@ version guard `#if (ANDROID_VERSION_MAJOR >= 10) && (ANDROID_VERSION_MAJOR < 12)
 excludes versions 12+, leaving `sync_get_fence_info` and `sync_file_info_free`
 undeclared. Fix: change to `#if (ANDROID_VERSION_MAJOR >= 10)`. This is handled
 automatically by the `build-libhybris-lindroid` script.
-
-### libhybris base commit (documented 2026-03-31)
-
-The tawc patch (`client/libhybris-tawc.patch`) applies to `Linux-on-droid/libhybris`
-branch `lindroid-21` AFTER cherry-picking commit `75be4aa` ("hybris: introduce
-thunk-based TLS access patcher for aarch64") from the `lindroid-drm` branch.
-The cherry-pick has a conflict in `hybris/common/Makefile.am` (needs both the
-`hooks/libhybris-hooks.la` LIBADD and the `tls_patcher.c` source file). The
-build script handles this automatically. See also `chroot-scripts/libhybris-base.md`.
 
 ---
 

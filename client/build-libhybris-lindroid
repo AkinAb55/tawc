@@ -1,7 +1,7 @@
 #!/system_ext/bin/bash
-# Build and install the lindroid fork of libhybris with tawc patches:
-#   - Cherry-picked TLS thunk patcher from lindroid-drm branch
-#   - bionic_tls allocation (stock Android TLS fix)
+# Build and install our fork of libhybris with stock Android support:
+#   - TLS thunk patcher (from lindroid-drm, for bionic TLS slot redirection)
+#   - bionic_tls allocation (our fix for stock Android firmware)
 #   - pthread_create thread wrapping (bionic_tls on new threads)
 #
 # Run from Termux or via adb. Requires the chroot to be set up.
@@ -11,15 +11,9 @@ set -euo pipefail
 
 CHROOT_DIR="/data/local/arch-chroot"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PATCH_FILE="$SCRIPT_DIR/libhybris-tawc.patch"
 
 if ! su -c "[ -d '$CHROOT_DIR/usr' ]"; then
     echo "Chroot not found. Run arch-chroot-create first."
-    exit 1
-fi
-
-if [ ! -f "$PATCH_FILE" ]; then
-    echo "Patch file not found: $PATCH_FILE"
     exit 1
 fi
 
@@ -28,14 +22,13 @@ if [ -x "$SCRIPT_DIR/arch-chroot-run" ]; then
     "$SCRIPT_DIR/arch-chroot-run" "true"
 fi
 
-# Copy patch and fix-headers into chroot
-su -c "cp '$PATCH_FILE' '$CHROOT_DIR/tmp/libhybris-tawc.patch'"
+# Copy fix-headers into chroot
 if [ -x "$SCRIPT_DIR/fix-android-headers" ]; then
     su -c "cp '$SCRIPT_DIR/fix-android-headers' '$CHROOT_DIR/tmp/fix-android-headers'"
     su -c "chmod +x '$CHROOT_DIR/tmp/fix-android-headers'"
 fi
 
-echo "==> Building lindroid libhybris inside chroot..."
+echo "==> Building libhybris inside chroot..."
 
 su -c "cat > '$CHROOT_DIR/tmp/build-lindroid.sh' << 'BUILDEOF'
 #!/bin/bash
@@ -68,74 +61,22 @@ if [ -x /tmp/fix-android-headers ]; then
     /tmp/fix-android-headers
 fi
 
-# Step 4: Clone if needed
+# Step 4: Clone our libhybris fork
 cd /root
-if [ ! -d libhybris-lindroid ]; then
-    echo '==> Cloning lindroid libhybris...'
-    git clone https://github.com/Linux-on-droid/libhybris.git libhybris-lindroid
+if [ ! -d libhybris ]; then
+    echo '==> Cloning libhybris fork...'
+    git clone https://github.com/wmww/libhybris.git
 fi
-
-# Step 5: Cherry-pick TLS thunk patcher from lindroid-drm and apply tawc patch
-cd /root/libhybris-lindroid
-
-# Reset to clean lindroid-21 state
-git checkout lindroid-21 2>/dev/null || true
-git checkout -- . 2>/dev/null || true
-
-# Check if TLS patcher is already present (from cherry-pick)
-if ! git log --oneline | head -5 | grep -q 'thunk-based TLS'; then
-    echo '==> Cherry-picking TLS thunk patcher from lindroid-drm...'
-    # The TLS thunk patcher commit from lindroid-drm branch
-    TLS_COMMIT=$(git log --oneline remotes/origin/lindroid-drm | grep 'thunk-based TLS' | head -1 | awk '{print $1}')
-    if [ -z "$TLS_COMMIT" ]; then
-        echo "ERROR: Could not find TLS thunk patcher commit on lindroid-drm"
-        exit 1
-    fi
-    echo "  Cherry-picking $TLS_COMMIT..."
-    if ! git cherry-pick "$TLS_COMMIT" 2>/dev/null; then
-        echo '  Resolving Makefile.am conflict...'
-        # The conflict is between LIBADD line (lindroid-21) and tls_patcher source (lindroid-drm)
-        # We need both
-        FILE=hybris/common/Makefile.am
-        awk '
-        /^<<<<<<< HEAD/ { skip=1; next }
-        /^=======$/     { if(skip) { skip=2; next } }
-        /^>>>>>>> /     {
-            if(skip) {
-                print "if WANT_ARCH_ARM64"
-                print "libhybris_common_la_SOURCES += \\"
-                print "\ttls_patcher.c"
-                print "endif"
-                print ""
-                print "libhybris_common_la_LIBADD = \\"
-                print "\thooks/libhybris-hooks.la"
-                skip=0
-                next
-            }
-        }
-        { if(!skip) print }
-        ' "$FILE" > "${FILE}.tmp"
-        mv "${FILE}.tmp" "$FILE"
-        git add "$FILE"
-        GIT_COMMITTER_NAME=tawc GIT_COMMITTER_EMAIL=tawc@local \
-        GIT_AUTHOR_NAME=tawc GIT_AUTHOR_EMAIL=tawc@local \
-        git cherry-pick --continue --no-edit
-    fi
-fi
-
-echo '==> Applying tawc patch...'
-git checkout -- . 2>/dev/null || true
-git apply /tmp/libhybris-tawc.patch
-echo '==> Patch applied'
+cd /root/libhybris
 
 echo "==> Android headers version: $(pkg-config --modversion android-headers)"
 
-# Step 6: Fix libsync for Android 16+ (version guard too restrictive)
+# Step 5: Fix libsync for Android 16+ (version guard too restrictive)
 echo '==> Fixing libsync version guard...'
 sed -i 's/#if (ANDROID_VERSION_MAJOR >= 10) && (ANDROID_VERSION_MAJOR < 12)/#if (ANDROID_VERSION_MAJOR >= 10)/' hybris/libsync/sync.c
 
-# Step 7: Build
-cd /root/libhybris-lindroid/hybris
+# Step 6: Build
+cd /root/libhybris/hybris
 
 echo '==> Running autogen.sh...'
 ./autogen.sh 2>&1 | tail -5
