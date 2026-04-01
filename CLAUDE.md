@@ -24,3 +24,23 @@ I'm letting you play with my phone, try not to fuck it up.
 
 ## Organization
 Avoid junking up devices (eg delete screenshots you take when you're done with them). On the phone things should generally stay in `/data/local/arch-chroot/`, `/data/local/claude-debug` (**NOT** `/data/local/tmp`)
+
+## How-to
+More details on each of these can be found in notes.md.
+
+- **Build the APK:** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug` (JDK 26 is broken with our Kotlin plugin version; must use 21)
+- **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.MainActivity`
+- **Set up the chroot:** Push and run the script: `adb push client/arch-chroot-run /data/local/tmp/ && adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run"` (interactive shell). The script handles all bind mounts and profile setup. SELinux must be permissive: `adb shell su -c setenforce 0`
+- **Run a Wayland app in the chroot:** `adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '<command>'"` — generic tawc Wayland env vars are set automatically by the login profile.
+- **Launch Firefox (GPU rendering):**
+  ```
+  adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+    'GDK_GL=disabled MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
+     MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
+     MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
+     DISPLAY= firefox --no-remote'"
+  ```
+- **Take a screenshot:** `adb shell su -c "screencap -p /sdcard/screenshot.png" && adb pull /sdcard/screenshot.png /tmp/screenshot.png` — analyze with a sub-agent (per Workflow rules), then clean up: `adb shell rm /sdcard/screenshot.png && rm /tmp/screenshot.png`
+- **Check compositor logs:** `adb logcat -s tawc-native` (Rust compositor) or `adb logcat -s tawc` (Kotlin app). Filter out frame spam with `grep -v renderer_gles2_frame`.
+- **Kill Firefox:** `adb shell su -c "killall firefox"`
+- **Restart compositor:** `adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.MainActivity`

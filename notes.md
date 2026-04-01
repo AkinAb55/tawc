@@ -3,6 +3,17 @@
 This file contains design, architecture and implementation notes, primarily written by
 and for LLM agents.
 
+## Building (2026-04-01)
+
+JDK 26 is incompatible with Kotlin Gradle plugin 2.1.20 (crashes parsing java version
+string "26.0.2"). Use JDK 21 when building:
+```bash
+cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
+```
+
+The Gradle build invokes `cargo ndk` for the Rust compositor automatically. SELinux must
+be permissive on the device (`adb shell su -c setenforce 0`).
+
 ## Compositor Architecture (2026-04-01)
 
 The compositor (`server/compositor/src/`) is split into:
@@ -144,30 +155,37 @@ Main content uses AHB at 972x1040; a small SHM subsurface exists for GTK decorat
 - Added `eglSetDamageRegionKHR` stub (Firefox calls it before
   `eglSwapBuffersWithDamageKHR`).
 
-**Firefox launch:**
+**Launching Wayland apps from adb:**
+
+Generic tawc Wayland env vars (WAYLAND_DISPLAY, XDG_RUNTIME_DIR, LD_LIBRARY_PATH,
+LD_PRELOAD, HYBRIS_PATCH_TLS) and the wayland socket symlink are set automatically by
+`/etc/profile.d/01-tawc.sh`, which `arch-chroot-run` installs in the chroot. Any login
+shell (`bash -l`) gets these for free. This means `arch-chroot-run "some-wayland-app"`
+just works for apps that don't need extra env vars.
+
+To launch from adb, push `arch-chroot-run` and invoke it:
 ```bash
-export WAYLAND_DISPLAY=wayland-0
-export XDG_RUNTIME_DIR=/tmp
-export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
-export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
-export HYBRIS_PATCH_TLS=1
-export MOZ_ENABLE_WAYLAND=1
-export HOME=/root
-export GDK_GL=disabled
-export MOZ_ACCELERATED=1
-export MOZ_DISABLE_CONTENT_SANDBOX=1
-export MOZ_DISABLE_GMP_SANDBOX=1
-export MOZ_DISABLE_RDD_SANDBOX=1
-export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
-export DISPLAY=
-ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0
-firefox --no-remote
+adb push client/arch-chroot-run /data/local/tmp/
+adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '<command>'"
 ```
 
-Key differences from GTK3 launch: `GDK_GL=disabled` (not `gles:always`) prevents GTK
-from creating a competing EGL surface. `MOZ_ACCELERATED=1` forces hardware acceleration.
-All sandbox vars must be disabled (chroot lacks namespace support). The wayland flush
-shim (`libwayland-flush-shim.so`) is no longer needed.
+**Firefox GPU rendering launch:**
+```bash
+adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+  'GDK_GL=disabled MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
+   MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
+   MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
+   DISPLAY= firefox --no-remote'"
+```
+
+Firefox-specific env vars (not in the profile because they're app-specific):
+- `GDK_GL=disabled` — prevents GTK from creating a competing EGL surface
+- `MOZ_ENABLE_WAYLAND=1` — use Wayland backend (not X11)
+- `MOZ_ACCELERATED=1` — force hardware acceleration
+- `MOZ_DISABLE_*_SANDBOX=1` — chroot lacks namespace support for sandboxing
+- `DISPLAY=` — clear X11 display so Firefox doesn't try X11
+
+The wayland flush shim (`libwayland-flush-shim.so`) is no longer needed.
 
 **Known issues:**
 - `seat.add_keyboard()` crashes (Smithay xkbcommon needs keymap data files not present
@@ -203,8 +221,6 @@ Touch events flow: Android `onTouchEvent` → JNI `nativeOnTouchEvent` → `call
 - Keyboard input still not working (`seat.add_keyboard()` crashes on Android).
 - Focus is always the first alive toplevel (no multi-window focus management yet).
 
-**Build note:** JDK 26 is incompatible with Kotlin Gradle plugin 2.1.20. Use
-`JAVA_HOME=/usr/lib/jvm/java-21-openjdk` when building.
 
 ## GPU Driver Strategy (2026-03-28)
 

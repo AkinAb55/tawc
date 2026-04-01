@@ -87,6 +87,27 @@ PROFEOF
     chmod 644 '$CHROOT_DIR/etc/profile.d/00-path.sh'"
 fi
 
+# Set up tawc Wayland environment so login shells can run Wayland clients.
+# These are generic (not app-specific). App-specific vars (e.g. MOZ_ENABLE_WAYLAND)
+# should be set at launch time.
+#
+# LD_PRELOAD must be set here (not before chroot entry) because it's a glibc .so
+# that would break bionic tools. Inside the chroot with the correct PATH, only
+# glibc tools run so this is safe.
+#
+# The wayland socket symlink is also created here because /tmp is the
+# XDG_RUNTIME_DIR and clients look for $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY.
+su -c "cat > '$CHROOT_DIR/etc/profile.d/01-tawc.sh' << 'PROFEOF'
+# tawc Wayland compositor environment
+export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/tmp
+export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
+export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
+export HYBRIS_PATCH_TLS=1
+ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
+PROFEOF
+    chmod 644 '$CHROOT_DIR/etc/profile.d/01-tawc.sh'"
+
 if [ $# -gt 0 ]; then
     # Run a command
     su -c "chroot '$CHROOT_DIR' /bin/bash -lc '$*'"
