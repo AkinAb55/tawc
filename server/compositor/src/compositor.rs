@@ -135,6 +135,7 @@ impl TawcState {
         let mut seat = seat_state.new_wl_seat(&dh, "tawc");
         // Advertise pointer capability so clients (esp. Firefox) will create windows
         seat.add_pointer();
+        seat.add_touch();
 
         dh.create_global::<Self, TawcBufferManagerV1, ()>(1, ());
 

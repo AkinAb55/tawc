@@ -9,9 +9,11 @@ The compositor (`server/compositor/src/`) is split into:
 
 - **lib.rs** — JNI entry points + `run_compositor()` which sets up EGL, Wayland display,
   output, and listening socket, then hands off to the event loop.
-- **event_loop.rs** — Calloop-based event loop with three sources: Wayland display fd
-  (dispatch client messages), listener socket (accept connections), frame timer (~60fps
-  render loop). This is the standard smithay pattern.
+- **event_loop.rs** — Calloop-based event loop with four sources: Wayland display fd
+  (dispatch client messages), listener socket (accept connections), touch input channel
+  (Android touch → wl_touch), frame timer (~60fps render loop).
+- **input.rs** — Touch input delivery from Android JNI to the compositor via calloop
+  channel. Global `OnceLock<Sender>` allows JNI callbacks to send events cross-thread.
 - **compositor.rs** — `TawcState` (Wayland protocol state) and all smithay handler trait
   impls. Does NOT hold rendering state.
 - **render.rs** — `RenderState` (GPU/EGL state), buffer import (AHB + SHM → GL textures),
@@ -178,6 +180,31 @@ shim (`libwayland-flush-shim.so`) is no longer needed.
 true (not based on whether they have buffers). SHM state is cleaned up when the toplevel
 dies. This is important because SHM clients don't create buffer state until after the first
 configure event, so buffer-based retain logic would immediately remove new toplevels.
+
+## Touch Input (2026-04-01)
+
+Touch events flow: Android `onTouchEvent` → JNI `nativeOnTouchEvent` → `calloop::channel`
+→ Smithay `TouchHandle` → `wl_touch` protocol events to client.
+
+**Architecture:**
+- `MainActivity.kt` sets an `OnTouchListener` on the SurfaceView. It dispatches DOWN,
+  MOVE, UP, POINTER_DOWN, POINTER_UP, and CANCEL events per-pointer via JNI.
+- `input.rs` holds a global `OnceLock<channel::Sender<TouchEvent>>` so the JNI thread
+  can send events to the compositor thread without shared mutable state.
+- `event_loop.rs` has a calloop channel source that converts `TouchEvent` into Smithay
+  `DownEvent`/`MotionEvent`/`UpEvent` and calls `touch.down()`/`.motion()`/`.up()` +
+  `.frame()`. Events are flushed immediately to minimize latency.
+- Coordinates arrive in physical pixels from Android and are divided by the scale factor
+  (2) to get logical Wayland coordinates.
+- Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
+- The seat advertises both pointer and touch capabilities.
+
+**Known issues:**
+- Keyboard input still not working (`seat.add_keyboard()` crashes on Android).
+- Focus is always the first alive toplevel (no multi-window focus management yet).
+
+**Build note:** JDK 26 is incompatible with Kotlin Gradle plugin 2.1.20. Use
+`JAVA_HOME=/usr/lib/jvm/java-21-openjdk` when building.
 
 ## GPU Driver Strategy (2026-03-28)
 

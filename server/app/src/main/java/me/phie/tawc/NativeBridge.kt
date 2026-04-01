@@ -15,4 +15,7 @@ object NativeBridge {
 
     /** Notify the compositor that the surface is being destroyed. */
     external fun nativeOnSurfaceDestroyed()
+
+    /** Forward a touch event to the compositor. */
+    external fun nativeOnTouchEvent(action: Int, pointerId: Int, x: Float, y: Float, eventTime: Long)
 }

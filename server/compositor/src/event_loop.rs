@@ -10,12 +10,17 @@ use std::time::{Duration, Instant};
 
 use log::{error, info};
 
+use smithay::backend::input::TouchSlot;
+use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
+use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::rustix;
-use smithay::utils::Size;
+use smithay::utils::{Point, Size, SERIAL_COUNTER};
 use wayland_server::{Display, ListeningSocket};
+
+use crate::input::TouchEvent;
 
 use crate::compositor::{ClientState, TawcState};
 use crate::render::{self, RenderState};
@@ -38,6 +43,8 @@ pub fn run(
     render: RenderState,
     listener: ListeningSocket,
     output_size: Size<i32, smithay::utils::Physical>,
+    scale: i32,
+    touch_channel: Channel<TouchEvent>,
     running: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<LoopData> = EventLoop::try_new()?;
@@ -78,7 +85,79 @@ pub fn run(
         Ok(PostAction::Continue)
     })?;
 
-    // --- Source 3: Frame timer (~60 fps) ---
+    // --- Source 3: Touch input channel ---
+    // Receives touch events from the Android UI thread via JNI.
+    // Coordinates arrive in physical pixels; we convert to logical (/ touch_scale).
+    let touch_scale = scale as f64;
+    loop_handle.insert_source(touch_channel, move |event, _, data: &mut LoopData| {
+        let evt = match event {
+            ChannelEvent::Msg(e) => e,
+            ChannelEvent::Closed => return,
+        };
+
+        let touch = match data.state.seat.get_touch() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Find the first alive toplevel's surface as the focus target.
+        // All toplevels are maximized at (0,0), so surface-local coords = global coords.
+        let focus = data.state.toplevels.iter()
+            .find(|t| t.alive())
+            .map(|t| (t.wl_surface().clone(), Point::from((0.0, 0.0))));
+
+        let serial = SERIAL_COUNTER.next_serial();
+
+        match evt {
+            TouchEvent::Down { id, x, y, time } => {
+                let location: Point<f64, smithay::utils::Logical> =
+                    (x as f64 / touch_scale, y as f64 / touch_scale).into();
+                touch.down(
+                    &mut data.state,
+                    focus,
+                    &DownEvent {
+                        slot: TouchSlot::from(Some(id as u32)),
+                        location,
+                        serial,
+                        time,
+                    },
+                );
+                touch.frame(&mut data.state);
+            }
+            TouchEvent::Motion { id, x, y, time } => {
+                let location: Point<f64, smithay::utils::Logical> =
+                    (x as f64 / touch_scale, y as f64 / touch_scale).into();
+                touch.motion(
+                    &mut data.state,
+                    focus,
+                    &MotionEvent {
+                        slot: TouchSlot::from(Some(id as u32)),
+                        location,
+                        time,
+                    },
+                );
+                touch.frame(&mut data.state);
+            }
+            TouchEvent::Up { id, time } => {
+                touch.up(
+                    &mut data.state,
+                    &UpEvent {
+                        slot: TouchSlot::from(Some(id as u32)),
+                        serial,
+                        time,
+                    },
+                );
+                touch.frame(&mut data.state);
+            }
+        }
+
+        // Flush immediately so clients see events without waiting for frame timer
+        if let Err(e) = data.display.flush_clients() {
+            error!("flush_clients error after touch: {}", e);
+        }
+    })?;
+
+    // --- Source 4: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
     //   1. Dispatch pending client messages (see note below)
     //   2. Import new buffers (AHB and SHM) as GL textures

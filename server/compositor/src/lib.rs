@@ -20,6 +20,7 @@ mod protocol;
 mod compositor;
 mod render;
 mod event_loop;
+mod input;
 
 use egl_android::AndroidNativeSurface;
 use gl_import::AhbTextureImporter;
@@ -99,6 +100,33 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnSurfaceDestroyed(
     RUNNING.store(false, Ordering::SeqCst);
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnTouchEvent(
+    _env: JNIEnv,
+    _class: JClass,
+    action: i32,
+    pointer_id: i32,
+    x: f32,
+    y: f32,
+    event_time: i64,
+) {
+    // Android MotionEvent actions
+    const ACTION_DOWN: i32 = 0;
+    const ACTION_UP: i32 = 1;
+    const ACTION_MOVE: i32 = 2;
+    const ACTION_POINTER_DOWN: i32 = 5;
+    const ACTION_POINTER_UP: i32 = 6;
+
+    let time = event_time as u32;
+    let event = match action {
+        ACTION_DOWN | ACTION_POINTER_DOWN => input::TouchEvent::Down { id: pointer_id, x, y, time },
+        ACTION_MOVE => input::TouchEvent::Motion { id: pointer_id, x, y, time },
+        ACTION_UP | ACTION_POINTER_UP => input::TouchEvent::Up { id: pointer_id, time },
+        _ => return,
+    };
+    input::send_touch_event(event);
+}
+
 /// Set up EGL, Wayland display, and output, then hand off to the calloop event loop.
 fn run_compositor(
     window_ptr: *mut c_void,
@@ -174,6 +202,9 @@ fn run_compositor(
 
     let output_size = Size::from((width, height));
 
+    // --- Touch input channel ---
+    let touch_channel = input::create_touch_channel();
+
     // --- Run ---
-    event_loop::run(wl_display, state, render_state, listener, output_size, &RUNNING)
+    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, &RUNNING)
 }
