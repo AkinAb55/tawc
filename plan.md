@@ -57,6 +57,13 @@ See [notes/text-input.md](notes/text-input.md) for design.
 33. Edge cases: focus changes during composition, multiple instances
 34. Test with Firefox, foot, GTK apps
 
+## Testing Infrastructure ✅
+- ✅ GTK3 debug app (`testing/gtk3-debug-app/`) -- C, built in chroot
+- ✅ Integration test harness (`testing/integration/`) -- Rust, runs on host
+- ✅ Broadcast-based input injection (reliable, bypasses IME)
+- ✅ Text input tests (basic text, backspace, multi-word)
+See [notes/testing.md](notes/testing.md) for details.
+
 ## Phase 7: wl_keyboard (non-text keys)
 Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalent).
 

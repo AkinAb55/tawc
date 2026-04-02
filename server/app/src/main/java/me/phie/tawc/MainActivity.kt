@@ -1,8 +1,12 @@
 package me.phie.tawc
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
+import android.util.Log
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -13,6 +17,35 @@ import android.view.inputmethod.InputConnection
 
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
+
+    /**
+     * BroadcastReceiver for injecting text input from tests.
+     * Usage: adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"
+     * Usage: adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67
+     *
+     * Events go through TawcInputConnection (via InputMethodManager) so they
+     * exercise the same code path as real Gboard input, including the
+     * BaseInputConnection Editable updates and all TawcInputConnection logic.
+     */
+    private val testInputReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val ic = surfaceView.onCreateInputConnection(EditorInfo()) ?: return
+            when (intent.action) {
+                "me.phie.tawc.TEXT_INPUT" -> {
+                    val text = intent.getStringExtra("text") ?: return
+                    Log.d("tawc", "TestInput: commitText \"$text\"")
+                    ic.commitText(text, 1)
+                }
+                "me.phie.tawc.KEY_EVENT" -> {
+                    val keycode = intent.getIntExtra("keycode", -1)
+                    if (keycode >= 0) {
+                        Log.d("tawc", "TestInput: sendKeyEvent $keycode")
+                        ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keycode))
+                    }
+                }
+            }
+        }
+    }
 
     @Suppress("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,6 +68,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.isFocusableInTouchMode = true
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
         NativeBridge.inputView = surfaceView
+
+        // Register test input receiver
+        val filter = IntentFilter().apply {
+            addAction("me.phie.tawc.TEXT_INPUT")
+            addAction("me.phie.tawc.KEY_EVENT")
+        }
+        @Suppress("UnspecifiedRegisterReceiverFlag")
+        registerReceiver(testInputReceiver, filter, RECEIVER_EXPORTED)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(testInputReceiver)
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {

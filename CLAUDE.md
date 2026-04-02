@@ -60,3 +60,8 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Restart compositor:** `adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.MainActivity`
 - **Simulate touch:** `adb shell input tap X Y` (screen pixel coords, 1:1 with SurfaceView due to immersive fullscreen)
 - **Touch debug loop:** Screenshot -> identify coords -> tap -> screenshot -> verify. Compositor uses 2x scale (logical = physical/2). Nearby UI elements are easy to confuse.
+- **Integration tests:** `cd testing/integration && cargo test -- --nocapture --test-threads=1`
+- **Build debug app:** `bash testing/build-debug-app.sh`
+- **Run debug app:** `adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk3-debug-app/gtk3-debug-app text-input'"` (must build first)
+- **Inject text (for testing):** `adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"`
+- **Inject keyevent (for testing):** `adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67`

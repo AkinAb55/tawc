@@ -56,3 +56,15 @@ Client-side WSI layer:
 - Cross-compiled for `aarch64-linux-gnu` (glibc, for chroot)
 - Links against libhybris
 - Installed in chroot's library path
+
+## Debug App & Integration Tests
+
+See [testing.md](testing.md) for full details.
+
+```bash
+# Build debug app on phone:
+bash testing/build-debug-app.sh
+
+# Run integration tests (from host):
+cd testing/integration && cargo test -- --nocapture --test-threads=1
+```

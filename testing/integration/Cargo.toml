@@ -1,0 +1,8 @@
+[package]
+name = "tawc-integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tawc_integration"
+path = "src/lib.rs"
