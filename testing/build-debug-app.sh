@@ -22,4 +22,4 @@ adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/bin/bash
 
 echo "=== Done ==="
 echo "Binary: /tmp/gtk3-debug-app/gtk3-debug-app (inside chroot)"
-echo "Run:    adb shell su -c \"/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk3-debug-app/gtk3-debug-app text-input'\""
+echo "Run:    adb shell su -c \"/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'\""

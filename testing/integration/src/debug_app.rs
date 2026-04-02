@@ -21,7 +21,7 @@ impl DebugApp {
     /// Start the debug app with the given subcommand.
     /// `binary_path` is the path inside the chroot (e.g. "/tmp/gtk3-debug-app/gtk3-debug-app").
     pub fn start(binary_path: &str, subcommand: &str) -> io::Result<Self> {
-        let cmd = format!("{} {}", binary_path, subcommand);
+        let cmd = format!("GDK_GL=gles:always {} {}", binary_path, subcommand);
         let mut child = adb::chroot_spawn(&cmd)?;
 
         let stdout = child.stdout.take().expect("stdout was piped");
