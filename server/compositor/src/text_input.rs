@@ -31,8 +31,11 @@ use crate::compositor::TawcState;
 
 /// Text input event from Android IME, expressed in text-input-v3 concepts.
 /// The mapping from Android keycodes happens at the JNI boundary in lib.rs.
+/// Evdev keycode for Enter/Return.
+pub const EVDEV_KEY_ENTER: u32 = 28;
+
 pub enum TextInputEvent {
-    /// Insert finalized text (from commitText or enter/tab key).
+    /// Insert finalized text (from commitText or tab key).
     CommitString { text: String },
     /// Set preedit/composing text (from setComposingText).
     SetPreeditString { text: String },
@@ -40,6 +43,9 @@ pub enum TextInputEvent {
     ClearPreedit,
     /// Delete surrounding text (from deleteSurroundingText or backspace/forward-delete).
     DeleteSurroundingText { before: u32, after: u32 },
+    /// Send an actual wl_keyboard key event (evdev keycode).
+    /// Used for Enter and other keys that need to be real key events, not text commits.
+    KeyPress { keycode: u32 },
 }
 
 /// Global sender for text input events from JNI. Replaced on compositor restart.
@@ -242,6 +248,7 @@ impl TextInputState {
                 TextInputEvent::DeleteSurroundingText { before, after } => {
                     ti.delete_surrounding_text(*before, *after);
                 }
+                TextInputEvent::KeyPress { .. } => unreachable!("handled in event_loop.rs"),
             }
             ti.done(serial);
         }

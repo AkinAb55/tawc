@@ -165,7 +165,12 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeCommitText(
     text: jni::objects::JString,
 ) {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
-    text_input::send_text_input_event(text_input::TextInputEvent::CommitString { text });
+    // Gboard sends Enter as commitText("\n") — route as a real key event
+    if text == "\n" {
+        text_input::send_text_input_event(text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER }); // KEY_ENTER
+    } else {
+        text_input::send_text_input_event(text_input::TextInputEvent::CommitString { text });
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -214,7 +219,7 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeSendKeyEvent(
     let event = match keycode {
         KEYCODE_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 1, after: 0 },
         KEYCODE_FORWARD_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 0, after: 1 },
-        KEYCODE_ENTER => text_input::TextInputEvent::CommitString { text: "\n".to_string() },
+        KEYCODE_ENTER => text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER }, // KEY_ENTER
         KEYCODE_TAB => text_input::TextInputEvent::CommitString { text: "\t".to_string() },
         _ => {
             info!("Unhandled key event: keycode={}", keycode);

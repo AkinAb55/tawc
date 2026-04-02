@@ -42,6 +42,13 @@ class TawcInputConnection(view: View) : BaseInputConnection(view, true) {
         return true
     }
 
+    override fun performEditorAction(actionCode: Int): Boolean {
+        Log.d(TAG, "InputConnection.performEditorAction: actionCode=$actionCode")
+        // IME action button (Go, Done, Search, etc.) — treat as Enter
+        NativeBridge.nativeSendKeyEvent(KeyEvent.KEYCODE_ENTER)
+        return true
+    }
+
     override fun sendKeyEvent(event: KeyEvent): Boolean {
         // Only handle key-down events to avoid double-processing
         if (event.action != KeyEvent.ACTION_DOWN) return true

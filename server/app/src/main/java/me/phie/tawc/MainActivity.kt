@@ -58,7 +58,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
-            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
             return TawcInputConnection(this)
         }
     }

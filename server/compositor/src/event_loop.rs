@@ -12,6 +12,8 @@ use log::{error, info};
 
 use smithay::backend::input::TouchSlot;
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
+use smithay::backend::input::KeyState;
+use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -171,7 +173,28 @@ pub fn run(
             ChannelEvent::Closed => return,
         };
 
-        data.state.text_input_state.handle_android_event(evt);
+        match evt {
+            TextInputEvent::KeyPress { keycode } => {
+                // Send as a real wl_keyboard key event (press + release)
+                if let Some(keyboard) = data.state.seat.get_keyboard() {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    let time = data.start_time.elapsed().as_millis() as u32;
+                    let keycode = Keycode::from(keycode + 8); // evdev → XKB offset
+                    keyboard.input::<(), _>(
+                        &mut data.state, keycode, KeyState::Pressed, serial, time,
+                        |_, _, _| FilterResult::Forward,
+                    );
+                    let serial = SERIAL_COUNTER.next_serial();
+                    keyboard.input::<(), _>(
+                        &mut data.state, keycode, KeyState::Released, serial, time + 1,
+                        |_, _, _| FilterResult::Forward,
+                    );
+                }
+            }
+            _ => {
+                data.state.text_input_state.handle_android_event(evt);
+            }
+        }
 
         // Flush so clients see text input events immediately
         if let Err(e) = data.display.flush_clients() {

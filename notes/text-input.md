@@ -32,9 +32,9 @@ xkbcommon needs XKB data files to initialize. On Android, set `XKB_CONFIG_ROOT` 
 
 The gap without full key event support is non-text keys: arrow keys, escape, Ctrl+C/V/Z, and other keyboard shortcuts have no text-input-v3 equivalent. This is a real limitation but orthogonal to text input and can be added later.
 
-For special keys that Android IMEs do send (backspace, enter), we can handle them through text-input-v3:
-- **Backspace**: `delete_surrounding_text(1, 0)` + `done`
-- **Enter**: `commit_string("\n")` + `done` (or `commit_string("\r\n")` depending on content type)
+For special keys that Android IMEs do send (backspace, enter):
+- **Backspace**: `delete_surrounding_text(1, 0)` + `done` (text-input-v3)
+- **Enter**: Sent as `wl_keyboard` key event (not text-input-v3). `commit_string("\n")` doesn't work for single-line fields like URL bars — Firefox ignores the newline character. A real key event is required.
 
 ### Not needed
 
@@ -82,13 +82,15 @@ Gboard sends regular characters via `commitText`, and special keys (backspace, e
 
 When the IME sends key events (e.g. backspace, enter), map them to text-input-v3 operations:
 
-| Android KeyEvent | text-input-v3 action |
+| Android KeyEvent | Action |
 |---|---|
-| KEYCODE_DEL (backspace) | `delete_surrounding_text(1, 0)` + `done` |
-| KEYCODE_FORWARD_DEL | `delete_surrounding_text(0, 1)` + `done` |
-| KEYCODE_ENTER | `commit_string("\n")` + `done` |
+| KEYCODE_DEL (backspace) | `delete_surrounding_text(1, 0)` + `done` (text-input-v3) |
+| KEYCODE_FORWARD_DEL | `delete_surrounding_text(0, 1)` + `done` (text-input-v3) |
+| KEYCODE_ENTER | `wl_keyboard` key event (evdev KEY_ENTER=28). Must be a real key event, not `commit_string("\n")`, because single-line fields (URL bars) ignore newline text but process Enter key presses. Also intercepted from `commitText("\n")` which Gboard sends when pressing Go. |
 | KEYCODE_DPAD_LEFT/RIGHT/UP/DOWN | (No text-input-v3 equivalent — deferred to wl_keyboard) |
-| KEYCODE_TAB | `commit_string("\t")` + `done` |
+| KEYCODE_TAB | `commit_string("\t")` + `done` (text-input-v3) |
+
+**Important:** Gboard sends Enter/Go via two paths: `sendKeyEvent(KEYCODE_ENTER)` and `commitText("\n")`. Both are intercepted and routed as `wl_keyboard` key events. The `performEditorAction()` callback is also overridden as a safety net (maps to KEYCODE_ENTER). Smithay's `Keycode` uses XKB numbering (evdev + 8), and `keyboard.key()` subtracts 8 on the wire.
 
 ### Showing/hiding the keyboard
 
