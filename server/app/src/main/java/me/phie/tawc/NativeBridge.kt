@@ -76,4 +76,19 @@ object NativeBridge {
             imm?.hideSoftInputFromWindow(view.windowToken, 0)
         }
     }
+
+    /**
+     * Called from native when a Wayland client reports cursor/selection changes
+     * caused by non-IME actions (user touch, arrow keys, etc.).
+     * Notifies Gboard so it can reset its composing state and text model.
+     */
+    @JvmStatic
+    fun onUpdateSelection(selStart: Int, selEnd: Int, composingStart: Int, composingEnd: Int) {
+        Log.d(TAG, "onUpdateSelection (from compositor): sel=$selStart..$selEnd composing=$composingStart..$composingEnd")
+        mainHandler.post {
+            val view = inputView ?: return@post
+            val imm = view.context.getSystemService(InputMethodManager::class.java)
+            imm?.updateSelection(view, selStart, selEnd, composingStart, composingEnd)
+        }
+    }
 }

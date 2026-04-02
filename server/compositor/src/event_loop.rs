@@ -242,12 +242,7 @@ pub fn run(
         let time = data.start_time.elapsed().as_millis() as u32;
         render::send_frame_callbacks(&data.state, time);
 
-        // 5. Flush
-        if let Err(e) = data.display.flush_clients() {
-            error!("flush_clients error: {}", e);
-        }
-
-        // 6. Cleanup
+        // 5. Cleanup
         data.state.toplevels.retain(|t| {
             if t.alive() {
                 true
@@ -264,6 +259,11 @@ pub fn run(
             .find(|t| t.alive())
             .map(|t| t.wl_surface().clone());
         data.state.text_input_state.update_focus(new_focus.as_ref());
+
+        // 6. Flush (after focus updates so enter/leave events are sent immediately)
+        if let Err(e) = data.display.flush_clients() {
+            error!("flush_clients error: {}", e);
+        }
 
         data.frame_count += 1;
         if data.frame_count % 300 == 0 {

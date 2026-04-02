@@ -188,7 +188,7 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeFinishComposingText(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    text_input::send_text_input_event(text_input::TextInputEvent::ClearPreedit);
+    text_input::send_text_input_event(text_input::TextInputEvent::FinishComposingText);
 }
 
 #[unsafe(no_mangle)]
@@ -216,10 +216,13 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeSendKeyEvent(
     const KEYCODE_ENTER: i32 = 66;
     const KEYCODE_TAB: i32 = 61;
 
+    const EVDEV_KEY_BACKSPACE: u32 = 14;
+    const EVDEV_KEY_DELETE: u32 = 111;
+
     let event = match keycode {
-        KEYCODE_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 1, after: 0 },
-        KEYCODE_FORWARD_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 0, after: 1 },
-        KEYCODE_ENTER => text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER }, // KEY_ENTER
+        KEYCODE_DEL => text_input::TextInputEvent::KeyPress { keycode: EVDEV_KEY_BACKSPACE },
+        KEYCODE_FORWARD_DEL => text_input::TextInputEvent::KeyPress { keycode: EVDEV_KEY_DELETE },
+        KEYCODE_ENTER => text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER },
         KEYCODE_TAB => text_input::TextInputEvent::CommitString { text: "\t".to_string() },
         _ => {
             info!("Unhandled key event: keycode={}", keycode);
