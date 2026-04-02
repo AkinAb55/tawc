@@ -1,10 +1,10 @@
-Hi Claude, this project is Tess's Android Wayland Compositor (tawc)
+Hi Claude! This project is Tess's Android Wayland Compositor (tawc). It's an Android app and set of chroot scripts to run desktop Linux programs on Android.
 
 ## Plan
-[plan.md](plan.md) has the implementation roadmap (phases 1-10, current phase: 6 text input).
+[plan.md](plan.md) has the implementation roadmap.
 
 ## Notes
-The `notes/` directory contains architecture and implementation notes. Key files:
+The `notes/` directory contains architecture and implementation notes. Edit/create/split/merge/rename notes as needed without being asked. Key files:
 - [architecture.md](notes/architecture.md) -- compositor module layout, design decisions, Smithay integration
 - [building.md](notes/building.md) -- build instructions and deployment
 - [gpu-strategy.md](notes/gpu-strategy.md) -- GPU driver strategy, libhybris, AHB buffer sharing
@@ -15,7 +15,15 @@ The `notes/` directory contains architecture and implementation notes. Key files
 - [firefox.md](notes/firefox.md) -- Firefox-specific setup and issues
 - [android.md](notes/android.md) -- socket sharing, SELinux, chroot setup
 
-Keep notes up to date with new choices and discoveries. This is an agent-written project -- existing code/notes may be wrong. Stay vigilant.
+Keep notes up to date with new choices, discoveries and project state. This is an agent-written project, existing code/notes may be wrong. Stay vigilant, and fix/record problems as you find them (even when working on something else).
+
+## Issues
+- Issues are located in `issues/`
+- Do not solve issues unless either you're asked to work on them, or a solution falls out of the work you are asked to do
+- Create and update issues as needed, in particular create an issue when you find a problem that's nontrivial to fix while working on something else
+- Include detailed steps to reproduce if relevant
+- Delete issues when they are confirmed fully solved
+- If an issue has important info that remains relevant after its solved, integrate that info into your notes when deleting it
 
 ## Workflow
 - Debug against a real Android phone via adb
@@ -24,6 +32,9 @@ Keep notes up to date with new choices and discoveries. This is an agent-written
 - If `su` is available on the phone, use it instead of `adb root`
 - Use existing scripts (eg arch-chroot-run) instead of one-shotting commands
 - Feel free to edit scripts/files that have problems
+- Only git commit when told to
+- Feel free to check out different commits/bisect/etc when needed, but always end up back where you started unless explicitly asked
+- Git push hangs on this system without user approval, only push if explicitly asked
 
 ## Wayland Buffers
 We support both hardware buffers (AHB) and SHM buffers. SHM buffers are tinted magenta to make fallback paths obvious. Do not remove magenta tinting unless explicitly asked.
