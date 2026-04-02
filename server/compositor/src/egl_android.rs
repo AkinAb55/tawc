@@ -84,6 +84,8 @@ pub struct AndroidNativeSurface {
     window: *mut c_void,
 }
 
+// SAFETY: ANativeWindow is reference-counted with thread-safe refcount ops.
+// Created on JNI thread, moved to compositor thread (one owner at a time).
 unsafe impl Send for AndroidNativeSurface {}
 
 impl AndroidNativeSurface {

@@ -39,7 +39,10 @@ pub struct RenderState {
     pub raw_egl_context: *const std::ffi::c_void,
 }
 
-// raw EGL pointers are not Send but we only use them from one thread.
+// SAFETY: Contains raw EGL pointers (raw_egl_display, raw_egl_context) which are
+// !Send. RenderState is created on the compositor thread and only accessed from the
+// calloop event loop on that same thread. Calloop requires Send for LoopData even
+// though it never actually moves data across threads.
 unsafe impl Send for RenderState {}
 
 /// Compile the magenta tint shader used for SHM buffer rendering.

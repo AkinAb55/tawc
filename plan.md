@@ -34,24 +34,24 @@
 Bridges Android InputConnection (soft keyboard) to `zwp_text_input_v3`.
 See [notes/text-input.md](notes/text-input.md) for design.
 
-**6a. Custom text-input-v3 handler**
-21. Implement `zwp_text_input_manager_v3` / `zwp_text_input_v3` directly
+**6a. Custom text-input-v3 handler** ✅
+21. ✅ Implement `zwp_text_input_manager_v3` / `zwp_text_input_v3` directly
     (Smithay's built-in requires input-method Wayland client; ours is Android IME)
-22. Track instances per client, manage focus (enter/leave)
-23. Handle client requests: enable, disable, surrounding_text, content_type, commit
+22. ✅ Track instances per client, manage focus (enter/leave)
+23. ✅ Handle client requests: enable, disable, surrounding_text, content_type, commit
 
-**6b. Android InputConnection**
-24. `TawcInputConnection` extending `BaseInputConnection`
-25. commitText -> commit_string + done
-26. setComposingText -> preedit_string + done
-27. deleteSurroundingText / sendKeyEvent(backspace) -> delete_surrounding_text + done
-28. SurfaceView focusable, returns TawcInputConnection from onCreateInputConnection
+**6b. Android InputConnection** ✅
+24. ✅ `TawcInputConnection` extending `BaseInputConnection`
+25. ✅ commitText -> commit_string + done
+26. ✅ setComposingText -> preedit_string + done
+27. ✅ deleteSurroundingText / sendKeyEvent(backspace) -> delete_surrounding_text + done
+28. ✅ SurfaceView focusable, returns TawcInputConnection from onCreateInputConnection
 
-**6c. Keyboard show/hide**
-29. Reverse JNI channel (compositor -> Android)
-30. Client enable -> showSoftInput; disable -> hideSoftInputFromWindow
-31. Map set_content_type -> EditorInfo.inputType
-32. Feed set_surrounding_text back to InputConnection
+**6c. Keyboard show/hide** ✅
+29. ✅ Reverse JNI channel (compositor -> Android via cached JavaVM + GlobalRef)
+30. ✅ Client enable -> showSoftInput; disable -> hideSoftInputFromWindow
+31. Map set_content_type -> EditorInfo.inputType (deferred: basic type works)
+32. Feed set_surrounding_text back to InputConnection (deferred: basic input works without it)
 
 **6d. Polish**
 33. Edge cases: focus changes during composition, multiple instances

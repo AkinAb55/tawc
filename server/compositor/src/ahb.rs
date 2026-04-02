@@ -13,6 +13,8 @@ pub struct AhbBuffer {
     height: u32,
 }
 
+// SAFETY: AHardwareBuffer is a reference-counted Android kernel object with
+// thread-safe refcount operations. Created on JNI thread, moved to compositor thread.
 unsafe impl Send for AhbBuffer {}
 
 impl AhbBuffer {

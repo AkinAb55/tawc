@@ -21,6 +21,7 @@ use smithay::utils::{Point, Size, SERIAL_COUNTER};
 use wayland_server::{Display, ListeningSocket};
 
 use crate::input::TouchEvent;
+use crate::text_input::TextInputEvent;
 
 use crate::compositor::{ClientState, TawcState};
 use crate::render::{self, RenderState};
@@ -45,6 +46,7 @@ pub fn run(
     output_size: Size<i32, smithay::utils::Physical>,
     scale: i32,
     touch_channel: Channel<TouchEvent>,
+    text_input_channel: Channel<TextInputEvent>,
     running: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<LoopData> = EventLoop::try_new()?;
@@ -157,7 +159,23 @@ pub fn run(
         }
     })?;
 
-    // --- Source 4: Frame timer (~60 fps) ---
+    // --- Source 4: Text input channel ---
+    // Receives text input events from Android IME via JNI.
+    loop_handle.insert_source(text_input_channel, move |event, _, data: &mut LoopData| {
+        let evt = match event {
+            ChannelEvent::Msg(e) => e,
+            ChannelEvent::Closed => return,
+        };
+
+        data.state.text_input_state.handle_android_event(evt);
+
+        // Flush so clients see text input events immediately
+        if let Err(e) = data.display.flush_clients() {
+            error!("flush_clients error after text input: {}", e);
+        }
+    })?;
+
+    // --- Source 5: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
     //   1. Dispatch pending client messages (see note below)
     //   2. Import new buffers (AHB and SHM) as GL textures
@@ -212,6 +230,13 @@ pub fn run(
             }
         });
         data.state.popup_manager.cleanup();
+        data.state.text_input_state.cleanup();
+
+        // Update text input focus if toplevels changed (new/removed)
+        let new_focus = data.state.toplevels.iter()
+            .find(|t| t.alive())
+            .map(|t| t.wl_surface().clone());
+        data.state.text_input_state.update_focus(new_focus.as_ref());
 
         data.frame_count += 1;
         if data.frame_count % 300 == 0 {

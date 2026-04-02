@@ -54,6 +54,8 @@ use crate::protocol::tawc_buffer_v1::server::{
     tawc_ahb_channel_v1::{self, TawcAhbChannelV1},
     tawc_buffer_manager_v1::{self, TawcBufferManagerV1},
 };
+use crate::text_input::TextInputState;
+use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 
 // ---------------------------------------------------------------------------
 // Per-surface state
@@ -128,6 +130,9 @@ pub struct TawcState {
 
     /// Logical output size (physical pixels / scale), used to configure toplevels.
     pub output_logical_size: (i32, i32),
+
+    /// Text input protocol state.
+    pub text_input_state: TextInputState,
 }
 
 impl TawcState {
@@ -146,6 +151,7 @@ impl TawcState {
         seat.add_touch();
 
         dh.create_global::<Self, TawcBufferManagerV1, ()>(1, ());
+        dh.create_global::<Self, ZwpTextInputManagerV3, ()>(1, ());
 
         Self {
             display_handle: dh,
@@ -162,6 +168,7 @@ impl TawcState {
             popup_manager: PopupManager::default(),
             output_scale,
             output_logical_size,
+            text_input_state: TextInputState::new(),
         }
     }
 }

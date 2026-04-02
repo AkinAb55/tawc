@@ -1,10 +1,12 @@
 use std::ffi::c_void;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use jni::JNIEnv;
-use jni::objects::JClass;
+use jni::objects::{GlobalRef, JClass, JObject, JValue};
 use jni::sys::jobject;
+use jni::JavaVM;
 use log::info;
 
 use smithay::backend::egl::EGLContext;
@@ -21,6 +23,7 @@ mod compositor;
 mod render;
 mod event_loop;
 mod input;
+mod text_input;
 
 use egl_android::AndroidNativeSurface;
 use gl_import::AhbTextureImporter;
@@ -30,12 +33,18 @@ use render::RenderState;
 /// Global flag shared between JNI calls to signal shutdown.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Cached JavaVM for reverse JNI calls from the compositor thread.
+static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
+
+/// Cached global ref to NativeBridge class for reverse JNI callbacks.
+static NATIVE_BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
+
 /// Wayland socket path accessible from chroot.
 const WAYLAND_SOCKET_PATH: &str = "/data/data/me.phie.tawc/wayland-0";
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnSurfaceCreated(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     surface: jobject,
 ) {
@@ -46,6 +55,24 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnSurfaceCreated(
     );
 
     info!("nativeOnSurfaceCreated called");
+
+    // Cache JavaVM for reverse JNI calls from compositor thread
+    if JAVA_VM.get().is_none() {
+        match env.get_java_vm() {
+            Ok(vm) => { let _ = JAVA_VM.set(vm); }
+            Err(e) => log::error!("Failed to get JavaVM: {}", e),
+        }
+    }
+
+    // Cache NativeBridge class ref for static method callbacks
+    if NATIVE_BRIDGE_CLASS.get().is_none() {
+        if let Ok(class) = env.find_class("me/phie/tawc/NativeBridge") {
+            let obj = JObject::from(class);
+            if let Ok(global) = env.new_global_ref(&obj) {
+                let _ = NATIVE_BRIDGE_CLASS.set(global);
+            }
+        }
+    }
 
     let window_ptr = unsafe {
         let ptr = ndk_sys::ANativeWindow_fromSurface(env.get_raw(), surface);
@@ -127,6 +154,106 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnTouchEvent(
     input::send_touch_event(event);
 }
 
+// ---------------------------------------------------------------------------
+// JNI: Text input events from Android InputConnection
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeCommitText(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: jni::objects::JString,
+) {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    text_input::send_text_input_event(text_input::TextInputEvent::CommitString { text });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeSetComposingText(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: jni::objects::JString,
+) {
+    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+    text_input::send_text_input_event(text_input::TextInputEvent::SetPreeditString { text });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeFinishComposingText(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    text_input::send_text_input_event(text_input::TextInputEvent::ClearPreedit);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeDeleteSurroundingText(
+    _env: JNIEnv,
+    _class: JClass,
+    before: i32,
+    after: i32,
+) {
+    text_input::send_text_input_event(text_input::TextInputEvent::DeleteSurroundingText {
+        before: before as u32,
+        after: after as u32,
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeSendKeyEvent(
+    _env: JNIEnv,
+    _class: JClass,
+    keycode: i32,
+) {
+    // Map Android keycodes to text-input-v3 concepts at the JNI boundary.
+    const KEYCODE_DEL: i32 = 67;        // backspace
+    const KEYCODE_FORWARD_DEL: i32 = 112;
+    const KEYCODE_ENTER: i32 = 66;
+    const KEYCODE_TAB: i32 = 61;
+
+    let event = match keycode {
+        KEYCODE_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 1, after: 0 },
+        KEYCODE_FORWARD_DEL => text_input::TextInputEvent::DeleteSurroundingText { before: 0, after: 1 },
+        KEYCODE_ENTER => text_input::TextInputEvent::CommitString { text: "\n".to_string() },
+        KEYCODE_TAB => text_input::TextInputEvent::CommitString { text: "\t".to_string() },
+        _ => {
+            info!("Unhandled key event: keycode={}", keycode);
+            return;
+        }
+    };
+    text_input::send_text_input_event(event);
+}
+
+// ---------------------------------------------------------------------------
+// Reverse JNI: Compositor → Android
+// ---------------------------------------------------------------------------
+
+/// Call a static void method on NativeBridge from any thread.
+/// Attaches to the JVM if needed.
+pub fn call_native_bridge_void(method: &str, sig: &str, args: &[JValue]) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => { log::error!("JavaVM not cached"); return; }
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => { log::error!("NativeBridge class not cached"); return; }
+    };
+
+    // AttachCurrentThread is idempotent — safe to call if already attached
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { log::error!("Failed to attach JNI thread: {}", e); return; }
+    };
+
+    // GlobalRef::as_obj() returns &JObject<'static>; we need a JClass.
+    // The underlying jobject is a jclass, so this reinterpret is safe.
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(class, method, sig, args) {
+        log::error!("Reverse JNI call {}({}) failed: {}", method, sig, e);
+    }
+}
+
 /// Set up EGL, Wayland display, and output, then hand off to the calloop event loop.
 fn run_compositor(
     window_ptr: *mut c_void,
@@ -205,6 +332,9 @@ fn run_compositor(
     // --- Touch input channel ---
     let touch_channel = input::create_touch_channel();
 
+    // --- Text input channel ---
+    let text_input_channel = text_input::create_text_input_channel();
+
     // --- Run ---
-    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, &RUNNING)
+    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, &RUNNING)
 }

@@ -1,12 +1,15 @@
 package me.phie.tawc
 
 import android.app.Activity
+import android.content.Context
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
@@ -25,10 +28,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
 
-        surfaceView = SurfaceView(this)
+        surfaceView = TawcSurfaceView(this)
         setContentView(surfaceView)
         surfaceView.holder.addCallback(this)
+        surfaceView.isFocusable = true
+        surfaceView.isFocusableInTouchMode = true
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
+        NativeBridge.inputView = surfaceView
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -41,6 +47,20 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         NativeBridge.nativeOnSurfaceDestroyed()
+    }
+
+    /**
+     * Custom SurfaceView that provides our InputConnection to the IME.
+     * This makes the view act as a text input target for Gboard.
+     */
+    private class TawcSurfaceView(context: Context) : SurfaceView(context) {
+        override fun onCheckIsTextEditor(): Boolean = true
+
+        override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+            return TawcInputConnection(this)
+        }
     }
 
     private fun dispatchTouchToCompositor(event: MotionEvent): Boolean {
