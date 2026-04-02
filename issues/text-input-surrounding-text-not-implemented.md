@@ -1,0 +1,3 @@
+- `InputConnection.getTextBeforeCursor()` is called by the IME on its own thread but not implemented
+- Gboard works without it, but other IMEs may need it for accurate predictions/autocomplete
+- See notes/text-input.md "Open Questions"

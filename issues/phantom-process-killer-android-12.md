@@ -1,0 +1,3 @@
+- Android 12+ Phantom Process Killer can terminate chroot processes unexpectedly
+- Users need to toggle a Developer Options setting to prevent this
+- See notes/architecture.md "Known Risks and Constraints"

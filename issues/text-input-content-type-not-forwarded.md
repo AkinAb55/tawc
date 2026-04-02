@@ -1,0 +1,4 @@
+- `set_content_type` from Wayland clients is received but not forwarded to Android's `EditorInfo.inputType`
+- Android can't show context-specific keyboard layouts (email, URL, password, number, etc.)
+- All fields get the default keyboard regardless of what the app requests
+- See notes/text-input.md "Open Questions"

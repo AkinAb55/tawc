@@ -1,0 +1,4 @@
+- Focus is always assigned to the first alive toplevel
+- No multi-window focus management via touch
+- Can't switch between multiple open applications by tapping
+- See notes/input.md "Known issues"

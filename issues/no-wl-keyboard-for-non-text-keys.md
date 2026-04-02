@@ -1,0 +1,4 @@
+- Arrow keys, Escape, Tab, Ctrl+C/V/Z, and other non-text keys have no text-input-v3 equivalent
+- Requires wl_keyboard implementation
+- Blocker: need to solve xkbcommon on Android (XKB_CONFIG_ROOT paths or keymap embedding)
+- See notes/text-input.md "What about wl_keyboard?" and plan.md Phase 7
