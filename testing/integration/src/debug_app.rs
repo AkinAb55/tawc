@@ -114,6 +114,55 @@ impl DebugApp {
             .rev()
             .find_map(|l| l.strip_prefix("TEXT_CHANGED:").map(|s| s.to_string()))
     }
+
+    /// Get the most recent cursor position (character offset).
+    pub fn last_cursor_pos(&self) -> Option<u32> {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_prefix("CURSOR_POS:").and_then(|s| s.parse().ok()))
+    }
+
+    /// Get the text content as it was at the time of the most recent CURSOR_POS event.
+    /// Useful for detecting if a click changed text content (it shouldn't).
+    pub fn text_at_last_cursor_event(&self) -> (Option<String>, Option<u32>) {
+        let lines = self.lines.lock().unwrap();
+        let mut last_text = None;
+        let mut last_cursor = None;
+        for line in lines.iter() {
+            if let Some(t) = line.strip_prefix("TEXT_CHANGED:") {
+                last_text = Some(t.to_string());
+            }
+            if let Some(c) = line.strip_prefix("CURSOR_POS:") {
+                if let Ok(pos) = c.parse::<u32>() {
+                    last_cursor = Some(pos);
+                }
+            }
+        }
+        (last_text, last_cursor)
+    }
+
+    /// Count how many TEXT_CHANGED events have been received so far.
+    pub fn text_changed_count(&self) -> usize {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("TEXT_CHANGED:"))
+            .count()
+    }
+
+    /// Count how many CURSOR_POS events have been received so far.
+    pub fn cursor_pos_count(&self) -> usize {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("CURSOR_POS:"))
+            .count()
+    }
 }
 
 impl Drop for DebugApp {

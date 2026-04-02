@@ -55,6 +55,12 @@ pub fn input_keyevent(keycode: u32) -> io::Result<Output> {
     ))
 }
 
+/// Send a tap at physical screen coordinates (x, y).
+/// The compositor divides by touch_scale (2) to get logical coordinates.
+pub fn input_tap(x: u32, y: u32) -> io::Result<Output> {
+    shell(&format!("input tap {} {}", x, y))
+}
+
 // Common Android keycodes (used with input_keyevent)
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_ENTER: u32 = 66;

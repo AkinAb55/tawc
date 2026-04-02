@@ -48,6 +48,18 @@ static void on_preedit_changed(GtkTextView *tv, const char *preedit, gpointer us
     debug_emit("PREEDIT", preedit);
 }
 
+static void on_mark_set(GtkTextBuffer *buffer, GtkTextIter *location,
+                        GtkTextMark *mark, gpointer user_data)
+{
+    (void)user_data;
+    if (mark != gtk_text_buffer_get_insert(buffer))
+        return;
+    int offset = gtk_text_iter_get_offset(location);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", offset);
+    debug_emit("CURSOR_POS", buf);
+}
+
 static gboolean emit_ready(gpointer user_data)
 {
     (void)user_data;
@@ -97,6 +109,7 @@ static int cmd_text_input(int argc, char *argv[])
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(text_view));
     g_signal_connect(buffer, "changed", G_CALLBACK(on_text_buffer_changed), NULL);
     g_signal_connect(text_view, "preedit-changed", G_CALLBACK(on_preedit_changed), NULL);
+    g_signal_connect(buffer, "mark-set", G_CALLBACK(on_mark_set), NULL);
     g_signal_connect(window, "map-event", G_CALLBACK(on_map_event), NULL);
 
     gtk_widget_show_all(window);
