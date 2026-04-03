@@ -26,18 +26,20 @@ fn start_text_input() -> DebugApp {
 }
 
 // Physical screen coordinates for tapping inside the text view.
-// The GTK window has a text view with margins: top=80, left=40 (logical pixels).
+// The GTK window has a text view inside a GtkScrolledWindow with margins:
+//   top=80, bottom=40, left=40, right=40 (logical pixels).
+// The scrolled window adds ~37px internal offset before the text view content.
+// So text content starts at approximately logical (40, 117) = physical (80, 234).
 // Compositor uses 2x scale, so logical = physical / 2.
-// Text content starts at approximately physical (80, 160).
 // Monospace 18pt ≈ 11 logical px per character = 22 physical px per character.
 
 /// Tap near the very start of the text (first character position).
 const TAP_TEXT_START_X: u32 = 90;
-const TAP_TEXT_START_Y: u32 = 200;
+const TAP_TEXT_START_Y: u32 = 250;
 
 /// Tap roughly in the middle of a line of ~10 characters.
 const TAP_TEXT_MID_X: u32 = 200;
-const TAP_TEXT_MID_Y: u32 = 200;
+const TAP_TEXT_MID_Y: u32 = 250;
 
 #[test]
 fn test_click_moves_cursor_to_start() {
