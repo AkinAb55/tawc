@@ -54,6 +54,7 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 ## External Repos
 - **libhybris fork:** https://github.com/wmww/libhybris -- clone to `./libhybris` if needed (`git clone https://github.com/wmww/libhybris.git ./libhybris`). Already in `.gitignore`.
 - **Build libhybris from local source:** `bash client/build-libhybris [--clean]` — syncs `./libhybris` to phone and builds inside chroot.
+- **Fork docs:** `libhybris/TAWC_FORK.md` documents the fork's lineage and our changes. Keep it up to date when modifying libhybris.
 
 ## Quick Reference
 - **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
