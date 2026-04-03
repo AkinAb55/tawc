@@ -21,6 +21,12 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
   is required for Firefox to enable text input (see text-input.md).
 - Keyboard focus is set on touch-down and when new toplevels are created.
 
+**GTK3 touch handling note:** GTK3 handles `wl_touch` events natively — GtkGestureMultiPress
+processes `GDK_TOUCH_BEGIN` directly, and GDK's Wayland backend sets `emulating_pointer=TRUE`
+on the primary touch which synthesizes crossing events for child widget routing. No server-side
+touch-to-pointer emulation is needed. When debugging touch, check coordinates carefully — the
+GTK widget tree only routes events to children whose GdkWindow allocation contains the hit point.
+
 **Known issues:**
 - Focus is always the first alive toplevel (no multi-window focus management yet).
 

@@ -21,6 +21,7 @@ Every test-relevant line is prefixed `TAWC_DEBUG:` to filter from GTK/Wayland no
 ```
 TAWC_DEBUG:READY                    Window mapped, text view focused
 TAWC_DEBUG:TEXT_CHANGED:<text>      Full buffer contents after change
+TAWC_DEBUG:CURSOR_POS:<offset>     Cursor position (character offset) after mark-set
 TAWC_DEBUG:PREEDIT:<text>           Current composing/preedit string
 ```
 
@@ -94,7 +95,14 @@ Host (cargo test)                    Phone
   │                                    │         └─ GTK text view
   │     └─ TAWC_DEBUG:TEXT_CHANGED ←───┤
   │                                    │
-  └─ assert text == expected           │
+  ├─ adb shell input tap X Y ─────────┤──→ SurfaceView.onTouchEvent
+  │                                    │     └─ nativeOnTouchEvent
+  │                                    │       └─ wl_touch → GDK_TOUCH_BEGIN
+  │                                    │         └─ GtkGestureMultiPress
+  │                                    │           └─ cursor move
+  │     └─ TAWC_DEBUG:CURSOR_POS ←────┤
+  │                                    │
+  └─ assert text/cursor == expected    │
 ```
 
 ### Key Modules
