@@ -144,6 +144,39 @@ fn test_click_does_not_change_text_content() {
 }
 
 #[test]
+fn test_backspace_after_click_to_middle() {
+    let app = start_text_input();
+
+    // Type text
+    adb::input_text("abcdef").expect("Failed to send text");
+    thread::sleep(Duration::from_millis(1000));
+
+    let text = app.last_text().expect("No text received");
+    assert_eq!(text, "abcdef", "Setup: text should be 'abcdef'");
+
+    // Click in the middle area (~4 characters in)
+    adb::input_tap(TAP_TEXT_MID_X, TAP_TEXT_MID_Y).expect("Failed to tap");
+    thread::sleep(Duration::from_millis(500));
+
+    // Record cursor position after click
+    let cursor_after_click = app.last_cursor_pos().expect("No cursor pos after click");
+    assert!(cursor_after_click > 0 && cursor_after_click < 6,
+        "Cursor should be in middle, got position {}", cursor_after_click);
+
+    // Press backspace - should delete the character BEFORE the cursor, not at the end
+    adb::input_keyevent(adb::KEYCODE_DEL).expect("Failed to send backspace");
+    thread::sleep(Duration::from_millis(1000));
+
+    let text = app.last_text().expect("No text after backspace");
+    // The text should have one character removed from the middle, not the end
+    assert_ne!(
+        text, "abcde",
+        "Backspace deleted from end instead of cursor position - click didn't properly reposition cursor for keyboard input"
+    );
+    assert_eq!(text.len(), 5, "Expected 5 characters after deleting one from 'abcdef', got '{}'", text);
+}
+
+#[test]
 fn test_click_reports_cursor_position_change() {
     let app = start_text_input();
 
