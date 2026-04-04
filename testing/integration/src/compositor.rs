@@ -12,6 +12,10 @@ pub struct CompositorState {
     pub toplevels: u32,
     pub surfaces_ahb: u32,
     pub surfaces_shm: u32,
+    pub frames: u64,
+    /// Number of toplevels visible in the last rendered frame.
+    /// If this is non-zero while toplevels is zero, the screen shows a stale frame.
+    pub rendered_toplevels: u32,
 }
 
 /// Query the compositor's current state via broadcast intent.
@@ -78,14 +82,17 @@ fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
     let mut toplevels = None;
     let mut surfaces_ahb = None;
     let mut surfaces_shm = None;
+    let mut frames = None;
+    let mut rendered_toplevels = None;
     for part in payload.split_whitespace() {
         if let Some((key, val)) = part.split_once('=') {
-            let val: u32 = val.parse().ok()?;
             match key {
-                "clients" => clients = Some(val),
-                "toplevels" => toplevels = Some(val),
-                "surfaces_ahb" => surfaces_ahb = Some(val),
-                "surfaces_shm" => surfaces_shm = Some(val),
+                "clients" => clients = Some(val.parse().ok()?),
+                "toplevels" => toplevels = Some(val.parse().ok()?),
+                "surfaces_ahb" => surfaces_ahb = Some(val.parse().ok()?),
+                "surfaces_shm" => surfaces_shm = Some(val.parse().ok()?),
+                "frames" => frames = Some(val.parse().ok()?),
+                "rendered_toplevels" => rendered_toplevels = Some(val.parse().ok()?),
                 _ => {}
             }
         }
@@ -95,7 +102,31 @@ fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
         toplevels: toplevels?,
         surfaces_ahb: surfaces_ahb?,
         surfaces_shm: surfaces_shm?,
+        frames: frames?,
+        rendered_toplevels: rendered_toplevels?,
     })
+}
+
+/// Wait until the last rendered frame shows the expected number of toplevels.
+/// This ensures the screen actually reflects the current state, not a stale frame.
+pub fn wait_for_rendered_toplevels(
+    expected: u32,
+    timeout: Duration,
+) -> Result<CompositorState, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = query_state(Duration::from_secs(2))?;
+        if state.rendered_toplevels == expected {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "Screen still shows {} toplevels (expected {}), compositor state: {:?}",
+                state.rendered_toplevels, expected, state
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 static STARTED: AtomicBool = AtomicBool::new(false);

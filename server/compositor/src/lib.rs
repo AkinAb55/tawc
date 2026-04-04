@@ -344,6 +344,8 @@ fn run_compositor(
         Some((0, 0).into()),
     );
     output.set_preferred(mode);
+    // GlobalId is not RAII — dropping it does NOT remove the Wayland global.
+    // The global lives as long as the Display. We just don't need the ID.
     let _output_global = output.create_global::<TawcState>(&state.display_handle);
     info!("Wayland output: {}x{}", width, height);
 

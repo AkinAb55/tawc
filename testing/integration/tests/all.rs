@@ -43,8 +43,9 @@ fn start_text_input(gdk_gl: &str) -> DebugApp {
     app
 }
 
-/// Assert the compositor has no connected clients or toplevels.
-/// Waits briefly for cleanup to propagate.
+/// Assert the compositor has no connected clients or toplevels, and that
+/// the screen actually shows an empty frame (not a stale frame from the
+/// previous client).
 fn assert_compositor_clean() {
     let state = compositor::wait_for_state(0, 0, TIMEOUT)
         .expect("Compositor did not return to clean state");
@@ -52,6 +53,10 @@ fn assert_compositor_clean() {
         "Expected no AHB surfaces after cleanup, got {:?}", state);
     assert_eq!(state.surfaces_shm, 0,
         "Expected no SHM surfaces after cleanup, got {:?}", state);
+    // Verify the screen reflects the clean state — the last rendered frame
+    // should show 0 toplevels, not a stale frame from the previous client.
+    compositor::wait_for_rendered_toplevels(0, TIMEOUT)
+        .expect("Screen still shows toplevels after cleanup");
 }
 
 // Physical screen coordinates for tapping inside the text view.

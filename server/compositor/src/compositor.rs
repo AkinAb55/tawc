@@ -140,6 +140,10 @@ pub struct TawcState {
     /// Number of connected Wayland clients. Shared with ClientState instances
     /// so they can increment/decrement from ClientData callbacks.
     pub client_count: Arc<AtomicU32>,
+
+    /// Set when toplevels are added or removed; cleared by the frame timer
+    /// after updating focus. Avoids per-frame focus scans when nothing changed.
+    pub toplevels_changed: bool,
 }
 
 impl TawcState {
@@ -181,6 +185,7 @@ impl TawcState {
             output_logical_size,
             text_input_state: TextInputState::new(),
             client_count: Arc::new(AtomicU32::new(0)),
+            toplevels_changed: false,
         }
     }
 }
@@ -237,6 +242,7 @@ impl XdgShellHandler for TawcState {
             keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
         }
         self.toplevels.push(surface);
+        self.toplevels_changed = true;
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -369,6 +375,12 @@ impl Dispatch<TawcBufferManagerV1, ()> for TawcState {
                 let channel = data_init.init(id, channel_data);
                 channel.channel_fd(client_sock.as_fd());
                 info!("Sent side-channel fd to client");
+
+                // Set nonblocking once at creation — the socket is only ever
+                // drained in a loop by import_one_ahb(), never blocking-read.
+                if let Err(e) = compositor_sock.set_nonblocking(true) {
+                    error!("Failed to set AHB socket nonblocking: {}", e);
+                }
 
                 state.surface_ahb.insert(
                     surface,

@@ -114,7 +114,13 @@ void main() {
 // ---------------------------------------------------------------------------
 
 /// Import pending AHB buffers for all surfaces that have one queued.
-pub fn import_pending_ahbs(state: &mut TawcState, render: &RenderState) {
+/// Returns true if any buffer was imported (caller can use for dirty tracking).
+pub fn import_pending_ahbs(state: &mut TawcState, render: &RenderState) -> bool {
+    // Short-circuit: avoid allocating a Vec when nothing is pending (common case).
+    if !state.surface_ahb.values().any(|s| s.pending_width.is_some()) {
+        return false;
+    }
+
     let surfaces: Vec<_> = state
         .surface_ahb
         .iter()
@@ -122,9 +128,10 @@ pub fn import_pending_ahbs(state: &mut TawcState, render: &RenderState) {
         .map(|(surf, _)| surf.clone())
         .collect();
 
-    for surface in surfaces {
-        import_one_ahb(state, render, &surface);
+    for surface in &surfaces {
+        import_one_ahb(state, render, surface);
     }
+    !surfaces.is_empty()
 }
 
 /// Import a single pending AHB for a surface.
@@ -145,8 +152,8 @@ fn import_one_ahb(
     };
 
     // Drain all pending AHBs from the side channel, keep only the latest.
+    // Socket is permanently nonblocking (set at creation in compositor.rs).
     let recv_fd = ahb_state.recv_socket.as_raw_fd();
-    ahb_state.recv_socket.set_nonblocking(true).ok();
     let mut latest_ahb = None;
     loop {
         match AhbBuffer::recv_from_socket(recv_fd) {
@@ -154,7 +161,6 @@ fn import_one_ahb(
             Err(_) => break,
         }
     }
-    ahb_state.recv_socket.set_nonblocking(false).ok();
 
     let Some(ahb) = latest_ahb else {
         return; // Client sent attach but AHB hasn't arrived yet
@@ -196,8 +202,8 @@ fn import_one_ahb(
 }
 
 /// Walk all toplevel surface trees and import any new SHM buffers as textures.
-/// Releases old buffers when replaced.
-pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
+/// Releases old buffers when replaced. Returns true if any buffer was imported.
+pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) -> bool {
     use smithay::backend::renderer::buffer_type;
     use smithay::backend::renderer::BufferType;
     use smithay::wayland::compositor::BufferAssignment;
@@ -250,6 +256,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
         );
     }
 
+    let mut imported = false;
     for (surface, buf) in to_import {
         let dims = smithay::wayland::shm::with_buffer_contents(&buf, |_, _, data| {
             (data.width, data.height)
@@ -281,6 +288,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
                 shm_state.current_buffer = Some(buf);
                 shm_state.committed_width = width;
                 shm_state.committed_height = height;
+                imported = true;
                 if is_new {
                     info!(
                         "SHM buffer imported: {}x{} for {:?}",
@@ -291,6 +299,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) {
             Err(e) => error!("SHM import failed: {}", e),
         }
     }
+    imported
 }
 
 // ---------------------------------------------------------------------------
@@ -385,21 +394,15 @@ fn draw_shm_surfaces(
                     .location;
                 TraversalAction::DoChildren((px + loc.x, py + loc.y))
             },
-            |surf, states, &(abs_x, abs_y)| {
-                let loc = states
-                    .cached_state
-                    .get::<SubsurfaceCachedState>()
-                    .current()
-                    .location;
-                let x = abs_x + loc.x;
-                let y = abs_y + loc.y;
-
+            |surf, _states, &(abs_x, abs_y)| {
+                // abs_x/abs_y already include this surface's subsurface offset
+                // (accumulated by the "down" callback above). Don't add loc again.
                 if let Some(shm_state) = state.surface_shm.get(surf) {
                     if let Some(ref tex) = shm_state.texture {
                         to_render.push((
                             tex.clone(),
-                            x,
-                            y,
+                            abs_x,
+                            abs_y,
                             shm_state.committed_width,
                             shm_state.committed_height,
                         ));

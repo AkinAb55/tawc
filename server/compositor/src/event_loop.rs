@@ -38,6 +38,12 @@ pub struct LoopData {
     pub output_size: Size<i32, smithay::utils::Physical>,
     pub start_time: Instant,
     pub frame_count: u64,
+    /// Set when buffer contents change; cleared after rendering.
+    /// Skips GPU work when the screen hasn't changed.
+    pub needs_render: bool,
+    /// Number of toplevels visible in the last rendered frame.
+    /// Used by the state query to verify the screen actually reflects cleanup.
+    pub last_rendered_toplevels: usize,
 }
 
 /// Set up and run the calloop event loop. Returns when `running` becomes false.
@@ -211,11 +217,13 @@ pub fn run(
         if let ChannelEvent::Msg(()) = event {
             let clients = data.state.client_count.load(std::sync::atomic::Ordering::Relaxed);
             info!(
-                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_ahb={} surfaces_shm={}",
+                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_ahb={} surfaces_shm={} frames={} rendered_toplevels={}",
                 clients,
                 data.state.toplevels.len(),
                 data.state.surface_ahb.len(),
                 data.state.surface_shm.len(),
+                data.frame_count,
+                data.last_rendered_toplevels,
             );
         }
     })?;
@@ -242,36 +250,58 @@ pub fn run(
             Err(e) => error!("dispatch_clients error: {}", e),
         }
 
-        // 2. Import buffers
-        render::import_pending_ahbs(&mut data.state, &data.render);
-        render::import_shm_buffers(&mut data.state, &mut data.render.renderer);
-
-        // 3. Render
-        if let Err(e) = render::render_frame(
-            &data.state,
-            &mut data.render,
-            data.output_size,
-            data.frame_count,
-        ) {
-            error!("Render error: {}", e);
+        // New toplevels or dead toplevels need a repaint and focus update.
+        // Consume the flag here so cleanup (step 5) can set it again for the
+        // next frame. Both render and focus update use the local variable.
+        let toplevels_changed = data.state.toplevels_changed;
+        if toplevels_changed {
+            data.state.toplevels_changed = false;
+            data.needs_render = true;
         }
 
-        // 4. Frame callbacks
+        // 2. Import buffers (marks dirty if new content arrived)
+        if render::import_pending_ahbs(&mut data.state, &data.render) {
+            data.needs_render = true;
+        }
+        if render::import_shm_buffers(&mut data.state, &mut data.render.renderer) {
+            data.needs_render = true;
+        }
+
+        // 3. Render (only when content changed)
+        if data.needs_render {
+            data.needs_render = false;
+            if let Err(e) = render::render_frame(
+                &data.state,
+                &mut data.render,
+                data.output_size,
+                data.frame_count,
+            ) {
+                error!("Render error: {}", e);
+            }
+            data.frame_count += 1;
+            data.last_rendered_toplevels = data.state.toplevels.len();
+        }
+
+        // 4. Frame callbacks (always sent so clients can
+        // submit new buffers even when we skipped rendering)
         let time = data.start_time.elapsed().as_millis() as u32;
         render::send_frame_callbacks(&data.state, time);
 
-        // 5. Cleanup
-        data.state.toplevels.retain(|t| {
-            if t.alive() {
-                true
-            } else {
-                info!("Removing dead toplevel");
-                let wl = t.wl_surface();
-                data.state.surface_shm.remove(wl);
-                data.state.surface_ahb.remove(wl);
-                false
-            }
-        });
+        // 5. Cleanup — collect dead toplevels first, then remove their state.
+        // (Two-pass avoids borrowing toplevels and surface maps simultaneously.)
+        let dead_surfaces: Vec<_> = data.state.toplevels.iter()
+            .filter(|t| !t.alive())
+            .map(|t| t.wl_surface().clone())
+            .collect();
+        if !dead_surfaces.is_empty() {
+            data.state.toplevels_changed = true;
+        }
+        for wl in &dead_surfaces {
+            info!("Removing dead toplevel");
+            data.state.surface_shm.remove(wl);
+            data.state.surface_ahb.remove(wl);
+        }
+        data.state.toplevels.retain(|t| t.alive());
 
         // Clean up AHB and SHM entries for surfaces whose client disconnected.
         // The toplevel cleanup above only removes entries keyed by the toplevel's
@@ -282,18 +312,19 @@ pub fn run(
         data.state.popup_manager.cleanup();
         data.state.text_input_state.cleanup();
 
-        // Update keyboard and text input focus if toplevels changed
-        let new_focus = data.state.toplevels.iter()
-            .find(|t| t.alive())
-            .map(|t| t.wl_surface().clone());
-        data.state.text_input_state.update_focus(new_focus.as_ref());
+        // Update keyboard and text input focus only when toplevels changed
+        if toplevels_changed {
+            let new_focus = data.state.toplevels.iter()
+                .find(|t| t.alive())
+                .map(|t| t.wl_surface().clone());
+            data.state.text_input_state.update_focus(new_focus.as_ref());
+        }
 
         // 6. Flush (after focus updates so enter/leave events are sent immediately)
         if let Err(e) = data.display.flush_clients() {
             error!("flush_clients error: {}", e);
         }
 
-        data.frame_count += 1;
         if data.frame_count % 300 == 0 {
             info!(
                 "Compositor: {} frames, {} toplevels, {} ahb, {} shm",
@@ -314,6 +345,8 @@ pub fn run(
         output_size,
         start_time: Instant::now(),
         frame_count: 0,
+        needs_render: true, // render background on first frame
+        last_rendered_toplevels: 0,
     };
 
     info!("Entering calloop event loop");

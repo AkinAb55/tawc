@@ -395,14 +395,14 @@ impl TextInputState {
 
     /// Clean up instances for dead resources.
     pub fn cleanup(&mut self) {
-        self.instances.retain(|ti| {
-            if ti.is_alive() {
-                true
-            } else {
-                self.instance_state.remove(&ti.id());
-                false
-            }
-        });
+        let dead_ids: Vec<_> = self.instances.iter()
+            .filter(|ti| !ti.is_alive())
+            .map(|ti| ti.id())
+            .collect();
+        for id in &dead_ids {
+            self.instance_state.remove(id);
+        }
+        self.instances.retain(|ti| ti.is_alive());
     }
 }
 
