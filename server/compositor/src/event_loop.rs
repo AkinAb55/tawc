@@ -50,6 +50,7 @@ pub fn run(
     scale: i32,
     touch_channel: Channel<TouchEvent>,
     text_input_channel: Channel<TextInputEvent>,
+    state_query_channel: Channel<()>,
     running: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<LoopData> = EventLoop::try_new()?;
@@ -79,10 +80,11 @@ pub fn run(
     loop_handle.insert_source(listener_source, |_, source, data: &mut LoopData| {
         while let Some(stream) = source.accept().map_err(|e| std::io::Error::other(e))? {
             info!("New Wayland client connected");
+            let client_state = ClientState::new(data.state.client_count.clone());
             if let Err(e) = data
                 .display
                 .handle()
-                .insert_client(stream, Arc::new(ClientState::default()))
+                .insert_client(stream, Arc::new(client_state))
             {
                 error!("Failed to insert client: {}", e);
             }
@@ -203,7 +205,22 @@ pub fn run(
         }
     })?;
 
-    // --- Source 5: Frame timer (~60 fps) ---
+    // --- Source 5: State query channel ---
+    // Receives requests to log compositor state (from QUERY_STATE broadcast).
+    loop_handle.insert_source(state_query_channel, move |event, _, data: &mut LoopData| {
+        if let ChannelEvent::Msg(()) = event {
+            let clients = data.state.client_count.load(std::sync::atomic::Ordering::Relaxed);
+            info!(
+                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_ahb={} surfaces_shm={}",
+                clients,
+                data.state.toplevels.len(),
+                data.state.surface_ahb.len(),
+                data.state.surface_shm.len(),
+            );
+        }
+    })?;
+
+    // --- Source 6: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
     //   1. Dispatch pending client messages (see note below)
     //   2. Import new buffers (AHB and SHM) as GL textures

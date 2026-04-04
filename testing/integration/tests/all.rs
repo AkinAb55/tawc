@@ -31,7 +31,27 @@ fn start_text_input(gdk_gl: &str) -> DebugApp {
     adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(&binary, "text-input", gdk_gl).expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
+
+    // Verify compositor sees the toplevel
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor state after app start");
+    assert!(state.toplevels >= 1,
+        "Compositor should see at least 1 toplevel after app start, got {:?}", state);
+    assert!(state.clients >= 1,
+        "Compositor should see at least 1 client after app start, got {:?}", state);
+
     app
+}
+
+/// Assert the compositor has no connected clients or toplevels.
+/// Waits briefly for cleanup to propagate.
+fn assert_compositor_clean() {
+    let state = compositor::wait_for_state(0, 0, TIMEOUT)
+        .expect("Compositor did not return to clean state");
+    assert_eq!(state.surfaces_ahb, 0,
+        "Expected no AHB surfaces after cleanup, got {:?}", state);
+    assert_eq!(state.surfaces_shm, 0,
+        "Expected no SHM surfaces after cleanup, got {:?}", state);
 }
 
 // Physical screen coordinates for tapping inside the text view.
@@ -63,6 +83,7 @@ fn test_text_input_and_backspace() {
         "Unexpected AHB buffer import (GDK_GL=disabled should not use hardware buffers)");
 
     app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
 }
 
 #[test]
@@ -111,6 +132,7 @@ fn test_click_cursor_positioning() {
         "Expected AHB buffer import in compositor logs (GDK_GL=gles:always should use hardware buffers)");
 
     app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
 }
 
 const FIREFOX_CMD: &str = "GDK_GL=disabled MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
@@ -152,12 +174,22 @@ fn test_firefox_launches_with_hardware_buffers() {
         }
         thread::sleep(Duration::from_millis(500));
     }
+
     // Let Firefox finish opening its window before killing it
     thread::sleep(Duration::from_millis(1000));
-
-    firefox.stop().expect("Firefox process group failed to stop cleanly");
 
     assert!(saw_ahb,
         "Firefox did not produce hardware (AHB) buffer imports within {:?}",
         FIREFOX_LAUNCH_TIMEOUT);
+
+    // Verify compositor sees Firefox's toplevel
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor state while Firefox running");
+    assert!(state.toplevels >= 1,
+        "Compositor should see at least 1 toplevel while Firefox running, got {:?}", state);
+    assert!(state.clients >= 1,
+        "Compositor should see at least 1 client while Firefox running, got {:?}", state);
+
+    firefox.stop().expect("Firefox process group failed to stop cleanly");
+    assert_compositor_clean();
 }

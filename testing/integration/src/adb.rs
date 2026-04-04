@@ -74,6 +74,11 @@ pub fn logcat_dump_tawc() -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Trigger the compositor to log its current state.
+pub fn broadcast_query_state() -> io::Result<Output> {
+    shell("am broadcast -a me.phie.tawc.QUERY_STATE")
+}
+
 // Common Android keycodes (used with input_keyevent)
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_ENTER: u32 = 66;

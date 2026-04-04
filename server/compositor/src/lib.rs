@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
@@ -42,6 +43,9 @@ static NATIVE_BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
 
 /// Wayland socket path accessible from chroot.
 const WAYLAND_SOCKET_PATH: &str = "/data/data/me.phie.tawc/wayland-0";
+
+/// Global sender for state query requests. Replaced each time the compositor restarts.
+static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Sender<()>>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnSurfaceCreated(
@@ -234,6 +238,20 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeSendKeyEvent(
 }
 
 // ---------------------------------------------------------------------------
+// JNI: State query from Android
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeQueryState(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    if let Some(sender) = STATE_QUERY_SENDER.lock().unwrap().as_ref() {
+        let _ = sender.send(());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reverse JNI: Compositor → Android
 // ---------------------------------------------------------------------------
 
@@ -346,6 +364,10 @@ fn run_compositor(
     // --- Text input channel ---
     let text_input_channel = text_input::create_text_input_channel();
 
+    // --- State query channel ---
+    let (state_query_sender, state_query_channel) = smithay::reexports::calloop::channel::channel();
+    *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
+
     // --- Run ---
-    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, &RUNNING)
+    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, state_query_channel, &RUNNING)
 }

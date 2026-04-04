@@ -43,6 +43,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                         ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keycode))
                     }
                 }
+                "me.phie.tawc.QUERY_STATE" -> {
+                    NativeBridge.nativeQueryState()
+                }
             }
         }
     }
@@ -73,6 +76,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val filter = IntentFilter().apply {
             addAction("me.phie.tawc.TEXT_INPUT")
             addAction("me.phie.tawc.KEY_EVENT")
+            addAction("me.phie.tawc.QUERY_STATE")
         }
         @Suppress("UnspecifiedRegisterReceiverFlag")
         registerReceiver(testInputReceiver, filter, RECEIVER_EXPORTED)

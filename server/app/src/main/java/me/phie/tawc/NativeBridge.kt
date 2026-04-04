@@ -52,6 +52,9 @@ object NativeBridge {
     /** sendKeyEvent mapped to keycode */
     external fun nativeSendKeyEvent(keycode: Int)
 
+    /** Query compositor state (logs COMPOSITOR_STATE line to logcat). */
+    external fun nativeQueryState()
+
     // --- Reverse JNI: Compositor → Android (called from compositor thread) ---
 
     /** Called from native when a Wayland client enables text input. */

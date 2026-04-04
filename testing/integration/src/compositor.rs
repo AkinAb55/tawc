@@ -1,9 +1,102 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::adb;
+
+/// Compositor state snapshot, parsed from COMPOSITOR_STATE log line.
+#[derive(Debug, Clone)]
+pub struct CompositorState {
+    pub clients: u32,
+    pub toplevels: u32,
+    pub surfaces_ahb: u32,
+    pub surfaces_shm: u32,
+}
+
+/// Query the compositor's current state via broadcast intent.
+/// Does NOT clear logcat — counts existing COMPOSITOR_STATE lines and waits for a new one.
+pub fn query_state(timeout: Duration) -> Result<CompositorState, String> {
+    // Count existing COMPOSITOR_STATE lines so we can detect the new one
+    let existing_logs = adb::logcat_dump_tawc()
+        .map_err(|e| format!("Failed to dump logcat: {}", e))?;
+    let existing_count = existing_logs.lines()
+        .filter(|l| l.contains("COMPOSITOR_STATE:"))
+        .count();
+
+    adb::broadcast_query_state().map_err(|e| format!("Failed to send query: {}", e))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let logs = adb::logcat_dump_tawc()
+            .map_err(|e| format!("Failed to dump logcat: {}", e))?;
+        let state_lines: Vec<&str> = logs.lines()
+            .filter(|l| l.contains("COMPOSITOR_STATE:"))
+            .collect();
+        if state_lines.len() > existing_count {
+            // Parse the newest COMPOSITOR_STATE line
+            if let Some(state) = parse_compositor_state_line(state_lines.last().unwrap()) {
+                return Ok(state);
+            }
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "Timeout waiting for COMPOSITOR_STATE in logcat (existing: {}, current: {})",
+                existing_count, state_lines.len()
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Wait until the compositor reports the expected number of clients and toplevels.
+pub fn wait_for_state(
+    expected_clients: u32,
+    expected_toplevels: u32,
+    timeout: Duration,
+) -> Result<CompositorState, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = query_state(Duration::from_secs(2))?;
+        if state.clients == expected_clients && state.toplevels == expected_toplevels {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "Compositor state didn't reach clients={} toplevels={} within {:?} (last: {:?})",
+                expected_clients, expected_toplevels, timeout, state
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
+    let idx = line.find("COMPOSITOR_STATE:")?;
+    let payload = &line[idx + "COMPOSITOR_STATE:".len()..];
+    let mut clients = None;
+    let mut toplevels = None;
+    let mut surfaces_ahb = None;
+    let mut surfaces_shm = None;
+    for part in payload.split_whitespace() {
+        if let Some((key, val)) = part.split_once('=') {
+            let val: u32 = val.parse().ok()?;
+            match key {
+                "clients" => clients = Some(val),
+                "toplevels" => toplevels = Some(val),
+                "surfaces_ahb" => surfaces_ahb = Some(val),
+                "surfaces_shm" => surfaces_shm = Some(val),
+                _ => {}
+            }
+        }
+    }
+    Some(CompositorState {
+        clients: clients?,
+        toplevels: toplevels?,
+        surfaces_ahb: surfaces_ahb?,
+        surfaces_shm: surfaces_shm?,
+    })
+}
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 

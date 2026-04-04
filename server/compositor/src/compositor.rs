@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info};
 
 use smithay::backend::renderer::gles::GlesTexture;
@@ -134,6 +136,10 @@ pub struct TawcState {
 
     /// Text input protocol state.
     pub text_input_state: TextInputState,
+
+    /// Number of connected Wayland clients. Shared with ClientState instances
+    /// so they can increment/decrement from ClientData callbacks.
+    pub client_count: Arc<AtomicU32>,
 }
 
 impl TawcState {
@@ -174,6 +180,7 @@ impl TawcState {
             output_scale,
             output_logical_size,
             text_input_state: TextInputState::new(),
+            client_count: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -414,18 +421,29 @@ impl Dispatch<TawcAhbChannelV1, ChannelData> for TawcState {
 // Client state + delegate macros
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    pub client_count: Arc<AtomicU32>,
+}
+
+impl ClientState {
+    pub fn new(client_count: Arc<AtomicU32>) -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            client_count,
+        }
+    }
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {
-        info!("Wayland client initialized");
+        self.client_count.fetch_add(1, Ordering::Relaxed);
+        info!("Wayland client initialized (total: {})", self.client_count.load(Ordering::Relaxed));
     }
 
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
-        info!("Wayland client disconnected: {:?}", _reason);
+        self.client_count.fetch_sub(1, Ordering::Relaxed);
+        info!("Wayland client disconnected: {:?} (total: {})", _reason, self.client_count.load(Ordering::Relaxed));
     }
 }
 
