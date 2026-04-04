@@ -103,7 +103,6 @@ export WAYLAND_DISPLAY=wayland-0
 export XDG_RUNTIME_DIR=/tmp
 export LD_LIBRARY_PATH=/tmp/tawc-wsi:/usr/local/lib
 export LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
-export HYBRIS_PATCH_TLS=1
 ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
 PROFEOF
     chmod 644 '$CHROOT_DIR/etc/profile.d/01-tawc.sh'"

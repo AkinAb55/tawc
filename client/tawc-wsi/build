@@ -43,4 +43,4 @@ echo "=== Creating GL symlinks ==="
 adb shell "su -c 'cd $CHROOT$BUILD && ln -sf /usr/local/lib/libGLESv2.so.2 libGLESv2.so.2 && ln -sf /usr/local/lib/libGLESv2.so.2 libGLESv2.so && ln -sf /usr/local/lib/libGLESv2.so.2 libGL.so.1 && ln -sf /usr/local/lib/libGLESv2.so.2 libGL.so'"
 
 echo "=== Done ==="
-echo "To use: LD_LIBRARY_PATH=$BUILD:\$LD_LIBRARY_PATH HYBRIS_PATCH_TLS=1 <app>"
+echo "To use: LD_LIBRARY_PATH=$BUILD:\$LD_LIBRARY_PATH <app>"

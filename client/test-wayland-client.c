@@ -12,7 +12,7 @@
  *       tawc-buffer-v1-client.c -lwayland-client -lhybris-common -I.
  *
  * Run:
- *   HYBRIS_PATCH_TLS=1 WAYLAND_DISPLAY=/tmp/tawc-wayland ./test-wayland-client
+ *   WAYLAND_DISPLAY=/tmp/tawc-wayland ./test-wayland-client
  */
 
 #include <stdio.h>

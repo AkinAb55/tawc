@@ -4,7 +4,7 @@
  *   gcc -o test-ahb-alloc test-ahb-alloc.c -lhybris-common -ldl
  *
  * Run:
- *   HYBRIS_PATCH_TLS=1 ./test-ahb-alloc
+ *   ./test-ahb-alloc
  */
 #include <stdio.h>
 #include <stdlib.h>

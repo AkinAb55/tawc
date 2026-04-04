@@ -52,4 +52,4 @@ ls -la test-wayland-client
 
 echo "=== Done ==="
 echo "To run:"
-echo "  adb shell su -c 'chroot $CHROOT /bin/bash -c \"HYBRIS_PATCH_TLS=1 WAYLAND_DISPLAY=/tmp/tawc-wayland $BUILD_DIR_CHROOT/test-wayland-client\"'"
+echo "  adb shell su -c 'chroot $CHROOT /bin/bash -c \"WAYLAND_DISPLAY=/tmp/tawc-wayland $BUILD_DIR_CHROOT/test-wayland-client\"'"

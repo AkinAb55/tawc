@@ -90,11 +90,11 @@ to `tls_hooks[]`, but slot -1 maps to `tls_hooks[-1]` which is NULL -> SIGSEGV.
 3. Thread wrapping: `_hybris_hook_pthread_create()` wraps `start_routine` to ensure allocation.
 
 **Result:** EGL 1.5 initializes on Pixel 4a (Adreno 618), Android 16, stock LineageOS.
-Env: `HYBRIS_PATCH_TLS=1`.
+TLS patching is always active (no env var needed).
 
 ### libhybris + libwayland-client Compatibility
 
-`HYBRIS_PATCH_TLS=1` is required. When linking libhybris-common.so at compile time
+TLS patching is always active. When linking libhybris-common.so at compile time
 alongside libwayland-client, the TLS patcher's constructor must run before any bionic
 library is loaded.
 

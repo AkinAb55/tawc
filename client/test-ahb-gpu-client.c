@@ -9,7 +9,7 @@
  *       -lhybris-common -lEGL -lGLESv2 -ldl -lm
  *
  * Run:
- *   HYBRIS_PATCH_TLS=1 ./test-ahb-gpu-client <socket-path>
+ *   ./test-ahb-gpu-client <socket-path>
  */
 #include <stdio.h>
 #include <stdlib.h>
