@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tawc_integration::{adb, chroot, compositor, debug_app::DebugApp};
 
@@ -24,9 +25,11 @@ fn setup() -> String {
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Start the text-input debug app and wait for it to be ready.
-fn start_text_input() -> DebugApp {
+/// `gdk_gl` controls buffer type: "disabled" for SHM, "gles:always" for hardware (AHB).
+fn start_text_input(gdk_gl: &str) -> DebugApp {
     let binary = setup();
-    let app = DebugApp::start(&binary, "text-input").expect("Failed to start debug app");
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(&binary, "text-input", gdk_gl).expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
     app
 }
@@ -40,7 +43,7 @@ const TAP_TEXT_MID_Y: u32 = 250;
 
 #[test]
 fn test_text_input_and_backspace() {
-    let app = start_text_input();
+    let app = start_text_input("disabled");
 
     // Type multi-word text (covers basic input + spaces)
     adb::input_text("hello world").expect("Failed to send text");
@@ -51,11 +54,18 @@ fn test_text_input_and_backspace() {
     adb::input_keyevent(adb::KEYCODE_DEL).expect("Failed to send backspace");
     app.wait_for_text("hello worl", TIMEOUT)
         .expect("Text should be 'hello worl' after backspace");
+
+    // Verify SHM buffers were used (GDK_GL=disabled → software rendering → SHM)
+    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    assert!(logs.contains("SHM buffer imported"),
+        "Expected SHM buffer import in compositor logs (GDK_GL=disabled should use SHM)");
+    assert!(!logs.contains("AHB imported as texture"),
+        "Unexpected AHB buffer import (GDK_GL=disabled should not use hardware buffers)");
 }
 
 #[test]
 fn test_click_cursor_positioning() {
-    let app = start_text_input();
+    let app = start_text_input("gles:always");
 
     // Type text
     adb::input_text("abcdef").expect("Failed to send text");
@@ -92,4 +102,51 @@ fn test_click_cursor_positioning() {
         .expect("No TEXT_CHANGED after typing X");
     assert!(!text.ends_with("X") || text.len() != 6,
         "Typed 'X' was appended to end instead of inserted at cursor position, got '{}'", text);
+
+    // Verify hardware (AHB) buffers were used (GDK_GL=gles:always → GL rendering → AHB)
+    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    assert!(logs.contains("AHB imported as texture"),
+        "Expected AHB buffer import in compositor logs (GDK_GL=gles:always should use hardware buffers)");
+}
+
+const FIREFOX_CMD: &str = "GDK_GL=disabled MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
+    MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
+    MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
+    DISPLAY= firefox --no-remote";
+
+const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[test]
+fn test_firefox_launches_with_hardware_buffers() {
+    setup();
+    adb::logcat_clear().expect("Failed to clear logcat");
+
+    // Remove lock/crash files so Firefox doesn't show the troubleshoot-mode dialog
+    // (killall doesn't give Firefox a clean shutdown, leaving these behind)
+    let _ = adb::chroot_run(
+        "rm -f ~/.config/mozilla/firefox/*/.parentlock \
+              ~/.config/mozilla/firefox/*/lock"
+    );
+
+    // Launch Firefox in the chroot (fire-and-forget spawn)
+    let _child = adb::chroot_spawn(FIREFOX_CMD).expect("Failed to spawn Firefox");
+
+    // Poll logcat until we see an AHB import, meaning Firefox rendered a frame
+    let deadline = Instant::now() + FIREFOX_LAUNCH_TIMEOUT;
+    let mut saw_ahb = false;
+    while Instant::now() < deadline {
+        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+        if logs.contains("AHB imported as texture") {
+            saw_ahb = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    // Clean up Firefox before asserting so it doesn't linger on failure
+    let _ = adb::chroot_run("killall firefox");
+
+    assert!(saw_ahb,
+        "Firefox did not produce hardware (AHB) buffer imports within {:?}",
+        FIREFOX_LAUNCH_TIMEOUT);
 }

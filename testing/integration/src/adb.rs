@@ -61,6 +61,19 @@ pub fn input_tap(x: u32, y: u32) -> io::Result<Output> {
     shell(&format!("input tap {} {}", x, y))
 }
 
+/// Clear the logcat buffer so subsequent reads only show new messages.
+pub fn logcat_clear() -> io::Result<Output> {
+    Command::new("adb").args(["logcat", "-c"]).output()
+}
+
+/// Dump logcat lines matching the tawc-native tag (compositor Rust logs).
+pub fn logcat_dump_tawc() -> io::Result<String> {
+    let output = Command::new("adb")
+        .args(["logcat", "-d", "-s", "tawc-native"])
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 // Common Android keycodes (used with input_keyevent)
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_ENTER: u32 = 66;
