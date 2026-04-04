@@ -64,6 +64,11 @@ See [notes/text-input.md](notes/text-input.md) for design.
 - ✅ Text input tests (basic text, backspace, multi-word)
 See [notes/testing.md](notes/testing.md) for details.
 
+## Vulkan WSI
+- Verify libhybris Vulkan with stock driver
+- Vulkan implicit layer using VK_ANDROID_external_memory_android_hardware_buffer
+- Test with vkcube, vkmark
+
 ## wl_keyboard (non-text keys)
 Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalent).
 
@@ -84,8 +89,3 @@ Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalen
 - Fractional scaling (wp-fractional-scale)
 - Clipboard bridge (wl_data_device <-> Android ClipboardManager)
 - Non-root socket sharing (Binder fd passing)
-
-## Vulkan WSI (stretch goal)
-- Verify libhybris Vulkan with stock driver
-- Vulkan implicit layer using VK_ANDROID_external_memory_android_hardware_buffer
-- Test with vkcube, vkmark
