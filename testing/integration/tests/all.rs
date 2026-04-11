@@ -140,7 +140,7 @@ fn test_click_cursor_positioning() {
     assert_compositor_clean();
 }
 
-const FIREFOX_CMD: &str = "GDK_GL=disabled MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
+const FIREFOX_CMD: &str = "GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
     MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
     MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
     DISPLAY= firefox --no-remote";
@@ -156,7 +156,10 @@ fn test_firefox_launches_with_hardware_buffers() {
     // (killall doesn't give Firefox a clean shutdown, leaving these behind)
     let _ = adb::chroot_run(
         "rm -f ~/.config/mozilla/firefox/*/.parentlock \
-              ~/.config/mozilla/firefox/*/lock"
+              ~/.config/mozilla/firefox/*/lock \
+              ~/.config/mozilla/firefox/*/sessionstore.jsonlz4 \
+              ~/.config/mozilla/firefox/*/sessionCheckpoints.json && \
+         rm -rf ~/.config/mozilla/firefox/*/sessionstore-backups"
     );
 
     let mut firefox = ChrootProcess::spawn(FIREFOX_CMD)
@@ -186,6 +189,11 @@ fn test_firefox_launches_with_hardware_buffers() {
     assert!(saw_ahb,
         "Firefox did not produce hardware (AHB) buffer imports within {:?}",
         FIREFOX_LAUNCH_TIMEOUT);
+
+    // Verify no SHM buffers were used (GDK_GL=gles:always means all surfaces use AHB)
+    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    assert!(!logs.contains("SHM buffer imported"),
+        "Firefox should not use SHM buffers with GDK_GL=gles:always (all surfaces should be AHB)");
 
     // Verify compositor sees Firefox's toplevel
     let state = compositor::query_state(TIMEOUT)

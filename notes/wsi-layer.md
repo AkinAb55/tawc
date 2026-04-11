@@ -70,6 +70,12 @@ our `libEGL.so`, falling back to `eglGetProcAddress`. Every missing export is a 
 `eglBindAPI(EGL_OPENGL_ES_API)` directly and compiles GLES shaders. The GLES-aware codepath
 was fixed in GTK 3.24.35; our chroot has 3.24.52.
 
+**GLX stub requirement:** libepoxy probes `dlsym(libGLESv2_handle, "glXGetCurrentContext")`
+to detect GLX vs EGL contexts. On GLES-only systems without desktop GL, this symbol is
+missing, and libepoxy's error handling calls `abort()`. The `libGLESv2.so.2` and `libGL.so`
+shims (built by `client/tawc-wsi/build`) export GLX stubs returning NULL to satisfy this
+probe. See `notes/firefox.md` for the full GL library shim architecture.
+
 ## Vulkan WSI Layer (Stretch Goal)
 
 Standard Khronos implicit layer mechanism. Would advertise `VK_KHR_wayland_surface` +
