@@ -64,42 +64,39 @@ See [notes/text-input.md](notes/text-input.md) for design.
 - ✅ Text input tests (basic text, backspace, multi-word)
 See [notes/testing.md](notes/testing.md) for details.
 
+## libhybris CFI Workaround
+Move the bionic CFI binary patch from `tawc-egl.c` into our libhybris fork's `android_linker_init()`.
+See [issues/libhybris-cfi-patch.md](issues/libhybris-cfi-patch.md) for details.
+
+- Add `cfi_bypass.c` to `hybris/common/`, call `hybris_patch_bionic_cfi()` from `android_linker_init()`
+- Patches `__cfi_slowpath` in bionic's `libdl.so` to `ret` (instruction-pattern match, Android 14 + 16+)
+- Test with GTK3 debug app and Firefox
+- Update `libhybris/TAWC_FORK.md`
+
+## Migrate to libhybris Wayland EGL Platform
+Replace our custom `tawc-egl.c` WSI layer and `tawc_buffer_v1` protocol with libhybris's built-in
+Wayland EGL platform (`eglplatform_wayland.so`) and `android_wlegl` buffer sharing protocol.
+Eliminates ~1500 lines of custom EGL wrapping, the GL shim libraries, `LD_LIBRARY_PATH` overrides,
+and our custom Wayland protocol. Gains triple buffering, vsync, damage forwarding, proper resize.
+See [issues/migrate-to-libhybris-wayland-platform.md](issues/migrate-to-libhybris-wayland-platform.md) for full plan.
+
+- Build libhybris with `--enable-wayland --enable-glvnd`
+- Implement `android_wlegl` protocol server-side in compositor (Rust)
+- C helper wraps libhybris gralloc + `RemoteWindowBuffer` for buffer import (native_handle_t → EGLClientBuffer → EGLImage)
+- Update chroot environment (`HYBRIS_EGLPLATFORM=wayland`, remove `/tmp/tawc-wsi`)
+- Delete tawc-egl.c, GL shims, tawc_buffer_v1 protocol, AHB side-channel socket code
+
 ## Vulkan WSI
-Buffer sharing uses the same AHB side-channel as EGL. The compositor doesn't need changes
-— it already imports AHBs as GL textures regardless of how clients rendered them.
+libhybris has built-in Wayland Vulkan WSI (`vulkanplatform_wayland.so`). It intercepts
+`vkCreateWaylandSurfaceKHR`, remaps to `vkCreateAndroidSurfaceKHR`, and uses the same
+`android_wlegl` protocol for buffer sharing. No custom implicit layer needed — once the
+Wayland platform migration is done and the compositor serves `android_wlegl`, Vulkan
+clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 
-**Verify libhybris Vulkan basics**
-- Load stock `libvulkan.so` via libhybris `android_dlopen()` from chroot
-- Enumerate physical devices and confirm correct GPU shows up
-- Check instance/device extensions, specifically `VK_ANDROID_external_memory_android_hardware_buffer`
-- Test: can we create a VkInstance + VkDevice + allocate a VkImage backed by an AHB?
-- Watch for bionic TLS issues (EGL needed a fix, Vulkan may need similar)
-
-**Vulkan implicit layer** (`client/tawc-vulkan/`)
-- Standard Khronos implicit layer (JSON manifest + shared library)
-- NOT using libhybris's built-in Vulkan WSI (it uses Sailfish's `android_wlegl` protocol)
-- Intercept instance-level: advertise `VK_KHR_wayland_surface`, hide `VK_KHR_android_surface`
-- Intercept device-level: implement `VK_KHR_swapchain`
-- Swapchain images: allocate AHBs, import as VkImage via
-  `VK_ANDROID_external_memory_android_hardware_buffer` + `VK_KHR_external_memory`
-- Present: explicit Vulkan fence/semaphore wait, then send AHB over side-channel socket
-  (same `tawc_buffer_v1` protocol + `tawc_ahb_channel_v1` as EGL layer)
-- Surface capabilities: report extent from `wl_egl_window` (or equivalent), FIFO present mode
-- Thread safety: Vulkan's threading model differs from EGL — `vkAcquireNextImageKHR` and
-  `vkQueuePresentKHR` may be called from different threads, side-channel fd needs guarding
-- Reference: ARM's [vulkan-wsi-layer](https://github.com/ArmSoM/vulkan-wsi-layer) for
-  layer structure (but it uses dmabufs which we can't use)
-
-**Open questions needing research**
-- GPU synchronization: EGL layer does `glFinish()` before sending AHB. Vulkan needs explicit
-  fence wait. Does AHB cross-process sync work correctly with Vulkan fences through libhybris?
-- Validation layers: may conflict with libhybris symbol interception. Test without them first.
-- Format negotiation: which VkFormats map to AHB formats the compositor can import?
-  (RGBA8 should work, others need testing)
-
-**Testing**
-- vkcube (basic triangle rendering + present)
-- vkmark (stress test various rendering patterns)
+- Verify `vulkanplatform_wayland.so` is built by `--enable-wayland`
+- Test with vkcube, vkmark
+- GPU synchronization: Android Vulkan driver handles fences internally via `android_wlegl`
+- Format negotiation: which VkFormats map to gralloc formats the compositor can import?
 - Real apps: Firefox WebGPU, games
 
 ## wl_keyboard (non-text keys)
