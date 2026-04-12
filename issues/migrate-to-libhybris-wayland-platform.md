@@ -36,7 +36,7 @@ Things we currently implement in tawc-egl.c that libhybris already handles:
 
 ## Prerequisites
 
-- **CFI workaround in libhybris:** The bionic CFI binary patch currently in tawc-egl.c must be moved into our libhybris fork before tawc-egl.c is deleted. See [libhybris-cfi-patch.md](libhybris-cfi-patch.md).
+- **CFI workaround in libhybris:** ✅ Done — the `__cfi_slowpath` patch lives in `hybris/common/q/cfi_bypass.c` in our libhybris fork. tawc-egl.c no longer needs it. See `libhybris/TAWC_FORK.md`.
 
 ## Plan
 

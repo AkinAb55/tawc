@@ -64,14 +64,12 @@ See [notes/text-input.md](notes/text-input.md) for design.
 - ✅ Text input tests (basic text, backspace, multi-word)
 See [notes/testing.md](notes/testing.md) for details.
 
-## libhybris CFI Workaround
-Move the bionic CFI binary patch from `tawc-egl.c` into our libhybris fork's `android_linker_init()`.
-See [issues/libhybris-cfi-patch.md](issues/libhybris-cfi-patch.md) for details.
-
-- Add `cfi_bypass.c` to `hybris/common/`, call `hybris_patch_bionic_cfi()` from `android_linker_init()`
-- Patches `__cfi_slowpath` in bionic's `libdl.so` to `ret` (instruction-pattern match, Android 14 + 16+)
-- Test with GTK3 debug app and Firefox
-- Update `libhybris/TAWC_FORK.md`
+## libhybris CFI Workaround ✅ (2026-04-11)
+- ✅ `hybris/common/q/cfi_bypass.c` finds `__cfi_slowpath` via libdl.so's dynsym and patches it to `ret`
+- ✅ Called from `android_linker_init()` (early) and `link_image()` (after each lib loads, where libdl is finally mapped); idempotent via static flag
+- ✅ 16K-page safe (`sysconf(_SC_PAGESIZE)`), no W+X window (RW → write → RX mprotect sequence)
+- ✅ Removed `patch_bionic_cfi()` and `<sys/mman.h>` include from `client/tawc-wsi/tawc-egl.c`
+- ✅ Integration tests pass (text-input, click-cursor, firefox); documented in `libhybris/TAWC_FORK.md`
 
 ## Migrate to libhybris Wayland EGL Platform
 Replace our custom `tawc-egl.c` WSI layer and `tawc_buffer_v1` protocol with libhybris's built-in
