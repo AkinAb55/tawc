@@ -238,3 +238,154 @@ This can be revisited later if client-side allocation works well.
 5. Run integration tests
 6. Check for regressions: damage, resize, multi-surface, subsurfaces
 7. Performance comparison: frame timing with triple-buffer + vsync vs old double-buffer + glFinish
+
+## 2026-04-11 — first implementation attempt and findings
+
+Phases 1–3 of the plan landed cleanly. Phase 1 produced the expected artifacts
+(`libEGL_libhybris.so.0`, `eglplatform_wayland.so`, the glvnd ICD JSON). Phase 2
+wired `android_wlegl` through Smithay with a small C helper in
+`server/compositor/native/wlegl_import.c`. Phase 3 flipped the chroot profile
+to `HYBRIS_EGLPLATFORM=wayland` and dropped `/tmp/tawc-wsi` from
+`LD_LIBRARY_PATH`. End-to-end testing with `weston-simple-egl` then hit a
+device-specific gralloc handle format mismatch that blocks the whole
+client-side-allocation path on our test device (Pixel 4a, Adreno 660,
+LineageOS / Android 16).
+
+### What fails, in order
+
+1. **Client-side allocation produces an old-format handle.** libhybris's
+   gralloc initialization in `hybris/gralloc/gralloc.c:109` tries three
+   backends in order: GRALLOC_COMPAT (`graphic_buffer_allocator_allocate`
+   from libui, via `libui_compat_layer.so`), GRALLOC1 (the vendor gralloc1
+   HAL), and GRALLOC0. libhybris logs
+   `library "libui_compat_layer.so" not found` and falls through to gralloc1.
+   Vendor gralloc1 (`/vendor/lib64/hw/gralloc.default.so`) on this device
+   returns a `private_handle_t` with `numFds=1, numInts=8`.
+
+2. **Modern qdgralloc rejects that handle.** The Android-side mapper
+   (gralloc4) expects `numFds=2, numInts=23` and logs
+   `qdgralloc: Invalid gralloc handle: ver(12/12) ints(8/23) fds(1/2)` every
+   time any consumer touches it. We observed this both on the client side
+   (during allocation) and on the compositor side (during import).
+
+3. **No import path on the compositor side accepts the handle:**
+
+   - `AHardwareBuffer_createFromHandle(REGISTER)` → `rc=2`
+     (`HIDL IMapper::Error::BAD_BUFFER`).
+   - `AHardwareBuffer_createFromHandle(CLONE)` → `rc=-22` (EINVAL after
+     `native_handle_clone` / importBuffer).
+   - `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, anwb_wrapper)` without any
+     gralloc retain → `EGL_BAD_ACCESS`, kernel log
+     `gsl_memory_map_ext_fd failed`. The Adreno EGL driver internally
+     validates through qdgralloc and rejects for the same reason.
+   - Direct vendor gralloc1 `retain` from the compositor process was
+     attempted but blocked at load time: the untrusted-app linker namespace
+     refuses `libhardware.so`, `libcutils.so`, and `libvndksupport.so` (the
+     last would expose `android_load_sphal_library`). `<uses-native-library>`
+     in AndroidManifest only works for entries in
+     `/system/etc/public.libraries.txt`, which on Android 16 consists of the
+     NDK libraries only (`libEGL.so`, `libGLESv*.so`, `libnativewindow.so`,
+     `libvulkan.so`, `libandroid.so`, …). Vendor HAL modules, libhardware,
+     libcutils, and libvndksupport are all excluded.
+
+So the compositor side is boxed in by the app sandbox: the only gralloc path
+we can actually reach from untrusted_app is whatever's inside the EGL/Vulkan
+drivers themselves, and those drivers use the modern gralloc4 mapper which
+refuses libhybris's handles.
+
+### Root cause
+
+libhybris without `libui_compat_layer.so` falls back to a gralloc API
+(gralloc1) whose handle layout the device's current vendor gralloc mapper
+(gralloc4) no longer understands. The mismatch is symmetric — the compositor
+can't import those handles and the client's own EGL driver would reject them
+if it went through the mapper path. Previous work with `tawc-egl.c` avoided
+the problem by calling `AHardwareBuffer_allocate` directly from the chroot
+(bypassing libhybris gralloc entirely), so this is the first time we've hit
+it.
+
+### Code state at the point we stopped
+
+- `server/compositor/protocols/android_wlegl.xml` — copy of the libhybris
+  protocol, wired via `wayland-scanner`.
+- `server/compositor/src/protocol.rs` — generates the `android_wlegl` server
+  bindings.
+- `server/compositor/src/wlegl.rs` — full `AndroidWlegl` /
+  `AndroidWleglHandle` / `WlBuffer<WleglBufferData>` dispatch. Holds an
+  opaque `ANativeWindowBuffer*` per buffer and lazily imports to `GlesTexture`.
+- `server/compositor/native/wlegl_import.c` — reconstructs `native_handle_t`
+  (hand-rolled, since libcutils isn't reachable), tries to open vendor
+  gralloc via `android_load_sphal_library` (fails at the dlopen of
+  `libvndksupport.so`), then wraps the handle in an `ANativeWindowBuffer`
+  and returns it as an EGLClientBuffer. The gralloc retain path is gated on
+  availability and currently always `NULL`.
+- `server/compositor/native/include/` — subset of halium android-headers
+  (`hardware/`, `cutils/`, `system/`, `nativebase/`, `apex/`, `vndk/`, `log/`,
+  `android/`) vendored for the C build.
+- `server/compositor/src/gl_import.rs` — added `import_client_buffer` that
+  takes a raw EGLClientBuffer and runs the existing
+  `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` → `GL_TEXTURE_EXTERNAL_OES`
+  pipeline.
+- `server/compositor/src/{compositor,render,event_loop}.rs` — swapped
+  `tawc_buffer_v1` / `SurfaceAhbState` for `android_wlegl` /
+  `SurfaceWleglState`. Commit handler picks up attached `WleglBufferData`
+  buffers, releases the previous one, and tracks the current one for
+  rendering. `import_wlegl_buffers` walks surfaces and lazily runs the C
+  helper through `gl_import`.
+- `client/build-libhybris` — adds `--enable-wayland`,
+  `--disable-wayland_serverside_buffers`, `--enable-glvnd`, installs
+  `libglvnd python wayland-protocols`, symlinks the ICD JSON into
+  `/usr/share/glvnd/egl_vendor.d/`, and cleans stale non-`_libhybris`
+  `libEGL.so`/`libGLESv2.so` left over from the previous build.
+- `client/arch-chroot-run` — `HYBRIS_EGLPLATFORM=wayland`,
+  `LD_LIBRARY_PATH=/usr/local/lib` (no more `/tmp/tawc-wsi`).
+
+Phase 4 dead-code cleanup was deliberately not done yet; `tawc-egl.c`,
+`libgl-shim.c`, `libglesv2-shim.c`, and `tawc_buffer_v1.xml` are still present
+so we can fall back to the old path if we decide to abandon this migration.
+
+### Options to unblock
+
+Three viable routes, ranked by how fork-local they are:
+
+1. **Patch libhybris gralloc to allocate via `AHardwareBuffer_allocate`.**
+   Add a new backend to `hybris/gralloc/gralloc.c` that wraps libnativewindow
+   (`AHardwareBuffer_allocate`, `AHardwareBuffer_getNativeHandle`,
+   `AHardwareBuffer_describe`, `AHardwareBuffer_release`). Route `lock`,
+   `unlock`, and `retain`/`release` through `AHardwareBuffer_lock`/
+   `AHardwareBuffer_unlock` and AHB refcounting. Make this backend preferred
+   when `libnativewindow.so` resolves at runtime. Modern handle format by
+   construction; our compositor's `AHardwareBuffer_createFromHandle` path
+   then works. Fork-local change in `libhybris`, ~1–2 days. This also
+   side-steps `libui_compat_layer.so` entirely for every future Halium-less
+   chroot.
+
+2. **Server-side buffer allocation.** Rebuild libhybris with
+   `--enable-wayland_serverside_buffers`. Implement `get_server_buffer_handle`
+   in the compositor: allocate via `AHardwareBuffer_allocate`, pull out the
+   native handle via `AHardwareBuffer_getNativeHandle` (public on
+   libnativewindow.so — already verified on the device), emit `buffer_fd` /
+   `buffer_ints` / `buffer` events. The *compositor* then owns allocation and
+   the handle format is modern by construction on our side. The open risk is
+   whether the **client** (libhybris gralloc1 in the chroot) can import
+   those modern handles; `private_handle_t` is shared between gralloc1 and
+   gralloc4 inside Qualcomm's vendor library, so in practice it usually
+   works, but this needs to be verified before committing.
+
+3. **Build `libui_compat_layer.so` from Halium.** Restores libhybris's
+   preferred GRALLOC_COMPAT path (`graphic_buffer_allocator_allocate`), which
+   routes through modern `GraphicBuffer` and produces gralloc4-compatible
+   handles. Needs AOSP / Halium build tooling; not fork-local. High effort
+   and device-specific — different Android versions want different compat
+   layers.
+
+A fourth option is to revert — keep `tawc-egl.c`. That loses the gains
+described at the top of this document (triple buffering, vsync, proper
+damage, fewer lines of our own code, etc.).
+
+### Recommendation
+
+Option 1. It's the smallest change that actually fixes the root cause, it's
+entirely within our libhybris fork, and it improves every other libhybris
+consumer in the chroot at the same time. The NDK path (`AHardwareBuffer_*`) is
+public and stable, so there's nothing device-specific to maintain.
