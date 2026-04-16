@@ -111,7 +111,11 @@ impl Drop for WleglBufferData {
 }
 
 // SAFETY: AHardwareBuffer refcounting is thread-safe; the pointer itself is
-// immutable after construction.
+// immutable after construction. The Mutex<Option<GlesTexture>> field is also
+// safe to send, but GlesTexture drop must happen on the GL thread — this is
+// guaranteed because WleglBufferData lives as wl_buffer user-data, and
+// resource cleanup runs during dispatch_clients on the compositor thread
+// (which is the GL thread).
 unsafe impl Send for WleglBufferData {}
 unsafe impl Sync for WleglBufferData {}
 

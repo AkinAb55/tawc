@@ -16,9 +16,9 @@ a configure. The PopupManager handles the popup tree hierarchy and provides popu
 relative to their toplevel root.
 
 **Note:** Firefox uses wl_subsurface (not xdg_popup) for its dropdown menus. Both paths go
-through the same rendering code in `draw_shm_surfaces`.
+through the same surface tree drawing code.
 
-## Wayland subsurface z-order for wlegl (AHB-backed) surfaces
+## Wayland subsurface z-order
 
 Firefox with WebRender creates two wlegl surfaces per window: a toplevel (main
 thread, holds the `xdg_toplevel` role plus a placeholder buffer) and a
@@ -27,15 +27,13 @@ chrome + page content from the Renderer thread. The subsurface is above the
 toplevel by default (Wayland z-order), so the subsurface's pixels must overlap
 the toplevel's placeholder.
 
-`draw_wlegl_surfaces` walks each toplevel tree with `with_surface_tree_downward`
-and then **reverses** the collected list before drawing. `with_surface_tree_downward`
-invokes its processor post-order (children first, then parent), which is the
-*reverse* of Wayland z-order — drawing in visit order would paint the toplevel
-last and cover the subsurface. Without the reverse, Firefox renders as a black
+Both wlegl and SHM surfaces use a unified drawing path: `collect_surface_draws`
+walks each toplevel tree plus its popups with `with_surface_tree_downward`,
+which invokes its processor post-order (children first, then parent). Each tree
+is independently **reversed** before drawing so parents are drawn first (behind)
+and subsurfaces last (on top). Without the reverse, Firefox renders as a black
 rectangle because the toplevel's placeholder buffer occludes WebRender's output.
-The same reversal is not needed for `draw_shm_surfaces` today only because
-nothing produces overlapping SHM subsurfaces with this ordering pathology; if
-an app starts doing so, apply the same `reverse()` there.
+Popup trees are appended after their parent toplevel so they draw on top.
 
 ## Coordinate System
 

@@ -12,6 +12,8 @@ use smithay::backend::renderer::gles::{
 };
 use smithay::utils::{Point, Rectangle, Size, Transform};
 
+use crate::gl_import::AhbTextureImporter;
+
 /// Dark turquoise target color in the upper-right corner (R, G, B).
 const TURQUOISE: (f32, f32, f32) = (0.1, 0.75, 0.95);
 
@@ -24,9 +26,9 @@ pub struct BackgroundRenderer {
 impl BackgroundRenderer {
     /// Compile the gradient shader and create a 1x1 dummy texture.
     /// Must be called with EGL context current.
-    pub fn new(renderer: &mut GlesRenderer) -> Option<Self> {
+    pub fn new(renderer: &mut GlesRenderer, importer: &AhbTextureImporter) -> Option<Self> {
         let shader = compile_gradient_shader(renderer)?;
-        let texture = create_dummy_texture(renderer)?;
+        let texture = importer.create_dummy_texture_2d(renderer)?;
         Some(BackgroundRenderer { shader, texture })
     }
 
@@ -114,63 +116,3 @@ void main() {
     }
 }
 
-/// Create a 1x1 white GL texture wrapped as a GlesTexture.
-fn create_dummy_texture(renderer: &GlesRenderer) -> Option<GlesTexture> {
-    use std::ffi::c_void;
-
-    let lib = match unsafe { libloading::Library::new("libGLESv2.so") } {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Background: failed to load libGLESv2.so: {}", e);
-            return None;
-        }
-    };
-
-    unsafe {
-        type FnGenTextures = unsafe extern "C" fn(i32, *mut u32);
-        type FnBindTexture = unsafe extern "C" fn(u32, u32);
-        type FnTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
-        type FnTexParameteri = unsafe extern "C" fn(u32, u32, i32);
-
-        macro_rules! load {
-            ($name:expr, $ty:ty) => {{
-                let sym: libloading::Symbol<*const c_void> = lib.get($name).ok()?;
-                std::mem::transmute::<*const c_void, $ty>(*sym)
-            }};
-        }
-
-        let gen_textures: FnGenTextures = load!(b"glGenTextures\0", FnGenTextures);
-        let bind_texture: FnBindTexture = load!(b"glBindTexture\0", FnBindTexture);
-        let tex_image_2d: FnTexImage2D = load!(b"glTexImage2D\0", FnTexImage2D);
-        let tex_parameteri: FnTexParameteri = load!(b"glTexParameteri\0", FnTexParameteri);
-
-        const GL_TEXTURE_2D: u32 = 0x0DE1;
-        const GL_RGBA: u32 = 0x1908;
-        const GL_UNSIGNED_BYTE: u32 = 0x1401;
-        const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
-        const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
-        const GL_NEAREST: i32 = 0x2600;
-
-        let mut tex = 0u32;
-        gen_textures(1, &mut tex);
-        bind_texture(GL_TEXTURE_2D, tex);
-        let white: [u8; 4] = [255, 255, 255, 255];
-        tex_image_2d(
-            GL_TEXTURE_2D, 0, GL_RGBA as i32, 1, 1, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE, white.as_ptr() as *const c_void,
-        );
-        tex_parameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        tex_parameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        bind_texture(GL_TEXTURE_2D, 0);
-
-        std::mem::forget(lib);
-
-        let texture = GlesTexture::from_raw_with_flags(
-            renderer, None, false, false, false, tex,
-            Size::from((1, 1)),
-        );
-
-        info!("Background 1x1 dummy texture created (GL tex {})", tex);
-        Some(texture)
-    }
-}

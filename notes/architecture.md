@@ -21,7 +21,8 @@ The compositor (`server/compositor/src/`) is split into:
 - **egl_android.rs** -- Raw EGL context creation and `AndroidNativeSurface` for Smithay.
 - **wlegl.rs** -- `android_wlegl` server: reconstruct client-allocated gralloc buffers
   into AHardwareBuffers via the C helper, expose them as wl_buffers.
-- **gl_import.rs** -- Import AHardwareBuffer as GlesTexture via EGL/GL extensions.
+- **gl_import.rs** -- GL/EGL extension loading and texture import. Imports AHardwareBuffers
+  as GlesTextures and provides shared GL utilities (dummy textures) to other modules.
 - **protocol.rs** -- wayland-scanner generated code for `android_wlegl`.
 - **native/wlegl_import.c** -- ~50-line C helper calling
   `AHardwareBuffer_createFromHandle(REGISTER)` (dlsym'd from libnativewindow.so).

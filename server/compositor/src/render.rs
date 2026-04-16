@@ -210,13 +210,17 @@ pub fn import_wlegl_buffers(state: &mut TawcState, render: &mut RenderState) -> 
 
 fn ensure_wlegl_texture(render: &RenderState, data: &WleglBufferData) -> bool {
     // Make EGL context current for GL operations
-    unsafe {
+    let ok = unsafe {
         smithay::backend::egl::ffi::egl::MakeCurrent(
             render.raw_egl_display,
             smithay::backend::egl::ffi::egl::NO_SURFACE,
             smithay::backend::egl::ffi::egl::NO_SURFACE,
             render.raw_egl_context,
-        );
+        )
+    };
+    if ok == smithay::backend::egl::ffi::egl::FALSE {
+        error!("eglMakeCurrent failed in ensure_wlegl_texture");
+        return false;
     }
     let res = render.importer.import_ahb(
         &render.renderer,
@@ -343,17 +347,131 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
 // Frame rendering
 // ---------------------------------------------------------------------------
 
+/// A surface ready to draw: texture, logical position, and buffer dimensions.
+struct SurfaceDraw {
+    texture: GlesTexture,
+    logical_x: i32,
+    logical_y: i32,
+    buf_w: i32,
+    buf_h: i32,
+}
+
+/// Walk a single surface tree, collecting drawable surfaces at their absolute
+/// logical positions. `offset_x`/`offset_y` is the root's position (0,0 for
+/// toplevels, popup geometry origin for popups).
+fn collect_tree_draws(
+    root: &WlSurface,
+    offset_x: i32,
+    offset_y: i32,
+    surface_fn: &impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32)>,
+    out: &mut Vec<SurfaceDraw>,
+) {
+    with_surface_tree_downward(
+        root,
+        (offset_x, offset_y),
+        |_surf, states, &(px, py)| {
+            let loc = states
+                .cached_state
+                .get::<SubsurfaceCachedState>()
+                .current()
+                .location;
+            TraversalAction::DoChildren((px + loc.x, py + loc.y))
+        },
+        |surf, _states, &(abs_x, abs_y)| {
+            if let Some((tex, w, h)) = surface_fn(surf) {
+                out.push(SurfaceDraw {
+                    texture: tex,
+                    logical_x: abs_x,
+                    logical_y: abs_y,
+                    buf_w: w,
+                    buf_h: h,
+                });
+            }
+        },
+        |_, _, _| true,
+    );
+}
+
+/// Walk all toplevel and popup surface trees, collecting drawable surfaces.
+///
+/// Each tree is independently reversed for correct z-order:
+/// `with_surface_tree_downward` processes children before parents (post-order),
+/// but Wayland stacking puts subsurfaces above their parent, so we need
+/// parents drawn first (behind) and children drawn last (on top).
+/// Firefox/WebRender relies on this — its toplevel wl_surface holds a
+/// placeholder buffer and WebRender draws the real UI into a subsurface.
+///
+/// Popup trees are appended after their parent toplevel, so they draw on top.
+fn collect_surface_draws(
+    state: &TawcState,
+    surface_fn: impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32)>,
+) -> Vec<SurfaceDraw> {
+    let mut draws = Vec::new();
+
+    for toplevel in &state.toplevels {
+        let root = toplevel.wl_surface();
+
+        let start = draws.len();
+        collect_tree_draws(root, 0, 0, &surface_fn, &mut draws);
+        draws[start..].reverse();
+
+        for (popup, location) in PopupManager::popups_for_surface(root) {
+            let start = draws.len();
+            collect_tree_draws(popup.wl_surface(), location.x, location.y, &surface_fn, &mut draws);
+            draws[start..].reverse();
+        }
+    }
+
+    draws
+}
+
+/// Draw collected surfaces with the logical→physical coordinate transform.
+///
+/// Subsurface positions are in logical (surface-local) coords, but smithay's
+/// GlesRenderer uses a GL projection where Y=0 is at the screen bottom (not
+/// top). So we both scale logical→physical AND flip Y:
+///
+///   physical_x = logical_x * scale
+///   physical_y = screen_h - logical_y * scale - buf_h
+fn draw_surfaces(
+    draws: &[SurfaceDraw],
+    frame: &mut GlesFrame<'_, '_>,
+    scale: i32,
+    screen_h: i32,
+    shader: Option<&GlesTexProgram>,
+    uniforms: &[Uniform],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for draw in draws {
+        let src = Rectangle::from_size(
+            Size::<i32, smithay::utils::Buffer>::from((draw.buf_w, draw.buf_h)).to_f64(),
+        );
+        let dst = Rectangle::new(
+            Point::from((
+                draw.logical_x * scale,
+                screen_h - draw.logical_y * scale - draw.buf_h,
+            )),
+            Size::from((draw.buf_w, draw.buf_h)),
+        );
+        let damage = Rectangle::from_size(Size::from((draw.buf_w, draw.buf_h)));
+
+        frame.render_texture_from_to(
+            &draw.texture, src, dst, &[damage], &[], Transform::Flipped180, 1.0,
+            shader, uniforms,
+        )?;
+    }
+    Ok(())
+}
+
 /// Render one frame: bind EGL surface, clear, draw all surfaces, swap.
 pub fn render_frame(
     state: &TawcState,
     render: &mut RenderState,
     output_size: Size<i32, smithay::utils::Physical>,
-    _frame_count: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Take a raw clone of the custom shader ref up front — `frame` below takes
-    // an exclusive borrow on `render.renderer` so we can't re-borrow
-    // `render.wlegl_opaque_shader` through it.
+    // Clone shader refs up front — `frame` below takes an exclusive borrow on
+    // `render.renderer` so we can't re-borrow render fields through it.
     let wlegl_shader = render.wlegl_opaque_shader.clone();
+    let shm_shader = render.shm_tint_shader.clone();
     let mut target = render.renderer.bind(&mut render.egl_surface)?;
 
     let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
@@ -363,205 +481,34 @@ pub fn render_frame(
         bg.draw(&mut frame, output_size.w, output_size.h)?;
     }
 
+    let scale = state.output_scale;
     let screen_h = output_size.h;
 
-    // Draw wlegl (AHB-backed) surfaces by walking each toplevel's surface
-    // tree so subsurface positioning is respected. Firefox/WebRender creates
-    // a subsurface on the Renderer thread for page content and the toplevel
-    // on the main thread for chrome; drawing every wlegl surface at (0,0)
-    // fullscreen lets whichever gets iterated last cover everything —
-    // usually the subsurface covers the chrome, giving a blank/black window.
-    draw_wlegl_surfaces(state, &mut frame, screen_h, wlegl_shader.as_ref())?;
+    // Draw wlegl (AHB-backed GPU) surfaces. Buffers are drawn 1:1 at their
+    // pixel dimensions; see SurfaceWleglState for why we don't honour
+    // wl_surface.set_buffer_scale here.
+    let wlegl_draws = collect_surface_draws(state, |surf| {
+        let ws = state.surface_wlegl.get(surf)?;
+        let buf = ws.current_buffer.as_ref()?;
+        let data = buf.data::<WleglBufferData>()?;
+        let tex = data.texture.lock().unwrap().clone()?;
+        Some((tex, ws.committed_width, ws.committed_height))
+    });
+    draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
 
-    // Draw SHM surfaces from toplevel surface trees with subsurface positioning
-    draw_shm_surfaces(state, &mut frame, screen_h, &render.shm_tint_shader)?;
+    // Draw SHM fallback surfaces (magenta-tinted to make the fallback obvious)
+    let shm_draws = collect_surface_draws(state, |surf| {
+        if state.surface_wlegl.contains_key(surf) { return None; }
+        let ss = state.surface_shm.get(surf)?;
+        let tex = ss.texture.as_ref()?.clone();
+        Some((tex, ss.committed_width, ss.committed_height))
+    });
+    draw_surfaces(&shm_draws, &mut frame, scale, screen_h, shm_shader.as_ref(),
+        &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))])?;
 
     let _ = frame.finish()?;
     drop(target);
     render.egl_surface.swap_buffers(None)?;
-    Ok(())
-}
-
-/// Walk each toplevel tree and draw wlegl surfaces at their subsurface
-/// offsets. Buffers are drawn 1:1 at their pixel dimensions (matching the
-/// SHM draw path); see `SurfaceWleglState` for why we don't honour
-/// `wl_surface.set_buffer_scale` here.
-fn draw_wlegl_surfaces(
-    state: &TawcState,
-    frame: &mut GlesFrame<'_, '_>,
-    screen_h: i32,
-    wlegl_shader: Option<&GlesTexProgram>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let scale = state.output_scale;
-    let toplevel_surfaces: Vec<_> = state
-        .toplevels
-        .iter()
-        .map(|t| t.wl_surface().clone())
-        .collect();
-
-    let mut to_render: Vec<(GlesTexture, i32, i32, i32, i32)> = Vec::new();
-
-    let collect_tree = |root: &WlSurface, offset_x: i32, offset_y: i32,
-                        to_render: &mut Vec<(GlesTexture, i32, i32, i32, i32)>| {
-        with_surface_tree_downward(
-            root,
-            (offset_x, offset_y),
-            |_surf, states, &(px, py)| {
-                let loc = states
-                    .cached_state
-                    .get::<SubsurfaceCachedState>()
-                    .current()
-                    .location;
-                TraversalAction::DoChildren((px + loc.x, py + loc.y))
-            },
-            |surf, _states, &(abs_x, abs_y)| {
-                let Some(wlegl_state) = state.surface_wlegl.get(surf) else { return };
-                let Some(ref buf) = wlegl_state.current_buffer else { return };
-                let Some(data) = buf.data::<WleglBufferData>() else { return };
-                let tex_guard = data.texture.lock().unwrap();
-                let Some(ref tex) = *tex_guard else { return };
-                to_render.push((
-                    tex.clone(),
-                    abs_x,
-                    abs_y,
-                    wlegl_state.committed_width,
-                    wlegl_state.committed_height,
-                ));
-            },
-            |_, _, _| true,
-        );
-    };
-
-    for root in &toplevel_surfaces {
-        collect_tree(root, 0, 0, &mut to_render);
-    }
-
-    // with_surface_tree_downward invokes its processor post-order (children
-    // first, then parent), which reverses Wayland's z-order: subsurfaces are
-    // above their parent by default, so they must be drawn last to appear
-    // on top. Firefox/WebRender relies on this — its toplevel wl_surface
-    // holds a placeholder buffer and WebRender draws the UI into a
-    // subsurface; post-order painted the toplevel last, occluding the UI.
-    to_render.reverse();
-
-    for (texture, logical_x, logical_y, buf_w, buf_h) in &to_render {
-        let src = Rectangle::from_size(
-            Size::<i32, smithay::utils::Buffer>::from((*buf_w, *buf_h)).to_f64(),
-        );
-        let dst = Rectangle::new(
-            Point::from((
-                logical_x * scale,
-                screen_h - logical_y * scale - buf_h,
-            )),
-            Size::from((*buf_w, *buf_h)),
-        );
-        let damage = Rectangle::from_size(Size::from((*buf_w, *buf_h)));
-
-        frame.render_texture_from_to(
-            &texture, src, dst, &[damage], &[], Transform::Flipped180, 1.0,
-            wlegl_shader, &[],
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Collect and draw all SHM-backed surfaces from toplevel and popup trees.
-///
-/// Coordinate transform: subsurface positions are in logical (surface-local)
-/// coords, but smithay's GlesRenderer uses a GL projection where Y=0 is at
-/// the screen bottom (not top). So we must both scale logical→physical AND
-/// flip Y. The formula for each surface is:
-///
-///   physical_x = logical_x * scale
-///   physical_y = screen_h - logical_y * scale - texture_h
-///
-/// AHB surfaces (drawn in render_frame) skip this because they're always
-/// fullscreen at the origin — the transform is a no-op at (0, 0, full size).
-fn draw_shm_surfaces(
-    state: &TawcState,
-    frame: &mut GlesFrame<'_, '_>,
-    screen_h: i32,
-    shm_shader: &Option<GlesTexProgram>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let scale = state.output_scale;
-    let toplevel_surfaces: Vec<_> = state
-        .toplevels
-        .iter()
-        .map(|t| t.wl_surface().clone())
-        .collect();
-
-    // Gather (texture, logical_x, logical_y, buf_w, buf_h) for every SHM surface.
-    let mut to_render: Vec<(GlesTexture, i32, i32, i32, i32)> = Vec::new();
-
-    // Walk a surface tree rooted at `root`, accumulating subsurface offsets
-    // starting from (offset_x, offset_y) in logical coords.
-    let collect_tree = |root: &WlSurface, offset_x: i32, offset_y: i32,
-                        to_render: &mut Vec<(GlesTexture, i32, i32, i32, i32)>| {
-        with_surface_tree_downward(
-            root,
-            (offset_x, offset_y),
-            |_surf, states, &(px, py)| {
-                let loc = states
-                    .cached_state
-                    .get::<SubsurfaceCachedState>()
-                    .current()
-                    .location;
-                TraversalAction::DoChildren((px + loc.x, py + loc.y))
-            },
-            |surf, _states, &(abs_x, abs_y)| {
-                // abs_x/abs_y already include this surface's subsurface offset
-                // (accumulated by the "down" callback above). Don't add loc again.
-                if let Some(shm_state) = state.surface_shm.get(surf) {
-                    if let Some(ref tex) = shm_state.texture {
-                        to_render.push((
-                            tex.clone(),
-                            abs_x,
-                            abs_y,
-                            shm_state.committed_width,
-                            shm_state.committed_height,
-                        ));
-                    }
-                }
-            },
-            |_, _, _| true,
-        );
-    };
-
-    for root in &toplevel_surfaces {
-        collect_tree(root, 0, 0, &mut to_render);
-
-        for (popup, location) in PopupManager::popups_for_surface(root) {
-            collect_tree(popup.wl_surface(), location.x, location.y, &mut to_render);
-        }
-    }
-
-    for (texture, logical_x, logical_y, tex_w, tex_h) in &to_render {
-        let src = Rectangle::from_size(
-            Size::<i32, smithay::utils::Buffer>::from((*tex_w, *tex_h)).to_f64(),
-        );
-        let dst = Rectangle::new(
-            Point::from((
-                logical_x * scale,
-                screen_h - logical_y * scale - tex_h,
-            )),
-            Size::from((*tex_w, *tex_h)),
-        );
-        let damage = Rectangle::from_size(Size::from((*tex_w, *tex_h)));
-
-        frame.render_texture_from_to(
-            &texture,
-            src,
-            dst,
-            &[damage],
-            &[],
-            Transform::Flipped180,
-            1.0,
-            shm_shader.as_ref(),
-            &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))],
-        )?;
-    }
-
     Ok(())
 }
 

@@ -41,6 +41,8 @@ the bound is still on the API.
    that documents the single-threaded assumption explicitly. Cheapest;
    trips up anyone who later tries to multi-thread the dispatch.
 
-Today (1) is the cleanest if/when this matters. Until then, this
-issue is a tripwire for the next contributor — file kept so the
-`unsafe impl` doesn't read as endorsed.
+Today (1) is the cleanest if/when this matters. The safety comment
+on the `unsafe impl` now documents the GlesTexture drop-thread
+requirement and why it's safe in practice (resource cleanup runs on
+the compositor/GL thread). This issue remains as a tripwire for
+anyone who later tries to multi-thread the dispatch.

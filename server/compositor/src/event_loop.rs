@@ -281,7 +281,6 @@ pub fn run(
                 &data.state,
                 &mut data.render,
                 data.output_size,
-                data.frame_count,
             ) {
                 error!("Render error: {}", e);
             }

@@ -1,7 +1,9 @@
-//! Import AHardwareBuffer as a GlesTexture via EGL/GL extensions.
+//! GL/EGL extension loading and texture import.
 //!
-//! Uses eglGetNativeClientBufferANDROID + eglCreateImageKHR + glEGLImageTargetTexture2DOES
-//! to create a GL texture backed by an AHB, then wraps it in Smithay's GlesTexture.
+//! Primary purpose: import AHardwareBuffers as GlesTextures via
+//! eglGetNativeClientBufferANDROID + eglCreateImageKHR + glEGLImageTargetTexture2DOES.
+//! Also provides general GL texture utilities (e.g. creating dummy textures) so
+//! that other modules don't need to independently load GL function pointers.
 
 use std::ffi::{c_void, CString};
 use log::{info, error};
@@ -16,27 +18,31 @@ const EGL_NATIVE_BUFFER_ANDROID: u32 = 0x3140;
 const EGL_IMAGE_PRESERVED_KHR: i32 = 0x30D2;
 
 // GL constants
-#[allow(dead_code)]
 const GL_TEXTURE_2D: u32 = 0x0DE1;
 const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
 const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
 const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
 const GL_LINEAR: i32 = 0x2601;
+const GL_NEAREST: i32 = 0x2600;
+const GL_RGBA: u32 = 0x1908;
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
 
 // Function pointer types
 type FnEglGetNativeClientBufferANDROID = unsafe extern "C" fn(*const c_void) -> *const c_void;
 type FnGlGenTextures = unsafe extern "C" fn(i32, *mut u32);
 type FnGlBindTexture = unsafe extern "C" fn(u32, u32);
 type FnGlTexParameteri = unsafe extern "C" fn(u32, u32, i32);
+type FnGlTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
 type FnGlEGLImageTargetTexture2DOES = unsafe extern "C" fn(u32, *const c_void);
 type FnGlGetError = unsafe extern "C" fn() -> u32;
 
-/// Holds loaded EGL/GL extension function pointers for AHB import.
+/// Loaded EGL/GL extension function pointers for texture import and creation.
 pub struct AhbTextureImporter {
     egl_get_native_client_buffer: FnEglGetNativeClientBufferANDROID,
     gl_gen_textures: FnGlGenTextures,
     gl_bind_texture: FnGlBindTexture,
     gl_tex_parameteri: FnGlTexParameteri,
+    gl_tex_image_2d: FnGlTexImage2D,
     gl_egl_image_target_texture_2d_oes: FnGlEGLImageTargetTexture2DOES,
     gl_get_error: FnGlGetError,
 }
@@ -79,6 +85,7 @@ impl AhbTextureImporter {
                 gl_gen_textures: std::mem::transmute(load_gl(&gles_lib, b"glGenTextures\0")?),
                 gl_bind_texture: std::mem::transmute(load_gl(&gles_lib, b"glBindTexture\0")?),
                 gl_tex_parameteri: std::mem::transmute(load_gl(&gles_lib, b"glTexParameteri\0")?),
+                gl_tex_image_2d: std::mem::transmute(load_gl(&gles_lib, b"glTexImage2D\0")?),
                 gl_egl_image_target_texture_2d_oes: std::mem::transmute(
                     load_egl("glEGLImageTargetTexture2DOES")?
                 ),
@@ -110,6 +117,30 @@ impl AhbTextureImporter {
                 return Err("eglGetNativeClientBufferANDROID returned null".into());
             }
             self.import_client_buffer(renderer, raw_display, client_buffer, width, height)
+        }
+    }
+
+    /// Create a 1x1 white GL_TEXTURE_2D, useful as a shader-only canvas
+    /// (e.g. the background gradient draws entirely in the fragment shader).
+    pub fn create_dummy_texture_2d(&self, renderer: &GlesRenderer) -> Option<GlesTexture> {
+        unsafe {
+            let mut tex = 0u32;
+            (self.gl_gen_textures)(1, &mut tex);
+            (self.gl_bind_texture)(GL_TEXTURE_2D, tex);
+            let white: [u8; 4] = [255, 255, 255, 255];
+            (self.gl_tex_image_2d)(
+                GL_TEXTURE_2D, 0, GL_RGBA as i32, 1, 1, 0,
+                GL_RGBA, GL_UNSIGNED_BYTE, white.as_ptr() as *const c_void,
+            );
+            (self.gl_tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            (self.gl_tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            (self.gl_bind_texture)(GL_TEXTURE_2D, 0);
+
+            let texture = GlesTexture::from_raw_with_flags(
+                renderer, None, false, false, false, tex, Size::from((1, 1)),
+            );
+            info!("1x1 dummy texture created (GL tex {})", tex);
+            Some(texture)
         }
     }
 
@@ -147,6 +178,7 @@ impl AhbTextureImporter {
         let mut tex: u32 = 0;
         (self.gl_gen_textures)(1, &mut tex);
         if tex == 0 {
+            egl_ffi::egl::DestroyImageKHR(raw_display, egl_image);
             return Err("glGenTextures failed".into());
         }
 
@@ -155,9 +187,14 @@ impl AhbTextureImporter {
 
         let gl_err = (self.gl_get_error)();
         if gl_err != 0 {
+            egl_ffi::egl::DestroyImageKHR(raw_display, egl_image);
             error!("GL error after EGLImageTargetTexture2DOES: 0x{:X}", gl_err);
             return Err(format!("glEGLImageTargetTexture2DOES failed: GL error 0x{:X}", gl_err));
         }
+
+        // The GL texture holds its own reference to the underlying buffer.
+        // Destroy the intermediate EGLImage to avoid leaking one per import.
+        egl_ffi::egl::DestroyImageKHR(raw_display, egl_image);
 
         (self.gl_tex_parameteri)(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         (self.gl_tex_parameteri)(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
