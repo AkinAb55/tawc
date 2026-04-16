@@ -76,17 +76,13 @@ These live as patches in our libhybris fork (see `libhybris/TAWC_FORK.md`):
    software WebRender) when they're NULL. The stubs honestly return
    "no info" (NULL / EGL_FALSE) without advertising
    `EGL_EXT_device_query`.
-2. **Shared per-display `wl_event_queue`** — Firefox/WebRender creates
-   two `wl_egl_window`s on different threads. With per-window queues
-   (upstream behaviour) the main thread's `wl_buffer.release` events
-   sit on a queue nobody dispatches, deadlocking the Renderer thread's
-   dequeueBuffer.
-3. **Attach + commit inside `queueBuffer`** — Adreno's WebRender path
+2. **Attach + commit inside `queueBuffer`** — Adreno's WebRender path
    pushes frames through `queueBuffer` from a driver-internal thread
    that never calls `eglSwapBuffers`, so upstream libhybris's
    `finishSwap`-driven attach never fires. We drain the queue inline
    from `queueBuffer` so the submission path doesn't depend on
-   `eglSwapBuffers`.
+   `eglSwapBuffers`. Without this patch: confirmed black screen on
+   Pixel 4a (Adreno 618).
 
 ## Known Issues
 

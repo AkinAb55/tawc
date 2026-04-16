@@ -64,7 +64,27 @@ adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
    DISPLAY= firefox --no-remote'"
 ```
 
-## Possible next steps
+## Workaround
+
+Setting these prefs in `user.js` inside the profile directory suppresses the
+crash recovery dialog and lets Firefox start normally:
+
+```js
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.resume_from_crash", false);
+```
+
+The profile must already exist (run Firefox once headless to create it, then
+push the file):
+
+```
+adb push /tmp/firefox-user.js /data/local/tmp/firefox-user.js
+adb shell su -c "cp /data/local/tmp/firefox-user.js \
+  /data/local/arch-chroot/root/.mozilla/firefox/<profile>.default-release/user.js"
+```
+
+## Possible next steps (root cause)
 
 1. Generate `/etc/machine-id` in the chroot (`systemd-machine-id-setup` or
    `dbus-uuidgen > /etc/machine-id`).

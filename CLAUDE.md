@@ -51,10 +51,18 @@ I'm letting you play with my phone, try not to fuck it up.
 ## Organization
 Avoid junking up devices (delete screenshots when done). On the phone, things stay in `/data/local/arch-chroot/`, `/data/local/claude-debug` (**NOT** `/data/local/tmp`).
 
-## External Repos
+## Libhybris fork
 - **libhybris fork:** https://github.com/wmww/libhybris -- clone to `./libhybris` if needed (`git clone https://github.com/wmww/libhybris.git ./libhybris`). Already in `.gitignore`.
 - **Build libhybris from local source:** `bash client/build-libhybris [--clean]` — syncs `./libhybris` to phone and builds inside chroot.
 - **Fork docs:** `libhybris/TAWC_FORK.md` documents the fork's lineage and our changes. Keep it up to date when modifying libhybris.
+- Our libhybris fork is a set of clean, self-contained commits on top of https://github.com/libhybris/libhybris
+- We combine commits that are logically part of the same change, unless the commits originally came from other forks (not written by us)
+- The libhybris commit history post-upstream is not a "history", it is a set of commits. Old commits can and should be edited when our implementation of that feature/fix changes
+- The final libhybris commit is always the one that adds TAWC_FORK.md. Changes to TAWC_FORK.md are always amended into this final commit rather than being added as additional commits like you would normally do
+- TAWC_FORK.md does not reference any of our commits by hash, as those would need to be kept up to date every change
+- Only commit to libhybris when and how you are told to
+- Each time we update our libhybris fork, we tag it based on the date and a counter, like `tawc-15-Apr-2026-0` (would be `...-1` for next update on same day, etc) and push the tags. This allows us to track and revert history of our changes while keeping git history clean
+- Git can be tricky, and this is an atypical workflow. Be careful and think things true when updating the libhybris git history
 
 ## Quick Reference
 - **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
