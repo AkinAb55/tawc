@@ -1,8 +1,9 @@
 //! Background gradient renderer.
 //!
-//! Draws a fullscreen gradient from black to dark turquoise in the upper-right
-//! corner. Uses a custom Smithay texture shader that computes the gradient from
-//! texture coordinates, applied to a 1x1 dummy texture rendered fullscreen.
+//! Draws a fullscreen vertical gradient from black at the top to dark turquoise
+//! at the bottom. Uses a custom Smithay texture shader that computes the
+//! gradient from texture coordinates, applied to a 1x1 dummy texture rendered
+//! fullscreen.
 
 use log::{error, info};
 
@@ -14,7 +15,7 @@ use smithay::utils::{Point, Rectangle, Size, Transform};
 
 use crate::gl_import::AhbTextureImporter;
 
-/// Dark turquoise target color in the upper-right corner (R, G, B).
+/// Dark turquoise target color at the bottom of the screen (R, G, B).
 const TURQUOISE: (f32, f32, f32) = (0.1, 0.75, 0.95);
 
 /// Compiled gradient shader and dummy texture for background rendering.

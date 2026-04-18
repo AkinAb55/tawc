@@ -94,11 +94,9 @@ pub extern "system" fn Java_me_phie_tawc_NativeBridge_nativeOnSurfaceCreated(
 
     RUNNING.store(true, Ordering::SeqCst);
 
-    // ANativeWindow_fromSurface acquires a ref. Acquire another for the render thread,
-    // then release the one from fromSurface.
-    unsafe { ndk_sys::ANativeWindow_acquire(window_ptr as *mut _) };
-    unsafe { ndk_sys::ANativeWindow_release(window_ptr as *mut _) };
-
+    // ANativeWindow_fromSurface returns the window with a +1 refcount that
+    // the caller must release. Hand that reference directly to the render
+    // thread, which releases it on exit.
     let window_addr = window_ptr as usize;
     std::thread::spawn(move || {
         let window_ptr = window_addr as *mut c_void;
