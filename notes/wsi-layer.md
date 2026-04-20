@@ -158,20 +158,29 @@ is cached on the buffer's `WleglBufferData` so re-attaches reuse it.
 ## `wl_buffer.release` for libhybris's pool
 
 libhybris's wayland-egl plugin allocates a fixed pool of `wl_buffer`s
-(`setBufferCount(3)` in `WaylandNativeWindow`'s ctor) and blocks in
-`dequeueBuffer` until one is released back. Smithay's
-`SurfaceAttributes::merge_into` automatically sends `wl_buffer.release`
-when a *new* buffer replaces an old one during commit — but that's
-too late for libhybris: it needs a release before it can dequeue the
-next buffer, and without one the very first commit blocks forever.
+(`setBufferCount(3)` in `WaylandNativeWindow`'s ctor,
+`hybris/platforms/wayland/wayland_window_common.cpp:196`) and blocks
+in `dequeueBuffer` only when all three are outstanding and none has
+been released. With three slots plus the per-swap frame callback
+pacing the client, one release per commit is enough to keep the pool
+from draining.
 
-So `render::release_consumed_wlegl_buffers` sends `wl_buffer.release`
-itself once we've imported the buffer's texture. To prevent Smithay
-from double-releasing the same buffer at the next commit, a pre-commit
-hook (registered in `CompositorHandler::new_surface`) clears the cached
-`BufferAssignment` right before `merge_into` runs. This uses Smithay's
-official `add_pre_commit_hook` API rather than reaching into the cache
-from outside — see compositor.rs for the hook.
+We therefore rely on Smithay's standard behaviour:
+`SurfaceAttributes::merge_into` sends `wl_buffer.release` for the
+previous buffer whenever a new one is attached on the next commit
+(see `smithay/src/wayland/compositor/handlers.rs:125`). Our own code
+does not emit `wl_buffer.release` anywhere.
+
+This has a correctness benefit as well: because we hold
+`current_buffer` until the replacing commit, the AHB backing the
+currently-displayed texture is never concurrently rewritten by the
+client — the client only learns it's free at the moment we swap to a
+different buffer. Releasing earlier (after the first render that
+consumed the buffer) used to cause intermittent flicker when any
+other surface triggered a re-render before the client's next commit:
+the already-released AHB could be mid-write on the client side while
+we sampled it again. See the git history around "Remove early-release
+flicker race for wlegl buffers" for the prior scheme.
 
 ## What this replaces
 

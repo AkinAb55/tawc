@@ -58,6 +58,13 @@ use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::Z
 /// Written by the CompositorHandler::commit callback when a wlegl wl_buffer
 /// is attached. Texture import happens lazily in render.rs, cached on the
 /// buffer's WleglBufferData user-data so reattaches reuse it.
+///
+/// `current_buffer` stays set until the client attaches a different buffer,
+/// at which point Smithay's `SurfaceAttributes::merge_into` sends
+/// `wl_buffer.release` for the old buffer as part of commit processing. We
+/// therefore keep reading `current_buffer`'s texture every frame knowing the
+/// client can't be overwriting it — it only learns the buffer is free on the
+/// replacing commit, which already swapped `current_buffer` to the new one.
 pub struct SurfaceWleglState {
     pub current_buffer: Option<wl_buffer::WlBuffer>,
     /// Buffer dimensions in buffer pixels (`wl_buffer.width/height`).
@@ -68,11 +75,6 @@ pub struct SurfaceWleglState {
     /// buffer_scale would draw them at 2× and run them off-screen.
     pub committed_width: i32,
     pub committed_height: i32,
-    /// True once we've sent wl_buffer.release for `current_buffer`. Set in
-    /// render::release_consumed_wlegl_buffers after a frame uses the buffer's
-    /// texture; reset when a new buffer is attached. Prevents double-release
-    /// (libhybris asserts on it — see hybris/platforms/wayland/wayland_window_common.cpp:254).
-    pub released: bool,
 }
 
 /// Per-surface SHM buffer state.
@@ -214,47 +216,14 @@ impl CompositorHandler for TawcState {
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
-    fn new_surface(&mut self, surface: &WlSurface) {
-        // Register a pre-commit hook that suppresses Smithay's auto-release for
-        // wlegl buffers we've already released ourselves.
-        //
-        // Background: libhybris's wayland-egl needs wl_buffer.release before
-        // the next dequeueBuffer (which happens before the next commit), but
-        // Smithay's auto-release fires during merge_into at the *next* commit —
-        // too late. We release early in release_consumed_wlegl_buffers(), but
-        // then Smithay would double-release in merge_into. This hook clears the
-        // cached buffer assignment right before merge_into runs, so Smithay sees
-        // no buffer to release.
-        //
-        // Pre-commit hooks are Smithay's official extension point for this: they
-        // run after pending state is set but before merge_into applies it.
-        use smithay::wayland::compositor::add_pre_commit_hook;
-        add_pre_commit_hook::<Self, _>(surface, |state, _dh, surface| {
-            use smithay::wayland::compositor::{with_states, SurfaceAttributes, BufferAssignment};
-            let Some(wlegl_state) = state.surface_wlegl.get(surface) else { return };
-            if !wlegl_state.released { return; }
-            let Some(ref released_buf) = wlegl_state.current_buffer else { return };
-            let released_buf = released_buf.clone();
-            with_states(surface, |surf_states| {
-                let mut guard = surf_states.cached_state.get::<SurfaceAttributes>();
-                let attrs = guard.current();
-                if let Some(BufferAssignment::NewBuffer(cached)) = &attrs.buffer {
-                    if *cached == released_buf {
-                        attrs.buffer = None;
-                    }
-                }
-            });
-        });
-    }
-
     fn commit(&mut self, surface: &WlSurface) {
         self.popup_manager.commit(surface);
         // Track the attached android_wlegl (AHB) buffer so the renderer can
-        // find its texture. wl_buffer.release is sent post-frame by
-        // release_consumed_wlegl_buffers(); the pre-commit hook registered in
-        // new_surface() suppresses Smithay's auto-release so the buffer isn't
-        // double-released. Without the early release, libhybris's wayland-egl
-        // never frees its dequeueBuffer pool and deadlocks after the first frame.
+        // find its texture. Smithay's `SurfaceAttributes::merge_into` already
+        // sent `wl_buffer.release` for the old buffer before this handler runs
+        // (see smithay/src/wayland/compositor/handlers.rs:125), so the client
+        // has been told the old buffer is free exactly once. We just mirror
+        // the current attachment into `surface_wlegl` for the renderer.
         use smithay::wayland::compositor::{with_states, SurfaceAttributes};
         use smithay::wayland::compositor::BufferAssignment;
 
@@ -281,7 +250,6 @@ impl CompositorHandler for TawcState {
                     current_buffer: Some(buf),
                     committed_width: w,
                     committed_height: h,
-                    released: false,
                 },
             );
             // A wlegl surface replaces any prior SHM attachment.

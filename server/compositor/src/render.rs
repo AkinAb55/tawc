@@ -516,37 +516,6 @@ pub fn render_frame(
 // Frame callbacks
 // ---------------------------------------------------------------------------
 
-/// Send wl_buffer.release for every wlegl surface whose current buffer has
-/// been used by the just-completed render pass.
-///
-/// libhybris's wayland-egl platform (`hybris/platforms/wayland/wayland_window_common.cpp`)
-/// allocates a fixed pool of wl_buffers (default 3, see `setBufferCount(3)` in
-/// the WaylandNativeWindow ctor) and blocks in `dequeueBuffer` until one is
-/// released back. Without this call libhybris hangs after the first frame —
-/// the buffer is attached, libhybris waits for `wl_buffer.release` before
-/// dequeuing the next, the release never comes, no second commit ever
-/// happens. Smithay's own auto-release fires only at the *next* commit
-/// (handlers.rs:125 `merge_into`), which by definition can't help here.
-///
-/// To prevent double-release (which trips libhybris's `assert(it !=
-/// fronted.end())` in `releaseBuffer`), a pre-commit hook registered in
-/// `CompositorHandler::new_surface` clears Smithay's cached buffer assignment
-/// before `merge_into` runs. See compositor.rs for that hook.
-pub fn release_consumed_wlegl_buffers(state: &mut TawcState) {
-    let surfaces: Vec<WlSurface> = state.surface_wlegl.keys().cloned().collect();
-    if surfaces.is_empty() { return; }
-    for surface in surfaces {
-        let Some(wlegl_state) = state.surface_wlegl.get_mut(&surface) else { continue };
-        if wlegl_state.released { continue; }
-        let Some(buf) = wlegl_state.current_buffer.clone() else { continue };
-        let Some(data) = buf.data::<WleglBufferData>() else { continue };
-        let consumed = data.texture.lock().unwrap().is_some();
-        if !consumed { continue; }
-        buf.release();
-        wlegl_state.released = true;
-    }
-}
-
 /// Send frame-done callbacks to all surfaces in all toplevel and popup surface trees.
 pub fn send_frame_callbacks(state: &TawcState, time: u32) {
     let send_callbacks = |root: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface| {

@@ -288,24 +288,17 @@ pub fn run(
             data.last_rendered_toplevels = data.state.toplevels.len();
         }
 
-        // Release wlegl buffers whose textures we've already imported, so
-        // libhybris's wayland-egl can dequeue the next one. Done every tick
-        // (not gated on needs_render) because the very first import sets
-        // needs_render true exactly once — without an unconditional release
-        // libhybris hangs after frame 1, no second buffer ever arrives, and
-        // needs_render never fires again.
-        render::release_consumed_wlegl_buffers(&mut data.state);
-
         // 4. Frame callbacks (always sent so clients can
         // submit new buffers even when we skipped rendering).
         let time = data.start_time.elapsed().as_millis() as u32;
         render::send_frame_callbacks(&data.state, time);
 
-        // Flush so that wl_buffer.release events (sent above) and frame
-        // callbacks reach the client even on idle ticks. The fd-source
-        // dispatcher only flushes on incoming requests; without an explicit
-        // flush here libhybris waits forever for a release that's already
-        // been written to its socket-side queue but not posted.
+        // Flush so frame callbacks reach the client even on idle ticks. The
+        // fd-source dispatcher only flushes on incoming requests; without an
+        // explicit flush here clients wait forever for a callback that's
+        // already been written to their socket-side queue but not posted.
+        // Smithay's merge_into-driven wl_buffer.release events also flow out
+        // here (they're queued during dispatch_clients above).
         if let Err(e) = data.display.flush_clients() {
             error!("flush_clients error in frame timer: {}", e);
         }
