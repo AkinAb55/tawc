@@ -1,92 +1,160 @@
 # Visual flickering reported in Firefox
 
-## Evidence
+## Symptom
 
-User reports visual flickering while using Firefox in the compositor.
-That's all the hard evidence we have right now — no screenshots, no
-logs, no reproduction steps, no frequency/pattern characterization.
-Everything below is a theory about a plausible cause; it has not been
-confirmed against the symptom.
+User report (the whole of the hard evidence): "when content changes it
+sometimes flickers between the old frame and the new frame for a few
+frames before settling." Not characterized further than that —
+specific trigger action, frequency, page vs chrome, size of the
+flickering region are all still unknown.
 
-## Theory (unconfirmed)
+Attempts to reproduce it headlessly via screencap/screenrecord have
+not succeeded. A captured `ABCA ABCA`-style pixel-hash cycle on the
+URL-bar region turned out to be sub-pixel encoder noise, not real
+flicker — the frames were visually identical in a side-by-side
+inspection. So nothing in this issue's investigation so far has
+actually observed the symptom; all the theories below were worked
+from the description alone.
 
-The early `wl_buffer.release` in the wlegl path creates a window where
-our cached texture points at an AHB the client is actively
-overwriting. If any re-render fires during that window, we'd draw
-partially-written contents.
+## Things tried that did NOT help
 
-Flow:
+### 1. Early `wl_buffer.release` race (original theory)
 
-1. Client commits buffer B1 on surface S.
-2. Frame timer tick: `import_wlegl_buffers` imports texture T1 from
-   B1, `render_frame` draws T1, `release_consumed_wlegl_buffers`
-   (`server/compositor/src/render.rs:535`) sends `wl_buffer.release(B1)`
-   and sets `wlegl_state.released = true`. T1 and
-   `surface_wlegl[S].current_buffer = Some(B1)` remain in place.
-3. libhybris dequeues B1 back into its pool and the client starts
-   rendering a new frame into it.
-4. Something *else* triggers `needs_render` before S commits a new
-   buffer — e.g. another surface's commit sets
-   `buffer_commit_pending`, a popup commits, a subsurface elsewhere
-   in the tree updates, or `toplevels_changed` fires
-   (`server/compositor/src/event_loop.rs:256-275`).
-5. The re-render walks `collect_surface_draws` for wlegl
-   (`render.rs:490`), finds T1 still on `WleglBufferData`, and draws
-   it — now showing whatever partial pixels libhybris has written so
-   far. Next frame, once S commits B2, the correct content comes
-   back. Net effect: a flicker.
+**Theory:** the former `render::release_consumed_wlegl_buffers`
+path sent `wl_buffer.release` right after the first render of a
+wlegl buffer, while the buffer's `GlesTexture` was still in use.
+libhybris would hand the slot back to the client, the client would
+start overwriting the AHB, and any re-render triggered by another
+surface before S's next commit would sample partial pixels.
 
-Firefox runs a toplevel surface (placeholder buffer) plus a WebRender
-subsurface (real content) plus occasional popup/tooltip subsurfaces
-(see `notes/rendering.md:22`), so "some other surface commits between
-release and next-commit on the WebRender subsurface" isn't rare.
+**Fix attempted:** replaced the custom early-release + pre-commit
+hook with Smithay's stock `SurfaceAttributes::merge_into`
+release-on-replace (sends `wl_buffer.release` for the previous
+buffer at the next commit). The "libhybris deadlocks on first
+commit without an early release" claim in the old
+`notes/wsi-layer.md` turned out to be inaccurate: with a
+3-slot dequeue pool (`setBufferCount(3)` in
+`libhybris/hybris/platforms/wayland/wayland_window_common.cpp:196`)
+and frame callbacks pacing the client, one release per commit is
+plenty.
 
-## Why the early release exists
+**Result:** integration tests continued to pass, code got simpler,
+**no change to the flicker.** This change was kept — it's a
+straightforward simplification independent of the flicker — and is
+now documented in `notes/wsi-layer.md`. The git log entry
+summarising it is "Remove early wl_buffer.release in wlegl path,
+rely on Smithay's merge_into".
 
-The early release is required for libhybris's `setBufferCount(3)`
-dequeue pool: without it, `dequeueBuffer` blocks forever waiting for
-a release that Smithay's auto-release only sends on the *next*
-commit, which never happens. See `notes/wsi-layer.md:158` and the
-comment on `release_consumed_wlegl_buffers` in `render.rs`.
+### 2. Adreno external-sampler staleness (per-buffer EGLImage rebind)
 
-Any fix has to preserve that property.
+**Theory:** on Adreno, a `GL_TEXTURE_EXTERNAL_OES` bound once to an
+EGLImage captures tile/compression metadata at
+`glEGLImageTargetTexture2DOES` time and can keep sampling stale
+content when the client rewrites the same AHB. SurfaceFlinger's
+`GLConsumer` re-creates the EGLImage on every buffer acquire; we
+were creating each EGLImage once and destroying it immediately
+after the first bind.
 
-## Possible fixes (if the theory holds)
+**Fix attempted:** added `WleglBufferData::needs_refresh` (set in
+the commit handler on every wlegl attach) and a
+`bind_ahb_to_texture` helper that, per re-committed buffer, created
+a fresh EGLImage from the AHB, re-ran `glEGLImageTargetTexture2DOES`
+on the same GL texture object, then destroyed the previous image.
+Old EGLImage tracked on `WleglBufferData` so `Drop` could destroy
+it.
 
-- Skip drawing a wlegl surface in `collect_surface_draws` when
-  `wlegl_state.released == true` — the last rendered frame stays on
-  screen (front buffer) until the client commits a new buffer. Risk:
-  if something else forces a redraw, the wlegl surface disappears
-  for that frame instead of flickering. Need to check whether that's
-  actually better.
-- Defer the release by one frame: render frame N with T1, release
-  B1 *after* presenting frame N+1. Keeps libhybris's pool fed (with
-  a one-frame lag) and guarantees we never draw a released buffer.
-  Needs a small per-surface "previous buffer to release" slot.
-- Keep a reference to the AHB (via `AHardwareBuffer_acquire`) from
-  our side until the client commits a replacement, so libhybris
-  allocates a new slot instead of reusing the one we're still
-  showing. This fights the pool cap and probably isn't the right
-  answer.
+**Result:** no observable change. Reverted — not correct to keep
+that much complexity for a speculative driver workaround that
+didn't help.
 
-## Next steps
+### 3. Firefox/WebRender partial-present over libhybris pool
 
-- Reproduce and characterize first. What kind of flicker — whole
-  window, a region, a scanline? Correlated with scrolling, cursor
-  movement, popups, animation? How often?
-- If the symptom matches the theory, try the "skip drawing when
-  released" fix and see if the flicker goes away.
-- If it doesn't match, this issue should be re-theorized or
-  closed. Candidates to rule in/out then: Firefox's WebRender
-  double-buffering, the xdg-configure/buffer-scale mismatch
-  described in `notes/rendering.md:57`, or something in the
-  libhybris attach-in-`queueBuffer` patch.
+**Theory:** WebRender, when `EGL_EXT_buffer_age` is advertised, does
+partial present — it only rewrites the damaged rects of the
+currently dequeued buffer. libhybris's dequeue hands back one of N
+pool slots whose "previous content" is whatever was rendered last
+time *that slot* was current, potentially frames ago. So each pool
+slot has a different stale base with current damage layered on top;
+cycling through them could produce old-vs-new alternation for a few
+frames before all slots converge.
 
-## Where
+**Fix attempted:** dropped a `user.js` into the test Firefox
+profile with
 
-- `server/compositor/src/render.rs:535` — `release_consumed_wlegl_buffers`
-- `server/compositor/src/render.rs:490` — wlegl draw collection
-- `server/compositor/src/event_loop.rs:246` — frame timer / render gating
-- `server/compositor/src/compositor.rs:217` — pre-commit hook suppressing
-  Smithay's auto-release
-- `notes/wsi-layer.md:158` — background on the release timing
+```
+user_pref("gfx.webrender.max-partial-present-rects", 0);
+user_pref("gfx.webrender.allow-partial-present-buffer-age", false);
+user_pref("gfx.webrender.force-partial-present", false);
+```
+
+(pref names confirmed against `libxul.so` strings.)
+
+**Result:** no observable change. `user.js` removed from the
+device.
+
+## What's still on the table
+
+- The symptom hasn't been reproduced in a controlled capture, so
+  there's no concrete signal to triangulate from. Next investigator
+  should first get a specific repro (what action, what page, how
+  frequently) and record that specific flow rather than random
+  browsing.
+- Ruled out so far: early-release race, external-sampler staleness
+  at the compositor, WebRender partial-present on the client.
+- Not yet ruled in or out:
+  - SurfaceFlinger / our own EGL back-buffer rotation — we don't
+    preserve back-buffer contents and redraw everything fullscreen
+    every frame, but check that there's no path that skips drawing
+    a surface on a re-render. `collect_surface_draws` pulls from
+    `surface_wlegl` / `surface_shm` by live surface lookup; if a
+    subsurface entry is momentarily missing between a commit and
+    the next render tick, that frame would show the toplevel
+    placeholder instead of the subsurface content.
+  - Subsurface sync vs desync handling by Smithay. Firefox uses a
+    wl_subsurface for WebRender content; if its commit is held
+    pending a parent commit (sync mode) while our
+    `buffer_commit_pending` flag still triggers a render, the
+    subsurface would briefly show its previous buffer.
+  - A plain damage-rectangle bug: we pass the whole buffer rect as
+    damage to `Frame::render_texture_from_to`, which should be
+    correct (damage is in dst-local coords per
+    `smithay/src/backend/renderer/gles/mod.rs:2522`), but this is
+    worth double-checking on an actual repro.
+  - Libhybris's `queueBuffer` path (our patch attaches+commits
+    inline from the driver thread). Race between client-side
+    `sync_wait` completion and our compositor sampling is in
+    principle closed by the fence, but hasn't been verified with
+    explicit instrumentation.
+
+## Where the code is now
+
+- `server/compositor/src/render.rs` — `import_wlegl_buffers` /
+  `ensure_wlegl_texture`, back to the original "import once, cache
+  texture on `WleglBufferData`" form.
+- `server/compositor/src/compositor.rs` — `commit` handler just
+  records `current_buffer` / `committed_width` / `committed_height`
+  and sets `buffer_commit_pending`; Smithay's merge_into does the
+  `wl_buffer.release`.
+- No pre-commit hook, no early release, no per-commit EGLImage
+  recreate.
+- `notes/wsi-layer.md` updated to reflect the new release path.
+
+## Suggested next step for whoever picks this up
+
+Get a repro. Ideal setup:
+
+1. Specific page / interaction that reliably flickers (probably
+   something with a quick visible state change — a link hover, a
+   menu open, a CSS transition).
+2. `screenrecord --bit-rate 20000000 --time-limit 5
+   /sdcard/flicker.mp4` while triggering it.
+3. Extract frames with ffmpeg, diff consecutive frames. Actual
+   flicker will show up as non-trivial pixel differences that
+   revert (frame N != frame N+1 and frame N ≈ frame N+2). Noise
+   alone won't.
+
+If the captured diff shows the oscillation, the content of the
+reverted-to frame tells us whether it's stale-buffer-in-pool (old
+content from a specific earlier state) or a partial-redraw issue
+(mix of new and old). From there one of the unresolved candidates
+above becomes the target.
