@@ -77,6 +77,14 @@ falls back to SHM instead of using hardware-accelerated AHB buffers.
 The SHM path is tracked separately from AHB: `surface_shm` HashMap holds `SurfaceShmState`
 per surface. Surfaces using the AHB channel protocol are never checked for SHM buffers.
 
+## Verified clients
+
+- `weston-simple-egl` (AHB)
+- `gtk3-widget-factory` (AHB + SHM popups)
+- Firefox / WebRender (AHB)
+- `gtk4-demo` 4.22.2 (AHB, no magenta tint; manually tested 2026-04-20,
+  including the Assistant dialog with text-input-v3 keyboard show)
+
 ### SELinux and Memfd Sharing
 
 When root processes in the chroot create memfds, they get label `u:object_r:tmpfs:s0`.

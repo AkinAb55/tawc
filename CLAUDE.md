@@ -79,7 +79,8 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Touch debug loop:** Screenshot -> identify coords -> tap -> screenshot -> verify. Compositor uses 2x scale (logical = physical/2). Nearby UI elements are easy to confuse.
 - **Integration tests (full):** `bash testing/run-integration-tests.sh` (builds everything, deploys, runs tests. Feel free to do these as-needed instead of using this script)
 - **Integration tests (tests only):** `cd testing/integration && cargo test -- --nocapture --test-threads=1`
-- **Build debug app:** `bash testing/build-debug-app.sh`
-- **Run debug app:** `adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'"` (must build first)
+- **Build debug apps:** `bash testing/build-debug-app.sh` (both gtk3+gtk4; or `... gtk3` / `... gtk4`)
+- **Run GTK3 debug app:** `adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'"` (must build first)
+- **Run GTK4 debug app:** `adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"`
 - **Inject text (for testing):** `adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"`
 - **Inject keyevent (for testing):** `adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67`

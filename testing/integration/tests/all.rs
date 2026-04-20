@@ -8,28 +8,47 @@ extern "C" fn stop_compositor() {
     compositor::stop_if_started();
 }
 
-/// One-time setup: ensure compositor running, deps installed, debug app built.
-/// Returns the path to the debug app binary inside the chroot.
-fn setup() -> String {
-    static BINARY_PATH: OnceLock<String> = OnceLock::new();
-    BINARY_PATH
-        .get_or_init(|| {
-            // Register atexit handler to stop compositor when tests finish
-            unsafe { libc::atexit(stop_compositor) };
-            compositor::ensure_running().expect("Failed to ensure compositor is running");
-            chroot::ensure_debug_app().expect("Failed to ensure debug app")
-        })
-        .clone()
+/// One-time compositor setup shared by all tests. Idempotent.
+fn ensure_compositor() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        // Register atexit handler to stop compositor when tests finish
+        unsafe { libc::atexit(stop_compositor) };
+        compositor::ensure_running().expect("Failed to ensure compositor is running");
+    });
+}
+
+/// One-time setup for a specific debug-app variant. Returns the binary path
+/// inside the chroot. Each variant has its own cache so switching between
+/// GTK3 and GTK4 tests doesn't re-run the build-check dance.
+fn setup_app(spec: &chroot::DebugAppSpec) -> String {
+    ensure_compositor();
+    match spec.name {
+        "gtk3-debug-app" => {
+            static GTK3_BIN: OnceLock<String> = OnceLock::new();
+            GTK3_BIN
+                .get_or_init(|| chroot::ensure_debug_app(&chroot::GTK3).expect("gtk3 debug app"))
+                .clone()
+        }
+        "gtk4-debug-app" => {
+            static GTK4_BIN: OnceLock<String> = OnceLock::new();
+            GTK4_BIN
+                .get_or_init(|| chroot::ensure_debug_app(&chroot::GTK4).expect("gtk4 debug app"))
+                .clone()
+        }
+        other => panic!("unknown debug app spec: {}", other),
+    }
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Start the text-input debug app and wait for it to be ready.
-/// `gdk_gl` controls buffer type: "disabled" for SHM, "gles:always" for hardware (AHB).
-fn start_text_input(gdk_gl: &str) -> DebugApp {
-    let binary = setup();
+/// Start the text-input subcommand of a debug app and wait for READY.
+/// `env` is prepended to the launch command (e.g. "GDK_GL=disabled" or
+/// "LD_BIND_NOW=1"); pass "" for no extra env.
+fn start_text_input(spec: &chroot::DebugAppSpec, env: &str) -> DebugApp {
+    let binary = setup_app(spec);
     adb::logcat_clear().expect("Failed to clear logcat");
-    let app = DebugApp::start(&binary, "text-input", gdk_gl).expect("Failed to start debug app");
+    let app = DebugApp::start(&binary, "text-input", env).expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
 
     // Verify compositor sees the toplevel
@@ -73,7 +92,7 @@ const TAP_TEXT_MID_Y: u32 = 250;
 
 #[test]
 fn test_text_input_and_backspace() {
-    let mut app = start_text_input("disabled");
+    let mut app = start_text_input(&chroot::GTK3, "GDK_GL=disabled");
 
     // Type multi-word text (covers basic input + spaces)
     adb::input_text("hello world").expect("Failed to send text");
@@ -98,7 +117,7 @@ fn test_text_input_and_backspace() {
 
 #[test]
 fn test_click_cursor_positioning() {
-    let mut app = start_text_input("gles:always");
+    let mut app = start_text_input(&chroot::GTK3, "GDK_GL=gles:always");
 
     // Type text
     adb::input_text("abcdef").expect("Failed to send text");
@@ -154,7 +173,7 @@ const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
 fn test_firefox_launches_with_hardware_buffers() {
-    setup();
+    ensure_compositor();
     adb::logcat_clear().expect("Failed to clear logcat");
 
     // Remove lock/crash files so Firefox doesn't show the troubleshoot-mode dialog
@@ -204,5 +223,29 @@ fn test_firefox_launches_with_hardware_buffers() {
         "Compositor should see at least 1 client while Firefox running, got {:?}", state);
 
     firefox.stop().expect("Firefox process group failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// GTK4 on libhybris always renders through android_wlegl (no software path:
+/// the SHM fallback is GTK3-specific). This test drives the GTK4 debug app
+/// through the same text-input flow as the GTK3 cursor test and asserts the
+/// compositor saw AHB buffer imports.
+#[test]
+fn test_gtk4_text_input_hardware_buffers() {
+    let mut app = start_text_input(&chroot::GTK4, "");
+
+    adb::input_text("gtk4 works").expect("Failed to send text");
+    app.wait_for_text("gtk4 works", TIMEOUT)
+        .expect("Text should be 'gtk4 works'");
+
+    adb::input_keyevent(adb::KEYCODE_DEL).expect("Failed to send backspace");
+    app.wait_for_text("gtk4 work", TIMEOUT)
+        .expect("Text should be 'gtk4 work' after backspace");
+
+    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    assert!(saw_ahb_import(&logs),
+        "Expected AHB buffer import in compositor logs (GTK4 on libhybris is always hardware-buffered)");
+
+    app.stop().expect("gtk4-debug-app crashed or failed to stop cleanly");
     assert_compositor_clean();
 }

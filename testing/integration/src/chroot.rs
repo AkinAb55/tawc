@@ -4,38 +4,72 @@ use std::process::Command;
 
 use crate::adb;
 
-const CHROOT_BUILD_DIR: &str = "/tmp/gtk3-debug-app";
-const HOST_STAGING: &str = "/data/local/tmp/gtk3-debug-app-src";
-const CHROOT_FS_BUILD_DIR: &str = "/data/local/arch-chroot/tmp/gtk3-debug-app";
+/// A debug-app variant we know how to build and deploy in the chroot.
+/// `name` is both the source directory (under `testing/`) and the binary name.
+pub struct DebugAppSpec {
+    pub name: &'static str,
+    pub pkgs: &'static [&'static str],
+}
+
+pub const GTK3: DebugAppSpec = DebugAppSpec {
+    name: "gtk3-debug-app",
+    pkgs: &["gtk3", "pkg-config"],
+};
+
+pub const GTK4: DebugAppSpec = DebugAppSpec {
+    name: "gtk4-debug-app",
+    pkgs: &["gtk4", "pkg-config"],
+};
+
+fn chroot_build_dir(spec: &DebugAppSpec) -> String {
+    format!("/tmp/{}", spec.name)
+}
+
+fn chroot_fs_build_dir(spec: &DebugAppSpec) -> String {
+    format!("/data/local/arch-chroot/tmp/{}", spec.name)
+}
+
+fn host_staging(spec: &DebugAppSpec) -> String {
+    format!("/data/local/tmp/{}-src", spec.name)
+}
+
+fn binary_path(spec: &DebugAppSpec) -> String {
+    format!("{}/{}", chroot_build_dir(spec), spec.name)
+}
 
 /// Check deps and build freshness in a single adb call.
 /// Returns (deps_ok, stamp_value).
-fn check_status() -> io::Result<(bool, String)> {
-    // pacman runs inside the chroot; the stamp/binary live in the chroot fs
-    // which is also visible from inside, so one chroot_run covers both.
-    let stamp_chroot = format!("{}/build-stamp", CHROOT_BUILD_DIR);
-    let binary_chroot = format!("{}/gtk3-debug-app", CHROOT_BUILD_DIR);
+fn check_status(spec: &DebugAppSpec) -> io::Result<(bool, String)> {
+    let build_dir = chroot_build_dir(spec);
+    let stamp_chroot = format!("{}/build-stamp", build_dir);
+    let binary_chroot = binary_path(spec);
+    let pkgs = spec.pkgs.join(" ");
+    // Use sentinel-framed output so unrelated warnings (e.g. from pacman) can't
+    // be mistaken for the stamp value.
     let cmd = format!(
-        "pacman -Q gtk3 pkg-config >/dev/null 2>&1 && echo DEPS_OK; \
-         test -f {} && cat {} 2>/dev/null || echo missing",
-        binary_chroot, stamp_chroot
+        "pacman -Q {} >/dev/null 2>&1 && echo DEPS_OK; \
+         printf 'STAMP:%s\\n' \"$(test -f {} && cat {} 2>/dev/null || echo missing)\"",
+        pkgs, binary_chroot, stamp_chroot
     );
     let output = adb::chroot_run(&cmd)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let deps_ok = stdout.contains("DEPS_OK");
-    let stamp = stdout.lines()
-        .find(|l| !l.contains("DEPS_OK") && !l.is_empty())
+    let deps_ok = stdout.lines().any(|l| l.trim() == "DEPS_OK");
+    let stamp = stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("STAMP:"))
         .unwrap_or("missing")
         .trim()
         .to_string();
     Ok((deps_ok, stamp))
 }
 
-/// Ensure GTK3 and build tools are installed in the chroot.
-pub fn ensure_build_deps() -> io::Result<()> {
-    // Called after check_status confirmed deps are missing
-    eprintln!("Installing build deps in chroot...");
-    let output = adb::chroot_run("pacman -Sy --noconfirm gtk3 pkg-config")?;
+/// Ensure the named packages are installed in the chroot.
+fn ensure_build_deps(spec: &DebugAppSpec) -> io::Result<()> {
+    eprintln!("Installing build deps in chroot: {}", spec.pkgs.join(" "));
+    let output = adb::chroot_run(&format!(
+        "pacman -Sy --noconfirm {}",
+        spec.pkgs.join(" ")
+    ))?;
     if !output.status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -48,20 +82,20 @@ pub fn ensure_build_deps() -> io::Result<()> {
     Ok(())
 }
 
-/// Ensure deps are installed and debug app is built.
+/// Ensure deps are installed and the debug app is built.
 /// Returns the path to the binary inside the chroot.
 /// Skips work that's already done.
-pub fn ensure_debug_app() -> io::Result<String> {
-    let binary_chroot = format!("{}/gtk3-debug-app", CHROOT_BUILD_DIR);
+pub fn ensure_debug_app(spec: &DebugAppSpec) -> io::Result<String> {
+    let binary_chroot = binary_path(spec);
     let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("gtk3-debug-app");
+        .join(spec.name);
 
-    let (deps_ok, stamp) = check_status()?;
+    let (deps_ok, stamp) = check_status(spec)?;
 
     if !deps_ok {
-        ensure_build_deps()?;
+        ensure_build_deps(spec)?;
     }
 
     // Check if build is fresh
@@ -71,20 +105,26 @@ pub fn ensure_debug_app() -> io::Result<String> {
         return Ok(binary_chroot);
     }
 
+    let staging = host_staging(spec);
+    let fs_build_dir = chroot_fs_build_dir(spec);
+
     // Push source files to staging area
-    adb::shell(&format!("rm -rf {}", HOST_STAGING))?;
+    adb::shell(&format!("rm -rf {}", staging))?;
     Command::new("adb")
-        .args(["push", &source_dir.to_string_lossy(), HOST_STAGING])
+        .args(["push", &source_dir.to_string_lossy(), &staging])
         .output()?;
 
     // Copy into chroot filesystem
     adb::shell(&format!(
         "su -c 'mkdir -p {} && cp {}/* {}'",
-        CHROOT_FS_BUILD_DIR, HOST_STAGING, CHROOT_FS_BUILD_DIR
+        fs_build_dir, staging, fs_build_dir
     ))?;
 
     // Build
-    let output = adb::chroot_run(&format!("/bin/bash {}/build.sh", CHROOT_BUILD_DIR))?;
+    let output = adb::chroot_run(&format!(
+        "/bin/bash {}/build.sh",
+        chroot_build_dir(spec)
+    ))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -97,7 +137,8 @@ pub fn ensure_debug_app() -> io::Result<String> {
     // Write stamp with latest source mtime so we can skip next time
     adb::chroot_run(&format!(
         "echo {} > {}/build-stamp",
-        source_mtime, CHROOT_BUILD_DIR
+        source_mtime,
+        chroot_build_dir(spec)
     ))?;
 
     Ok(binary_chroot)

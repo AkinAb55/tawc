@@ -1,25 +1,51 @@
 #!/bin/bash
-# Build gtk3-debug-app on the phone inside the chroot.
-# Run from the host. Pushes source, installs deps if needed, compiles.
+# Build the GTK3 and GTK4 debug apps on the phone inside the chroot.
+# Run from the host. Pushes sources, installs deps if needed, compiles.
+#
+# Usage:
+#   testing/build-debug-app.sh            # build both
+#   testing/build-debug-app.sh gtk3       # just gtk3
+#   testing/build-debug-app.sh gtk4       # just gtk4
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_DIR="$SCRIPT_DIR/gtk3-debug-app"
-CHROOT_DIR="/data/local/arch-chroot"
-BUILD_DIR="$CHROOT_DIR/tmp/gtk3-debug-app"
 
-echo "=== Pushing source ==="
-adb shell su -c "mkdir -p $BUILD_DIR"
-adb push "$SOURCE_DIR/gtk3-debug-app.c" "/data/local/tmp/gtk3-debug-app.c"
-adb push "$SOURCE_DIR/build.sh" "/data/local/tmp/build.sh"
-adb shell su -c "cp /data/local/tmp/gtk3-debug-app.c /data/local/tmp/build.sh $BUILD_DIR/"
+TARGET="${1:-all}"
 
-echo "=== Ensuring build deps ==="
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'pacman -Q gtk3 pkg-config >/dev/null 2>&1 || pacman -Sy --noconfirm gtk3 pkg-config'"
+build_one() {
+    local app_name="$1"     # e.g. gtk3-debug-app
+    local pkg="$2"          # e.g. gtk3 or gtk4
+    local src_dir="$SCRIPT_DIR/$app_name"
+    local build_dir="/data/local/arch-chroot/tmp/$app_name"
 
-echo "=== Building ==="
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/bin/bash /tmp/gtk3-debug-app/build.sh'"
+    echo "=== $app_name: pushing source ==="
+    adb shell su -c "mkdir -p $build_dir"
+    adb push "$src_dir/$app_name.c" "/data/local/tmp/$app_name.c" >/dev/null
+    adb push "$src_dir/build.sh" "/data/local/tmp/$app_name-build.sh" >/dev/null
+    adb shell su -c "cp /data/local/tmp/$app_name.c $build_dir/$app_name.c && \
+                     cp /data/local/tmp/$app_name-build.sh $build_dir/build.sh"
 
-echo "=== Done ==="
-echo "Binary: /tmp/gtk3-debug-app/gtk3-debug-app (inside chroot)"
-echo "Run:    adb shell su -c \"/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'\""
+    echo "=== $app_name: ensuring build deps ($pkg, pkg-config) ==="
+    adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+        'pacman -Q $pkg pkg-config >/dev/null 2>&1 || pacman -Sy --noconfirm $pkg pkg-config'"
+
+    echo "=== $app_name: building ==="
+    adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+        '/bin/bash /tmp/$app_name/build.sh'"
+
+    echo "=== $app_name: done ==="
+    echo "Binary (inside chroot): /tmp/$app_name/$app_name"
+}
+
+case "$TARGET" in
+    gtk3) build_one gtk3-debug-app gtk3 ;;
+    gtk4) build_one gtk4-debug-app gtk4 ;;
+    all)
+        build_one gtk3-debug-app gtk3
+        build_one gtk4-debug-app gtk4
+        ;;
+    *)
+        echo "Usage: $0 [gtk3|gtk4|all]" >&2
+        exit 1
+        ;;
+esac

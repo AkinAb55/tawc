@@ -44,6 +44,19 @@ adb shell am start -n me.phie.tawc/.MainActivity
 
 SELinux must be permissive: `adb shell su -c setenforce 0` (resets on reboot).
 
+## Chroot package gotchas
+
+- **Always `pacman -Syu` before installing GTK4 (or anything else recent).**
+  Plain `pacman -S gtk4` installs the current gtk4 package but does **not**
+  upgrade already-installed deps like `glib2`. GTK4 4.22 references
+  `g_get_monotonic_time_ns`, which only exists in `glib2` >= 2.88 — if the
+  chroot still has an older glib2 (e.g. 2.86.4), `gtk4-demo` will fail with
+  `symbol lookup error: /usr/lib/libgtk-4.so.1: undefined symbol:
+  g_get_monotonic_time_ns` on the first lazy PLT resolution. `pacman -Syu`
+  (or `pacman -Sy gtk4` to at least pull a fresh package db) fixes it.
+  This is not a tawc or ALARM bug; it's just how pacman works when you
+  skip the sync step.
+
 ## Build System Details
 
 - Rust compositor cross-compiled for `aarch64-linux-android` via `cargo-ndk`
