@@ -1,6 +1,6 @@
 - GDK/GLib calls `syscall(SYS_memfd_create, ...)` directly, bypassing our LD_PRELOAD shim that relabels memfds for SELinux
 - This causes the compositor to fail when mmapping client buffers
-- Workaround: `adb shell su -c setenforce 0` (must be re-run after each reboot)
+- Workaround: `adb shell "su -c 'setenforce 0'"` (must be re-run after each reboot)
 - Affects Firefox and likely all GTK apps
 - Proper fix options: intercept `syscall()` itself, or run clients as the compositor's UID
 - See notes/rendering.md "SELinux and Memfd Sharing" and notes/firefox.md "Known Issues"

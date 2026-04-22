@@ -14,7 +14,7 @@ behaviour here — it's a Firefox-side startup problem (see
 ## Launching
 
 ```bash
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
   'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
    MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
    MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
@@ -96,13 +96,13 @@ These live as patches in our libhybris fork (see `libhybris/TAWC_FORK.md`):
 
 - All Firefox sandboxing disabled. The chroot doesn't support clone/namespace operations.
 - `setenforce 0` required (GDK's memfds bypass the LD_PRELOAD SELinux shim).
-- If Firefox connects but shows a black screen, check SELinux: `adb shell su -c getenforce`
+- If Firefox connects but shows a black screen, check SELinux: `adb shell "su -c 'getenforce'"`
   (resets to Enforcing on every device reboot).
 
 ## Killing and Restarting
 
 ```bash
-adb shell su -c "killall firefox"
+adb shell "su -c 'killall firefox'"
 ```
 
 The wayland flush shim (`libwayland-flush-shim.so`) is no longer needed.

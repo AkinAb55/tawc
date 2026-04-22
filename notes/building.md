@@ -42,7 +42,7 @@ adb shell am start -n me.phie.tawc/.MainActivity
 
 ## Device Setup
 
-SELinux must be permissive: `adb shell su -c setenforce 0` (resets on reboot).
+SELinux must be permissive: `adb shell "su -c 'setenforce 0'"` (resets on reboot).
 
 ## Chroot package gotchas
 
@@ -65,10 +65,10 @@ SELinux must be permissive: `adb shell su -c setenforce 0` (resets on reboot).
 - libxkbcommon cross-compiled from source with NDK toolchain
 - wayland-rs uses pure Rust backend (no libwayland dependency)
 
-Client-side WSI layer:
-- Cross-compiled for `aarch64-linux-gnu` (glibc, for chroot)
-- Links against libhybris
-- Installed in chroot's library path
+Client-side libraries (built inside the chroot, not cross-compiled):
+- libhybris provides EGL/GLES by loading Android's GPU drivers
+- GL shims (libgl-shim.c, libglesv2-shim.c) stub out GLX so Mesa is never probed
+- memfd-selinux-shim relabels memfds for cross-process SHM sharing
 
 ## libhybris
 

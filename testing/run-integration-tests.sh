@@ -23,7 +23,7 @@ echo "=== Checking adb connection ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }
 
 echo "=== Setting SELinux permissive ==="
-adb shell su -c "setenforce 0"
+adb shell "su -c 'setenforce 0'"
 
 echo "=== Building compositor APK ==="
 cd "$ROOT_DIR/server"

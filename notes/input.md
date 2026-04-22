@@ -38,7 +38,7 @@ fullscreen, so screen coordinates map 1:1 to SurfaceView coordinates. The compos
 divides by the scale factor (2) to get Wayland logical coordinates.
 
 **Debug loop:**
-1. Screenshot: `adb shell su -c "screencap -p /sdcard/screenshot.png" && adb pull /sdcard/screenshot.png /tmp/screenshot.png`
+1. Screenshot: `adb shell "su -c 'screencap -p /sdcard/screenshot.png'" && adb pull /sdcard/screenshot.png /tmp/screenshot.png`
 2. Identify target element's pixel coordinates in the 1080x2400 image
 3. Tap: `adb shell input tap X Y`
 4. Screenshot again to see result

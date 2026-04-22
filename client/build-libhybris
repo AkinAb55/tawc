@@ -1,288 +1,80 @@
 #!/bin/bash
-# Build and install our fork of libhybris with stock Android support:
-#   - TLS thunk patcher (from lindroid-drm, for bionic TLS slot redirection)
-#   - bionic_tls allocation (our fix for stock Android firmware)
-#   - pthread_create thread wrapping (bionic_tls on new threads)
-#
-# Run from the host (not the phone). Syncs local ./libhybris to the phone
-# and builds inside the chroot.
+# Build our libhybris fork inside the Android chroot.
+# Syncs local ./libhybris + shim sources to the phone and builds inside the chroot.
 #
 # Usage: bash client/build-libhybris [--clean] [--if-needed]
-#   --clean:     force full reconfigure (otherwise does incremental build)
-#   --if-needed: skip build if source hash matches the stamp on the phone
+#   --clean:     full reconfigure from scratch
+#   --if-needed: skip if source hash matches stamp on phone
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIBHYBRIS_DIR="$REPO_DIR/libhybris"
-CHROOT_DIR="/data/local/arch-chroot"
-STAMP_FILE="$CHROOT_DIR/usr/local/lib/.libhybris-build-stamp"
-INSTALLED_LIB="$CHROOT_DIR/usr/local/lib/libhybris-common.so.1.0.0"
+CHROOT="/data/local/arch-chroot"
+STAMP="$CHROOT/usr/local/lib/.libhybris-build-stamp"
+INSTALLED_LIB="$CHROOT/usr/local/lib/libhybris-common.so.1.0.0"
 
 if [ ! -d "$LIBHYBRIS_DIR/hybris" ]; then
-    echo "ERROR: $LIBHYBRIS_DIR not found or missing hybris/ directory."
-    echo "Clone it: git clone https://github.com/wmww/libhybris.git ./libhybris"
+    echo "ERROR: $LIBHYBRIS_DIR/hybris not found."
+    echo "Clone: git clone https://github.com/wmww/libhybris.git ./libhybris"
     exit 1
 fi
 
-CLEAN=0
-IF_NEEDED=0
+CLEAN=0; IF_NEEDED=0
 for arg in "$@"; do
     case "$arg" in
         --clean) CLEAN=1 ;;
         --if-needed) IF_NEEDED=1 ;;
-        *) echo "ERROR: unknown argument: $arg"; exit 1 ;;
+        *) echo "ERROR: unknown arg: $arg"; exit 1 ;;
     esac
 done
 
-# Hash everything that feeds the build so --if-needed can skip work.
-compute_source_hash() {
-    (
-        cd "$REPO_DIR"
-        find libhybris -type f \
-            ! -path '*/.git/*' ! -path '*/autom4te.cache/*' \
+# Hash all build inputs so --if-needed can detect changes.
+SOURCE_HASH=$(
+    cd "$REPO_DIR"
+    {
+        find libhybris -type f ! -path '*/.git/*' ! -path '*/autom4te.cache/*' \
             -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
-        sha256sum client/libgl-shim.c client/libglesv2-shim.c client/build-libhybris
-        [ -f client/fix-android-headers ] && sha256sum client/fix-android-headers
-    ) | sha256sum | awk '{print $1}'
-}
+        sha256sum client/libgl-shim.c client/libglesv2-shim.c \
+                  client/build-libhybris client/build-libhybris-chroot.sh
+        [ -f client/fix-android-headers ] && sha256sum client/fix-android-headers || true
+    } | sha256sum | awk '{print $1}'
+)
 
-SOURCE_HASH=$(compute_source_hash)
-
+# --if-needed: skip if hash matches and the lib is installed
 if [ "$IF_NEEDED" = "1" ] && [ "$CLEAN" = "0" ]; then
-    STORED_HASH=$(adb shell "su -c 'cat $STAMP_FILE 2>/dev/null; [ -f $INSTALLED_LIB ] && echo INSTALLED'" 2>/dev/null | tr -d '\r' || true)
-    if echo "$STORED_HASH" | grep -qF "$SOURCE_HASH" && echo "$STORED_HASH" | grep -q INSTALLED; then
-        echo "==> libhybris up-to-date (hash $SOURCE_HASH), skipping build"
+    STORED=$(adb shell "su -c '[ -f $INSTALLED_LIB ] && cat $STAMP 2>/dev/null'" 2>/dev/null \
+             | tr -d '\r' || true)
+    if [ "$STORED" = "$SOURCE_HASH" ]; then
+        echo "==> libhybris up-to-date ($SOURCE_HASH), skipping"
         exit 0
     fi
-    echo "==> libhybris sources changed or not installed, rebuilding"
+    echo "==> libhybris changed or not installed, rebuilding"
 fi
 
-# Step 1: Sync local libhybris source to the phone's chroot
-echo "==> Syncing libhybris source to phone..."
-TAR_TMP=$(mktemp /tmp/libhybris-src.XXXXXX.tar.gz)
-tar czf "$TAR_TMP" -C "$REPO_DIR" --exclude='.git' --exclude='autom4te.cache' libhybris/
-adb push "$TAR_TMP" /data/local/tmp/libhybris-src.tar.gz
-rm -f "$TAR_TMP"
+# Bundle libhybris source + shim sources + build helpers into one tarball.
+echo "==> Packing sources..."
+TAR=$(mktemp /tmp/libhybris-bundle.XXXXXX.tar.gz)
+trap 'rm -f "$TAR"' EXIT
 
-adb shell su -c "cp /data/local/tmp/libhybris-src.tar.gz '$CHROOT_DIR/tmp/libhybris-src.tar.gz'"
+EXTRA_FILES="libgl-shim.c libglesv2-shim.c build-libhybris-chroot.sh"
+[ -f "$SCRIPT_DIR/fix-android-headers" ] && EXTRA_FILES="$EXTRA_FILES fix-android-headers"
 
-# Step 2: Push arch-chroot-run and fix-headers if available
+tar czf "$TAR" \
+    -C "$REPO_DIR" --exclude='.git' --exclude='autom4te.cache' libhybris/ \
+    -C "$SCRIPT_DIR" $EXTRA_FILES
+
+# Push bundle + chroot runner to the phone.
+echo "==> Pushing to phone..."
+adb push "$TAR" /data/local/tmp/libhybris-bundle.tar.gz
 adb push "$SCRIPT_DIR/arch-chroot-run" /data/local/tmp/
-if [ -f "$SCRIPT_DIR/fix-android-headers" ]; then
-    adb push "$SCRIPT_DIR/fix-android-headers" /data/local/tmp/
-    adb shell su -c "cp /data/local/tmp/fix-android-headers '$CHROOT_DIR/tmp/fix-android-headers'"
-fi
 
-# Step 3: Write the in-chroot build script
-adb shell su -c "cat > '$CHROOT_DIR/tmp/build-libhybris.sh'" << 'BUILDEOF'
-#!/bin/bash
-set -e
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export TMPDIR=/tmp
-export HOME=/root
-export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+# Copy bundle into chroot (needs root for /data/local/arch-chroot/).
+adb shell "su -c 'cp /data/local/tmp/libhybris-bundle.tar.gz $CHROOT/tmp/'"
 
-CLEAN=${1:-0}
-
-# Sync source to build tree, preserving build artifacts for incremental builds.
-# Only files whose content changed get updated timestamps, so make correctly
-# rebuilds only what's needed.
-echo '==> Extracting libhybris source...'
-cd /root
-if [ "$CLEAN" = "1" ]; then
-    rm -rf libhybris
-    tar xzf /tmp/libhybris-src.tar.gz
-else
-    # Extract to staging dir, then sync only changed files to preserve build
-    # artifacts (.o/.la/.libs) while ensuring make sees modified sources.
-    rm -rf /tmp/libhybris-staging
-    mkdir -p /tmp/libhybris-staging
-    tar xzf /tmp/libhybris-src.tar.gz -C /tmp/libhybris-staging --strip-components=1
-
-    if [ ! -d /root/libhybris ]; then
-        mkdir -p /root/libhybris
-        cp -a /tmp/libhybris-staging/. /root/libhybris/
-    else
-        # Copy only changed source files; touch updates the timestamp so make
-        # sees them as newer than any existing build artifacts
-        CHANGED=0
-        cd /tmp/libhybris-staging
-        find . -type f | while read -r f; do
-            if [ ! -f "/root/libhybris/$f" ] || ! cmp -s "$f" "/root/libhybris/$f"; then
-                mkdir -p "$(dirname "/root/libhybris/$f")"
-                cp "$f" "/root/libhybris/$f"
-                touch "/root/libhybris/$f"
-            fi
-        done
-        # Remove source files that were deleted upstream. Only check
-        # committed source types — not headers (.h can be auto-generated
-        # like config.h), not .in (generated by automake).
-        cd /root/libhybris
-        find . -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.am' -o -name '*.ac' -o -name '*.xml' -o -name '*.md' -o -name '*.txt' \) | while read -r f; do
-            if [ ! -f "/tmp/libhybris-staging/$f" ]; then
-                echo "  Removing deleted file: $f"
-                rm -f "$f"
-            fi
-        done
-    fi
-    rm -rf /tmp/libhybris-staging
-fi
-rm -f /tmp/libhybris-src.tar.gz
-
-# Ensure build deps. Notably NOT libglvnd — it would pull in mesa as a hard
-# runtime dep (libGLX_mesa can't init in this chroot, breaks Firefox startup
-# probes). We install libhybris's libEGL/libGLESv2 directly under
-# /usr/local/lib and put that first on the library search path, which is the
-# path every chroot app uses.
-pacman -S --noconfirm --needed libtool wayland wayland-protocols pkg-config autoconf automake patchelf vulkan-headers vulkan-tools 2>&1 | tail -3
-
-# Install android-headers if needed
-if ! pkg-config --exists android-headers 2>/dev/null; then
-    echo '==> Installing android-headers from Halium...'
-    cd /root
-    rm -rf android-headers
-    git clone --branch halium-11.0 --depth 1 https://github.com/Halium/android-headers.git
-    cd android-headers
-    sed -i 's/ANDROID_VERSION_MAJOR 11/ANDROID_VERSION_MAJOR 16/' android-version.h
-    sed -i 's/Version: 11.0.0/Version: 16.0.0/' android-headers.pc.in
-    make PREFIX=/usr/local install
-    echo "==> Android headers installed: $(pkg-config --modversion android-headers)"
-fi
-
-# Fix android headers for GCC compatibility
-if [ -x /tmp/fix-android-headers ]; then
-    /tmp/fix-android-headers
-fi
-
-cd /root/libhybris
-
-echo "==> Android headers version: $(pkg-config --modversion android-headers)"
-
-# Fix libsync for Android 16+ (version guard too restrictive).
-# Only modify if the old guard is still present, to avoid touching the file
-# on every build and triggering unnecessary recompilation.
-if grep -q 'ANDROID_VERSION_MAJOR < 12' hybris/libsync/sync.c 2>/dev/null; then
-    echo '==> Fixing libsync version guard...'
-    sed -i 's/#if (ANDROID_VERSION_MAJOR >= 10) && (ANDROID_VERSION_MAJOR < 12)/#if (ANDROID_VERSION_MAJOR >= 10)/' hybris/libsync/sync.c
-fi
-
-cd /root/libhybris/hybris
-
-# Run autogen+configure if:
-# - No Makefile (first build or after --clean)
-# - configure.ac or any Makefile.am changed (newer than Makefile)
-NEED_CONFIGURE=0
-if [ ! -f Makefile ] || [ "$CLEAN" = "1" ]; then
-    NEED_CONFIGURE=1
-elif [ -n "$(find /root/libhybris -name 'configure.ac' -o -name 'Makefile.am' | xargs -I{} find {} -newer Makefile 2>/dev/null)" ]; then
-    echo '==> configure.ac or Makefile.am changed, reconfiguring...'
-    NEED_CONFIGURE=1
-fi
-
-if [ "$NEED_CONFIGURE" = "1" ]; then
-    echo '==> Running autogen.sh...'
-    ./autogen.sh 2>&1 | tail -5
-
-    echo '==> Configuring...'
-    ./configure \
-        --enable-arch=arm64 \
-        --enable-wayland \
-        --disable-wayland_serverside_buffers \
-        --enable-adreno-quirks \
-        --enable-property-cache \
-        --with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64 \
-        --prefix=/usr/local 2>&1 | grep -E 'Android version|arch |prefix|Features|wayland'
-else
-    echo '==> Makefile exists, doing incremental build (use --clean to reconfigure)'
-fi
-
-echo '==> Building...'
-for dir in include common properties libsync platforms hardware ui gralloc egl glesv1 glesv2 hwc2 vulkan utils; do
-    if [ -d "$dir" ] && [ -f "$dir/Makefile" ]; then
-        echo "  Building $dir..."
-        if ! make -C "$dir" -j4 2>&1 | tail -3; then
-            echo "  WARNING: $dir build failed, continuing..."
-        fi
-    fi
-done
-
-echo '==> Installing...'
-for dir in include common properties libsync platforms hardware ui gralloc egl glesv1 glesv2 hwc2 vulkan utils; do
-    if [ -d "$dir" ] && [ -f "$dir/Makefile" ]; then
-        make -C "$dir" install 2>/dev/null || echo "  (skipped $dir install)"
-    fi
-done
-
-echo '==> Clearing execstack on libhybris-common...'
-patchelf --clear-execstack /usr/local/lib/libhybris-common.so.1.0.0 2>/dev/null || true
-
-echo '==> Removing stale glvnd-suffixed libEGL/libGLES (no longer used — we build without --enable-glvnd)...'
-for f in /usr/local/lib/libEGL_libhybris* /usr/local/lib/libGLESv1_CM_libhybris* /usr/local/lib/libGLESv2_libhybris*; do
-    [ -e "$f" ] && rm -f "$f"
-done
-# And remove the ICD JSON that libglvnd would have scanned
-rm -f /usr/local/share/glvnd/egl_vendor.d/10_libhybris.json \
-      /usr/share/glvnd/egl_vendor.d/10_libhybris.json
-
-ldconfig
-
-echo '==> Installed libraries:'
-ls /usr/local/lib/libEGL.so* /usr/local/lib/libGLESv2.so* /usr/local/lib/libhybris-common.so 2>/dev/null || echo "WARNING: some libraries missing"
-echo '==> Wayland EGL platform:'
-ls /usr/local/lib/libhybris/eglplatform_wayland.so 2>/dev/null || echo "WARNING: eglplatform_wayland.so missing"
-
-# --- GL shims ---
-# Apps resolve libGL.so / libGLESv2.so.2 by name. The distro's libGL.so is
-# libglvnd routing to Mesa GLX, which can't init (no DRI render node).
-# Firefox's glxtest and GTK's libepoxy abort or fall back to software when
-# the probes hit broken Mesa GLX. These shims export NULL-returning glX*
-# stubs and DT_NEEDED-link to the real libhybris GLES so dlsym for GL
-# symbols still resolves.
-echo '==> Building GL shims...'
-SHIM_DIR=/tmp/gl-shims
-rm -rf "$SHIM_DIR"
-mkdir -p "$SHIM_DIR"
-cp /tmp/libhybris-build-staging/libgl-shim.c "$SHIM_DIR/"
-cp /tmp/libhybris-build-staging/libglesv2-shim.c "$SHIM_DIR/"
-cd "$SHIM_DIR"
-
-cp /usr/local/lib/libGLESv2.so.2 libGLESv2_real.so
-patchelf --set-soname libGLESv2_real.so libGLESv2_real.so
-
-gcc -shared -fPIC -o libGLESv2.so.2 libglesv2-shim.c \
-    -L"$SHIM_DIR" -l:libGLESv2_real.so \
-    -Wl,-rpath,"$SHIM_DIR" -Wl,--no-as-needed \
-    -Wl,-soname,libGLESv2.so.2
-ln -sf libGLESv2.so.2 libGLESv2.so
-
-ln -sf "$SHIM_DIR/libGLESv2.so.2" libGL.so.1
-gcc -shared -fPIC -o libGL.so libgl-shim.c \
-    -L"$SHIM_DIR" -l:libGL.so.1 \
-    -Wl,-rpath,"$SHIM_DIR" -Wl,--no-as-needed \
-    -Wl,-soname,libGL.so.1
-
-echo '==> GL shims:'
-ls -la libGL.so libGL.so.1 libGLESv2.so libGLESv2.so.2 libGLESv2_real.so
-
-echo '==> Done'
-BUILDEOF
-
-# Step 4: Push GL shim sources to staging area
-echo "==> Pushing GL shim sources..."
-STAGING="/data/local/tmp/libhybris-build-staging"
-adb shell su -c "mkdir -p '$CHROOT_DIR/tmp/libhybris-build-staging'"
-adb push "$SCRIPT_DIR/libgl-shim.c" /data/local/tmp/
-adb push "$SCRIPT_DIR/libglesv2-shim.c" /data/local/tmp/
-adb shell su -c "cp /data/local/tmp/libgl-shim.c '$CHROOT_DIR/tmp/libhybris-build-staging/'"
-adb shell su -c "cp /data/local/tmp/libglesv2-shim.c '$CHROOT_DIR/tmp/libhybris-build-staging/'"
-
-# Step 5: Build inside chroot (libhybris + GL shims)
-echo "==> Building libhybris + GL shims inside chroot..."
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'bash /tmp/build-libhybris.sh $CLEAN'"
-
-# Record the source hash so future --if-needed invocations can skip.
-adb shell "su -c 'echo $SOURCE_HASH > $STAMP_FILE'"
-
-echo "==> libhybris build complete (hash $SOURCE_HASH)"
+# Build inside chroot. arch-chroot-run handles su internally.
+echo "==> Building inside chroot..."
+STAMP_CHROOT="/usr/local/lib/.libhybris-build-stamp"
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'tar xzf /tmp/libhybris-bundle.tar.gz -C /tmp && rm /tmp/libhybris-bundle.tar.gz && bash /tmp/build-libhybris-chroot.sh $CLEAN && echo $SOURCE_HASH > $STAMP_CHROOT'"
+echo "==> libhybris build complete ($SOURCE_HASH)"

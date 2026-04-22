@@ -56,7 +56,7 @@ crash-recovery mode on the next launch.
 ## Reproduce
 
 ```
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
   'rm -rf /root/.mozilla /root/.cache/mozilla; \
    GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
    MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
@@ -80,8 +80,8 @@ push the file):
 
 ```
 adb push /tmp/firefox-user.js /data/local/tmp/firefox-user.js
-adb shell su -c "cp /data/local/tmp/firefox-user.js \
-  /data/local/arch-chroot/root/.mozilla/firefox/<profile>.default-release/user.js"
+adb shell "su -c 'cp /data/local/tmp/firefox-user.js \
+  /data/local/arch-chroot/root/.mozilla/firefox/<profile>.default-release/user.js'"
 ```
 
 ## Possible next steps (root cause)

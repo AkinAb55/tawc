@@ -6,7 +6,7 @@
 #   testing/build-debug-app.sh            # build both
 #   testing/build-debug-app.sh gtk3       # just gtk3
 #   testing/build-debug-app.sh gtk4       # just gtk4
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -19,19 +19,15 @@ build_one() {
     local build_dir="/data/local/arch-chroot/tmp/$app_name"
 
     echo "=== $app_name: pushing source ==="
-    adb shell su -c "mkdir -p $build_dir"
     adb push "$src_dir/$app_name.c" "/data/local/tmp/$app_name.c" >/dev/null
     adb push "$src_dir/build.sh" "/data/local/tmp/$app_name-build.sh" >/dev/null
-    adb shell su -c "cp /data/local/tmp/$app_name.c $build_dir/$app_name.c && \
-                     cp /data/local/tmp/$app_name-build.sh $build_dir/build.sh"
+    adb shell "su -c 'mkdir -p $build_dir && cp /data/local/tmp/$app_name.c $build_dir/$app_name.c && cp /data/local/tmp/$app_name-build.sh $build_dir/build.sh'"
 
     echo "=== $app_name: ensuring build deps ($pkg, pkg-config) ==="
-    adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
-        'pacman -Q $pkg pkg-config >/dev/null 2>&1 || pacman -Sy --noconfirm $pkg pkg-config'"
+    adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'pacman -Q $pkg pkg-config >/dev/null 2>&1 || pacman -Sy --noconfirm $pkg pkg-config'"
 
     echo "=== $app_name: building ==="
-    adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
-        '/bin/bash /tmp/$app_name/build.sh'"
+    adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/bin/bash /tmp/$app_name/build.sh'"
 
     echo "=== $app_name: done ==="
     echo "Binary (inside chroot): /tmp/$app_name/$app_name"

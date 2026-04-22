@@ -46,12 +46,12 @@ fi
 
 # Tarball is kept for re-runs. Delete manually if you want to reclaim ~200MB.
 
-# Step 4: Configure DNS
+# Step 3: Configure DNS
 echo "==> Configuring DNS..."
 su -c "rm -f $CHROOT_DIR/etc/resolv.conf"
 echo "nameserver 8.8.8.8" | su -c "tee $CHROOT_DIR/etc/resolv.conf >/dev/null"
 
-# Step 5: Configure pacman
+# Step 4: Configure pacman
 echo "==> Configuring pacman (disable signature checking and sandbox for Android)..."
 su -c "sed -i 's/^SigLevel.*/SigLevel = Never/' '$CHROOT_DIR/etc/pacman.conf'"
 # Disable Landlock sandbox and user switching (not supported in Android chroot)
@@ -62,7 +62,7 @@ su -c "sed -i 's/^CheckSpace/#CheckSpace/' '$CHROOT_DIR/etc/pacman.conf'"
 # Skip kernel/firmware packages -- useless in a chroot
 su -c "grep -q '^IgnorePkg' '$CHROOT_DIR/etc/pacman.conf' || sed -i '/#CheckSpace/a IgnorePkg = linux linux-aarch64 linux-firmware linux-firmware-*' '$CHROOT_DIR/etc/pacman.conf'"
 
-# Step 6: Set up bind mounts
+# Step 5: Set up bind mounts
 echo "==> Setting up bind mounts..."
 su -c "mkdir -p '$CHROOT_DIR/dev' '$CHROOT_DIR/proc' '$CHROOT_DIR/sys' \
     '$CHROOT_DIR/vendor' '$CHROOT_DIR/system' '$CHROOT_DIR/system_ext' \
@@ -77,7 +77,7 @@ done
 # Plain mount --bind gives empty directories for the individual APEXes.
 su -c "mountpoint -q '$CHROOT_DIR/apex' 2>/dev/null || mount --rbind /apex '$CHROOT_DIR/apex'"
 
-# Step 7: Initialize pacman keyring and update (skip if base-devel already installed)
+# Step 6: Initialize pacman keyring and update (skip if base-devel already installed)
 if su -c "chroot '$CHROOT_DIR' /bin/bash -c 'command -v make'" &>/dev/null; then
     echo "==> base-devel already installed, skipping pacman init/update"
 else

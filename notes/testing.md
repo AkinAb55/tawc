@@ -60,10 +60,10 @@ cd /tmp/gtk4-debug-app && bash build.sh
 
 ```bash
 # GTK3
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk3-debug-app/gtk3-debug-app text-input'"
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk3-debug-app/gtk3-debug-app text-input'"
 
 # GTK4
-adb shell su -c "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"
 ```
 
 ## Integration Tests
@@ -80,7 +80,7 @@ cargo test -- --nocapture --test-threads=1
 Tests require:
 - Phone connected via adb
 - Compositor APK installed and running
-- SELinux permissive (`adb shell su -c setenforce 0`)
+- SELinux permissive (`adb shell "su -c 'setenforce 0'"`)
 - `arch-chroot-run` pushed to phone
 
 ### Test Input Mechanism
