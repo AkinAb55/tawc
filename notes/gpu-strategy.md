@@ -151,19 +151,79 @@ are **opaque fds**, not dmabufs. `VK_EXT_external_memory_dma_buf` is NOT availab
 the most robust path for buffer sharing. Both sides are under our control, so custom
 Wayland protocol (not `zwp_linux_dmabuf_v1`) is fine.
 
-## libhybris Vulkan (Stretch Goal)
+## libhybris Vulkan
 
 libhybris has built-in Vulkan support: loads stock `libvulkan.so` via `android_dlopen()`,
-performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_surface`).
-Used in Sailfish OS ecosystem.
+performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_surface`)
+in `vulkanplatform_wayland.so`, presents via `android_wlegl`. Used in Sailfish OS.
 
-**Unmerged PRs needed:**
+**Status on tawc (OnePlus 9 / Adreno 660 / Android 16 LineageOS):** ✅ working.
+- `bash client/build-libhybris` builds the `vulkan` subdir and installs
+  `/usr/local/lib/libvulkan.so.1` and `/usr/local/lib/libhybris/vulkanplatform_wayland.so`.
+  Because the chroot profile puts `/usr/local/lib` ahead of `/usr/lib` on
+  `LD_LIBRARY_PATH`, libhybris's `libvulkan.so.1` shadows the `vulkan-icd-loader` copy.
+- `vulkaninfo --summary` works end-to-end: `android_dlopen("libvulkan.so")` succeeds,
+  the Adreno Vulkan driver enumerates as GPU0, `VK_KHR_wayland_surface` is advertised.
+  Covered by `test_vulkaninfo_loads_android_driver`.
+- `vkcube` renders correctly as of 2026-04-20 through the standard direct-render path,
+  no FBO workaround needed.
+
+### What `vkcube` actually needs (2026-04-20)
+
+Two fixes were needed:
+
+1. **`NATIVE_WINDOW_BUFFER_AGE=0`** — landed as a Firefox flicker fix
+   (libhybris commit `59b9a58`, tawc companion commit `12bca6b`).
+   Upstream hardcoded age=2; Adreno's Vulkan WSI used that as a hint to
+   preserve 2-frame-old content and did `LOAD_OP_LOAD` on images still
+   in `VK_IMAGE_LAYOUT_UNDEFINED`, so the frame was effectively
+   discarded.
+2. **Spec-correct undefined `currentExtent` + swapchain resize** —
+   per the Vulkan spec for Wayland, `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`
+   reports `currentExtent = {0xFFFFFFFF, 0xFFFFFFFF}` (undefined), letting the
+   app choose its own size. `maxImageExtent` is raised to 16384x16384.
+   The `wl_egl_window` is created at 1x1; `vkCreateSwapchainKHR` is
+   intercepted (via `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr`)
+   to resize the `WaylandNativeWindow` to match the app's `imageExtent`.
+
+**Known compositor limitation:** the tawc compositor currently renders
+wlegl/Vulkan buffers 1:1 to physical pixels without applying output
+scale. Apps that query `wl_output` get logical dimensions (e.g.
+540x1200 at 2x scale) and create a swapchain at that size, which
+then only covers part of the physical display. The fix belongs in
+the compositor (scale wlegl surfaces by output scale factor).
+
+### Vulkan dispatch interception (2026-04-20)
+
+The Vulkan dispatch in `vulkan.c` intercepts several calls for the
+Wayland platform (when `WANT_WAYLAND` is defined):
+
+- **`vkGetInstanceProcAddr`** — returns our wrappers for surface
+  creation/destruction, capabilities, swapchain, and device proc addr
+- **`vkGetDeviceProcAddr`** — returns our `vkCreateSwapchainKHR`
+  wrapper. Critical because apps (including vkcube) `dlopen` libvulkan
+  and resolve device-level functions via `vkGetDeviceProcAddr`, not PLT
+- **`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`** — calls through to
+  the Android driver, then patches `currentExtent` to undefined
+  (0xFFFFFFFF) and raises `maxImageExtent` to 16384
+- **`vkCreateSwapchainKHR`** — resizes the `WaylandNativeWindow` to
+  match `imageExtent` before calling the real driver
+
+Also pending in the libhybris working tree: a fence-order fix in the
+Vulkan platform's `queueBuffer` (move `presentBuffer` from before to
+after `sync_wait(fenceFd)`) and a header-skew fix for the Cuda NV
+extension guard. Both are ready to commit; see `libhybris/TAWC_FORK.md`.
+
+**Known libhybris-side header-skew fix we carry:** `vulkan.c`'s Cuda NV extension
+block was guarded on `VK_HEADER_VERSION >= 269`, but in vulkan-headers 1.4.341 the
+NV Cuda symbols are no longer in `vulkan_core.h` (moved behind a beta/compile-time
+flag). We switched the guard to `#ifdef VK_NV_cuda_kernel_launch`, which
+correctly follows the extension's feature-test macro.
+
+**Upstream PRs worth re-evaluating if we push further on vkcube:**
 - PR #604: Mali `currentExtent` fix, `maxImageExtent` raise, opaque alpha support
-- PR #607: Replace `gnu_indirect_function` with regular wrappers (musl/relocation fix)
-
-**For tawc:** libhybris's existing Vulkan WSI is designed for Sailfish's `android_wlegl`
-protocol. We'd need our own WSI layer using AHB-based buffer sharing. The core insight
-is valid: `android_dlopen` can successfully load stock Vulkan drivers from glibc.
+- PR #607: Replace `gnu_indirect_function` with regular wrappers (musl/relocation fix;
+  not needed for glibc but the IDLOAD design has other sharp edges)
 
 ## Termux:X11 Comparison
 

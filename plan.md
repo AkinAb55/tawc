@@ -80,15 +80,27 @@ See [notes/testing.md](notes/testing.md) for details.
 - ✅ Tiny GL shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`, ~30 lines each) built as part of `bash client/build-libhybris`. Firefox/glxtest and GTK/libepoxy probe libGL.so/libGLESv2.so by name and need GLX symbols stubbed so Mesa GLX (broken in chroot) doesn't get reached. See `notes/wsi-layer.md` "Why GL shims still exist".
 - ✅ Integration tests (text-input SHM, click-cursor AHB, firefox AHB) all pass.
 
-## Vulkan WSI
+## Vulkan WSI ✅ (2026-04-20)
 libhybris has built-in Wayland Vulkan WSI (`vulkanplatform_wayland.so`). It intercepts
 `vkCreateWaylandSurfaceKHR`, remaps to `vkCreateAndroidSurfaceKHR`, and uses the same
 `android_wlegl` protocol for buffer sharing. No custom implicit layer needed — once the
 Wayland platform migration is done and the compositor serves `android_wlegl`, Vulkan
 clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 
-- Verify `vulkanplatform_wayland.so` is built by `--enable-wayland`
-- Test with vkcube, vkmark
+- ✅ `vulkan` subdir built by `bash client/build-libhybris`; installs `libvulkan.so.1`
+  (shadows `vulkan-icd-loader` via `LD_LIBRARY_PATH`) and `libhybris/vulkanplatform_wayland.so`
+- ✅ `vulkan.c` compiles with vulkan-headers 1.4.341 (Cuda NV extension guard switched
+  from `VK_HEADER_VERSION >= 269` to `#ifdef VK_NV_cuda_kernel_launch` — the NV Cuda
+  symbols got pulled from the C core headers in recent vulkan-headers releases)
+- ✅ `vulkaninfo --summary` passes: Adreno Vulkan driver loaded via `android_dlopen`,
+  `VK_KHR_wayland_surface` advertised, integration test `test_vulkaninfo_loads_android_driver`
+- ✅ `vkcube` renders correctly on OnePlus 9. Two libhybris fixes required:
+  (a) `NATIVE_WINDOW_BUFFER_AGE=0` (committed as the Firefox flicker fix; Adreno's
+  Vulkan WSI was treating the hardcoded age=2 as "preserved content"), and (b)
+  spec-correct `currentExtent = {0xFFFFFFFF, 0xFFFFFFFF}` (undefined extent) +
+  `vkCreateSwapchainKHR` interception to resize `WaylandNativeWindow` to match
+  the app's `imageExtent`. The dispatch in `vulkan.c` intercepts `vkGetDeviceProcAddr`
+  and `vkGetInstanceProcAddr` to hook swapchain creation and surface capabilities.
 - GPU synchronization: Android Vulkan driver handles fences internally via `android_wlegl`
 - Format negotiation: which VkFormats map to gralloc formats the compositor can import?
 - Real apps: Firefox WebGPU, games
