@@ -21,7 +21,7 @@ This is the current development approach.
 Push and run the script:
 ```bash
 adb push client/arch-chroot-run /data/local/tmp/
-adb shell /system_ext/bin/bash /data/local/tmp/arch-chroot-run
+adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run"
 ```
 
 The script handles all bind mounts, su escalation, and profile setup. For
