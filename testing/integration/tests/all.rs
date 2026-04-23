@@ -322,6 +322,13 @@ fn test_vulkaninfo_loads_android_driver() {
 fn test_gtk4_text_input_hardware_buffers() {
     let mut app = start_text_input(&chroot::GTK4, "");
 
+    let renderer = app.wait_for("RENDERER:", TIMEOUT)
+        .expect("Debug app did not report renderer type");
+    let vulkan = app.wait_for("VULKAN_LOADED:", TIMEOUT)
+        .expect("Debug app did not report Vulkan status");
+    assert!(vulkan.ends_with("yes"),
+        "GTK4 should use Vulkan by default, but libvulkan was not loaded. {renderer}");
+
     adb::input_text("gtk4 works").expect("Failed to send text");
     app.wait_for_text("gtk4 works", TIMEOUT)
         .expect("Text should be 'gtk4 works'");

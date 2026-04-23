@@ -72,7 +72,25 @@ static void on_mark_set(GtkTextBuffer *buffer, GtkTextIter *location,
 
 static gboolean emit_ready(gpointer user_data)
 {
-    (void)user_data;
+    GtkWidget *window = GTK_WIDGET(user_data);
+
+    GskRenderer *renderer = gtk_native_get_renderer(GTK_NATIVE(window));
+    debug_emit("RENDERER", renderer ? G_OBJECT_TYPE_NAME(renderer) : "unknown");
+
+    FILE *maps = fopen("/proc/self/maps", "r");
+    gboolean vulkan = FALSE;
+    if (maps) {
+        char buf[512];
+        while (fgets(buf, sizeof(buf), maps)) {
+            if (strstr(buf, "libvulkan")) {
+                vulkan = TRUE;
+                break;
+            }
+        }
+        fclose(maps);
+    }
+    debug_emit("VULKAN_LOADED", vulkan ? "yes" : "no");
+
     debug_emit("READY", NULL);
     return G_SOURCE_REMOVE;
 }
@@ -85,9 +103,8 @@ static gboolean emit_ready(gpointer user_data)
  * 300ms is the observed gap on this device; 500ms is a comfortable margin. */
 static void on_map(GtkWidget *widget, gpointer user_data)
 {
-    (void)widget;
     (void)user_data;
-    g_timeout_add(500, emit_ready, NULL);
+    g_timeout_add(500, emit_ready, widget);
 }
 
 /* Match gtk3-debug-app's Monospace 18pt text. GTK4 dropped
