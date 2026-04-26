@@ -322,9 +322,14 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
                         committed_width: 0,
                         committed_height: 0,
                     });
-                if let Some(old_buf) = shm_state.current_buffer.take() {
-                    old_buf.release();
-                }
+                // Don't call old_buf.release() here — smithay's
+                // SurfaceAttributes::merge_into has already released the
+                // previous buffer during commit handling. A second release
+                // breaks GTK4 cairo: gdkcairocontext-wayland.c caches the
+                // first release for reuse, and a second release destroys
+                // the cached surface, leaving a dangling pointer that
+                // produces "target surface has been finished" warnings on
+                // the next frame.
                 shm_state.texture = Some(texture);
                 shm_state.current_buffer = Some(buf);
                 shm_state.committed_width = width;
