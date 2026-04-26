@@ -371,5 +371,7 @@ fn run_compositor(
     *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
 
     // --- Run ---
-    event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, state_query_channel, &RUNNING)
+    let result = event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, state_query_channel, &RUNNING);
+    *STATE_QUERY_SENDER.lock().unwrap() = None;
+    result
 }
