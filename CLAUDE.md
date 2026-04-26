@@ -27,7 +27,10 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - If an issue has important info that remains relevant after its solved, integrate that info into your notes when deleting it
 
 ## Workflow
-- Debug against a real Android phone via adb. An emulator (x86_64 AVD with Magisk) is also supported for non-GPU work — see [emulator.md](notes/emulator.md). When both are connected, set `TAWC_TARGET=device` or `TAWC_TARGET=emulator` (the host scripts source `client/select-device.sh` to pick).
+- Debugging against both a real Android phone via adb or an emulator (x86_64 AVD with Magisk) are supported
+- libhybris/GPU drivers are not supported on thet emulator — see [emulator.md](notes/emulator.md)
+- A device can be selected with `TAWC_TARGET=device` or `TAWC_TARGET=emulator`, however generally default target should be automatically picked up (specified in `./.tawctarget`)
+- Use the default device unless explicitly requested/approved by the user.
 - Work autonomously when possible. If you need human help to set up your dev loop, ask
 - When analyzing screenshots, use a sub-agent so the image doesn't end up in main context
 - If `su` is available on the phone, use it instead of `adb root`

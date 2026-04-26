@@ -5,12 +5,21 @@
 # Selection rules:
 #   TAWC_TARGET=device   -> first non-emulator
 #   TAWC_TARGET=emulator -> first emulator-*
-#   unset                -> if exactly one device, use it; if multiple, error
+#   unset                -> read ./.tawctarget at the project root if present;
+#                           otherwise if exactly one device, use it; if multiple, error
 #
 # ANDROID_SERIAL already set by the caller wins -- we don't override.
 
 if [ -n "${ANDROID_SERIAL:-}" ]; then
     return 0 2>/dev/null || exit 0
+fi
+
+if [ -z "${TAWC_TARGET:-}" ]; then
+    _script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    _tawctarget_file="$(dirname "$_script_dir")/.tawctarget"
+    if [ -f "$_tawctarget_file" ]; then
+        TAWC_TARGET=$(head -n1 "$_tawctarget_file" | tr -d '[:space:]')
+    fi
 fi
 
 _devices=$(adb devices | awk 'NR>1 && $2=="device" {print $1}')

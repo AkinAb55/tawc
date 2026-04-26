@@ -20,3 +20,6 @@ smithay/
 
 # OS
 .DS_Store
+
+# Local default device selection (see client/select-device.sh)
+.tawctarget
