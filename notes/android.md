@@ -21,13 +21,13 @@ This is the current development approach.
 Push and run the script:
 ```bash
 adb push client/arch-chroot-run /data/local/tmp/
-adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run"
+adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run"
 ```
 
 The script handles all bind mounts, su escalation, and profile setup. For
 running a command:
 ```bash
-adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '<command>'"
+adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '<command>'"
 ```
 
 Generic tawc Wayland env vars are set automatically by `/etc/profile.d/01-tawc.sh`.
@@ -52,7 +52,7 @@ adb shell "su -c 'cp /tmp/foo /chroot/tmp/ && bash /chroot/build.sh'"
 commands in the chroot should NOT wrap in an outer `su -c`:
 ```bash
 # Preferred: no outer su, arch-chroot-run escalates internally.
-adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'build command'"
+adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run 'build command'"
 
 # Only use su -c for operations on the chroot filesystem itself.
 adb shell "su -c 'cp /data/local/tmp/foo /data/local/arch-chroot/tmp/'"

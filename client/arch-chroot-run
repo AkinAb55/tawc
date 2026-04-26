@@ -1,18 +1,21 @@
-#!/system_ext/bin/bash
-# Enter the Arch Linux ARM chroot. Sets up bind mounts if not already mounted.
-# Run from Termux. Requires root (su).
+#!/system/bin/sh
+# Enter the Arch chroot. Sets up bind mounts if not already mounted.
+# Requires root (su). Works against both real device and emulator
+# (this script is POSIX/mksh-compatible because /system_ext/bin/bash
+# is not on stock emulator images).
 #
 # Usage:
-#   ./arch-chroot              # interactive shell
-#   ./arch-chroot "command"    # run a command and exit
+#   ./arch-chroot-run              # interactive shell
+#   ./arch-chroot-run "command"    # run a command and exit
 
-set -euo pipefail
+set -eu
+set -o pipefail 2>/dev/null || true
 
 CHROOT_DIR="/data/local/arch-chroot"
 
 # Build the setup + chroot command as a single su invocation to avoid
 # repeated su overhead (~15 su calls -> 1).
-read -r -d '' SETUP_SCRIPT << 'ENDSCRIPT' || true
+SETUP_SCRIPT=$(cat << 'ENDSCRIPT'
 set -eu
 CHROOT_DIR="/data/local/arch-chroot"
 TAWC_DATA="/data/data/me.phie.tawc"
@@ -85,6 +88,9 @@ if ! grep -q " $CHROOT_DIR/sys " /proc/mounts 2>/dev/null; then
     # clients (magisk context). Without this, magisk-created memfds get
     # tmpfs:s0 label which untrusted_app can't access. This rule makes them
     # get appdomain_tmpfs:s0 instead (same as normal Android app memfds).
+    # On emulators rootAVD's Magisk doesn't install magiskpolicy, so this
+    # silently no-ops; client/start-emulator does `setenforce 0` after boot
+    # instead (see notes/emulator.md).
     magiskpolicy --live "type_transition magisk tmpfs file appdomain_tmpfs" 2>/dev/null || true
 
     # Ensure chroot environment fixes are in place (PATH, TMPDIR)
@@ -117,6 +123,7 @@ ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
 PROFEOF
 chmod 644 "$CHROOT_DIR/etc/profile.d/01-tawc.sh"
 ENDSCRIPT
+)
 
 if [ $# -gt 0 ]; then
     su -c "$SETUP_SCRIPT

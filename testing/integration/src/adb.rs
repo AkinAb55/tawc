@@ -14,7 +14,7 @@ pub fn shell(cmd: &str) -> io::Result<Output> {
 pub fn chroot_run(cmd: &str) -> io::Result<Output> {
     let escaped = cmd.replace('\'', "'\\''");
     shell(&format!(
-        "su -c \"/system_ext/bin/bash /data/local/tmp/arch-chroot-run '{}'\"",
+        "su -c \"/system/bin/sh /data/local/tmp/arch-chroot-run '{}'\"",
         escaped
     ))
 }
@@ -27,7 +27,7 @@ pub fn chroot_spawn(cmd: &str) -> io::Result<std::process::Child> {
         .args([
             "shell",
             &format!(
-                "su -c \"/system_ext/bin/bash /data/local/tmp/arch-chroot-run '{}'\"",
+                "su -c \"/system/bin/sh /data/local/tmp/arch-chroot-run '{}'\"",
                 escaped
             ),
         ])

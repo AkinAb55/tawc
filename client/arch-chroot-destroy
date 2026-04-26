@@ -1,4 +1,4 @@
-#!/system_ext/bin/bash
+#!/system/bin/sh
 # Unmount and delete the Arch Linux ARM chroot.
 # Run from Termux. Requires root (su).
 # Usage: ./arch-chroot-destroy
@@ -13,11 +13,12 @@ if ! su -c "[ -d '$CHROOT_DIR' ]"; then
 fi
 
 echo "This will permanently delete the chroot at $CHROOT_DIR"
-read -p "Are you sure? [y/N] " confirm
-if [[ "$confirm" != [yY] ]]; then
-    echo "Aborted."
-    exit 1
-fi
+printf "Are you sure? [y/N] "
+read confirm
+case "$confirm" in
+    [yY]) ;;
+    *) echo "Aborted."; exit 1 ;;
+esac
 
 # Unmount ALL mount points under the chroot (in reverse order to handle nesting).
 # This is critical -- if bind mounts are still active, rm -rf will delete real

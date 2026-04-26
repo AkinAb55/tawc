@@ -1,6 +1,8 @@
-#!/system_ext/bin/bash
+#!/system/bin/sh
 # Create an Arch Linux ARM chroot on a rooted Android device.
 # Run from Termux. Requires root (su) and an internet connection.
+# (Termux-only because of `pkg install`. For emulators use
+# client/arch-chroot-create-emulator from the host instead.)
 # Safe to re-run -- skips completed steps.
 # Usage: ./arch-chroot-create
 
@@ -20,7 +22,7 @@ TARBALL_URL="http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
 TARBALL="/data/local/tmp/archlinux-aarch64.tar.gz"
 
 # Ensure curl is available in Termux
-if ! command -v curl &>/dev/null; then
+if ! command -v curl >/dev/null 2>&1; then
     echo "==> Installing curl..."
     pkg install -y curl
 fi
@@ -78,7 +80,7 @@ done
 su -c "mountpoint -q '$CHROOT_DIR/apex' 2>/dev/null || mount --rbind /apex '$CHROOT_DIR/apex'"
 
 # Step 6: Initialize pacman keyring and update (skip if base-devel already installed)
-if su -c "chroot '$CHROOT_DIR' /bin/bash -c 'command -v make'" &>/dev/null; then
+if su -c "chroot '$CHROOT_DIR' /bin/bash -c 'command -v make'" >/dev/null 2>&1; then
     echo "==> base-devel already installed, skipping pacman init/update"
 else
     # Write a setup script inside the chroot and run it directly.

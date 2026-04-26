@@ -14,7 +14,7 @@ behaviour here — it's a Firefox-side startup problem (see
 ## Launching
 
 ```bash
-adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run \
+adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run \
   'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
    MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
    MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
