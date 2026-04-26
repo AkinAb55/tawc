@@ -191,6 +191,7 @@ impl TextInputState {
     pub fn remove_instance(&mut self, id: &ObjectId) {
         self.instances.retain(|ti| ti.id() != *id);
         self.instance_state.remove(id);
+        self.sync_keyboard_visibility();
     }
 
     // --- Client request handlers (called from protocol dispatch) ---
@@ -399,10 +400,14 @@ impl TextInputState {
             .filter(|ti| !ti.is_alive())
             .map(|ti| ti.id())
             .collect();
+        if dead_ids.is_empty() {
+            return;
+        }
         for id in &dead_ids {
             self.instance_state.remove(id);
         }
         self.instances.retain(|ti| ti.is_alive());
+        self.sync_keyboard_visibility();
     }
 }
 

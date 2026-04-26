@@ -95,16 +95,10 @@ static gboolean emit_ready(gpointer user_data)
     return G_SOURCE_REMOVE;
 }
 
-/* The GTK4 "map" signal fires when the widget's surface is mapped. Defer the
- * READY emission briefly so the IM context has a chance to send
- * zwp_text_input_v3.enable — otherwise the Rust harness races the broadcast
- * against text-input setup and the first commit_string is dropped by the
- * compositor (see server/compositor/src/text_input.rs: `if !inst.enabled`).
- * 300ms is the observed gap on this device; 500ms is a comfortable margin. */
 static void on_map(GtkWidget *widget, gpointer user_data)
 {
     (void)user_data;
-    g_timeout_add(500, emit_ready, widget);
+    g_idle_add(emit_ready, widget);
 }
 
 /* Match gtk3-debug-app's Monospace 18pt text. GTK4 dropped

@@ -42,6 +42,23 @@ fn setup_app(spec: &chroot::DebugAppSpec) -> String {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Wait until the compositor reports that the Android keyboard has been shown,
+/// meaning at least one client has enabled text input. Polls the `tawc` logcat
+/// tag for the `onShowKeyboard` message emitted by NativeBridge.
+fn wait_for_keyboard_shown(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let logs = adb::logcat_dump("tawc").expect("Failed to dump logcat");
+        if logs.contains("onShowKeyboard") {
+            return;
+        }
+        if Instant::now() > deadline {
+            panic!("Timeout waiting for onShowKeyboard in logcat");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Start the text-input subcommand of a debug app and wait for READY.
 /// `env` is prepended to the launch command (e.g. "GDK_GL=disabled" or
 /// "LD_BIND_NOW=1"); pass "" for no extra env.
@@ -50,6 +67,11 @@ fn start_text_input(spec: &chroot::DebugAppSpec, env: &str) -> DebugApp {
     adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(&binary, "text-input", env).expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
+
+    // Wait for the client's IM context to enable text input. Without this,
+    // text injected via broadcast is dropped because the compositor gates
+    // commit_string on the text-input-v3 enabled flag.
+    wait_for_keyboard_shown(TIMEOUT);
 
     // Verify compositor sees the toplevel
     let state = compositor::query_state(TIMEOUT)

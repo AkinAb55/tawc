@@ -68,8 +68,13 @@ pub fn logcat_clear() -> io::Result<Output> {
 
 /// Dump logcat lines matching the tawc-native tag (compositor Rust logs).
 pub fn logcat_dump_tawc() -> io::Result<String> {
+    logcat_dump("tawc-native")
+}
+
+/// Dump logcat lines matching a specific tag.
+pub fn logcat_dump(tag: &str) -> io::Result<String> {
     let output = Command::new("adb")
-        .args(["logcat", "-d", "-s", "tawc-native"])
+        .args(["logcat", "-d", "-s", tag])
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
