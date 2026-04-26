@@ -14,6 +14,7 @@ The `notes/` directory contains architecture and implementation notes. Edit/crea
 - [text-input.md](notes/text-input.md) -- text input design (Android IME <-> zwp_text_input_v3)
 - [firefox.md](notes/firefox.md) -- Firefox-specific setup and issues
 - [android.md](notes/android.md) -- socket sharing, SELinux, chroot setup
+- [emulator.md](notes/emulator.md) -- AVD setup, Magisk root, x86_64 chroot, what works/doesn't
 
 Keep notes up to date with new choices, discoveries and project state. This is an agent-written project, existing code/notes may be wrong. Stay vigilant, and fix/record problems as you find them (even when working on something else).
 
@@ -26,7 +27,7 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - If an issue has important info that remains relevant after its solved, integrate that info into your notes when deleting it
 
 ## Workflow
-- Debug against a real Android phone via adb
+- Debug against a real Android phone via adb. An emulator (x86_64 AVD with Magisk) is also supported for non-GPU work — see [emulator.md](notes/emulator.md). When both are connected, set `TAWC_TARGET=device` or `TAWC_TARGET=emulator` (the host scripts source `client/select-device.sh` to pick).
 - Work autonomously when possible. If you need human help to set up your dev loop, ask
 - When analyzing screenshots, use a sub-agent so the image doesn't end up in main context
 - If `su` is available on the phone, use it instead of `adb root`
@@ -69,9 +70,9 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
 - **Build (libhybris):** `bash client/build-libhybris` (or `--clean` to reconfigure). Edit `./libhybris` locally, script syncs to phone.
 - **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.MainActivity`
-- **Chroot:** `adb push client/arch-chroot-run /data/local/tmp/ && adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run"`
-- **Run Wayland app:** `adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '<command>'"` (env vars set by profile)
-- **Firefox:** `adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 DISPLAY= firefox --no-remote'"`
+- **Chroot:** `adb push client/arch-chroot-run /data/local/tmp/ && adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run"`
+- **Run Wayland app:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '<command>'"` (env vars set by profile)
+- **Firefox:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 DISPLAY= firefox --no-remote'"`
 - **Screenshot:** `adb shell "su -c 'screencap -p /sdcard/screenshot.png'" && adb pull /sdcard/screenshot.png /tmp/screenshot.png` (analyze with sub-agent, then clean up both files)
 - **Logs:** `adb logcat -s tawc-native` (Rust) or `adb logcat -s tawc` (Kotlin). Filter frame spam: `grep -v renderer_gles2_frame`
 - **Kill Firefox:** `adb shell "su -c 'killall firefox'"`
@@ -81,7 +82,7 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Integration tests (full):** `bash testing/run-integration-tests.sh` (builds everything, deploys, runs tests. Feel free to do these as-needed instead of using this script)
 - **Integration tests (tests only):** `cd testing/integration && cargo test -- --nocapture --test-threads=1`
 - **Build debug apps:** `bash testing/build-debug-app.sh` (both gtk3+gtk4; or `... gtk3` / `... gtk4`)
-- **Run GTK3 debug app:** `adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'"` (must build first)
-- **Run GTK4 debug app:** `adb shell "/system_ext/bin/bash /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"`
+- **Run GTK3 debug app:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always /tmp/gtk3-debug-app/gtk3-debug-app text-input'"` (must build first)
+- **Run GTK4 debug app:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"`
 - **Inject text (for testing):** `adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"`
 - **Inject keyevent (for testing):** `adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67`

@@ -16,6 +16,7 @@ target/
 
 # External repos
 libhybris/
+smithay/
 
 # OS
 .DS_Store

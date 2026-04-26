@@ -12,6 +12,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIBHYBRIS_DIR="$REPO_DIR/libhybris"
 CHROOT="/data/local/arch-chroot"
+
+# shellcheck source=select-device.sh
+source "$SCRIPT_DIR/select-device.sh"
+
+# libhybris needs real Android GPU drivers, which emulators don't have.
+case "${ANDROID_SERIAL:-}" in
+    emulator-*)
+        echo "ERROR: build-libhybris doesn't make sense against an emulator" >&2
+        echo "       (no Android GPU drivers / vendor blobs to bind to)." >&2
+        echo "       Set TAWC_TARGET=device or ANDROID_SERIAL=<real device>." >&2
+        exit 1
+        ;;
+esac
 STAMP="$CHROOT/usr/local/lib/.libhybris-build-stamp"
 INSTALLED_LIB="$CHROOT/usr/local/lib/libhybris-common.so.1.0.0"
 

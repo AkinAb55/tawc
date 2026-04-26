@@ -19,7 +19,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 
-echo "=== Checking adb connection ==="
+# shellcheck source=../client/select-device.sh
+source "$ROOT_DIR/client/select-device.sh"
+
+echo "=== Checking adb connection ($ANDROID_SERIAL) ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }
 
 echo "=== Building compositor APK ==="
@@ -37,8 +40,15 @@ echo "=== Pushing pidfile helper ==="
 adb push testing/tawc-pidfile-exec /data/local/tmp/
 adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/local/arch-chroot/tmp/tawc-pidfile-exec && chmod +x /data/local/arch-chroot/tmp/tawc-pidfile-exec'"
 
-echo "=== Building libhybris + GL shims (if sources changed) ==="
-bash client/build-libhybris --if-needed
+case "$ANDROID_SERIAL" in
+    emulator-*)
+        echo "=== Skipping libhybris build (emulator has no Android GPU drivers) ==="
+        ;;
+    *)
+        echo "=== Building libhybris + GL shims (if sources changed) ==="
+        bash client/build-libhybris --if-needed
+        ;;
+esac
 
 echo "=== Running integration tests ==="
 # Note: debug app build + deps are handled by the Rust test harness

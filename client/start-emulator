@@ -1,0 +1,83 @@
+#!/bin/bash
+# Launch the tawc AVD. Windowed by default; pass --headless for no UI.
+# See notes/emulator.md for one-time setup (SDK, AVD, Magisk).
+#
+# Usage: bash client/start-emulator [--headless] [--cold]
+
+set -eu
+
+ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+EMU="$ANDROID_HOME/emulator/emulator"
+AVD_NAME="${TAWC_AVD:-tawc}"
+LOG="${TAWC_EMULATOR_LOG:-/tmp/emulator.log}"
+
+[ -x "$EMU" ] || { echo "ERROR: emulator not found at $EMU (set ANDROID_HOME?)" >&2; exit 1; }
+
+# Refuse if a real qemu instance for this AVD is running. Match the
+# binary path rather than the args, so unrelated shells that grep for
+# "tawc" don't trip the check.
+if pgrep -af '/qemu-system-x86_64 ' | grep -q -- "-avd $AVD_NAME\b"; then
+    echo "AVD '$AVD_NAME' already running. PIDs:" >&2
+    pgrep -af '/qemu-system-x86_64 ' | grep -- "-avd $AVD_NAME\b" >&2
+    exit 1
+fi
+
+ARGS=(-avd "$AVD_NAME" -no-audio -no-boot-anim)
+HEADLESS=0
+for arg in "$@"; do
+    case "$arg" in
+        --headless) ARGS+=(-no-window); HEADLESS=1 ;;
+        --cold)     ARGS+=(-no-snapshot-load) ;;
+        *) echo "ERROR: unknown arg: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# Windowed mode: emulator's bundled Qt only has the xcb (X11) plugin, no
+# wayland plugin. On a Wayland session you need an Xwayland socket. If
+# DISPLAY isn't set or points at an unreachable :0, fall back to whatever
+# X socket the current $XDG_RUNTIME_DIR / /tmp/.X11-unix has for this user.
+if [ "$HEADLESS" = "0" ]; then
+    if [ -z "${DISPLAY:-}" ] || ! command -v xset >/dev/null 2>&1 || ! xset q >/dev/null 2>&1; then
+        for sock in /tmp/.X11-unix/X*; do
+            [ -e "$sock" ] || continue
+            [ "$(stat -c %u "$sock")" = "$(id -u)" ] || continue
+            n=${sock##*/X}
+            if DISPLAY=":$n" xset q >/dev/null 2>&1; then
+                export DISPLAY=":$n"
+                echo "==> using DISPLAY=$DISPLAY"
+                break
+            fi
+        done
+    fi
+    if ! xset q >/dev/null 2>&1; then
+        echo "WARNING: no reachable X display; emulator window will fail to open." >&2
+        echo "         On Wayland, start an Xwayland-capable session as your user." >&2
+    fi
+fi
+
+echo "==> launching: $EMU ${ARGS[*]}"
+echo "    log: $LOG"
+nohup "$EMU" "${ARGS[@]}" >"$LOG" 2>&1 &
+EMU_PID=$!
+echo "    pid: $EMU_PID"
+echo
+echo "==> waiting for boot (Ctrl+C to background; AVD keeps running)"
+ADB="$ANDROID_HOME/platform-tools/adb"
+[ -x "$ADB" ] || ADB=adb
+until "$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
+    sleep 3
+    if ! kill -0 "$EMU_PID" 2>/dev/null; then
+        echo "ERROR: emulator died — see $LOG" >&2
+        tail -20 "$LOG" >&2
+        exit 1
+    fi
+done
+echo "==> booted: emulator-5554"
+
+# rootAVD's Magisk doesn't ship magiskpolicy (see notes/emulator.md), so
+# arch-chroot-run can't install the SELinux type_transition that lets the
+# compositor (untrusted_app) mmap memfds from chroot clients. Drop to
+# permissive instead — emulator-only, resets on reboot. We already gave
+# up isolation by Magisk-rooting the AVD for dev.
+"$ADB" -s emulator-5554 shell 'su -c "setenforce 0"' >/dev/null 2>&1 || \
+    echo "WARNING: failed to set SELinux permissive; SHM client surfaces will not render" >&2
