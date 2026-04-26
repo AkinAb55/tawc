@@ -116,6 +116,19 @@ AHardwareBuffer *tawc_wlegl_import(
         return NULL;
     }
 
+    AHardwareBuffer_Desc actual;
+    AHardwareBuffer_describe(ahb, &actual);
+    if (actual.width != width || actual.height != height ||
+        actual.stride != stride || actual.format != format) {
+        LOGE("tawc_wlegl_import: desc mismatch: "
+             "client=%ux%u stride=%u fmt=%u, "
+             "actual=%ux%u stride=%u fmt=%u",
+             width, height, stride, format,
+             actual.width, actual.height, actual.stride, actual.format);
+        g_release(ahb);
+        return NULL;
+    }
+
     LOGI("tawc_wlegl_import: ok, ahb=%p %ux%u fmt=%u usage=0x%llx",
          (void *)ahb, width, height, format, (unsigned long long)usage);
     return ahb;
