@@ -1,6 +1,17 @@
-- GDK/GLib calls `syscall(SYS_memfd_create, ...)` directly, bypassing our LD_PRELOAD shim that relabels memfds for SELinux
-- This causes the compositor to fail when mmapping client buffers
-- Workaround: `adb shell "su -c 'setenforce 0'"` (must be re-run after each reboot)
-- Affects Firefox and likely all GTK apps
-- Proper fix options: intercept `syscall()` itself, or run clients as the compositor's UID
-- See notes/rendering.md "SELinux and Memfd Sharing" and notes/firefox.md "Known Issues"
+# SELinux enforcing mode: SHM buffers fail due to memfd labels
+
+- Chroot clients run under the `magisk` SELinux context, which isn't in `appdomain`
+- Their memfds get labeled `tmpfs:s0` instead of `appdomain_tmpfs:s0`
+- The compositor (`untrusted_app`) is denied `{ read write }` on `tmpfs:s0` memfds under enforcing SELinux
+- Our LD_PRELOAD shim (`memfd-selinux-shim`) relabels memfds via `fsetxattr`, but GDK/GLib bypasses it by calling `syscall(SYS_memfd_create, ...)` directly
+- Hardware buffer (AHB/wlegl) path is unaffected — only SHM buffers break
+- dmesg: `avc: denied { read write } for path=memfd:gdk-wayland dev="tmpfs" scontext=u:r:untrusted_app:... tcontext=u:object_r:tmpfs:s0`
+- Workaround: `adb shell "su -c 'setenforce 0'"` (resets on reboot)
+
+## Fix direction
+
+If chroot clients ran in an `appdomain` SELinux context, their memfds would automatically get labeled `appdomain_tmpfs` — no shim needed at all. Approach: after chroot setup (which needs root), drop to the compositor's UID and SELinux context before exec'ing the client. Need to verify `runcon`/context transitions work and that GPU/hwbinder access survives the switch.
+
+## See also
+- notes/rendering.md "SELinux and Memfd Sharing"
+- notes/firefox.md "Known Issues"
