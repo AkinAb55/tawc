@@ -80,7 +80,6 @@ cargo test -- --nocapture --test-threads=1
 Tests require:
 - Phone connected via adb
 - Compositor APK installed and running
-- SELinux permissive (`adb shell "su -c 'setenforce 0'"`)
 - `arch-chroot-run` pushed to phone
 
 ### Test Input Mechanism

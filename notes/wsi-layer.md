@@ -18,7 +18,6 @@ WAYLAND_DISPLAY=wayland-0
 XDG_RUNTIME_DIR=/tmp
 LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib
 HYBRIS_EGLPLATFORM=wayland
-LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
 ```
 
 `/tmp/gl-shims` holds the shim libraries (built by
@@ -26,8 +25,6 @@ LD_PRELOAD=/tmp/memfd-selinux-shim/libmemfd-selinux-shim.so
 `bash client/build-libhybris` installs libhybris (libEGL.so,
 libGLESv2.so, libGLESv1_CM.so, libvulkan.so.1, plus eglplatform_*.so
 and vulkanplatform_*.so plugins under `/usr/local/lib/libhybris/`).
-The memfd SELinux shim is unrelated to WSI but still required on
-stock firmware.
 
 We deliberately build libhybris **without** `--enable-glvnd` (see
 `client/build-libhybris`): the glvnd path drags `libglvnd` in as a hard

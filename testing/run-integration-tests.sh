@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run the full tawc integration test suite.
 #
-# Builds all components (compositor APK, memfd shim, debug app), deploys to
+# Builds all components (compositor APK, debug app), deploys to
 # the phone, and runs the Cargo integration tests.
 #
 # Prerequisites:
@@ -22,9 +22,6 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 echo "=== Checking adb connection ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }
 
-echo "=== Setting SELinux permissive ==="
-adb shell "su -c 'setenforce 0'"
-
 echo "=== Building compositor APK ==="
 cd "$ROOT_DIR/server"
 ./gradlew assembleDebug --quiet
@@ -42,9 +39,6 @@ adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/local/arch-chroot/t
 
 echo "=== Building libhybris + GL shims (if sources changed) ==="
 bash client/build-libhybris --if-needed
-
-echo "=== Building memfd shim ==="
-bash client/memfd-selinux-shim/build
 
 echo "=== Running integration tests ==="
 # Note: debug app build + deps are handled by the Rust test harness
