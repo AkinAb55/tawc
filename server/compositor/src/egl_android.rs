@@ -37,9 +37,11 @@ pub unsafe fn create_raw_egl_context() -> Result<(*const c_void, *const c_void, 
         return Err("eglBindAPI(OPENGL_ES_API) failed".into());
     }
 
-    // Choose config
+    // Choose config. PBUFFER_BIT in addition to WINDOW_BIT lets smithay
+    // allocate a 1x1 dummy pbuffer for make_current on drivers without
+    // EGL_KHR_surfaceless_context (e.g. Android emulator's gfxstream).
     let config_attribs: &[i32] = &[
-        egl_ffi::egl::SURFACE_TYPE as i32, egl_ffi::egl::WINDOW_BIT as i32,
+        egl_ffi::egl::SURFACE_TYPE as i32, (egl_ffi::egl::WINDOW_BIT | egl_ffi::egl::PBUFFER_BIT) as i32,
         egl_ffi::egl::RENDERABLE_TYPE as i32, egl_ffi::egl::OPENGL_ES2_BIT as i32,
         egl_ffi::egl::RED_SIZE as i32, 8,
         egl_ffi::egl::GREEN_SIZE as i32, 8,
