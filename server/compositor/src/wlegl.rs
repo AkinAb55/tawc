@@ -228,6 +228,7 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                 if ahb.is_null() {
                     // Leave fds owned by WleglHandleData; they'll be closed
                     // on handle destroy.
+                    // post_error is fatal (kills the client), so skipping data_init.init() is safe.
                     resource.post_error(
                         android_wlegl::Error::BadHandle,
                         "AHardwareBuffer_createFromHandle failed",
