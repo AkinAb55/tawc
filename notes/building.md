@@ -63,8 +63,13 @@ via `magiskpolicy --live` on every chroot entry.
 
 The compositor needs xkeyboard-config data files for xkbcommon to load keymaps.
 These are vendored in `server/app/src/main/assets/xkb/` and extracted to the
-app's data dir on first launch. The data came from the chroot's
-`/usr/share/xkeyboard-config-2/` (Arch Linux ARM `xkeyboard-config` package).
+app's data dir (`files/xkb`) by `CompositorService.onCreate` before
+`nativeStartCompositor` runs — must happen before xkbcommon's keymap lookup,
+otherwise `seat.add_keyboard(XkbConfig::default(), ...)` returns a NULL
+keymap and the compositor SIGSEGVs. The extractor is idempotent
+(versioned via `files/xkb/.version`), so it's a no-op after the first run.
+The data came from the chroot's `/usr/share/xkeyboard-config-2/` (Arch
+Linux ARM `xkeyboard-config` package).
 
 To update from the chroot:
 ```bash

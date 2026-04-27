@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
@@ -18,7 +17,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import java.io.File
 
 /**
  * Hosts the Rust Wayland compositor on a SurfaceView. All interaction
@@ -159,10 +157,9 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         activityId = id
         Log.d(TAG, "CompositorActivity onCreate activityId=$activityId")
 
-        extractXkbData()
-
         // Start and bind the CompositorService. The Service owns the
-        // compositor thread and survives this Activity's lifetime.
+        // compositor thread (and runs xkb-data extraction) and survives
+        // this Activity's lifetime.
         val serviceIntent = Intent(this, CompositorService::class.java)
         startForegroundService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
@@ -252,34 +249,6 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
             return TawcInputConnection(this)
         }
-    }
-
-    private fun extractXkbData() {
-        val destDir = File(filesDir, "xkb")
-        val versionFile = File(destDir, ".version")
-        val currentVersion = try {
-            packageManager.getPackageInfo(packageName, 0).longVersionCode
-        } catch (_: PackageManager.NameNotFoundException) { 0L }
-
-        if (versionFile.exists() && versionFile.readText().trim() == currentVersion.toString()) return
-
-        destDir.deleteRecursively()
-        fun extractDir(assetPath: String, destPath: File) {
-            val children = assets.list(assetPath) ?: return
-            if (children.isEmpty()) {
-                assets.open(assetPath).use { input ->
-                    destPath.outputStream().use { output -> input.copyTo(output) }
-                }
-            } else {
-                destPath.mkdirs()
-                for (child in children) {
-                    extractDir("$assetPath/$child", File(destPath, child))
-                }
-            }
-        }
-        extractDir("xkb", destDir)
-        versionFile.writeText(currentVersion.toString())
-        Log.d(TAG, "Extracted xkb data to $destDir")
     }
 
     private fun dispatchTouchToCompositor(event: MotionEvent): Boolean {

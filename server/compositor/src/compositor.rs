@@ -208,7 +208,8 @@ impl TawcState {
         let mut seat = seat_state.new_wl_seat(&dh, "tawc");
         // Advertise pointer, keyboard, and touch capabilities
         seat.add_pointer();
-        std::env::set_var("XKB_CONFIG_ROOT", "/data/data/me.phie.tawc/files/xkb");
+        let xkb_root = "/data/data/me.phie.tawc/files/xkb";
+        std::env::set_var("XKB_CONFIG_ROOT", xkb_root);
         // Smithay falls back to writing the keymap to a tempfile under
         // XDG_RUNTIME_DIR (or std::env::temp_dir() = /tmp) for wl_keyboard
         // versions < 7. /tmp doesn't exist on a stock Android emulator and
@@ -216,6 +217,21 @@ impl TawcState {
         // keymap, smithay skips wl_keyboard.enter, GTK never activates the
         // wayland IM, and text-input.enable never fires.
         std::env::set_var("XDG_RUNTIME_DIR", "/data/data/me.phie.tawc");
+        // libxkbcommon's `xkb_context_new` returns NULL when none of its
+        // include paths can be opened; xkbcommon-rs's `Context::new`
+        // doesn't NULL-check that, and the C `xkb_context_ref` it later
+        // hands the NULL to doesn't NULL-check either, so the failure
+        // mode reaching us via smithay's `add_keyboard` is a SIGSEGV with
+        // no useful log line. Catch the realistic precondition (xkb data
+        // dir present) up front so the panic message lands in
+        // tawc-native logcat instead of just `libc Fatal signal 11`.
+        let evdev_rules = std::path::Path::new(xkb_root).join("rules/evdev");
+        if !evdev_rules.is_file() {
+            panic!(
+                "xkb data missing at {} — CompositorService.ensureXkbDataExtracted should have populated this before nativeStartCompositor",
+                evdev_rules.display(),
+            );
+        }
         seat.add_keyboard(XkbConfig::default(), 200, 25)
             .expect("Failed to add keyboard to seat");
         seat.add_touch();

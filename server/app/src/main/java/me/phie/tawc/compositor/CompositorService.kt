@@ -8,12 +8,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import android.view.WindowManager
+import java.io.File
 import java.lang.ref.WeakReference
 
 /**
@@ -67,6 +69,13 @@ class CompositorService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
+
+        // xkbcommon's keymap lookup happens during compositor startup and
+        // dereferences a NULL keymap if XKB_CONFIG_ROOT is missing — extract
+        // bundled xkb data before starting the compositor thread. Idempotent
+        // (skips when files/xkb/.version matches the package version), so
+        // it's a no-op on subsequent service restarts.
+        ensureXkbDataExtracted()
 
         // Hand the application context + service to NativeBridge so its
         // reverse-JNI spawnActivity/finishActivity entry points work even
@@ -137,6 +146,34 @@ class CompositorService : Service() {
         val wm = getSystemService(WindowManager::class.java) ?: return 0 to 0
         val bounds = wm.maximumWindowMetrics.bounds
         return bounds.width() to bounds.height()
+    }
+
+    private fun ensureXkbDataExtracted() {
+        val destDir = File(filesDir, "xkb")
+        val versionFile = File(destDir, ".version")
+        val currentVersion = try {
+            packageManager.getPackageInfo(packageName, 0).longVersionCode
+        } catch (_: PackageManager.NameNotFoundException) { 0L }
+
+        if (versionFile.exists() && versionFile.readText().trim() == currentVersion.toString()) return
+
+        destDir.deleteRecursively()
+        fun extractDir(assetPath: String, destPath: File) {
+            val children = assets.list(assetPath) ?: return
+            if (children.isEmpty()) {
+                assets.open(assetPath).use { input ->
+                    destPath.outputStream().use { output -> input.copyTo(output) }
+                }
+            } else {
+                destPath.mkdirs()
+                for (child in children) {
+                    extractDir("$assetPath/$child", File(destPath, child))
+                }
+            }
+        }
+        extractDir("xkb", destDir)
+        versionFile.writeText(currentVersion.toString())
+        Log.d(TAG, "Extracted xkb data to $destDir")
     }
 
     private fun ensureNotificationChannel() {
