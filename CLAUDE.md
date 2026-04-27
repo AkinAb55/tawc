@@ -40,6 +40,7 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - Only git commit when told to
 - Feel free to check out different commits/bisect/etc when needed, but always end up back where you started unless explicitly asked
 - Git push hangs on this system without user approval, only push if explicitly asked
+- Never `/schedule` anything, and never suggest using `/schedule` unprompted — only use the feature when the user explicitly asks for it
 
 ## Background
 The compositor shows a vertical gradient background (black at top, bright blue-turquoise at bottom) when no app is covering the screen. This is rendered via a custom Smithay texture shader on a 1x1 dummy texture (`background.rs`). The color constant is `TURQUOISE` in that file.
