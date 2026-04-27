@@ -4,7 +4,7 @@ use std::process::{Command, Output, Stdio};
 /// Path to the on-device chroot wrapper rendered by the in-app installer
 /// (see ChrootMounter.enterScript). Mount + chroot logic lives there;
 /// these helpers just shell into `su -c '<enter.sh> <b64-cmd>'`.
-const ENTER_SCRIPT: &str = "/data/data/me.phie.tawc/installations/arch/enter.sh";
+const ENTER_SCRIPT: &str = "/data/data/me.phie.tawc/distros/arch/enter.sh";
 
 /// Run an adb shell command, wait for completion, return output.
 pub fn shell(cmd: &str) -> io::Result<Output> {

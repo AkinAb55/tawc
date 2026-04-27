@@ -73,7 +73,7 @@ Linux ARM `xkeyboard-config` package).
 
 To update from the chroot:
 ```bash
-adb shell "su -c 'cd /data/data/me.phie.tawc/installations/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/xkb-data.tar .'"
+adb shell "su -c 'cd /data/data/me.phie.tawc/distros/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/xkb-data.tar .'"
 adb pull /data/local/tmp/xkb-data.tar /tmp/xkb-data.tar
 rm -rf server/app/src/main/assets/xkb
 mkdir -p server/app/src/main/assets/xkb

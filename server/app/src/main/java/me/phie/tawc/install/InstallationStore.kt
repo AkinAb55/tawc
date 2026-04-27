@@ -11,7 +11,7 @@ import java.io.File
  *
  *     <app data>/
  *       cache/install/                 # downloaded bootstrap tarballs
- *       installations/
+ *       distros/
  *         <id>/
  *           metadata.json
  *           rootfs/                    # the chroot itself
@@ -20,7 +20,7 @@ import java.io.File
  * varies the id; nothing else here cares.
  */
 class InstallationStore(context: Context) {
-    val baseDir: File = File(context.dataDir, "installations")
+    val baseDir: File = File(context.dataDir, "distros")
     val cacheDir: File = File(context.cacheDir, "install")
 
     fun installationDir(id: String): File = File(baseDir, id)

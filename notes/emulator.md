@@ -95,7 +95,7 @@ matching a real Magisk-rooted device.
 
 This installs the tawc app and triggers its in-app installer, which
 downloads the Arch x86_64 bootstrap tarball, extracts it to
-`/data/data/me.phie.tawc/installations/arch/rootfs/`, configures pacman,
+`/data/data/me.phie.tawc/distros/arch/rootfs/`, configures pacman,
 and installs `base-devel` + Wayland + GTK3 inside the chroot. Takes a
 few minutes the first time. Idempotent — re-running skips done steps
 (apart from a forced re-extract; uninstall + reinstall for a clean slate).

@@ -21,7 +21,7 @@ Everything lives under the app's private data dir:
 
     /data/data/me.phie.tawc/
       cache/install/                 # downloaded bootstrap tarballs (kept across runs)
-      installations/
+      distros/
         arch/
           metadata.json              # JSON: id, distro, arch, method, sourceUrl, …
           rootfs/                    # the chroot itself (what `arch-chroot` would chroot into)
@@ -168,7 +168,7 @@ Listing existing installations from the host: read the metadata
 directly with root.
 
 ```sh
-adb shell "su -c 'ls /data/data/me.phie.tawc/installations/'"
+adb shell "su -c 'ls /data/data/me.phie.tawc/distros/'"
 ```
 
 ## Required permissions

@@ -101,7 +101,7 @@ the rest of the app's UI/management features.
   - `TawcInputConnection.kt` — IME bridge.
 - `install/` — Kotlin implementation of the chroot install / run /
   destroy logic. The rootfs is stored under
-  `/data/data/me.phie.tawc/installations/<id>/rootfs/` so uninstalling
+  `/data/data/me.phie.tawc/distros/<id>/rootfs/` so uninstalling
   the app reclaims it. The host-side counterpart is
   `client/tawc-chroot-run`, which shells into the same auto-generated
   `enter.sh` over `adb shell su`. See [installation.md](installation.md)

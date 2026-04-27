@@ -14,7 +14,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 app_name="gtk4-debug-app"
 src_dir="$SCRIPT_DIR/$app_name"
-chroot_root="/data/data/me.phie.tawc/installations/arch/rootfs"
+chroot_root="/data/data/me.phie.tawc/distros/arch/rootfs"
 build_dir="$chroot_root/tmp/$app_name"
 
 echo "=== $app_name: pushing source ==="

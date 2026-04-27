@@ -154,13 +154,13 @@ pub fn assert_running() {
 /// readiness on the very next test run.
 pub fn is_running() -> io::Result<bool> {
     // /tmp inside the chroot is the rootfs's /tmp dir; from outside, that's
-    // /data/data/me.phie.tawc/installations/arch/rootfs/tmp. The compositor
+    // /data/data/me.phie.tawc/distros/arch/rootfs/tmp. The compositor
     // puts its socket at /data/data/me.phie.tawc/wayland-0 and 01-tawc.sh
     // symlinks it to /tmp/wayland-0 inside the chroot — the symlink is
     // what we check here.
     let output = adb::shell(
         "pidof me.phie.tawc >/dev/null && \
-         su -c 'test -e /data/data/me.phie.tawc/installations/arch/rootfs/tmp/wayland-0' \
+         su -c 'test -e /data/data/me.phie.tawc/distros/arch/rootfs/tmp/wayland-0' \
          && echo ready",
     )?;
     Ok(String::from_utf8_lossy(&output.stdout).contains("ready"))

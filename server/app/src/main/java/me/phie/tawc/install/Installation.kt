@@ -6,7 +6,7 @@ import java.io.File
 /**
  * Persistent metadata for a single installed Linux environment. Stored as
  * `metadata.json` next to the rootfs in
- * `<app data>/installations/<id>/`.
+ * `<app data>/distros/<id>/`.
  *
  * The set of fields is deliberately small but already factored to support
  * the directions called out in the original task:

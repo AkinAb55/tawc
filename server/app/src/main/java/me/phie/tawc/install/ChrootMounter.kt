@@ -120,7 +120,7 @@ object ChrootMounter {
             # symlinks it to /tmp/wayland-0.
             #
             # Yes, this creates a recursion (the rootfs contains itself
-            # via .../installations/<id>/rootfs/data/data/...). It's
+            # via .../distros/<id>/rootfs/data/data/...). It's
             # benign because no tool recursively walks through it.
             if [ -d "$tawcData" ]; then
                 mkdir -p "${'$'}ROOTFS$tawcData"

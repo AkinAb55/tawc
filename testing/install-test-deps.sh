@@ -11,7 +11,7 @@
 #   - Android device or emulator connected via adb (set TAWC_TARGET= if
 #     multiple targets are connected)
 #   - In-app Arch chroot installed at
-#     /data/data/me.phie.tawc/installations/arch/ (install from the app's
+#     /data/data/me.phie.tawc/distros/arch/ (install from the app's
 #     home screen, or `am start -n me.phie.tawc/.install.InstallActivity
 #     --es autoStart true --es id arch`)
 #

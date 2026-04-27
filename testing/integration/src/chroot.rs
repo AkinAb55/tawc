@@ -8,7 +8,7 @@ const APP_NAME: &str = "gtk4-debug-app";
 
 /// Filesystem root of the in-app Arch chroot, as seen from outside.
 /// Inside the chroot the same dir is just `/`.
-const CHROOT_ROOTFS: &str = "/data/data/me.phie.tawc/installations/arch/rootfs";
+const CHROOT_ROOTFS: &str = "/data/data/me.phie.tawc/distros/arch/rootfs";
 
 fn chroot_build_dir() -> String {
     format!("/tmp/{}", APP_NAME)

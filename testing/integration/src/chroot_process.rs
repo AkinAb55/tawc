@@ -15,10 +15,10 @@ const PID_TIMEOUT: Duration = Duration::from_secs(10);
 const PIDFILE_HELPER_CHROOT: &str = "/tmp/tawc-pidfile-exec";
 
 /// Filesystem root of the in-app Arch chroot, as seen from outside.
-const CHROOT_ROOTFS: &str = "/data/data/me.phie.tawc/installations/arch/rootfs";
+const CHROOT_ROOTFS: &str = "/data/data/me.phie.tawc/distros/arch/rootfs";
 
 /// Path for the pidfile helper script on the device filesystem (outside chroot).
-const PIDFILE_HELPER_DEVICE: &str = "/data/data/me.phie.tawc/installations/arch/rootfs/tmp/tawc-pidfile-exec";
+const PIDFILE_HELPER_DEVICE: &str = "/data/data/me.phie.tawc/distros/arch/rootfs/tmp/tawc-pidfile-exec";
 
 /// A process running inside the Android chroot with process-group-based lifecycle.
 ///

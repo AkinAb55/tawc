@@ -11,7 +11,7 @@
 #     (multiple targets: set TAWC_TARGET=device|emulator first)
 #   - tawc app installed (this script reinstalls it during build)
 #   - In-app Arch chroot installed at
-#     /data/data/me.phie.tawc/installations/arch/. Install via:
+#     /data/data/me.phie.tawc/distros/arch/. Install via:
 #       adb shell am start -n me.phie.tawc/.install.InstallActivity \
 #           --es autoStart true --es id arch
 #   - Test-suite chroot packages installed (run
@@ -78,9 +78,9 @@ if [ "$DO_BUILD" -eq 1 ]; then
     adb install -r server/app/build/outputs/apk/debug/app-debug.apk
 
     echo "=== Verifying in-app chroot is installed ==="
-    if ! adb shell "su -c 'test -x /data/data/me.phie.tawc/installations/arch/enter.sh'" >/dev/null 2>&1; then
+    if ! adb shell "su -c 'test -x /data/data/me.phie.tawc/distros/arch/enter.sh'" >/dev/null 2>&1; then
         cat >&2 <<'EOF'
-ERROR: in-app chroot not found at /data/data/me.phie.tawc/installations/arch/.
+ERROR: in-app chroot not found at /data/data/me.phie.tawc/distros/arch/.
 
 Install it from the host:
   adb shell am start -n me.phie.tawc/.install.InstallActivity \
@@ -94,7 +94,7 @@ EOF
 
     echo "=== Pushing pidfile helper ==="
     adb push testing/tawc-pidfile-exec /data/local/tmp/
-    adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/data/me.phie.tawc/installations/arch/rootfs/tmp/tawc-pidfile-exec && chmod +x /data/data/me.phie.tawc/installations/arch/rootfs/tmp/tawc-pidfile-exec'"
+    adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/data/me.phie.tawc/distros/arch/rootfs/tmp/tawc-pidfile-exec && chmod +x /data/data/me.phie.tawc/distros/arch/rootfs/tmp/tawc-pidfile-exec'"
 
     case "$ANDROID_SERIAL" in
         emulator-*)
