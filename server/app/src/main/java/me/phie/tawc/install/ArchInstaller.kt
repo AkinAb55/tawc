@@ -31,6 +31,7 @@ import java.io.IOException
  */
 class ArchInstaller(
     private val store: InstallationStore,
+    private val cache: BootstrapCache,
     private val id: String = Installation.DISTRO_ARCH,
 ) {
     companion object {
@@ -55,7 +56,7 @@ class ArchInstaller(
         log: (String) -> Unit,
     ) {
         val arch = primaryArch()
-        val (url, isZst, stripPrefix) = selectBootstrap(arch)
+        val (url, format, stripPrefix) = selectBootstrap(arch)
 
         val rootfsDir = store.rootfsDir(id)
         val rootfsPath = rootfsDir.absolutePath
@@ -79,11 +80,13 @@ class ArchInstaller(
             )
         )
 
-        // Stage 1: download.
-        val cacheFile = File(store.cacheDir, "bootstrap-$arch.${if (isZst) "tar.zst" else "tar.gz"}")
+        // Stage 1: download. BootstrapCache owns the cache dir entirely —
+        // filename scheme, freshness mtime, and the TTL janitor — so the
+        // installer just hands it (arch, url, format) and gets back a
+        // ready-to-extract file.
         progress(InstallProgress(InstallStage.DOWNLOADING, "Downloading $arch bootstrap…"))
-        log("download: $url -> ${cacheFile.absolutePath}")
-        Downloader.download(url, cacheFile) { read, total ->
+        log("download: $url")
+        val cacheFile = cache.download(arch, url, format) { read, total ->
             val pct = total?.let { ((read * 100) / it).toInt().coerceIn(0, 100) }
             val totalLabel = total?.let { humanSize(it) } ?: "?"
             progress(
@@ -98,10 +101,17 @@ class ArchInstaller(
         // Stage 2: extract. The rootfs dir does not exist yet — the
         // gate only invokes install on a `(no dir)` slot — so tar lays
         // everything onto a fresh tree. Archive.extractAsRoot does not
-        // wipe; never has reason to.
+        // wipe; never has reason to. For zstd bootstraps we pass the
+        // cache-owned transient path so all `cache/install/` files have
+        // one owner.
         progress(InstallProgress(InstallStage.EXTRACTING, "Extracting rootfs…"))
         log("extract: ${cacheFile.name} -> $rootfsPath (strip=$stripPrefix)")
-        Archive.extractAsRoot(cacheFile, rootfsPath, stripPrefix) { line ->
+        Archive.extractAsRoot(
+            tarball = cacheFile,
+            destDir = rootfsPath,
+            tempPlainTar = cache.tempPlainTarFor(arch),
+            stripPrefix = stripPrefix,
+        ) { line ->
             log("tar: $line")
         }
 
@@ -215,14 +225,19 @@ class ArchInstaller(
         Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
 
     /**
-     * Returns (url, is_zstd, stripPrefix). [stripPrefix] is the single
-     * top-level dir inside the tarball that needs to be flattened into
-     * the rootfs ("root.x86_64" for the Arch x86_64 bootstrap; null for
-     * the ALARM tarball which is already flat).
+     * Returns the bootstrap descriptor for [arch]. [stripPrefix] is the
+     * single top-level dir inside the tarball that needs to be flattened
+     * into the rootfs ("root.x86_64" for the Arch x86_64 bootstrap; null
+     * for the ALARM tarball which is already flat).
+     *
+     * This is the *only* place arch→format policy lives — `BootstrapCache`
+     * is intentionally policy-free and consumes the format we hand it.
      */
-    private fun selectBootstrap(arch: String): Triple<String, Boolean, String?> = when (arch) {
-        "x86_64" -> Triple(MIRROR_X86_64, true, "root.x86_64")
-        "arm64-v8a" -> Triple(MIRROR_AARCH64, false, null)
+    private data class Bootstrap(val url: String, val format: BootstrapFormat, val stripPrefix: String?)
+
+    private fun selectBootstrap(arch: String): Bootstrap = when (arch) {
+        "x86_64" -> Bootstrap(MIRROR_X86_64, BootstrapFormat.ZSTD, "root.x86_64")
+        "arm64-v8a" -> Bootstrap(MIRROR_AARCH64, BootstrapFormat.GZIP, null)
         else -> throw IOException("Unsupported ABI: $arch")
     }
 

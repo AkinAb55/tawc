@@ -20,7 +20,11 @@ auto-generated `enter.sh`.
 Everything lives under the app's private data dir:
 
     /data/data/me.phie.tawc/
-      cache/install/                 # downloaded bootstrap tarballs (kept across runs)
+      cache/install/                 # owned by BootstrapCache (see below):
+      cache/install/bootstrap-<arch>.tar.zst    # canonical Arch x86_64 bootstrap (7-day TTL)
+      cache/install/bootstrap-<arch>.tar.gz     # canonical ALARM aarch64 bootstrap (7-day TTL)
+      cache/install/bootstrap-<arch>.tar.tmp                  # transient zstd decompression target (Archive owns lifecycle; sweep evicts unconditionally)
+      cache/install/bootstrap-<arch>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
       distros/
         arch/
           metadata.json              # JSON: id, distro, arch, method, sourceUrl, state, failure?
@@ -97,6 +101,7 @@ recovery is uninstall + install.
 | `InstallationStore.kt`         | Filesystem layout + JSON metadata I/O. `setState` is the one entry point that writes the state field. |
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
+| `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempPlainTarFor(arch)` for [Archive]'s zstd-decompression target so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<arch>.tar.{zst,gz}`; unconditional deletion of `*.tmp` and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
 | `Archive.kt`                   | Tar extraction (decompresses zstd in-process to a sibling `.tar`, then hands it to `toybox tar` running as root). Never wipes — install only runs against an empty slot. |
 | `RootfsCleaner.kt`             | The one and only delete path: kill chroot processes → unmount strictly → `find -xdev -depth -delete`. Used by uninstall; never by install. |
 | `ChrootMounter.kt`             | Builds the bind-mount shell snippet, renders the canonical `enter.sh` (mount + chroot wrapper), and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
@@ -135,7 +140,9 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
 
 1. **(state write)** — `setState(INSTALLING)` runs first; from here on
    the entry exists on disk and any failure parks it in `FAILED`.
-2. **DOWNLOADING** — bootstrap tarball into `cache/install/`.
+2. **DOWNLOADING** — `BootstrapCache.download(arch, url, format, …)`
+   handles the fetch, the cache filename, and the mtime touch. The TTL
+   counts from "last used" rather than original download.
    - x86_64: `https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst` (toplevel `root.x86_64/` is flattened post-extract because toybox `tar` doesn't `--strip-components`)
    - aarch64: `http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz` (no wrapper dir; HTTP — see *Network security* below)
 3. **EXTRACTING** — root-owned via toybox tar. Zstd is decompressed
@@ -167,6 +174,41 @@ The downloaded tarball persists in `cache/install/` across runs; the
 *next* install of the same arch reuses it as a download cache hit. The
 rootfs itself does not — every install is a fresh extraction, by
 construction.
+
+[BootstrapCache] enforces a 7-day idle TTL on top of `cacheDir`. Without
+that, Android only evicts under storage pressure (or when the user hits
+"Clear Cache" in app info), so a 200 MB tarball can squat indefinitely
+on a phone with free space, competing with caches from apps the user
+actually opens. [TawcApplication.onCreate] runs `sweepStale()` on a
+background thread on every cold start. The sweep is a two-pass janitor:
+
+1. **TTL pass** — canonical `bootstrap-<arch>.tar.{zst,gz}` files are
+   evicted when their mtime is older than 7 days. Reuse refreshes the
+   clock because `BootstrapCache.download` touches the mtime on every
+   successful fetch (whether the bytes were freshly downloaded or served
+   from a size-match cache hit inside [Downloader]). `setLastModifiedTime`
+   is the NIO variant — `File.setLastModified` silently no-ops on some
+   Android FS/SDK combos.
+2. **Unconditional pass** — `bootstrap-<arch>.tar.tmp` ([Archive]'s
+   zstd-decompression transient) and `bootstrap-<arch>.tar.{zst,gz}.part`
+   ([Downloader]'s in-flight suffix) are deleted regardless of mtime,
+   since neither is ever meaningful across processes — they only exist
+   inside one `Archive.extractAsRoot` / `Downloader.download` call's
+   `try/finally`. Anything found at app start is by definition stranded
+   by a crash.
+
+During an x86_64 install the cache dir briefly *triples* in apparent
+size: ~200 MB compressed `tar.zst`, plus the ~800 MB decompressed `.tmp`
+that [Archive] writes for toybox tar to consume. The `.tmp` is deleted
+in [Archive.extractAsRoot]'s `finally`; if that delete fails (e.g. FS
+error) the next sweep evicts the leftover unconditionally.
+
+The sweep is best-effort. There's a tiny window where it could race a
+concurrent install — sweep stat()s the canonical tarball, decides to
+evict, unlinks just before [Archive.extractAsRoot] runs `require(tarball.exists())`.
+The install fails to `FAILED`; recovery is uninstall + retry. Practical
+exposure is small because installs are user-initiated via `am start` and
+sweep fires once at process cold start.
 
 ## Uninstall pipeline (the one and only wipe)
 

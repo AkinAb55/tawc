@@ -4,24 +4,16 @@ import android.content.Context
 import java.io.File
 
 /**
- * On-disk layout for installations.
- *
- * Everything lives under the app's private data dir so uninstalling tawc
- * automatically reclaims the space:
- *
- *     <app data>/
- *       cache/install/                 # downloaded bootstrap tarballs
- *       distros/
- *         <id>/
- *           metadata.json
- *           rootfs/                    # the chroot itself
+ * On-disk layout for per-distro installations under
+ * `<app data>/distros/<id>/`. The bootstrap-tarball cache at
+ * `<cacheDir>/install/` is owned by [BootstrapCache], not this class —
+ * see notes/installation.md for the full layout.
  *
  * The default install id is `arch`. Future multi-install support just
  * varies the id; nothing else here cares.
  */
 class InstallationStore(context: Context) {
     val baseDir: File = File(context.dataDir, "distros")
-    val cacheDir: File = File(context.cacheDir, "install")
 
     fun installationDir(id: String): File = File(baseDir, id)
     fun rootfsDir(id: String): File = File(installationDir(id), "rootfs")

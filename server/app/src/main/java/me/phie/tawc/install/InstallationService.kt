@@ -100,7 +100,7 @@ class InstallationService : Service() {
             }
         }
         currentJob = scope.launch {
-            val installer = ArchInstaller(store, id)
+            val installer = ArchInstaller(store, BootstrapCache(applicationContext), id)
             try {
                 installer.install(::publishProgress, ::appendLog)
             } catch (t: Throwable) {
@@ -128,7 +128,7 @@ class InstallationService : Service() {
         }
         val store = InstallationStore(applicationContext)
         currentJob = scope.launch {
-            val installer = ArchInstaller(store, id)
+            val installer = ArchInstaller(store, BootstrapCache(applicationContext), id)
             try {
                 installer.uninstall(::publishProgress, ::appendLog)
             } catch (t: Throwable) {

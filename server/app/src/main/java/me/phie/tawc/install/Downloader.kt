@@ -40,7 +40,8 @@ object Downloader {
             return
         }
 
-        dest.parentFile?.mkdirs()
+        // Caller (BootstrapCache) owns the parent dir lifecycle and has
+        // already mkdir'd by the time we're here.
         val tmp = File(dest.parentFile, dest.name + ".part")
         tmp.delete()
 

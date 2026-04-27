@@ -15,8 +15,9 @@ import java.io.IOException
  * We can't pipe the decompressed tar into the shell's stdin because the
  * shell pre-buffers stdin past the script and tar then sees garbage
  * ("tar: Not tar"). So if the source is compressed with zstd (which
- * toybox tar can't read), we decompress it to a sibling `.tar` file in
- * the same cache dir first, hand that to tar, and delete it after.
+ * toybox tar can't read), we decompress it to a transient `.tar` file
+ * (path supplied by [BootstrapCache.tempPlainTarFor]) first, hand that
+ * to tar, and delete it after.
  *
  * Toybox tar can't `--strip-components`, so when the bootstrap is wrapped
  * in a single top-level dir (`root.x86_64/`) we extract verbatim and
@@ -30,6 +31,12 @@ object Archive {
      * exist; **does not** clear an existing directory — the install
      * pipeline's state-machine gate guarantees we only ever run against
      * a `(no dir)` slot. Root permissions are required.
+     *
+     * For `.tar.zst` inputs the decompressed bytes are written to
+     * [tempPlainTar] (owned by the cache); the file is deleted on entry
+     * (so a crash leftover never gets reused — those used to be silently
+     * accepted on `length() != 0L`) and again in the `finally`. For
+     * `.tar` / `.tar.gz` inputs [tempPlainTar] is unused.
      *
      * (Wiping is the sole job of [RootfsCleaner], called from the
      * uninstall path. If install ever wiped here, a single missed
@@ -45,15 +52,13 @@ object Archive {
     fun extractAsRoot(
         tarball: File,
         destDir: String,
+        tempPlainTar: File,
         stripPrefix: String? = null,
         onLine: (String) -> Unit = {},
     ) {
         require(tarball.exists()) { "Tarball not found: $tarball" }
 
-        // Ensure we have a plain `.tar` file on disk (toybox tar reads
-        // gzip natively but not zstd). For .tar.zst we decompress to a
-        // sibling .tar; for .tar / .tar.gz we just point tar at the file.
-        val (tarFile, isTempPlain) = ensurePlainTar(tarball)
+        val (tarFile, isTransient) = decompressIfNeeded(tarball, tempPlainTar)
 
         try {
             val script = buildString {
@@ -84,34 +89,32 @@ object Archive {
                 throw IOException("Tar extraction did not report OK. Output:\n${result.output}")
             }
         } finally {
-            if (isTempPlain) tarFile.delete()
+            if (isTransient) tempPlainTar.delete()
         }
     }
 
     /**
-     * Returns the plain-`.tar` file that toybox tar can read, plus a
-     * flag indicating whether it was a temp file we should delete after
-     * extraction.
+     * Returns `(tarFile, isTransient)`. For `.tar` / `.tar.gz` inputs
+     * `tarFile = src` and `isTransient = false`. For `.tar.zst` decompresses
+     * into [plainTmp] and returns it with `isTransient = true` — caller's
+     * `finally` deletes. [plainTmp] is unconditionally deleted before write
+     * so a crashed previous run can't get reused as if complete.
      */
-    private fun ensurePlainTar(tarball: File): Pair<File, Boolean> {
-        val name = tarball.name.lowercase()
+    private fun decompressIfNeeded(src: File, plainTmp: File): Pair<File, Boolean> {
+        val name = src.name.lowercase()
         return when {
-            name.endsWith(".tar") -> tarball to false
-            name.endsWith(".tar.gz") || name.endsWith(".tgz") -> tarball to false
+            name.endsWith(".tar") -> src to false
+            name.endsWith(".tar.gz") || name.endsWith(".tgz") -> src to false
             name.endsWith(".tar.zst") || name.endsWith(".tzst") -> {
-                val plain = File(tarball.parentFile, tarball.nameWithoutExtension)
-                // tarball.nameWithoutExtension on "bootstrap-x86_64.tar.zst"
-                // returns "bootstrap-x86_64.tar" — exactly what we want.
-                if (!plain.exists() || plain.length() == 0L) {
-                    BufferedInputStream(tarball.inputStream(), 256 * 1024).use { raw ->
-                        ZstdInputStream(raw).use { zin ->
-                            plain.outputStream().use { out -> zin.copyTo(out) }
-                        }
+                plainTmp.delete()
+                BufferedInputStream(src.inputStream(), 256 * 1024).use { raw ->
+                    ZstdInputStream(raw).use { zin ->
+                        plainTmp.outputStream().use { out -> zin.copyTo(out) }
                     }
                 }
-                plain to true
+                plainTmp to true
             }
-            else -> throw IOException("Unsupported tarball extension: ${tarball.name}")
+            else -> throw IOException("Unsupported tarball extension: ${src.name}")
         }
     }
 
