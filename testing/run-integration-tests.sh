@@ -89,6 +89,37 @@ if [ "$DO_BUILD" -eq 1 ]; then
     esac
 fi
 
+# Launch the compositor once for the whole suite. Tests assert it is
+# running rather than starting it themselves, so the suite gets a single
+# clean compositor lifetime instead of N partial ones. Force-stop first
+# so a leftover wayland-0 socket from a previous run is cleared before
+# the new compositor binds. The Service is `exported="false"`, so we
+# launch MainActivity — its onCreate calls startForegroundService.
+echo "=== Starting compositor ==="
+adb shell "am force-stop me.phie.tawc"
+sleep 0.3
+adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
+
+# Wait until the tawc process is alive AND the chroot-visible Wayland
+# socket exists. Both matter: `am force-stop` leaves the unix-domain
+# socket file behind on disk even though no process is listening, so
+# the file alone would falsely indicate readiness.
+COMPOSITOR_READY=0
+for _ in $(seq 1 150); do
+    if adb shell "pidof me.phie.tawc >/dev/null && \
+                  su -c 'test -e /data/local/arch-chroot/tmp/wayland-0' && \
+                  echo ready" 2>/dev/null | grep -q ready; then
+        COMPOSITOR_READY=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$COMPOSITOR_READY" -ne 1 ]; then
+    echo "ERROR: compositor did not become ready within 15s" >&2
+    adb shell am force-stop me.phie.tawc || true
+    exit 1
+fi
+
 LIBTEST_ARGS=(--nocapture --test-threads=1)
 if [ -n "$TEST_FILTER" ]; then
     LIBTEST_ARGS+=("$TEST_FILTER")

@@ -41,7 +41,8 @@ by `finishActivity` when the toplevel dies). The recents view shows
 `MainActivity` (the launcher card) plus one card per window. There is
 no separate "compositor" / "primary" task to confuse the user.
 
-For tests, `compositor::ensure_running` checks `pidof me.phie.tawc`
+For tests, `run-integration-tests.sh` launches the compositor before
+`cargo test` and `compositor::is_running` checks `pidof me.phie.tawc`
 AND the chroot-side socket symlink, so a leftover socket file from a
 prior `am force-stop` doesn't get mistaken for a live compositor.
 

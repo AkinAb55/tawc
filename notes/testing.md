@@ -147,11 +147,16 @@ Host (cargo test)                    Phone
   and `ensure_pkgs()` (idempotent pacman install used to make sure
   upstream packages are present in the chroot)
 - **`debug_app.rs`**: Start/stop lifecycle, stdout reader thread, `wait_for()` with timeout
-- **`compositor.rs`**: Ensure compositor is running, query state via broadcast
-- **`helpers.rs`**: Shared test helpers (`ensure_compositor`, `start_text_input`,
+- **`compositor.rs`**: Check whether the compositor is running (`is_running`,
+  `assert_running`) and query its state via broadcast. The compositor itself
+  is launched by `run-integration-tests.sh` before `cargo test` runs — the
+  Rust harness never starts it, only asserts it's there.
+- **`helpers.rs`**: Shared test helpers (`require_compositor`, `start_text_input`,
   `assert_compositor_clean`, `launch_and_wait_for_ahb`, `saw_ahb_import`,
-  `saw_shm_import`). The OnceLock state means one-time setup
-  (compositor start, debug-app build) runs once per `cargo test` invocation.
+  `saw_shm_import`). `require_compositor` panics with a clear message if the
+  compositor isn't running, telling the developer to use the run script
+  instead of invoking `cargo test` directly. The OnceLock state means
+  one-time setup (debug-app build) runs once per `cargo test` invocation.
 
 ## Adding New Tests
 

@@ -1,6 +1,8 @@
 //! Shared test helpers used by the per-group submodules under `tests/`.
-//! OnceLock state means one-time setup (compositor start, debug-app
-//! build) runs once per `cargo test` invocation.
+//! OnceLock state means one-time setup (debug-app build) runs once per
+//! `cargo test` invocation. The compositor itself is launched by
+//! `run-integration-tests.sh` before the test binary starts; tests just
+//! assert it's there.
 
 use std::sync::OnceLock;
 use std::thread;
@@ -14,22 +16,18 @@ use crate::{adb, chroot, compositor};
 /// after a window is mapped, etc).
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One-time compositor setup shared by all tests in the current binary.
-/// Idempotent. Does NOT stop the compositor on exit — the next test binary
-/// (or the next `cargo test` run) reuses it via `ensure_running`'s
-/// already-running fast-path. `run-integration-tests.sh` does a final
-/// force-stop after the whole suite completes.
-pub fn ensure_compositor() {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        compositor::ensure_running().expect("Failed to ensure compositor is running");
-    });
+/// Fail the current test with a clear message if the compositor isn't
+/// running on the device. Tests must call this (directly or via another
+/// helper that does) before touching the compositor — the launch lives
+/// in `run-integration-tests.sh`, not in the test harness.
+pub fn require_compositor() {
+    compositor::assert_running();
 }
 
 /// Build/install the gtk4-debug-app inside the chroot if needed and return
 /// the path to the binary. Memoized per test binary.
 pub fn ensure_gtk4_debug_app() -> String {
-    ensure_compositor();
+    require_compositor();
     static BIN: OnceLock<String> = OnceLock::new();
     BIN.get_or_init(|| chroot::ensure_debug_app().expect("gtk4 debug app build"))
         .clone()
@@ -149,7 +147,7 @@ pub fn assert_compositor_clean() {
 /// On return the process is still running; the caller is responsible for
 /// stopping it (typically via `proc.stop()`).
 pub fn launch_and_wait_for_ahb(cmd: &str, name: &str, timeout: Duration) -> ChrootProcess {
-    ensure_compositor();
+    require_compositor();
     adb::logcat_clear().expect("Failed to clear logcat");
 
     let mut proc = ChrootProcess::spawn(cmd).unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tawc_integration::chroot_process::ChrootProcess;
 use tawc_integration::helpers::{
-    assert_compositor_clean, ensure_compositor, launch_and_wait_for_ahb, saw_ahb_import,
+    assert_compositor_clean, launch_and_wait_for_ahb, require_compositor, saw_ahb_import,
     saw_shm_import, TIMEOUT,
 };
 use tawc_integration::{adb, chroot, compositor};
@@ -91,7 +91,7 @@ fn test_supertuxkart_launches_with_hardware_buffers() {
 /// real, non-debug program.
 #[test]
 fn test_gtk3_app_uses_shm_buffers() {
-    ensure_compositor();
+    require_compositor();
     chroot::ensure_pkgs(&["gtk3"]).expect("install gtk3");
     adb::logcat_clear().expect("Failed to clear logcat");
 
@@ -198,7 +198,7 @@ fn test_gtk4_app_uses_hardware_buffers() {
 /// buffers will crash GTK4 here while leaving GTK3 working).
 #[test]
 fn test_gtk4_app_uses_shm_buffers() {
-    ensure_compositor();
+    require_compositor();
     chroot::ensure_pkgs(&["gtk4"]).expect("install gtk4");
     adb::logcat_clear().expect("Failed to clear logcat");
 

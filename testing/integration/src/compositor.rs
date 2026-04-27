@@ -128,47 +128,22 @@ pub fn wait_for_rendered_toplevels(
     }
 }
 
-/// Ensure the tawc compositor is running on the phone. Starts the
-/// `CompositorService` (which owns the compositor thread + Wayland
-/// socket) if it isn't already up. The harness never stops the
-/// compositor itself — `run-integration-tests.sh` does the final
-/// force-stop after the suite, and leaving the service running between
-/// test binaries lets the next one hit the already-running fast-path.
-///
-/// Liveness is determined by the tawc app process, not by an Android
-/// Activity: per-window CompositorActivities only exist for the
-/// duration of an actual Wayland toplevel and are absent between tests.
-/// The socket file alone isn't a good signal — `am force-stop` leaves
-/// the bound socket file behind, so subsequent `test -e` checks would
-/// pass against a dead compositor.
-pub fn ensure_running() -> io::Result<()> {
-    if compositor_alive()? {
-        return Ok(());
-    }
-
-    eprintln!("Starting compositor (via MainActivity → CompositorService)...");
-    // The Service is `exported="false"`, so `am start-foreground-service`
-    // fails over adb with "Requires permission not exported." Launch
-    // MainActivity instead — its onCreate calls startForegroundService
-    // unconditionally, which has the same effect from inside the app.
-    // Force-stop first so any leftover socket file from a previous
-    // run is cleared before the new compositor binds.
-    adb::shell("am force-stop me.phie.tawc")?;
-    thread::sleep(Duration::from_millis(300));
-    adb::shell("am start -n me.phie.tawc/.MainActivity")?;
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if compositor_alive()? {
-            return Ok(());
-        }
-        if std::time::Instant::now() > deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Compositor did not become ready within 15s",
-            ));
-        }
-        thread::sleep(Duration::from_millis(100));
+/// Panic with a clear message if the compositor isn't running. The
+/// harness never starts the compositor itself — `run-integration-tests.sh`
+/// launches it once before invoking `cargo test` and force-stops it
+/// after the suite. A failure here means the script wasn't used (or
+/// the compositor died mid-suite), and the right fix is to re-run
+/// `bash testing/run-integration-tests.sh` rather than to start it
+/// from inside a test.
+pub fn assert_running() {
+    match is_running() {
+        Ok(true) => {}
+        Ok(false) => panic!(
+            "tawc compositor is not running on the device — run the suite via \
+             `bash testing/run-integration-tests.sh` (which starts the compositor) \
+             instead of invoking `cargo test` directly"
+        ),
+        Err(e) => panic!("failed to check whether tawc compositor is running: {e}"),
     }
 }
 
@@ -177,7 +152,7 @@ pub fn ensure_running() -> io::Result<()> {
 /// leaves the unix-domain socket file behind on disk even though no
 /// process is listening, so the file alone would falsely indicate
 /// readiness on the very next test run.
-fn compositor_alive() -> io::Result<bool> {
+pub fn is_running() -> io::Result<bool> {
     let output = adb::shell(
         "pidof me.phie.tawc >/dev/null && \
          su -c 'test -e /data/local/arch-chroot/tmp/wayland-0' && echo ready",

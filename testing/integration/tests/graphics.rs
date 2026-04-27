@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tawc_integration::chroot_process::ChrootProcess;
 use tawc_integration::helpers::{
-    assert_client_animating, assert_compositor_clean, ensure_compositor, launch_and_wait_for_ahb,
+    assert_client_animating, assert_compositor_clean, launch_and_wait_for_ahb, require_compositor,
     saw_ahb_import, saw_shm_import, TIMEOUT,
 };
 use tawc_integration::{adb, chroot, compositor};
@@ -35,7 +35,7 @@ const VKCUBE_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// `test_vulkan_client_uses_hardware_buffers` test below does.
 #[test]
 fn test_vulkaninfo_loads_android_driver() {
-    ensure_compositor();
+    require_compositor();
 
     let out = adb::chroot_run("vulkaninfo --summary").expect("failed to run vulkaninfo in chroot");
     assert!(
@@ -79,7 +79,7 @@ fn test_vulkaninfo_loads_android_driver() {
 /// `Mali`) for GLES.
 #[test]
 fn test_eglinfo_loads_android_driver() {
-    ensure_compositor();
+    require_compositor();
     chroot::ensure_pkgs(&["mesa-utils"]).expect("install mesa-utils");
 
     let out = adb::chroot_run("eglinfo -B").expect("failed to run eglinfo in chroot");
@@ -120,7 +120,7 @@ fn test_eglinfo_loads_android_driver() {
 /// regardless of what GTK/Firefox do.
 #[test]
 fn test_weston_simple_shm_uses_shm_buffers() {
-    ensure_compositor();
+    require_compositor();
     chroot::ensure_pkgs(&["weston"]).expect("install weston");
     adb::logcat_clear().expect("Failed to clear logcat");
 
