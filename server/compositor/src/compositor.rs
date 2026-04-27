@@ -283,7 +283,12 @@ impl CompositorHandler for TawcState {
             self.surface_shm.remove(surface);
             self.buffer_commit_pending = true;
         } else if removed {
+            // wl_surface.attach(NULL): drop both wlegl and SHM state for this
+            // surface. Without the SHM removal an SHM-only surface that
+            // unmaps via a null commit would keep its last texture rendering
+            // until the surface itself dies.
             self.surface_wlegl.remove(surface);
+            self.surface_shm.remove(surface);
             self.buffer_commit_pending = true;
         } else {
             // No buffer change — but buffer_scale or viewport may have moved.
