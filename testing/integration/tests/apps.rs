@@ -18,10 +18,7 @@ use tawc_integration::helpers::{
 };
 use tawc_integration::{adb, chroot, compositor};
 
-const FIREFOX_CMD: &str = "GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
-    MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
-    MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
-    DISPLAY= firefox --no-remote";
+const FIREFOX_CMD: &str = "GDK_GL=gles:always firefox --no-remote";
 
 const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const STK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);

@@ -15,18 +15,29 @@ behaviour here — it's a Firefox-side startup problem (see
 
 ```bash
 adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run \
-  'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 \
-   MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
-   MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
-   DISPLAY= firefox --no-remote'"
+  'GDK_GL=gles:always firefox --no-remote'"
 ```
 
-Firefox-specific env vars (not in the chroot profile because they're app-specific):
-- `GDK_GL=gles:always` -- forces GTK to use GLES (not desktop GL) for rendering
-- `MOZ_ENABLE_WAYLAND=1` -- use Wayland backend (not X11)
-- `MOZ_ACCELERATED=1` -- force hardware acceleration
-- `MOZ_DISABLE_*_SANDBOX=1` -- chroot lacks namespace support for sandboxing
-- `DISPLAY=` -- clear X11 display so Firefox doesn't try X11
+The only Firefox-specific env var we need is `GDK_GL=gles:always`, which
+forces GTK to use GLES (not desktop GL) for rendering. Wayland backend
+and hardware acceleration are auto-selected by Firefox 149 when
+`WAYLAND_DISPLAY` is set and no `DISPLAY` socket is reachable; the older
+`MOZ_ENABLE_WAYLAND=1` / `MOZ_ACCELERATED=1` / `DISPLAY=` opt-ins are no
+longer required.
+
+### Sandbox
+
+We do **not** set any `MOZ_DISABLE_*_SANDBOX` vars. Firefox 149 sandboxes
+content / RDD / socket processes via seccomp-bpf + the SandboxBroker file
+ACL even though the OnePlus 9 stock kernel (5.4) lacks `CONFIG_USER_NS`,
+`CONFIG_PID_NS`, and `CONFIG_IPC_NS`. The pieces that are present
+(`UTS_NS`, `NET_NS`, `CGROUP_NS`, `SECCOMP_FILTER`, `BPF_SYSCALL`) plus
+chroot are enough for Firefox to fall back gracefully — child processes
+end up with `Seccomp: 2` (filter mode) and `NoNewPrivs: 1`. Disabling the
+sandboxes also makes Firefox display an in-page "your configuration is
+unsupported and less secure" warning banner, so leaving the sandbox on
+is strictly better. SELinux is not a blocker — we run in the `magisk`
+domain with full caps. (See `notes/android.md` for the SELinux setup.)
 
 ### Why GDK_GL=gles:always (not disabled)
 
@@ -91,10 +102,6 @@ These live as patches in our libhybris fork (see `libhybris/TAWC_FORK.md`):
    old scrolled states for ~10 frames after a tap burst. Returning `0`
    ("content undefined") disables partial-present on the client and
    fixes it. See `notes/wsi-layer.md`.
-
-## Known Issues
-
-- All Firefox sandboxing disabled. The chroot doesn't support clone/namespace operations.
 
 ## Killing and Restarting
 
