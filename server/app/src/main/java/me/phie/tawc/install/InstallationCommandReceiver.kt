@@ -98,9 +98,24 @@ class InstallationCommandReceiver : BroadcastReceiver() {
                     setResult(1, "missing --es cmd", null)
                     return
                 }
-                val r = ChrootRunner.run(rootfs, cmd)
-                Log.i(TAG, "RUN exit=${r.exitCode}\n${r.output}")
-                setResult(if (r.ok) 0 else 1, r.output, null)
+                // BroadcastReceiver.onReceive runs on the main thread with a
+                // ~10s ANR budget; ChrootRunner.run can block much longer
+                // (pacman, builds, …). goAsync hands the result back when
+                // the worker thread finishes so `am broadcast -W` still
+                // sees the exit code + output.
+                val pending = goAsync()
+                Thread({
+                    try {
+                        val r = ChrootRunner.run(rootfs, cmd)
+                        Log.i(TAG, "RUN exit=${r.exitCode}\n${r.output}")
+                        pending.setResult(if (r.ok) 0 else 1, r.output, null)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "RUN failed", t)
+                        pending.setResult(1, "RUN failed: ${t.message}", null)
+                    } finally {
+                        pending.finish()
+                    }
+                }, "tawc-install-run").start()
             }
 
             else -> Log.w(TAG, "Unknown action: ${intent.action}")

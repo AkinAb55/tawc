@@ -129,6 +129,25 @@ object ChrootMounter {
             fi
             """.trimIndent()
         )
+        // Refresh profile.d/01-tawc.sh on every chroot entry so changes to
+        // the Wayland env (LD_LIBRARY_PATH, HYBRIS_EGLPLATFORM, …) take
+        // effect without reinstalling. Cheap (<1ms) and matches the legacy
+        // arch-chroot-run behaviour. 00-path.sh is install-time-only because
+        // it's identical for every install.
+        sb.appendLine(
+            """
+            mkdir -p "${'$'}ROOTFS/etc/profile.d"
+            cat > "${'$'}ROOTFS/etc/profile.d/01-tawc.sh" <<'TAWC_PROF_EOF'
+            # tawc Wayland compositor environment (refreshed each chroot entry)
+            export WAYLAND_DISPLAY=wayland-0
+            export XDG_RUNTIME_DIR=/tmp
+            export LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib
+            export HYBRIS_EGLPLATFORM=wayland
+            ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
+            TAWC_PROF_EOF
+            chmod 644 "${'$'}ROOTFS/etc/profile.d/01-tawc.sh"
+            """.trimIndent()
+        )
         return sb.toString()
     }
 

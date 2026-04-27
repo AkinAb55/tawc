@@ -62,7 +62,11 @@ that opens `ManageInstallationsActivity`.
    - `/etc/pacman.conf` (`SigLevel=Never`, `DisableSandbox`, `#CheckSpace`, `IgnorePkg = linux …`)
    - `/etc/pacman.d/mirrorlist` (x86_64 only — ALARM ships its own)
    - `/etc/profile.d/00-path.sh` (PATH/TMPDIR/HOME)
-   - `/etc/profile.d/01-tawc.sh` (`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`, `HYBRIS_EGLPLATFORM`, `wayland-0` symlink)
+   - `/etc/profile.d/01-tawc.sh` is *not* written here — `ChrootMounter`
+     rewrites it on every chroot entry (Wayland env: `WAYLAND_DISPLAY`,
+     `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`, `HYBRIS_EGLPLATFORM`, `wayland-0`
+     symlink) so env changes pick up without a reinstall, matching legacy
+     `arch-chroot-run`.
 4. **PACMAN_INIT** — `pacman-key --init`, `--populate archlinux` /
    `archlinuxarm` depending on arch. (Bind mounts are not a separate
    stage — they're set up inside the very `su` shell that runs each
@@ -155,9 +159,12 @@ adb shell am start \
 # Tail the install log (download → extract → configure → pacman):
 adb logcat -s tawc-install
 
-# Run a command in the chroot synchronously. The mounts come up inside
-# this RUN's su shell and disappear with it (per Mount lifecycle above).
-# The result data is returned via `am broadcast -W`'s data field.
+# Run a command in the chroot. The receiver uses goAsync() and runs the
+# command on a worker thread, so it can outlive the BroadcastReceiver's
+# ~10s ANR budget; `am broadcast -W` blocks until the worker completes.
+# Mounts come up inside this RUN's su shell and disappear with it (per
+# Mount lifecycle above). Result data is returned via `am broadcast -W`'s
+# data field.
 adb shell am broadcast -W \
     -n me.phie.tawc/.install.InstallationCommandReceiver \
     -a me.phie.tawc.install.RUN --es id arch --es cmd 'uname -m'

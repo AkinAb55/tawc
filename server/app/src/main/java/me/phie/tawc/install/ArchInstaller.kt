@@ -114,52 +114,59 @@ class ArchInstaller(
         // in one su invocation (same as the legacy `arch-chroot-run`).
         //
         // Stage 5–6: pacman keyring + system.
-        if (hasMake(rootfsPath)) {
-            log("base-devel already present, skipping pacman bootstrap")
-            progress(InstallProgress(InstallStage.DONE, "Installation already complete"))
-            return
-        }
-
-        progress(InstallProgress(InstallStage.PACMAN_INIT, "Initializing pacman keyring…"))
-        // Arch x86_64 ships the archlinux keyring; ALARM ships archlinuxarm.
-        // Either way the keyring isn't strictly required since we set
-        // SigLevel=Never above, but populating matches what the legacy
-        // create script does and keeps `pacman -Syu` quiet.
-        val populate = if (arch == "x86_64") {
-            "pacman-key --populate archlinux 2>/dev/null || true"
+        //
+        // The slow parts (keyring init, `pacman -Syu` full mirror sync)
+        // are gated on `hasMake` so re-runs against a complete chroot
+        // skip them. `pacman -S --needed ${BUILD_PKGS}` always runs: it
+        // is a no-op when every package is already installed (~1s) and
+        // picks up newly-added entries in BUILD_PKGS without forcing a
+        // full reinstall.
+        val needsBootstrap = !hasMake(rootfsPath)
+        if (needsBootstrap) {
+            progress(InstallProgress(InstallStage.PACMAN_INIT, "Initializing pacman keyring…"))
+            // Arch x86_64 ships the archlinux keyring; ALARM ships archlinuxarm.
+            // Either way the keyring isn't strictly required since we set
+            // SigLevel=Never above, but populating matches what the legacy
+            // create script does and keeps `pacman -Syu` quiet.
+            val populate = if (arch == "x86_64") {
+                "pacman-key --populate archlinux 2>/dev/null || true"
+            } else {
+                "pacman-key --populate archlinuxarm 2>/dev/null || true"
+            }
+            val initRes = ChrootRunner.run(
+                rootfsPath,
+                """
+                export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+                pacman-key --init
+                $populate
+                pacman -Syu --noconfirm
+                """.trimIndent(),
+                onLine = { log("pacman-key: $it") },
+            )
+            if (!initRes.ok) {
+                throw IOException("pacman-key init / -Syu failed (exit=${initRes.exitCode})")
+            }
         } else {
-            "pacman-key --populate archlinuxarm 2>/dev/null || true"
-        }
-        val initRes = ChrootRunner.run(
-            rootfsPath,
-            """
-            export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-            pacman-key --init
-            $populate
-            """.trimIndent(),
-            onLine = { log("pacman-key: $it") },
-        )
-        if (!initRes.ok) {
-            throw IOException("pacman-key init failed (exit=${initRes.exitCode})")
+            log("base-devel already present, skipping pacman keyring + -Syu")
         }
 
         progress(
             InstallProgress(
                 InstallStage.PACMAN_INSTALL,
-                "Installing base packages (this takes a few minutes)…"
+                if (needsBootstrap) "Installing base packages (this takes a few minutes)…"
+                else "Ensuring build packages are present…"
             )
         )
         val syncRes = ChrootRunner.run(
             rootfsPath,
             """
             export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-            pacman -Syu --noconfirm
             pacman -S --noconfirm --needed ${BUILD_PKGS.joinToString(" ")}
             """.trimIndent(),
             onLine = { log("pacman: $it") },
         )
         if (!syncRes.ok) {
-            throw IOException("pacman -Syu / base-devel install failed (exit=${syncRes.exitCode})")
+            throw IOException("pacman --needed install failed (exit=${syncRes.exitCode})")
         }
 
         progress(InstallProgress(InstallStage.DONE, "Installation complete."))
@@ -202,13 +209,17 @@ class ArchInstaller(
         }
 
         progress(InstallProgress(InstallStage.DELETING, "Deleting rootfs…"))
-        // `find -xdev -depth -delete` (toybox `rm` lacks --one-file-system):
-        // if a bind mount somehow leaked past `unmount` and survived the
-        // kill sweep, refuse to descend into it instead of unlinking
-        // through it. That guard is what separates "leaked empty
-        // mount-point dirs" from "host's /dev/socket got deleted and
-        // zygote can't restart". The empty mountpoint dirs are then
-        // orphaned but harmless and reclaimed on next install.
+        // `find -xdev -depth -delete` (toybox `rm` lacks --one-file-system).
+        // The primary safety here is the `unmount` step above, which refuses
+        // to proceed if any mount under the rootfs is still live. `-xdev` is
+        // a belt-and-braces against leaked *cross-fs* binds (`/dev`, `/proc`,
+        // `/sys`, `/apex/...`, `/system`) — without it, a single missed
+        // unmount could let `rm` walk through a live `/dev` bind and unlink
+        // host nodes (the historical bug that crashed zygote). It does NOT
+        // protect against same-fs binds: our self-bind of `/data/data/<pkg>`
+        // at `<rootfs>/data/data/<pkg>` shares st_dev with the rootfs, so if
+        // unmount somehow missed it, `find` would happily descend in. The
+        // unmount step is what catches that case.
         //
         // (An earlier attempt to `mv` the dir to /data/local/tmp first
         // is documented in git log; it didn't work because /data/data/
@@ -354,6 +365,9 @@ class ArchInstaller(
                 # profile.d/00-path.sh — the chroot bash inherits PATH
                 # from the host (Android) which leaks /system/bin and
                 # breaks everything; force a sane PATH/TMPDIR/HOME here.
+                # 01-tawc.sh (Wayland env) is rewritten on every chroot
+                # entry by ChrootMounter so env changes don't need a
+                # reinstall — see notes/installation.md.
                 mkdir -p "${'$'}ROOTFS/etc/profile.d"
                 cat > "${'$'}ROOTFS/etc/profile.d/00-path.sh" <<'PROF1_EOF'
                 # tawc: fix Android-leaked environment for the chroot
@@ -362,18 +376,6 @@ class ArchInstaller(
                 export HOME=/root
                 PROF1_EOF
                 chmod 644 "${'$'}ROOTFS/etc/profile.d/00-path.sh"
-
-                # profile.d/01-tawc.sh — Wayland compositor env. Same
-                # contents as the legacy arch-chroot-run wrote.
-                cat > "${'$'}ROOTFS/etc/profile.d/01-tawc.sh" <<'PROF2_EOF'
-                # tawc Wayland compositor environment
-                export WAYLAND_DISPLAY=wayland-0
-                export XDG_RUNTIME_DIR=/tmp
-                export LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib
-                export HYBRIS_EGLPLATFORM=wayland
-                ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
-                PROF2_EOF
-                chmod 644 "${'$'}ROOTFS/etc/profile.d/01-tawc.sh"
                 echo OK
                 """.trimIndent()
             )
