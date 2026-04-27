@@ -10,9 +10,9 @@
 #
 # Requires:
 #   - the `me.phie.tawc` app installed
-#   - an installation present at /data/data/me.phie.tawc/installations/<id>/
-#     (install via `am start -n me.phie.tawc/.install.ManageInstallationsActivity
-#     --es autoAction install --es id arch`, or the Manage installations UI)
+#   - an installation present at /data/data/me.phie.tawc/distros/<id>/
+#     (install via `am start -n me.phie.tawc/.install.InstallActivity
+#     --es autoStart true --es id arch`, or the home-screen Install button)
 #   - root via Magisk `su` granted to adb shell (uid 2000)
 #
 # Usage:
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 INSTALL_ID="${TAWC_INSTALL_ID:-arch}"
-INSTALL_DIR="/data/data/me.phie.tawc/installations/$INSTALL_ID"
+INSTALL_DIR="/data/data/me.phie.tawc/distros/$INSTALL_ID"
 ENTER="$INSTALL_DIR/enter.sh"
 
 # Quick existence check via su (the app data dir is 0700, adb shell
@@ -32,8 +32,8 @@ if ! adb shell "su -c 'test -x \"$ENTER\"'" >/dev/null 2>&1; then
 ERROR: $ENTER not found or not executable on the device.
 
 Did you install the chroot? From the host:
-  adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \\
-      --es autoAction install --es id $INSTALL_ID
+  adb shell am start -n me.phie.tawc/.install.InstallActivity \\
+      --es autoStart true --es id $INSTALL_ID
 
 Tail progress:
   adb logcat -s tawc-install

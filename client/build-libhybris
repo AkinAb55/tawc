@@ -14,7 +14,7 @@ LIBHYBRIS_DIR="$REPO_DIR/libhybris"
 # In-app rootfs (see notes/installation.md). Owned by the app uid; root
 # is needed to write into it from adb shell, which is fine because the
 # build commands all run via tawc-chroot-run (su).
-CHROOT="/data/data/me.phie.tawc/installations/arch/rootfs"
+CHROOT="/data/data/me.phie.tawc/distros/arch/rootfs"
 
 # shellcheck source=select-device.sh
 source "$SCRIPT_DIR/select-device.sh"

@@ -125,7 +125,7 @@ adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
 COMPOSITOR_READY=0
 for _ in $(seq 1 150); do
     if adb shell "pidof me.phie.tawc >/dev/null && \
-                  su -c 'test -e /data/local/arch-chroot/tmp/wayland-0' && \
+                  su -c 'test -e /data/data/me.phie.tawc/distros/arch/rootfs/tmp/wayland-0' && \
                   echo ready" 2>/dev/null | grep -q ready; then
         COMPOSITOR_READY=1
         break
