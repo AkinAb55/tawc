@@ -135,19 +135,19 @@ class ManageInstallationsActivity : Activity() {
     }
 
     /**
-     * If we were launched with an `autoAction` extra (typically by
-     * [InstallationCommandReceiver] forwarding an adb broadcast), kick
-     * the corresponding service start as soon as the activity is up.
-     * From an Activity context, `startForegroundService()` is always
+     * If we were launched with an `autoAction` extra (`am start
+     * --es autoAction install|uninstall --es id <id>`), kick the
+     * corresponding service start as soon as the activity is up. From
+     * an Activity context, `startForegroundService()` is always
      * permitted, which is the whole point of routing through here.
      */
     private fun handleAutoActionIntent(intent: Intent?) {
         intent ?: return
-        val autoAction = intent.getStringExtra(InstallationCommandReceiver.EXTRA_AUTO_ACTION) ?: return
-        val id = intent.getStringExtra(InstallationCommandReceiver.EXTRA_ID) ?: targetId
+        val autoAction = intent.getStringExtra(EXTRA_AUTO_ACTION) ?: return
+        val id = intent.getStringExtra(EXTRA_ID) ?: targetId
         targetId = id
         // Clear the extra so a configuration change doesn't re-trigger.
-        intent.removeExtra(InstallationCommandReceiver.EXTRA_AUTO_ACTION)
+        intent.removeExtra(EXTRA_AUTO_ACTION)
         when (autoAction) {
             "install" -> onInstallClicked()
             "uninstall" -> onUninstallClicked()
@@ -254,4 +254,10 @@ class ManageInstallationsActivity : Activity() {
 
     private fun btnLp(): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = 12 }
+
+    companion object {
+        // Recognised by `am start … --es autoAction install|uninstall --es id <id>`.
+        const val EXTRA_AUTO_ACTION = "autoAction"
+        const val EXTRA_ID = "id"
+    }
 }

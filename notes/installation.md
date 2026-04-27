@@ -42,8 +42,7 @@ class, and [InstallationStore] already handle it.
 | `ArchInstaller.kt`             | Stage machine: download → extract → configure → pacman init → pacman install. Mirrors `arch-chroot-create*`. (No separate mount stage — see *Mount lifecycle*.) |
 | `InstallProgress.kt`           | Stage enum + progress event used by the service. |
 | `InstallationService.kt`       | Foreground service that runs install/uninstall in a coroutine and exposes `progress` (StateFlow) and `log` (SharedFlow). |
-| `InstallationCommandReceiver.kt`| BroadcastReceiver that maps adb broadcasts onto the install package. |
-| `ManageInstallationsActivity.kt`| Plain-Android UI: status, progress bar, log tail, install/uninstall/refresh buttons. Bound to the service for live updates. |
+| `ManageInstallationsActivity.kt`| Plain-Android UI: status, progress bar, log tail, install/uninstall/refresh buttons. Bound to the service for live updates. Recognises an `autoAction` extra (`install`/`uninstall`) so adb / scripts can drive it via `am start`. |
 
 The `MainActivity` home screen has a new "Manage installations" button
 that opens `ManageInstallationsActivity`.
@@ -130,32 +129,21 @@ mount), but no tool actually walks into it.
 
 ## CLI command interface
 
-Every installation operation is reachable from the host so existing
-scripted workflows can be ported off the legacy `arch-chroot-*` scripts.
-Two flavours, picked per operation by what they need to do:
+Install and uninstall are driven from the host via `am start` into
+[ManageInstallationsActivity] with an `autoAction` extra. Activities
+launched by `am start` have full FGS-launch privileges, so the
+activity can immediately start `InstallationService` and the operation
+runs to completion in the foreground service whether the activity
+stays open or not.
 
-- **`am start`** into [ManageInstallationsActivity] — INSTALL and
-  UNINSTALL. They need a foreground-service start, which background
-  broadcast receivers can't reliably do on Android 14+ (BAL_BLOCK from
-  cold). Activities launched by `am start` always have FGS-launch
-  privileges, so the activity can start `InstallationService`
-  immediately. The activity briefly surfaces, then the install runs to
-  completion in the foreground service whether the activity stays open
-  or not.
-- **`am broadcast -W`** to `InstallationCommandReceiver` — LIST and
-  RUN. Cheap and synchronous (LIST) or `goAsync()`'d onto a worker
-  (RUN); both return their result via `am broadcast -W`'s data field.
-  **Always use the explicit component form
-  (`-n …/.install.InstallationCommandReceiver`)** — Android 14 silently
-  drops implicit broadcasts to manifest-declared receivers when the
-  sender isn't in the same package.
+There is intentionally **no broadcast/receiver surface** for running
+arbitrary commands as root in the chroot. The app has Magisk root for
+its own install/uninstall flow; exposing that as a public endpoint
+would let any other app on the device get root execution inside the
+chroot. If we ever need a no-UI handle for the test harness, build it
+with auth baked in (signature permission or uid check) at that point.
 
 ```sh
-# Show what's installed.
-adb shell am broadcast -W \
-    -n me.phie.tawc/.install.InstallationCommandReceiver \
-    -a me.phie.tawc.install.LIST
-
 # Kick off a fresh install (works cold; the activity briefly surfaces).
 adb shell am start \
     -n me.phie.tawc/.install.ManageInstallationsActivity \
@@ -164,21 +152,18 @@ adb shell am start \
 # Tail the install log (download → extract → configure → pacman):
 adb logcat -s tawc-install
 
-# Run a command in the chroot. The receiver uses goAsync() and runs the
-# command on a worker thread, so it can outlive the BroadcastReceiver's
-# ~10s ANR budget; `am broadcast -W` blocks until the worker completes.
-# Mounts come up inside this RUN's su shell and disappear with it (per
-# Mount lifecycle above). Result data is returned via `am broadcast -W`'s
-# data field.
-adb shell am broadcast -W \
-    -n me.phie.tawc/.install.InstallationCommandReceiver \
-    -a me.phie.tawc.install.RUN --es id arch --es cmd 'uname -m'
-
 # Tear down the install. Defensive unmount runs first; if anything
 # can't be released, `rm -rf` is refused.
 adb shell am start \
     -n me.phie.tawc/.install.ManageInstallationsActivity \
     --es autoAction uninstall --es id arch
+```
+
+Listing existing installations from the host: read the metadata
+directly with root.
+
+```sh
+adb shell "su -c 'ls /data/data/me.phie.tawc/installations/'"
 ```
 
 ## Required permissions

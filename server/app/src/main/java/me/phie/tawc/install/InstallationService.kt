@@ -28,11 +28,12 @@ import me.phie.tawc.MainActivity
 /**
  * Foreground service that runs install / uninstall jobs in a coroutine.
  *
- * Both UI (ManageInstallationsActivity binding to the service) and
- * command-line callers (InstallationCommandReceiver firing
- * `am startservice` intents) drop work onto the same paths, so the
- * progress/log streams below are the single source of truth for any
- * surface watching the operation.
+ * The UI ([ManageInstallationsActivity]) binds to this service for live
+ * progress; the CLI surface is `am start` into the activity with an
+ * `autoAction` extra, which then starts the service the same way.
+ * Either entry point hits the same paths, so the progress/log streams
+ * below are the single source of truth for any surface watching the
+ * operation.
  */
 class InstallationService : Service() {
 
