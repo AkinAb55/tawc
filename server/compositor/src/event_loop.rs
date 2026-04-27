@@ -386,6 +386,15 @@ pub fn run(
         }
         data.state.toplevels.retain(|t| t.alive());
 
+        // Cap the rendered-toplevels counter at the live count: once a host
+        // has been torn down, no further frames render here, and otherwise
+        // last_rendered_toplevels would stay frozen at its peak value (so
+        // waiters for "compositor went idle" — assert_compositor_clean,
+        // wait_for_rendered_toplevels(0) — never see it return to 0).
+        if data.last_rendered_toplevels > data.state.toplevels.len() {
+            data.last_rendered_toplevels = data.state.toplevels.len();
+        }
+
         // Clean up wlegl/SHM entries for surfaces whose client disconnected.
         // The toplevel cleanup above only removes entries keyed by the toplevel's
         // wl_surface, but subsurfaces (e.g. Firefox WebRender) live separately.
