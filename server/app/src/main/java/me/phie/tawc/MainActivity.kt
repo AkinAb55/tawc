@@ -115,7 +115,13 @@ class MainActivity : Activity() {
 
     private fun displayName(inst: Installation): String {
         val distro = inst.distro.replaceFirstChar { it.titlecase() }
-        return "$distro (${inst.arch}) ›"
+        val suffix = when (inst.state) {
+            Installation.State.READY -> ""
+            Installation.State.INSTALLING -> " — installing…"
+            Installation.State.UNINSTALLING -> " — uninstalling…"
+            Installation.State.FAILED -> " — failed"
+        }
+        return "$distro (${inst.arch})$suffix ›"
     }
 
     private fun lp(w: Int, h: Int, bottomMargin: Int = 0): LinearLayout.LayoutParams =

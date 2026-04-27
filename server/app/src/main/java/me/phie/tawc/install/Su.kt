@@ -47,18 +47,23 @@ object Su {
      * appended to the captured output buffer. The script runs with `set -eu`
      * prepended so the first failing command aborts.
      *
-     * Magisk runs each `su` invocation inside a private mount namespace
-     * (`unshare(CLONE_NEWNS)`), so any bind mounts performed by [script]
-     * vanish when the call returns. Callers that need mounts must keep
-     * mount + chroot in the same script — the canonical entry point is
-     * `<installation-dir>/enter.sh`, rendered by [ChrootMounter.enterScript].
+     * Magisk's `su` inherits the **calling** process's mount namespace
+     * by default — bind mounts performed inside one [run] would
+     * therefore persist into the app's namespace and pollute every
+     * later call (the rootfs's recursive `/data/data/<pkg>` self-bind
+     * then trips `find -xdev` with "loop detected" during uninstall).
+     * To keep each invocation isolated we wrap the non-`mountMaster`
+     * path in `unshare -m`, which gives the script its own private
+     * mount namespace that's torn down when the script exits.
      *
      * Set [mountMaster] to launch via `su -mm` (Magisk's "mount master"
-     * mode) — joins the global mount namespace instead of a private one,
-     * so `mount` / `umount` calls affect every other process on the
-     * device. Used by [ChrootMounter.unmount] to clean up bind mounts
-     * leaked into the global namespace by host-side `tawc-chroot-run`
-     * invocations (which inherit the adb shell's mount-master `su`).
+     * mode) — joins the global (init) mount namespace, so `mount` /
+     * `umount` calls affect every other process on the device. Used by
+     * [ChrootMounter.unmount] to clean up bind mounts leaked into the
+     * global namespace by host-side `tawc-chroot-run` invocations
+     * (which inherit the adb shell's mount-master `su`). We deliberately
+     * do *not* unshare the `-mm` path: the global namespace is the whole
+     * point of `-mm`.
      */
     fun run(
         script: String,
@@ -66,7 +71,13 @@ object Su {
         mountMaster: Boolean = false,
         onLine: ((String) -> Unit)? = null,
     ): Result {
-        val cmd = if (mountMaster) listOf("su", "-mm") else listOf("su")
+        // su parses -c <arg> and feeds <arg> to its shell; the inner
+        // `exec unshare -m -- /system/bin/sh` replaces that shell with
+        // sh-in-fresh-mount-namespace, which then reads our piped
+        // script from stdin. This is the only safe way to ensure no
+        // bind mount escapes the call.
+        val cmd = if (mountMaster) listOf("su", "-mm")
+                  else listOf("su", "-c", "exec unshare -m -- /system/bin/sh")
         val pb = ProcessBuilder(cmd).redirectErrorStream(true)
         // Magisk's su inherits a sane PATH itself; nothing to do here.
         val proc = pb.start()

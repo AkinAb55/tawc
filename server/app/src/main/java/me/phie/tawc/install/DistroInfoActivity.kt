@@ -68,6 +68,10 @@ class DistroInfoActivity : Activity() {
         root.addView(infoRow("Distro:", installation.distro), rowLp(pad))
         root.addView(infoRow("Architecture:", installation.arch), rowLp(pad))
         root.addView(infoRow("Method:", installation.method), rowLp(pad))
+        root.addView(infoRow("State:", installation.state.name.lowercase()), rowLp(pad))
+        if (installation.failure != null) {
+            root.addView(infoRow("Failure:", installation.failure), rowLp(pad))
+        }
         root.addView(infoRow("Source:", installation.sourceUrl), rowLp(pad))
         root.addView(
             infoRow("Installed:", DateFormat.getDateTimeInstance().format(Date(installation.installedAtMillis))),
@@ -77,8 +81,11 @@ class DistroInfoActivity : Activity() {
             infoRow("Rootfs path:", store.rootfsDir(installation.id).absolutePath),
             rowLp(pad),
         )
+        // Only `READY` installs are walkable in any meaningful sense;
+        // `du -sk` against an in-flight install fights with the
+        // installer for IO and the number is meaningless anyway.
         sizeValue = TextView(this).apply {
-            text = "computing…"
+            text = if (installation.state == Installation.State.READY) "computing…" else "—"
             textSize = 14f
             typeface = Typeface.MONOSPACE
         }
@@ -98,13 +105,14 @@ class DistroInfoActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (store.load(targetId) == null) {
+        val cur = store.load(targetId)
+        if (cur == null) {
             // Uninstall happened in a child activity while we were paused;
             // there's nothing to show so back out to the home screen.
             finish()
             return
         }
-        startSizeProbe()
+        if (cur.state == Installation.State.READY) startSizeProbe()
     }
 
     override fun onPause() {

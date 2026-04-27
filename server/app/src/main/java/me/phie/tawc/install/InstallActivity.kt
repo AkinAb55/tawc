@@ -20,8 +20,13 @@ import android.widget.TextView
  * bound to [InstallationService] via [OperationLogPanel].
  *
  * `am start … --es autoStart true --es id <id>` skips the form and
- * triggers the install immediately (used by integration tests + the
- * `am start` install hook documented in notes/installation.md).
+ * triggers the install immediately (used by the `am start` install hook
+ * documented in `notes/installation.md`). The autoStart fires at most
+ * once per launch (`savedInstanceState == null`); a fresh `am start`
+ * delivers a new launch intent and re-fires, but a process-death
+ * recreation does not. Even if the gate ever leaked, the request would
+ * be refused at the [InstallationService] level — this is the UX
+ * shortcut, not the safety net.
  */
 class InstallActivity : Activity() {
 
@@ -37,6 +42,7 @@ class InstallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         targetId = intent?.getStringExtra(EXTRA_ID) ?: Installation.DISTRO_ARCH
+        started = savedInstanceState?.getBoolean(KEY_STARTED) == true
 
         val pad = (16 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
@@ -55,13 +61,18 @@ class InstallActivity : Activity() {
         root.addView(formSection, lp(MATCH_PARENT, WRAP_CONTENT))
 
         panel = OperationLogPanel(this)
-        panel.view.visibility = View.GONE
+        panel.view.visibility = if (started) View.VISIBLE else View.GONE
+        if (started) formSection.visibility = View.GONE
         root.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(root)
 
-        if (autoStartRequested(intent)) {
-            intent?.removeExtra(EXTRA_AUTO_START)
+        // Fire autoStart only on the very first onCreate of this
+        // activity instance. Re-creations restore [started]=true from
+        // savedInstanceState and skip this path. A fresh `am start`
+        // produces a null savedInstanceState (Android creates a new
+        // activity instance), so the CLI keeps working.
+        if (savedInstanceState == null && autoStartRequested(intent)) {
             beginInstall()
         }
     }
@@ -71,9 +82,13 @@ class InstallActivity : Activity() {
         setIntent(intent)
         targetId = intent.getStringExtra(EXTRA_ID) ?: targetId
         if (autoStartRequested(intent)) {
-            intent.removeExtra(EXTRA_AUTO_START)
             beginInstall()
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_STARTED, started)
     }
 
     // `am start --es autoStart true` sends a string extra; `--ez autoStart
@@ -108,9 +123,18 @@ class InstallActivity : Activity() {
             text = "Install"
             setOnClickListener { beginInstall() }
         }
-        if (store.list().any { it.id == targetId }) {
+        // Mirror the service-level gate so the form makes the refusal
+        // obvious before the user taps. The service is still the
+        // source of truth — the button is just a hint.
+        val current = store.load(targetId)
+        if (current != null) {
             installButton.isEnabled = false
-            installButton.text = "Install (already installed)"
+            installButton.text = when (current.state) {
+                Installation.State.READY -> "Install (already installed — uninstall first)"
+                Installation.State.INSTALLING -> "Install (in progress — uninstall to abort)"
+                Installation.State.UNINSTALLING -> "Install (uninstall in progress)"
+                Installation.State.FAILED -> "Install (failed — uninstall first)"
+            }
         }
         s.addView(installButton, lp(MATCH_PARENT, WRAP_CONTENT))
         return s
@@ -126,7 +150,6 @@ class InstallActivity : Activity() {
     }
 
     private fun beginInstall() {
-        if (started) return
         if (!Su.rootAvailable()) {
             // Surface the error in the log area so the form stays visible
             // for the user to read the install location alongside.
@@ -135,10 +158,15 @@ class InstallActivity : Activity() {
             panel.setStatus("ERROR: root (su) not available — Magisk must grant this app.")
             return
         }
-        started = true
         formSection.visibility = View.GONE
         panel.view.visibility = View.VISIBLE
-        panel.appendLog("[ui] starting install of '$targetId'")
+        // [InstallationService] is the authoritative gate; we just hand
+        // off and let it decide whether to run or reject. `started` only
+        // tracks UI state (form vs panel) so a process-death recreate
+        // restores the panel view.
+        panel.appendLog(if (started) "[ui] re-requesting install of '$targetId'"
+                        else "[ui] starting install of '$targetId'")
+        started = true
         InstallationService.startInstall(this, targetId)
     }
 
@@ -151,5 +179,6 @@ class InstallActivity : Activity() {
     companion object {
         const val EXTRA_ID = "id"
         const val EXTRA_AUTO_START = "autoStart"
+        private const val KEY_STARTED = "tawc.install.started"
     }
 }

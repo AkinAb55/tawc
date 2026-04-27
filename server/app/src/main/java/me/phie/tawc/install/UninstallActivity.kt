@@ -33,6 +33,7 @@ class UninstallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         targetId = intent?.getStringExtra(EXTRA_ID) ?: Installation.DISTRO_ARCH
+        started = savedInstanceState?.getBoolean(KEY_STARTED) == true
 
         val pad = (16 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
@@ -51,13 +52,15 @@ class UninstallActivity : Activity() {
         root.addView(confirmSection, lp(MATCH_PARENT, WRAP_CONTENT))
 
         panel = OperationLogPanel(this)
-        panel.view.visibility = View.GONE
+        panel.view.visibility = if (started) View.VISIBLE else View.GONE
+        if (started) confirmSection.visibility = View.GONE
         root.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(root)
 
-        if (autoStartRequested(intent)) {
-            intent?.removeExtra(EXTRA_AUTO_START)
+        // autoStart fires once per launch; see InstallActivity for the
+        // savedInstanceState rationale.
+        if (savedInstanceState == null && autoStartRequested(intent)) {
             beginUninstall()
         }
     }
@@ -67,9 +70,13 @@ class UninstallActivity : Activity() {
         setIntent(intent)
         targetId = intent.getStringExtra(EXTRA_ID) ?: targetId
         if (autoStartRequested(intent)) {
-            intent.removeExtra(EXTRA_AUTO_START)
             beginUninstall()
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_STARTED, started)
     }
 
     // `am start --es autoStart true` sends a string extra; `--ez autoStart
@@ -126,17 +133,20 @@ class UninstallActivity : Activity() {
     }
 
     private fun beginUninstall() {
-        if (started) return
         if (!Su.rootAvailable()) {
             confirmSection.visibility = View.GONE
             panel.view.visibility = View.VISIBLE
             panel.setStatus("ERROR: root (su) not available — Magisk must grant this app.")
             return
         }
-        started = true
         confirmSection.visibility = View.GONE
         panel.view.visibility = View.VISIBLE
-        panel.appendLog("[ui] starting uninstall of '$targetId'")
+        // [InstallationService] is the authoritative gate; we just hand
+        // off. `started` only tracks UI state (confirm vs panel) so a
+        // process-death recreate restores the panel view.
+        panel.appendLog(if (started) "[ui] re-requesting uninstall of '$targetId'"
+                        else "[ui] starting uninstall of '$targetId'")
+        started = true
         InstallationService.startUninstall(this, targetId)
     }
 
@@ -146,5 +156,6 @@ class UninstallActivity : Activity() {
     companion object {
         const val EXTRA_ID = "id"
         const val EXTRA_AUTO_START = "autoStart"
+        private const val KEY_STARTED = "tawc.uninstall.started"
     }
 }

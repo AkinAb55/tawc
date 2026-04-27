@@ -26,14 +26,25 @@ import kotlinx.coroutines.launch
 import me.phie.tawc.MainActivity
 
 /**
- * Foreground service that runs install / uninstall jobs in a coroutine.
+ * Foreground service that runs install / uninstall jobs in a coroutine
+ * **and** enforces the installation state machine — the single gate
+ * through which `<distros>/<id>/` is mutated.
  *
- * The UI ([InstallActivity] / [UninstallActivity]) binds to this
- * service for live progress; the CLI surface is `am start` into the
- * matching activity with `--es autoStart true`, which then starts the
- * service the same way. Either entry point hits the same paths, so the
- * progress/log streams below are the single source of truth for any
- * surface watching the operation.
+ * The transition table lives in `notes/installation.md`; the short
+ * version is:
+ *
+ *   install:    only allowed from `(no dir)`
+ *   uninstall:  allowed from every state but `(no dir)` (which is a no-op)
+ *
+ * Both UI ([InstallActivity] / [UninstallActivity]) and `am start`
+ * autoStart are inputs; this service decides whether to actually run.
+ * On a refused request we emit a [InstallStage.FAILED] progress event
+ * so the bound UI can surface the rejection — disk state is unchanged.
+ *
+ * On a running operation success the wrapper writes
+ * [Installation.State.READY] / removes the dir; on a throw we write
+ * [Installation.State.FAILED] with the message so the user can see
+ * what went wrong and decide whether to uninstall.
  */
 class InstallationService : Service() {
 
@@ -71,18 +82,30 @@ class InstallationService : Service() {
         super.onDestroy()
     }
 
-    /** Begin an install for [id]. No-op if a job is already running. */
+    /** Begin an install for [id]. Refuses if the gate forbids it. */
     fun startInstall(id: String) {
         if (currentJob?.isActive == true) {
-            appendLog("[skip] Job already running")
+            reject("install '$id'", "another job is already running")
             return
         }
+        val store = InstallationStore(applicationContext)
+        when (val s = store.load(id)?.state) {
+            null -> Unit  // (no dir) — proceed
+            Installation.State.READY,
+            Installation.State.INSTALLING,
+            Installation.State.UNINSTALLING,
+            Installation.State.FAILED -> {
+                reject("install '$id'", "id is in state $s; uninstall first")
+                return
+            }
+        }
         currentJob = scope.launch {
-            val installer = ArchInstaller(InstallationStore(applicationContext), id)
+            val installer = ArchInstaller(store, id)
             try {
                 installer.install(::publishProgress, ::appendLog)
             } catch (t: Throwable) {
                 Log.e(TAG, "install failed", t)
+                store.setState(id, Installation.State.FAILED, t.message ?: "(no detail)")
                 appendLog("FAILED: ${t.message}")
                 publishProgress(
                     InstallProgress(
@@ -97,18 +120,25 @@ class InstallationService : Service() {
         }
     }
 
-    /** Begin an uninstall for [id]. No-op if a job is already running. */
+    /** Begin an uninstall for [id]. Refuses only if a job is already running. */
     fun startUninstall(id: String) {
         if (currentJob?.isActive == true) {
-            appendLog("[skip] Job already running")
+            reject("uninstall '$id'", "another job is already running")
             return
         }
+        val store = InstallationStore(applicationContext)
         currentJob = scope.launch {
-            val installer = ArchInstaller(InstallationStore(applicationContext), id)
+            val installer = ArchInstaller(store, id)
             try {
                 installer.uninstall(::publishProgress, ::appendLog)
             } catch (t: Throwable) {
                 Log.e(TAG, "uninstall failed", t)
+                // Only park as FAILED if the dir actually survived; a
+                // wipe that succeeded then threw on cleanup is logically
+                // gone and shouldn't show up as a parking-state install.
+                if (store.installationDir(id).exists()) {
+                    store.setState(id, Installation.State.FAILED, t.message ?: "(no detail)")
+                }
                 appendLog("FAILED: ${t.message}")
                 publishProgress(
                     InstallProgress(
@@ -121,6 +151,21 @@ class InstallationService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             }
         }
+    }
+
+    /**
+     * Surface a refused-by-gate request to the bound UI without
+     * mutating disk state. Uses the FAILED progress stage because
+     * that's the one the panel renders as a terminal error; the
+     * message starts with `rejected:` so it's distinguishable from a
+     * mid-operation throw.
+     */
+    private fun reject(what: String, reason: String) {
+        val msg = "rejected $what: $reason"
+        Log.w(TAG, msg)
+        appendLog(msg)
+        publishProgress(InstallProgress(InstallStage.FAILED, msg, errorMessage = reason))
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun firstLine(s: String?): String =

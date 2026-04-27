@@ -8,11 +8,10 @@ import java.io.File
  * `metadata.json` next to the rootfs in
  * `<app data>/distros/<id>/`.
  *
- * The set of fields is deliberately small but already factored to support
- * the directions called out in the original task:
- *  - alternative distros via [distro]
- *  - alternative install methods (chroot now, proot later) via [method]
- *  - multiple installations via [id]
+ * The presence of this file plus its [state] field together encode the
+ * installation state machine documented in `notes/installation.md`. The
+ * file is written by [InstallationStore] alone; every other piece of
+ * the system reads it but never writes.
  */
 data class Installation(
     val id: String,
@@ -21,6 +20,8 @@ data class Installation(
     val method: String,
     val installedAtMillis: Long,
     val sourceUrl: String,
+    val state: State = State.READY,
+    val failure: String? = null,
 ) {
     fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
@@ -32,7 +33,17 @@ data class Installation(
         put("method", method)
         put("installedAtMillis", installedAtMillis)
         put("sourceUrl", sourceUrl)
+        put("state", state.name)
+        if (failure != null) put("failure", failure)
     }.toString(2)
+
+    /**
+     * Lifecycle of one installation slot. See `notes/installation.md`
+     * for the full transition table; the gate that enforces it lives in
+     * [InstallationService]. `READY` is the default for missing-field
+     * legacy metadata so pre-state-machine installs aren't lost.
+     */
+    enum class State { INSTALLING, READY, UNINSTALLING, FAILED }
 
     companion object {
         const val DISTRO_ARCH = "arch"
@@ -47,6 +58,9 @@ data class Installation(
                 method = obj.getString("method"),
                 installedAtMillis = obj.optLong("installedAtMillis", 0L),
                 sourceUrl = obj.optString("sourceUrl", ""),
+                state = obj.optString("state", State.READY.name)
+                    .let { runCatching { State.valueOf(it) }.getOrDefault(State.READY) },
+                failure = if (obj.has("failure") && !obj.isNull("failure")) obj.getString("failure") else null,
             )
         }
     }

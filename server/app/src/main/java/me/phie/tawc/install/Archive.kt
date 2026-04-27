@@ -26,8 +26,15 @@ object Archive {
 
     /**
      * Extract [tarball] (a `.tar`, `.tar.gz`, or `.tar.zst`) into [destDir]
-     * inside the device's filesystem. The destination is wiped and
-     * recreated; root permissions are required.
+     * inside the device's filesystem. Creates [destDir] if it doesn't
+     * exist; **does not** clear an existing directory — the install
+     * pipeline's state-machine gate guarantees we only ever run against
+     * a `(no dir)` slot. Root permissions are required.
+     *
+     * (Wiping is the sole job of [RootfsCleaner], called from the
+     * uninstall path. If install ever wiped here, a single missed
+     * unmount could let `rm` walk through a live `/dev` bind and unlink
+     * host system nodes — see notes/installation.md.)
      *
      * If [stripPrefix] is non-null and exactly that single top-level
      * directory exists in the tarball, its contents are flattened into
@@ -50,7 +57,6 @@ object Archive {
 
         try {
             val script = buildString {
-                appendLine("rm -rf '$destDir'")
                 appendLine("mkdir -p '$destDir'")
                 // -z is autodetected by toybox tar when the file's first
                 // bytes look like gzip; we don't need to spell it out.

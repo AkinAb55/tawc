@@ -61,6 +61,21 @@ class InstallationStore(context: Context) {
     }
 
     /**
+     * Update the [Installation.state] field (and optional [failure]
+     * detail) for [id], leaving every other field unchanged. The single
+     * entry point through which the state machine moves; [InstallationService]
+     * is the only caller.
+     *
+     * If no metadata exists yet the call is a no-op — install transitions
+     * call [save] first to lay down the initial record, and uninstall
+     * never moves a `(no dir)` slot.
+     */
+    fun setState(id: String, state: Installation.State, failure: String? = null) {
+        val current = load(id) ?: return
+        save(current.copy(state = state, failure = failure))
+    }
+
+    /**
      * Total bytes used by [id]'s installation dir (rootfs + metadata +
      * enter.sh). Uses `du -sk` via `su` because the rootfs is owned by
      * root after extraction, so app-uid `File.length()` traversal would
