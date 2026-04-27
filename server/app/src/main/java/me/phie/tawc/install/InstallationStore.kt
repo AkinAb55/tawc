@@ -59,4 +59,21 @@ class InstallationStore(context: Context) {
         installationDir(installation.id).mkdirs()
         metadataFile(installation.id).writeText(installation.toJson())
     }
+
+    /**
+     * Total bytes used by [id]'s installation dir (rootfs + metadata +
+     * enter.sh). Uses `du -sk` via `su` because the rootfs is owned by
+     * root after extraction, so app-uid `File.length()` traversal would
+     * return 0 for everything inside it. Returns -1 on failure.
+     *
+     * Blocks on `su`; call from a background dispatcher.
+     */
+    fun computeSizeBytes(id: String): Long {
+        val dir = installationDir(id)
+        if (!dir.exists()) return 0L
+        val r = Su.run("du -sk '${dir.absolutePath}' 2>/dev/null | awk '{print \$1}'")
+        if (!r.ok) return -1L
+        val kb = r.output.trim().toLongOrNull() ?: return -1L
+        return kb * 1024L
+    }
 }

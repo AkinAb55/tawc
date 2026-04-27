@@ -20,8 +20,8 @@ This is the current development approach.
 
 Install (once, via the in-app installer):
 ```bash
-adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \
-    --es autoAction install --es id arch
+adb shell am start -n me.phie.tawc/.install.InstallActivity \
+    --es autoStart true --es id arch
 adb logcat -s tawc-install   # tail progress
 ```
 
@@ -105,7 +105,7 @@ the rest of the app's UI/management features.
   the app reclaims it. The host-side counterpart is
   `client/tawc-chroot-run`, which shells into the same auto-generated
   `enter.sh` over `adb shell su`. See [installation.md](installation.md)
-  for the package map, the `am start --es autoAction …` CLI, and the
+  for the package map, the `am start --es autoStart …` CLI, and the
   Android 14 FGS-from-broadcast rationale.
 
 When adding new app features (settings, app launcher, …), put them in

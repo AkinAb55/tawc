@@ -61,9 +61,14 @@
         </service>
 
         <activity
-            android:name=".install.ManageInstallationsActivity"
+            android:name=".install.InstallActivity"
             android:exported="true"
-            android:label="Manage installations" />
+            android:label="Install distro" />
+
+        <activity
+            android:name=".install.UninstallActivity"
+            android:exported="true"
+            android:label="Uninstall" />
 
         <service
             android:name=".install.InstallationService"

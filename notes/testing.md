@@ -94,7 +94,7 @@ when more than one target is connected.
 
 Prerequisites: a phone (or emulator) connected via adb, the tawc app
 installed, the in-app Arch chroot installed (via `am start … --es
-autoAction install --es id arch`; see [installation.md](installation.md)),
+autoStart true --es id arch`; see [installation.md](installation.md)),
 and the test suite's chroot packages installed (run
 `bash testing/install-test-deps.sh` once per chroot install — covers
 gtk3/gtk4/weston/mesa-utils/vulkan-tools). Some modules have additional

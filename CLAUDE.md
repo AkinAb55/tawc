@@ -87,7 +87,7 @@ bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 - **Build (libhybris):** `bash client/build-libhybris` (or `--clean` to reconfigure). Edit `./libhybris` locally, script syncs to phone.
 - **Build (libxkbcommon):** `bash client/build-libxkbcommon [--abi=aarch64|x86_64|both] [--clean]`. Clones a pinned upstream tag into `./libxkbcommon/` (gitignored) if missing — no patches. Run once after fresh clone or when bumping the version pin.
 - **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.compositor.CompositorActivity`
-- **Install chroot:** `adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity --es autoAction install --es id arch` (then `adb logcat -s tawc-install` to watch). The chroot lives at `/data/data/me.phie.tawc/installations/arch/rootfs/`.
+- **Install chroot:** `adb shell am start -n me.phie.tawc/.install.InstallActivity --es autoStart true --es id arch` (then `adb logcat -s tawc-install` to watch). The chroot lives at `/data/data/me.phie.tawc/installations/arch/rootfs/`.
 - **Chroot (interactive):** `bash client/tawc-chroot-run`
 - **Run Wayland app:** `bash client/tawc-chroot-run '<command>'` (env vars set by profile)
 - **Firefox:** `bash client/tawc-chroot-run 'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 DISPLAY= firefox --no-remote'`

@@ -12,8 +12,8 @@
 #   - tawc app installed (this script reinstalls it during build)
 #   - In-app Arch chroot installed at
 #     /data/data/me.phie.tawc/installations/arch/. Install via:
-#       adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \
-#           --es autoAction install --es id arch
+#       adb shell am start -n me.phie.tawc/.install.InstallActivity \
+#           --es autoStart true --es id arch
 #   - Test-suite chroot packages installed (run
 #     `bash testing/install-test-deps.sh` once per chroot install)
 #   - libhybris already built and installed in the chroot (run
@@ -83,8 +83,8 @@ if [ "$DO_BUILD" -eq 1 ]; then
 ERROR: in-app chroot not found at /data/data/me.phie.tawc/installations/arch/.
 
 Install it from the host:
-  adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \
-      --es autoAction install --es id arch
+  adb shell am start -n me.phie.tawc/.install.InstallActivity \
+      --es autoStart true --es id arch
 
 Then tail progress:
   adb logcat -s tawc-install

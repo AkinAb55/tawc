@@ -44,10 +44,14 @@ class, and [InstallationStore] already handle it.
 | `ArchInstaller.kt`             | Stage machine: download → extract → configure → pacman init → pacman install. (No separate mount stage — see *Mount lifecycle*.) |
 | `InstallProgress.kt`           | Stage enum + progress event used by the service. |
 | `InstallationService.kt`       | Foreground service that runs install/uninstall in a coroutine and exposes `progress` (StateFlow) and `log` (SharedFlow). |
-| `ManageInstallationsActivity.kt`| Plain-Android UI: status, progress bar, log tail, install/uninstall/refresh buttons. Bound to the service for live updates. Recognises an `autoAction` extra (`install`/`uninstall`) so adb / scripts can drive it via `am start`. |
+| `OperationLogPanel.kt`         | Reusable Android view (status line + progress bar + scrolling log) that binds to the service's `progress`/`log` flows. Used by both [InstallActivity] and [UninstallActivity] so the per-operation UI lives in one place. |
+| `InstallActivity.kt`           | Install flow: read-only summary (distro, detected CPU arch, install path) → Install button → swap to [OperationLogPanel] for live progress. Recognises `autoStart=true` to skip the form and start immediately. |
+| `UninstallActivity.kt`         | Uninstall flow: confirmation prompt → Uninstall button → swap to [OperationLogPanel]. Recognises `autoStart=true` to skip the confirmation. |
 
-The `MainActivity` home screen has a new "Manage installations" button
-that opens `ManageInstallationsActivity`.
+The `MainActivity` home screen lists the on-disk installations
+(distro/arch + size via `du -sk` over `su`) with a Delete button per
+row that opens [UninstallActivity], plus an "Install new distro"
+button that opens [InstallActivity].
 
 ## Stages of an Arch install
 
@@ -131,11 +135,11 @@ mount), but no tool actually walks into it.
 ## CLI command interface
 
 Install and uninstall are driven from the host via `am start` into
-[ManageInstallationsActivity] with an `autoAction` extra. Activities
-launched by `am start` have full FGS-launch privileges, so the
-activity can immediately start `InstallationService` and the operation
-runs to completion in the foreground service whether the activity
-stays open or not.
+[InstallActivity] / [UninstallActivity] with an `autoStart=true` extra.
+Activities launched by `am start` have full FGS-launch privileges, so
+the activity can immediately start `InstallationService` and the
+operation runs to completion in the foreground service whether the
+activity stays open or not.
 
 There is intentionally **no broadcast/receiver surface** for running
 arbitrary commands as root in the chroot. The app has Magisk root for
@@ -147,8 +151,8 @@ with auth baked in (signature permission or uid check) at that point.
 ```sh
 # Kick off a fresh install (works cold; the activity briefly surfaces).
 adb shell am start \
-    -n me.phie.tawc/.install.ManageInstallationsActivity \
-    --es autoAction install --es id arch
+    -n me.phie.tawc/.install.InstallActivity \
+    --es autoStart true --es id arch
 
 # Tail the install log (download → extract → configure → pacman):
 adb logcat -s tawc-install
@@ -156,8 +160,8 @@ adb logcat -s tawc-install
 # Tear down the install. Defensive unmount runs first; if anything
 # can't be released, `rm -rf` is refused.
 adb shell am start \
-    -n me.phie.tawc/.install.ManageInstallationsActivity \
-    --es autoAction uninstall --es id arch
+    -n me.phie.tawc/.install.UninstallActivity \
+    --es autoStart true --es id arch
 ```
 
 Listing existing installations from the host: read the metadata
@@ -204,11 +208,11 @@ Activity Launches from the same context are also blocked
 (`BAL_BLOCK`). That rules out a clean broadcast endpoint for INSTALL /
 UNINSTALL, which need an FGS to run anything long-running.
 
-`am start` directly into `ManageInstallationsActivity` is the
-documented CLI for those operations: Activities launched by `am start`
-have full FGS-launch privileges, so the activity can start
-`InstallationService` immediately and the install runs to completion
-whether the activity stays open or not.
+`am start` directly into `InstallActivity` / `UninstallActivity` (with
+`--es autoStart true`) is the documented CLI for those operations:
+Activities launched by `am start` have full FGS-launch privileges, so
+the activity can start `InstallationService` immediately and the
+install runs to completion whether the activity stays open or not.
 
 If a no-UI INSTALL/UNINSTALL trigger is ever needed (e.g. headless
 test workflows that can't run `am start`), the right answer is

@@ -11,8 +11,9 @@
 #   - Android device or emulator connected via adb (set TAWC_TARGET= if
 #     multiple targets are connected)
 #   - In-app Arch chroot installed at
-#     /data/data/me.phie.tawc/installations/arch/ (install via the app's
-#     Manage installations screen, or `am start --es autoAction install`)
+#     /data/data/me.phie.tawc/installations/arch/ (install from the app's
+#     home screen, or `am start -n me.phie.tawc/.install.InstallActivity
+#     --es autoStart true --es id arch`)
 #
 # Usage:
 #   bash testing/install-test-deps.sh

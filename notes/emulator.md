@@ -89,8 +89,8 @@ matching a real Magisk-rooted device.
 ### 6. Bootstrap the chroot
     adb -s emulator-5554 install -r server/app/build/outputs/apk/debug/app-debug.apk
     adb -s emulator-5554 shell am start \
-        -n me.phie.tawc/.install.ManageInstallationsActivity \
-        --es autoAction install --es id arch
+        -n me.phie.tawc/.install.InstallActivity \
+        --es autoStart true --es id arch
     adb -s emulator-5554 logcat -s tawc-install   # tail progress
 
 This installs the tawc app and triggers its in-app installer, which

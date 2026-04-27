@@ -28,12 +28,12 @@ import me.phie.tawc.MainActivity
 /**
  * Foreground service that runs install / uninstall jobs in a coroutine.
  *
- * The UI ([ManageInstallationsActivity]) binds to this service for live
- * progress; the CLI surface is `am start` into the activity with an
- * `autoAction` extra, which then starts the service the same way.
- * Either entry point hits the same paths, so the progress/log streams
- * below are the single source of truth for any surface watching the
- * operation.
+ * The UI ([InstallActivity] / [UninstallActivity]) binds to this
+ * service for live progress; the CLI surface is `am start` into the
+ * matching activity with `--es autoStart true`, which then starts the
+ * service the same way. Either entry point hits the same paths, so the
+ * progress/log streams below are the single source of truth for any
+ * surface watching the operation.
  */
 class InstallationService : Service() {
 
@@ -87,7 +87,7 @@ class InstallationService : Service() {
                 publishProgress(
                     InstallProgress(
                         InstallStage.FAILED,
-                        "Install failed",
+                        "Install failed: ${firstLine(t.message)}",
                         errorMessage = t.message,
                     )
                 )
@@ -113,7 +113,7 @@ class InstallationService : Service() {
                 publishProgress(
                     InstallProgress(
                         InstallStage.FAILED,
-                        "Uninstall failed",
+                        "Uninstall failed: ${firstLine(t.message)}",
                         errorMessage = t.message,
                     )
                 )
@@ -122,6 +122,9 @@ class InstallationService : Service() {
             }
         }
     }
+
+    private fun firstLine(s: String?): String =
+        s?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "(no detail)"
 
     private fun publishProgress(p: InstallProgress) {
         _progress.value = p
