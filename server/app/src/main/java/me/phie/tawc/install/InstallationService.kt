@@ -110,7 +110,7 @@ class InstallationService : Service() {
             return
         }
         currentJob = scope.launch {
-            val installer = Installer(store, BootstrapCache(applicationContext), distro, id)
+            val installer = Installer(applicationContext, store, BootstrapCache(applicationContext), distro, id)
             try {
                 installer.install(::publishProgress, ::appendLog)
             } catch (t: Throwable) {
@@ -147,7 +147,7 @@ class InstallationService : Service() {
             ?: DistroRegistry.defaultForHost()
             ?: DistroRegistry.all.first()
         currentJob = scope.launch {
-            val installer = Installer(store, BootstrapCache(applicationContext), distro, id)
+            val installer = Installer(applicationContext, store, BootstrapCache(applicationContext), distro, id)
             try {
                 installer.uninstall(::publishProgress, ::appendLog)
             } catch (t: Throwable) {

@@ -107,6 +107,7 @@ The package is split into three layers:
 | `InstallationStore.kt`         | Filesystem layout + JSON metadata I/O. `setState` is the one entry point that writes the state field. |
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
+| `SignatureVerifier.kt`         | Sealed `BootstrapVerification` (`None` / `Pgp` / `CrossMirrorMd5`) and `verify(...)`. Called from [Installer] between download and extract — see *Bootstrap integrity* below. Uses BouncyCastle (`bcpg-jdk18on` + `bcprov-jdk18on`) for the OpenPGP layer. Treat as load-bearing security code. |
 | `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempPlainTarFor(arch)` for [Archive]'s zstd-decompression target so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<arch>.tar.{zst,gz}`; unconditional deletion of `*.tmp` and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
 | `Archive.kt`                   | Tar extraction (decompresses zstd in-process to a sibling `.tar`, then hands it to `toybox tar` running as root). Never wipes — install only runs against an empty slot. |
 | `RootfsCleaner.kt`             | The one and only delete path: kill chroot processes → unmount strictly → `find -xdev -depth -delete`. Used by uninstall; never by install. |
@@ -158,30 +159,37 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
    handles the fetch, the cache filename, and the mtime touch. The TTL
    counts from "last used" rather than original download.
    - x86_64: `https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst` (toplevel `root.x86_64/` is flattened post-extract because toybox `tar` doesn't `--strip-components`)
-   - aarch64: `http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz` (no wrapper dir; HTTP — see *Network security* below)
-3. **EXTRACTING** — root-owned via toybox tar. Zstd is decompressed
+   - aarch64: `https://fl.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz` (no wrapper dir)
+3. **VERIFYING** — `SignatureVerifier.verify(...)` checks the
+   tarball against the distro's [BootstrapVerification] before the
+   extractor sees it. Throws on mismatch / forged blob and the
+   install lands in `FAILED` before any byte hits the rootfs. See
+   *Bootstrap integrity* below for what each distro declares.
+4. **EXTRACTING** — root-owned via toybox tar. Zstd is decompressed
    in-process to a sibling `.tar` first because piping data into a
    shell's stdin loses bytes (the shell pre-buffers past the script).
    The destination is a freshly-mkdir'd directory; the install gate
    guarantees nothing else lives there.
-4. **CONFIGURING** — writes the same files the legacy create scripts do:
+5. **CONFIGURING** — writes the same files the legacy create scripts do:
    - `/etc/resolv.conf` (8.8.8.8)
-   - `/etc/pacman.conf` (`SigLevel=Never`, `DisableSandbox`, `#CheckSpace`, `IgnorePkg = linux …`)
-   - `/etc/pacman.d/mirrorlist` (x86_64: geo-routed `geo.mirror.pkgbuild.com`; aarch64: a curated multi-mirror list — see *ALARM mirror failover* below)
+   - `/etc/pacman.conf` (`DisableSandbox`, `#CheckSpace`, `IgnorePkg = linux …`; **upstream `SigLevel` is left intact** — see *Bootstrap integrity* below)
+   - `/etc/pacman.d/mirrorlist` (x86_64: geo-routed `geo.mirror.pkgbuild.com`; aarch64: HTTPS-first curated multi-mirror list — see *ALARM mirror failover* below)
    - `/etc/profile.d/00-path.sh` (PATH/TMPDIR/HOME)
    - `/etc/profile.d/01-tawc.sh` is *not* written here — `ChrootMounter`
      rewrites it on every chroot entry (Wayland env: `WAYLAND_DISPLAY`,
      `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`, `HYBRIS_EGLPLATFORM`, `wayland-0`
      symlink) so env changes pick up without a reinstall.
-5. **PACMAN_INIT** — `pacman-key --init`, `--populate archlinux` /
-   `archlinuxarm` depending on arch. (Bind mounts are not a separate
-   stage — they're set up inside the very `su` shell that runs each
-   chroot command, see *Mount lifecycle* below.)
-6. **PACMAN_INSTALL** — `pacman -Syu --noconfirm` then
+6. **PACMAN_INIT** — `pacman-key --init`, then `--populate archlinux` /
+   `archlinuxarm` (no `|| true` — populate must succeed since pacman
+   is now run with the upstream default `SigLevel`). (Bind mounts are
+   not a separate stage — they're set up inside the very `su` shell
+   that runs each chroot command, see *Mount lifecycle* below.)
+7. **PACMAN_INSTALL** — `pacman -Syu --noconfirm` then
    `pacman -S --noconfirm --needed base-devel git libtool wayland
    wayland-protocols pkg-config autoconf automake patchelf weston gtk3
-   gtk3-demos`.
-7. **(state write)** — `setState(READY)` only after every step above
+   gtk3-demos`. Every package is signature-verified against the
+   keyring populated above.
+8. **(state write)** — `setState(READY)` only after every step above
    succeeds.
 
 The downloaded tarball persists in `cache/install/` across runs; the
@@ -372,12 +380,80 @@ them. To do it by hand:
     adb shell "su -c 'magisk --sqlite \"INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($uid,2,0,1,0);\"'"
     adb shell pm grant me.phie.tawc android.permission.POST_NOTIFICATIONS
 
-## Network security
+## Bootstrap integrity (load-bearing — do not weaken)
 
-`os.archlinuxarm.org` doesn't redirect to HTTPS for the bootstrap
-tarball, so `res/xml/network_security_config.xml` carves out plaintext
-HTTP for `archlinuxarm.org` and **only** that domain. Everything else
-stays HTTPS-only.
+**Every byte we lay down inside the chroot's rootfs is run as root
+inside that chroot, so the bootstrap-tarball trust path is the
+single most security-relevant part of the install pipeline.** It is
+specifically designed so that "there's a bug, just turn off the
+check to keep going" is **never** the right move. Anyone touching
+this code path is expected to keep the integrity barrier intact and
+add to it, not weaken it.
+
+Hard rules:
+
+- **Every [DistroBootstrap] must carry a real
+  [BootstrapVerification].** New distros do not get to ship with
+  `BootstrapVerification.None` — that variant exists only for cases
+  where neither PGP nor cross-mirror checksums are realistically
+  obtainable, and even then it logs a loud warning every install.
+  Before adding a new distro, find an upstream signature
+  (`<tarball>.sig` is the convention) or set up a cross-mirror
+  checksum cross-check; only fall back to `None` if you've actually
+  exhausted those.
+- **`SigLevel = Never` is gone from `pacman.conf` and stays gone.**
+  Pacman runs with the upstream default
+  (`Required DatabaseOptional`); `pacman-key --populate <keyring>`
+  is required to succeed; `pacman -Syu` verifies every package
+  against the populated keyring. If `--populate` fails on a new
+  Android version, fix it — don't paper over with `Never`.
+- **`network_security_config.xml` is HTTPS-only.** No `cleartext`
+  carve-outs. Both bootstrap fetches now go over TLS; if a future
+  source is HTTP-only, mirror it via something with a valid cert
+  rather than re-opening cleartext for the whole app.
+- **Removing or downgrading these checks is a security regression
+  even if it makes a CI failure go away.** Code review should treat
+  changes that delete a `BootstrapVerification`, drop a `.sig` URL,
+  re-add `SigLevel = Never`, or re-introduce a cleartext carve-out
+  the same as deleting the password check on a login screen.
+
+### What's verified today
+
+| Bootstrap | Verification | Where |
+| --- | --- | --- |
+| Arch x86_64 (`geo.mirror.pkgbuild.com`, HTTPS) | PGP detached signature `<tarball>.sig`, against Pierre Schmitz's Arch developer key (`3E80 CA1A 8B89 F69C BA57 D98A 76A5 EF90 5444 9A5C`) shipped at `res/raw/arch_signing_key.asc` | `BootstrapVerification.Pgp` in `ArchLinuxX86_64.kt` |
+| ALARM aarch64 (`fl.us.mirror.archlinuxarm.org`, HTTPS) | Cross-mirror MD5 cross-check: `.md5` fetched over HTTPS from `fl.us.` and `ca.us.` (independently-operated mirrors with their own valid certs), digests must agree byte-for-byte, then the tarball's MD5 must match | `BootstrapVerification.CrossMirrorMd5` in `ArchLinuxArm.kt` |
+| In-chroot pacman packages | Default `SigLevel = Required DatabaseOptional`, against the keyring populated by `pacman-key --populate archlinux` / `archlinuxarm` | `ArchPacmanCommon.kt` (the `Never` line was removed, `--populate` is no longer `\|\| true`'d) |
+
+### Known weaker spot: ALARM bootstrap
+
+ALARM is the weaker of the two bootstrap paths because upstream
+publishes only an MD5 sidecar, not a PGP signature. The cross-mirror
+HTTPS check is much better than the previous plaintext-HTTP-no-check
+setup but it's not as strong as the Arch x86_64 PGP path: an
+attacker who can compromise both `fl.us.mirror.archlinuxarm.org` and
+`ca.us.mirror.archlinuxarm.org` (or get Let's Encrypt to mis-issue
+for both subdomains, or compromise the underlying ALARM CDN
+operator) could lie consistently and we'd accept it. PGP would
+defeat any of those.
+
+This is tracked in `issues/install-alarm-bootstrap-no-pgp.md` with
+the upgrade path: when ALARM upstream starts signing the bootstrap,
+swap the verification to `BootstrapVerification.Pgp`. Until then,
+the cross-mirror MD5 is the floor.
+
+### Verifier code
+
+- `SignatureVerifier.kt` — sealed `BootstrapVerification` (`None`,
+  `Pgp`, `CrossMirrorMd5`) and `verify(context, tarball, verification)`.
+  Called from `Installer.install` between [BootstrapCache.download]
+  and [Archive.extractAsRoot]. Throws `IOException` on any failure
+  and the install is parked in `FAILED` before any byte hits the
+  rootfs.
+- BouncyCastle (`bcpg-jdk18on`, `bcprov-jdk18on`) provides the OpenPGP
+  layer; the duplicate `META-INF/versions/9/OSGI-INF/MANIFEST.MF`
+  across the three jars is resolved with a `pickFirsts` rule in
+  `app/build.gradle.kts`.
 
 ## ALARM mirror failover
 
@@ -390,8 +466,14 @@ is a stable 404 on a small handful of `*.pkg.tar.xz` files mid-
 transaction (e.g. `bubblewrap-0.11.2-1-aarch64.pkg.tar.xz`). With one
 Server line pacman has no fallback and the whole transaction aborts;
 with several explicit mirrors it skips past the stale one to the next.
-The list lives in `ArchInstaller.configure` and intentionally puts the
-geo-redirector first so the common case still uses the closest mirror.
+
+The list lives in `ArchLinuxArm.MIRROR_LIST` and is now HTTPS-first:
+`fl.us.` and `ca.us.` (the two ALARM mirrors with valid certs covering
+their own hostnames) come first, then the geo-redirector and a few
+regional HTTP mirrors as fallback. Pacman package signatures are
+verified against the populated keyring (no more `SigLevel = Never`),
+so HTTP for the fallback mirrors is defense-in-depth missing rather
+than a hole. See *Bootstrap integrity* for the load-bearing rules.
 
 ## Android 14 FGS rules and why INSTALL/UNINSTALL aren't broadcasts
 

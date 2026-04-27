@@ -1,6 +1,7 @@
 package me.phie.tawc.install.distro
 
 import me.phie.tawc.install.BootstrapFormat
+import me.phie.tawc.install.BootstrapVerification
 
 /**
  * Per-distro policy: bootstrap tarball, `/etc` configuration,
@@ -86,9 +87,15 @@ interface Distro {
  *   bootstrap; `null` for tarballs that are already flat). Toybox tar
  *   has no `--strip-components`, so `Archive.extractAsRoot` flattens
  *   with `mv` after extraction when this is non-null.
+ * @property verification integrity-check policy (PGP detached
+ *   signature, etc.) consumed by [me.phie.tawc.install.SignatureVerifier]
+ *   between download and extract. Distros must opt out explicitly via
+ *   [BootstrapVerification.None] so the security stance of every
+ *   bootstrap source is visible at the call site.
  */
 data class DistroBootstrap(
     val url: String,
     val format: BootstrapFormat,
     val stripPrefix: String?,
+    val verification: BootstrapVerification,
 )

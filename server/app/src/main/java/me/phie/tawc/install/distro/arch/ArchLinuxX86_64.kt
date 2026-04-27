@@ -1,6 +1,7 @@
 package me.phie.tawc.install.distro.arch
 
 import me.phie.tawc.install.BootstrapFormat
+import me.phie.tawc.install.BootstrapVerification
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroBootstrap
@@ -17,10 +18,21 @@ internal object ArchLinuxX86_64 : Distro {
     override val linuxArch: String = "x86_64"
     override val androidAbi: String = "x86_64"
 
+    private const val BOOTSTRAP_URL =
+        "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst"
+
     override val bootstrap: DistroBootstrap = DistroBootstrap(
-        url = "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
+        url = BOOTSTRAP_URL,
         format = BootstrapFormat.ZSTD,
         stripPrefix = "root.x86_64",
+        // Detached PGP signature signed by Pierre Schmitz
+        // (3E80 CA1A 8B89 F69C BA57  D98A 76A5 EF90 5444 9A5C),
+        // listed at https://archlinux.org/people/developers/.
+        // Public key shipped at res/raw/arch_signing_key.asc.
+        verification = BootstrapVerification.Pgp(
+            signatureUrl = "$BOOTSTRAP_URL.sig",
+            keyResource = "arch_signing_key",
+        ),
     )
 
     override val basePackages: List<String> = ArchPacmanCommon.DEFAULT_BASE_PACKAGES

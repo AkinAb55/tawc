@@ -36,6 +36,17 @@ android {
             jniLibs.srcDirs("src/main/jniLibs")
         }
     }
+
+    // BouncyCastle's three jars (bcpg, bcprov, bcutil) each carry the
+    // same MR-jar OSGI manifest at META-INF/versions/9/OSGI-INF/MANIFEST.MF
+    // and the Android packager refuses to merge identically-named
+    // resources by default. Picking the first is safe — the manifests
+    // are OSGi metadata, irrelevant at Android runtime.
+    packaging {
+        resources {
+            pickFirsts.add("META-INF/versions/9/OSGI-INF/MANIFEST.MF")
+        }
+    }
 }
 
 dependencies {
@@ -44,6 +55,14 @@ dependencies {
     // zstd. Together this keeps the install path tool-free.
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("com.github.luben:zstd-jni:1.5.6-9@aar")
+
+    // BouncyCastle: detached-PGP-signature verification of the Arch
+    // x86_64 bootstrap tarball before we extract it as root. See
+    // notes/installation.md "Bootstrap integrity". `jdk18on` = JDK 1.8
+    // and up (matches our `JavaVersion.VERSION_11`); `bcpg` brings the
+    // OpenPGP layer, `bcprov` the underlying crypto provider.
+    implementation("org.bouncycastle:bcpg-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 

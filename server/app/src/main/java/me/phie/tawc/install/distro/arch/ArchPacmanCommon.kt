@@ -46,14 +46,16 @@ internal object ArchPacmanCommon {
                 rm -f "${'$'}ROOTFS/etc/resolv.conf"
                 echo nameserver 8.8.8.8 > "${'$'}ROOTFS/etc/resolv.conf"
 
-                # pacman.conf: SigLevel=Never (we don't ship the keyring's
-                # web-of-trust into the chroot), DisableSandbox (Magisk's
-                # sandbox propagation breaks pacman's sandbox helper),
-                # comment out CheckSpace (statvfs returns 0 inside the
-                # chroot's bind mounts and pacman aborts), and IgnorePkg
-                # for the kernel/firmware packages that would try to
-                # install boot artefacts into the rootfs and fail.
-                sed -i 's/^SigLevel.*/SigLevel = Never/' "${'$'}ROOTFS/etc/pacman.conf"
+                # pacman.conf: leave the upstream SigLevel alone (defaults
+                # to Required-DatabaseOptional) so package signatures are
+                # verified — pacman-key --populate runs in
+                # initPackageManager and ships the keyring's master keys
+                # via the bootstrap. DisableSandbox (Magisk's sandbox
+                # propagation breaks pacman's sandbox helper), comment
+                # out CheckSpace (statvfs returns 0 inside the chroot's
+                # bind mounts and pacman aborts), and IgnorePkg for the
+                # kernel/firmware packages that would try to install
+                # boot artefacts into the rootfs and fail.
                 grep -q '^DisableSandbox' "${'$'}ROOTFS/etc/pacman.conf" || \
                     sed -i '/^SigLevel/a DisableSandbox' "${'$'}ROOTFS/etc/pacman.conf"
                 sed -i 's/^CheckSpace/#CheckSpace/' "${'$'}ROOTFS/etc/pacman.conf"
@@ -96,9 +98,12 @@ internal object ArchPacmanCommon {
 
     /**
      * `pacman-key --init && pacman-key --populate <keyring> && pacman
-     * -Syu`. Although we set `SigLevel=Never` so the keyring isn't
-     * strictly required, populating matches what the legacy create
-     * scripts did and keeps `pacman -Syu` quiet.
+     * -Syu`. The keyring populate is now required: pacman.conf's
+     * default SigLevel (`Required DatabaseOptional`) means `pacman
+     * -Syu` will refuse unsigned packages, and `--populate` is what
+     * imports the distro master keys + their signed packager keys
+     * into the chroot's pacman keyring. If populate fails the install
+     * is broken — fail loudly rather than `|| true`-ing past it.
      */
     fun initPackageManager(
         rootfs: String,
@@ -109,8 +114,9 @@ internal object ArchPacmanCommon {
             rootfs,
             """
             export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            set -e
             pacman-key --init
-            pacman-key --populate $keyring 2>/dev/null || true
+            pacman-key --populate $keyring
             pacman -Syu --noconfirm
             """.trimIndent(),
             onLine = { log("pacman-key: $it") },

@@ -7,6 +7,8 @@ package me.phie.tawc.install
 enum class InstallStage {
     IDLE,
     DOWNLOADING,
+    /** PGP-signature / checksum check between download and extract. */
+    VERIFYING,
     EXTRACTING,
     CONFIGURING,
     /** Distro-agnostic name for "init the package manager / its keyring". */

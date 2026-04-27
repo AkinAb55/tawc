@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Allow plaintext HTTP for the Arch Linux ARM mirror. The bootstrap
-     tarball URL (http://os.archlinuxarm.org/...) does not have an HTTPS
-     equivalent. Everything else stays HTTPS-only. -->
+<!-- HTTPS-only across the board. Both bootstrap fetches go over TLS:
+     Arch x86_64 via geo.mirror.pkgbuild.com, ALARM aarch64 via
+     fl.us.mirror.archlinuxarm.org / ca.us.mirror.archlinuxarm.org
+     (regional ALARM mirrors with proper certs). See
+     notes/installation.md "Bootstrap integrity" — plaintext is
+     forbidden here on purpose; do not re-add carve-outs without
+     replacing them with another integrity barrier. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">archlinuxarm.org</domain>
-    </domain-config>
 </network-security-config>

@@ -1,5 +1,6 @@
 package me.phie.tawc.install
 
+import android.content.Context
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.util.AppOwnership
 import me.phie.tawc.install.util.HumanSize
@@ -18,17 +19,26 @@ import java.io.IOException
  *                             FAILED for the user to uninstall + retry.
  *   2. DOWNLOADING          — [BootstrapCache.download] using
  *                             `distro.linuxArch` as the cache key.
- *   3. EXTRACTING           — [Archive.extractAsRoot] honouring the
+ *   3. VERIFYING            — [SignatureVerifier.verify] checks the
+ *                             tarball against the distro's
+ *                             [BootstrapVerification] policy (PGP
+ *                             detached signature for Arch x86_64;
+ *                             [BootstrapVerification.None] with a
+ *                             loud warning for ALARM aarch64 since
+ *                             upstream publishes no signature). On
+ *                             mismatch the install fails before any
+ *                             byte hits the rootfs.
+ *   4. EXTRACTING           — [Archive.extractAsRoot] honouring the
  *                             optional `bootstrap.stripPrefix`.
- *   4. CONFIGURING          — [Distro.configure] writes /etc files,
+ *   5. CONFIGURING          — [Distro.configure] writes /etc files,
  *                             then [writeEnterScript] renders
  *                             `enter.sh`.
- *   5. PKG_KEYRING          — [Distro.initPackageManager] (pacman-key
+ *   6. PKG_KEYRING          — [Distro.initPackageManager] (pacman-key
  *                             init / keyring populate / pacman -Syu
  *                             for Arch; apt-get update for Debian).
- *   6. PKG_INSTALL          — [Distro.installBasePackages] installs
+ *   7. PKG_INSTALL          — [Distro.installBasePackages] installs
  *                             the base package list.
- *   7. (state write)        — `setState(READY)`.
+ *   8. (state write)        — `setState(READY)`.
  *
  * The state-machine gate ([InstallationService]) only dispatches to
  * `install` against a `(no dir)` slot, so the rootfs is laid down on a
@@ -36,6 +46,7 @@ import java.io.IOException
  * to [RootfsCleaner.wipe]; mounts are torn down there, never here.
  */
 class Installer(
+    private val context: Context,
     private val store: InstallationStore,
     private val cache: BootstrapCache,
     private val distro: Distro,
@@ -88,7 +99,23 @@ class Installer(
             ))
         }
 
-        // Stage 2: extract. The rootfs dir does not exist yet — the
+        // Stage 2: integrity check. PGP-verify the just-downloaded
+        // tarball against the distro's [BootstrapVerification] before
+        // any byte hits the rootfs. Throws on mismatch / missing
+        // signature key / forged blob — and parks the install in
+        // FAILED upstream so the user can uninstall + retry from a
+        // clean tree. Distros that opt in to
+        // [BootstrapVerification.None] (e.g. ALARM, where upstream
+        // publishes no signature) get a loud warning and proceed —
+        // see notes/installation.md "Bootstrap integrity".
+        progress(InstallProgress(
+            InstallStage.VERIFYING,
+            "Verifying bootstrap signature…",
+        ))
+        log("verify: ${distro.bootstrap.verification::class.simpleName}")
+        SignatureVerifier.verify(context, cacheFile, distro.bootstrap.verification)
+
+        // Stage 3: extract. The rootfs dir does not exist yet — the
         // gate only invokes install on a `(no dir)` slot — so tar lays
         // everything onto a fresh tree. Archive.extractAsRoot does not
         // wipe; never has reason to. For zstd bootstraps we pass the
