@@ -277,13 +277,19 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeCommitTex
     mut env: JNIEnv,
     _class: JClass,
     text: jni::objects::JString,
+    delete_before: jint,
+    delete_after: jint,
 ) {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
     // Gboard sends Enter as commitText("\n") — route as a real key event
     if text == "\n" {
         text_input::send_text_input_event(text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER }); // KEY_ENTER
     } else {
-        text_input::send_text_input_event(text_input::TextInputEvent::CommitString { text });
+        text_input::send_text_input_event(text_input::TextInputEvent::CommitString {
+            text,
+            delete_before: delete_before.max(0) as u32,
+            delete_after: delete_after.max(0) as u32,
+        });
     }
 }
 
@@ -292,9 +298,15 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetCompos
     mut env: JNIEnv,
     _class: JClass,
     text: jni::objects::JString,
+    delete_before: jint,
+    delete_after: jint,
 ) {
     let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
-    text_input::send_text_input_event(text_input::TextInputEvent::SetPreeditString { text });
+    text_input::send_text_input_event(text_input::TextInputEvent::SetPreeditString {
+        text,
+        delete_before: delete_before.max(0) as u32,
+        delete_after: delete_after.max(0) as u32,
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -337,7 +349,11 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSendKeyEv
         KEYCODE_DEL => text_input::TextInputEvent::KeyPress { keycode: EVDEV_KEY_BACKSPACE },
         KEYCODE_FORWARD_DEL => text_input::TextInputEvent::KeyPress { keycode: EVDEV_KEY_DELETE },
         KEYCODE_ENTER => text_input::TextInputEvent::KeyPress { keycode: text_input::EVDEV_KEY_ENTER },
-        KEYCODE_TAB => text_input::TextInputEvent::CommitString { text: "\t".to_string() },
+        KEYCODE_TAB => text_input::TextInputEvent::CommitString {
+            text: "\t".to_string(),
+            delete_before: 0,
+            delete_after: 0,
+        },
         _ => {
             info!("Unhandled key event: keycode={}", keycode);
             return;
@@ -387,6 +403,39 @@ pub fn call_native_bridge_void(method: &str, sig: &str, args: &[JValue]) {
     let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
     if let Err(e) = env.call_static_method(class, method, sig, args) {
         log::error!("Reverse JNI call {}({}) failed: {}", method, sig, e);
+    }
+}
+
+/// Reverse-JNI: push the Wayland client's authoritative surrounding text +
+/// selection up to Android, replacing the active TawcInputConnection's
+/// Editable contents. Called from the calloop thread whenever a client
+/// commits a `set_surrounding_text`. `sel_start`/`sel_end` are UTF-16
+/// code-unit offsets within `text` (Android's native editor measure).
+pub fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => return,
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
+    };
+    let text_jstr = match env.new_string(text) {
+        Ok(s) => s,
+        Err(e) => { log::error!("new_string for editable text failed: {}", e); return; }
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(
+        class,
+        "onUpdateEditableText",
+        "(Ljava/lang/String;II)V",
+        &[(&text_jstr).into(), JValue::Int(sel_start), JValue::Int(sel_end)],
+    ) {
+        log::error!("onUpdateEditableText reverse-JNI failed: {}", e);
     }
 }
 

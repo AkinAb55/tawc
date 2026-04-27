@@ -36,13 +36,64 @@ pub fn chroot_spawn(cmd: &str) -> io::Result<std::process::Child> {
         .spawn()
 }
 
-/// Send text to the compositor via broadcast intent.
-/// Goes through: BroadcastReceiver -> nativeCommitText -> text_input_v3 -> GTK.
-/// This is more reliable than `adb shell input text` which may be intercepted by the IME.
+/// Send text to the compositor via broadcast intent — equivalent to
+/// Gboard calling `commitText(text, 1)`. Goes through:
+/// BroadcastReceiver -> TawcInputConnection.commitText -> nativeCommitText
+/// -> text_input_v3 -> Wayland client.
+///
+/// More reliable than `adb shell input text` which may be intercepted by
+/// the IME before reaching the editor.
 pub fn input_text(text: &str) -> io::Result<Output> {
     shell(&format!(
         "am broadcast -a me.phie.tawc.TEXT_INPUT --es text '{}'",
         text.replace('\'', "'\\''")
+    ))
+}
+
+/// Set composing/preedit text — equivalent to Gboard calling
+/// `setComposingText(text, 1)`. The Wayland client should display this as
+/// a preedit (highlighted, not yet committed). Successive calls replace the
+/// previous preedit. Pass an empty string to clear the preedit.
+pub fn input_set_composing(text: &str) -> io::Result<Output> {
+    input_set_composing_with_delete(text, 0, 0)
+}
+
+/// `setComposingText` with explicit composing-region replacement deltas.
+/// `delete_before` / `delete_after` are UTF-16 code units around the
+/// cursor that should be removed from committed text before the new
+/// preedit is set — i.e. simulating Gboard's `setComposingRegion(s, e)`
+/// followed by `setComposingText(text)` flow without depending on an
+/// actual IME service. (Test broadcasts bypass the system IME to avoid
+/// non-determinism — see CompositorActivity.testInputReceiver.)
+pub fn input_set_composing_with_delete(text: &str, delete_before: u32, delete_after: u32) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.SET_COMPOSING_TEXT --es text '{}' --ei deleteBefore {} --ei deleteAfter {}",
+        text.replace('\'', "'\\''"), delete_before, delete_after
+    ))
+}
+
+/// `commitText` with explicit composing-region replacement deltas.
+/// See [input_set_composing_with_delete] for delta semantics.
+pub fn input_text_with_delete(text: &str, delete_before: u32, delete_after: u32) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.TEXT_INPUT --es text '{}' --ei deleteBefore {} --ei deleteAfter {}",
+        text.replace('\'', "'\\''"), delete_before, delete_after
+    ))
+}
+
+/// Finalize the current preedit as committed text — equivalent to Gboard
+/// calling `finishComposingText()`. The active preedit becomes part of the
+/// editor's text and the preedit is cleared.
+pub fn input_finish_composing() -> io::Result<Output> {
+    shell("am broadcast -a me.phie.tawc.FINISH_COMPOSING_TEXT")
+}
+
+/// Delete `before` UTF-16 code units before the cursor and `after` after —
+/// equivalent to Gboard calling `deleteSurroundingText(before, after)`.
+pub fn input_delete_surrounding(before: u32, after: u32) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.DELETE_SURROUNDING_TEXT --ei before {} --ei after {}",
+        before, after
     ))
 }
 

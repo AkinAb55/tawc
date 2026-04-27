@@ -129,6 +129,55 @@ impl DebugApp {
             .find_map(|l| l.strip_prefix("TEXT_CHANGED:").map(|s| s.to_string()))
     }
 
+    /// Get the most recent preedit text reported by the debug app.
+    /// `Some("")` means the preedit was explicitly cleared. `None` means no
+    /// PREEDIT event has been seen yet.
+    pub fn last_preedit(&self) -> Option<String> {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|l| {
+                if l == "PREEDIT" {
+                    Some(String::new())
+                } else {
+                    l.strip_prefix("PREEDIT:").map(|s| s.to_string())
+                }
+            })
+    }
+
+    /// Wait until the most recent preedit equals `expected`, or timeout.
+    /// Pass `""` to wait for the preedit to be cleared.
+    pub fn wait_for_preedit(&self, expected: &str, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.last_preedit().as_deref() == Some(expected) {
+                thread::sleep(MIN_ACTION_DELAY);
+                return Ok(());
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    format!(
+                        "Timeout waiting for preedit '{}' (last: {:?})",
+                        expected,
+                        self.last_preedit()
+                    )
+                })?;
+            match self.line_rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "Debug app exited waiting for preedit '{}' (last: {:?})",
+                        expected,
+                        self.last_preedit()
+                    ));
+                }
+            }
+        }
+    }
+
     /// Get the most recent cursor position (character offset).
     pub fn last_cursor_pos(&self) -> Option<u32> {
         self.lines

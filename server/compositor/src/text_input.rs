@@ -4,18 +4,17 @@
 //! Both are built around the same concepts (composing text, committing text,
 //! deleting surrounding text, content type hints), but differ in details:
 //!
-//! - Android uses UTF-16 character counts; Wayland uses UTF-8 byte counts
-//! - Android batches operations via beginBatchEdit/endBatchEdit; Wayland batches
-//!   via done events
+//! - Android uses UTF-16 code units for character counts; Wayland uses UTF-8
+//!   byte offsets. The compositor converts between them using the client's
+//!   stored surrounding text.
+//! - Android batches operations via beginBatchEdit/endBatchEdit; Wayland
+//!   batches via done events.
 //! - Android's IME queries editor state (getTextBeforeCursor etc.); Wayland
-//!   clients push state (set_surrounding_text)
+//!   clients push state (set_surrounding_text). The compositor mirrors the
+//!   client's surrounding text up to Android's BaseInputConnection Editable
+//!   so Gboard's queries return the truth.
 //!
-//! The compositor must maintain synchronized state between both sides:
-//! - Store surrounding text from Wayland clients → serve to Android IME
-//! - Track preedit text sent to clients → needed for finishComposingText
-//! - Notify Android when cursor moves for non-IME reasons → updateSelection
-//!
-//! Bypasses Smithay's built-in TextInputManagerState which requires a Wayland
+//! Bypasses Smithay's built-in TextInputManagerState which assumes a Wayland
 //! input-method client. Our IME is Android's Gboard via InputConnection/JNI.
 
 use std::collections::HashMap;
@@ -43,18 +42,32 @@ use crate::compositor::TawcState;
 pub const EVDEV_KEY_ENTER: u32 = 28;
 
 pub enum TextInputEvent {
-    /// Insert finalized text (from commitText or tab key).
-    CommitString { text: String },
-    /// Set preedit/composing text (from setComposingText).
-    SetPreeditString { text: String },
-    /// Finalize current preedit (from finishComposingText).
-    /// Unlike ClearPreedit, this commits the composing text rather than discarding it.
+    /// Insert finalized text (from commitText or tab key). Replaces any
+    /// active preedit on the client side per the protocol's done ordering.
+    /// If the client-side text under the soon-to-be-replaced composing
+    /// region was committed text (Gboard's `setComposingRegion` flow,
+    /// not a previous `setComposingText`), `delete_before`/`delete_after`
+    /// are non-zero and identify the bytes the client should drop before
+    /// the new commit — measured in UTF-16 code units around the cursor.
+    CommitString { text: String, delete_before: u32, delete_after: u32 },
+    /// Set preedit/composing text (from setComposingText). Replaces the
+    /// previous preedit; cursor lives at the end of the preedit.
+    /// `delete_before`/`delete_after` carry the same meaning as for
+    /// `CommitString` — when Gboard marks already-committed text as
+    /// composing (`setComposingRegion`) and then `setComposingText`
+    /// replaces it, the original text must be deleted from the client's
+    /// committed buffer before the new preedit is shown.
+    SetPreeditString { text: String, delete_before: u32, delete_after: u32 },
+    /// Finalize current preedit (from finishComposingText): commit it as
+    /// final text and clear the preedit. Without this, finishComposingText
+    /// would discard the composing text.
     FinishComposingText,
     /// Delete surrounding text (from Android IME's deleteSurroundingText).
-    /// before/after are in Java characters (UTF-16 code units), NOT bytes.
+    /// before/after are in Android's UTF-16 code units, NOT bytes or chars —
+    /// the compositor converts using the client's stored surrounding text.
     DeleteSurroundingText { before: u32, after: u32 },
     /// Send an actual wl_keyboard key event (evdev keycode).
-    /// Used for Enter, Backspace, Delete, and other keys that should be real
+    /// Used for Enter, Backspace, Delete, etc. — keys that should be real
     /// key events rather than text-input-v3 operations.
     KeyPress { keycode: u32 },
 }
@@ -90,9 +103,9 @@ fn hide_keyboard() {
     crate::call_native_bridge_void("onHideKeyboard", "()V", &[]);
 }
 
-/// Notify Android IME that the editor's selection/cursor has changed.
-/// This is critical after cursor movement by touch/click (change_cause=other)
-/// so Gboard can reset its composing state and internal text model.
+/// Notify Android IME (via InputMethodManager.updateSelection) that the
+/// editor's selection/cursor has changed. Critical after non-IME cursor
+/// movement so Gboard can reset its internal model.
 fn update_selection(sel_start: i32, sel_end: i32) {
     crate::call_native_bridge_void(
         "onUpdateSelection",
@@ -104,6 +117,13 @@ fn update_selection(sel_start: i32, sel_end: i32) {
             jni::objects::JValue::Int(-1),
         ],
     );
+}
+
+/// Push the Wayland client's text + selection up to the Android side so
+/// the active TawcInputConnection's Editable matches the editor's truth.
+/// `sel_start`/`sel_end` are UTF-16 code-unit offsets within `text`.
+fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
+    crate::update_editable_text(text, sel_start, sel_end);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +168,7 @@ struct InstanceState {
     enabled: bool,
     surrounding: Option<SurroundingText>,
 
-    /// Last preedit text sent to this instance. Needed so finishComposingText
+    /// Last preedit text we sent to this client. Needed so finishComposingText
     /// can commit the composing text rather than discarding it.
     current_preedit: Option<String>,
 }
@@ -231,6 +251,11 @@ impl TextInputState {
 
     /// Process a commit from the client. Atomically applies all pending state.
     pub fn commit(&mut self, id: &ObjectId) {
+        // Look up the resource up-front so we can emit events outside the
+        // mutable borrow on `instance_state` below. Cloning a resource is
+        // cheap (refcounted handle).
+        let ti = self.instances.iter().find(|t| t.id() == *id).cloned();
+
         let state = match self.instance_state.get_mut(id) {
             Some(s) => s,
             None => return,
@@ -240,6 +265,7 @@ impl TextInputState {
 
         // Apply enable/disable. Per spec, if both are pending, disable wins.
         // enable resets all state from the previous enable/disable cycle.
+        let mut just_enabled = false;
         if state.pending_disable {
             info!("text_input: commit disable");
             state.enabled = false;
@@ -248,30 +274,81 @@ impl TextInputState {
         } else if state.pending_enable {
             info!("text_input: commit enable");
             state.enabled = true;
-            // Per spec: enable resets all associated state
+            // Per spec: enable resets all associated state.
             state.surrounding = None;
             state.current_preedit = None;
+            just_enabled = true;
         }
 
-        // Apply pending surrounding text
+        // Apply pending surrounding text.
         let change_cause = state.pending_change_cause;
+        let mut sync_to_android: Option<(String, i32, i32, bool)> = None;
+        // Whether to send a preedit-clearing done event to the client
+        // after we drop the borrow on `state`. Set when the client moved
+        // the cursor outside IME control while we had an active preedit:
+        // GTK keeps rendering preedit at the cursor, so without this,
+        // the user's typed-but-not-committed word visually follows the
+        // cursor. Clearing matches what every desktop text widget does
+        // on click during composition (the in-progress word is dropped).
+        let mut clear_client_preedit = false;
         if let Some(surrounding) = state.pending_surrounding.take() {
-            // When text/cursor changed for non-IME reasons (user touch, arrow keys),
-            // notify Android so Gboard can reset its composing state.
-            if change_cause == ChangeCause::Other && state.enabled {
-                let sel_start = byte_offset_to_char_count(&surrounding.text, surrounding.cursor);
-                let sel_end = byte_offset_to_char_count(&surrounding.text, surrounding.anchor);
-                update_selection(sel_start as i32, sel_end as i32);
+            let sel_start = byte_offset_to_utf16_count(&surrounding.text, surrounding.cursor) as i32;
+            let sel_end = byte_offset_to_utf16_count(&surrounding.text, surrounding.anchor) as i32;
+            let need_imm_update = change_cause == ChangeCause::Other && state.enabled;
+
+            if change_cause == ChangeCause::Other {
+                // Drop our compositor-side preedit tracking so a defensive
+                // `finishComposingText` from the IME doesn't re-commit the
+                // preedit at the new cursor (the "words reappear" bug).
+                if state.current_preedit.take().is_some() {
+                    // We had a preedit that the client may still be
+                    // rendering; tell it to clear so it doesn't shadow
+                    // the cursor at its new position.
+                    clear_client_preedit = true;
+                }
             }
+
+            sync_to_android = Some((surrounding.text.clone(), sel_start, sel_end, need_imm_update));
             state.surrounding = Some(surrounding);
+        } else if just_enabled {
+            // Client enabled without first reporting surrounding text; treat
+            // the editor as empty for Android-side mirroring purposes.
+            sync_to_android = Some((String::new(), 0, 0, false));
         }
 
-        // Reset pending state
+        // Reset pending state.
         state.pending_enable = false;
         state.pending_disable = false;
         state.pending_change_cause = ChangeCause::default();
+        let enabled_now = state.enabled;
+        let commit_count = state.commit_count;
 
-        // Update keyboard visibility based on whether any instance is enabled
+        // End of borrow on `state`; do JNI calls outside the &mut.
+        if enabled_now {
+            if let Some((text, sel_start, sel_end, need_imm_update)) = sync_to_android {
+                // Always mirror the Wayland client's text into the Android
+                // Editable so Gboard's queries match the editor's truth.
+                update_editable_text(&text, sel_start, sel_end);
+                if need_imm_update {
+                    // Cursor moved by user touch / arrow keys / etc. — also
+                    // poke IMM so Gboard resets its internal composing model.
+                    update_selection(sel_start, sel_end);
+                }
+            }
+        }
+
+        // Tell the client to drop its preedit if the cursor moved
+        // out-of-band while we had one tracked. Done order means the
+        // existing preedit is replaced by the cursor on the next done
+        // (step 1) and nothing is inserted afterwards.
+        if clear_client_preedit {
+            if let Some(ti) = ti {
+                ti.preedit_string(None, 0, 0);
+                ti.done(commit_count);
+            }
+        }
+
+        // Update keyboard visibility based on whether any instance is enabled.
         self.sync_keyboard_visibility();
     }
 
@@ -348,42 +425,95 @@ impl TextInputState {
             }
 
             match &event {
-                TextInputEvent::CommitString { text } => {
-                    // Clear preedit, then commit the text.
-                    // Per done ordering: preedit cleared (step 1), then commit
-                    // string inserted with cursor at its end (step 3).
+                TextInputEvent::CommitString { text, delete_before, delete_after } => {
+                    // If the client's current cursor sits inside committed
+                    // text that Gboard has marked as composing (via
+                    // setComposingRegion), the IME is asking us to *replace*
+                    // that text with this commit. The replacement requires
+                    // an explicit delete_surrounding_text — Wayland's preedit
+                    // model doesn't carry "this committed text is composing".
+                    let (before_bytes, after_bytes) = utf16_units_to_bytes(
+                        inst.surrounding.as_ref(),
+                        *delete_before,
+                        *delete_after,
+                    );
+                    if before_bytes > 0 || after_bytes > 0 {
+                        ti.delete_surrounding_text(before_bytes, after_bytes);
+                    }
+                    // Per done ordering: existing preedit is replaced by the
+                    // cursor (step 1), surrounding text is deleted relative
+                    // to that cursor (step 2), then the commit string is
+                    // inserted (step 3). Sending preedit_string(None) is
+                    // explicit and idempotent — clients that miss the
+                    // automatic step-1 still get the right outcome.
                     ti.preedit_string(None, 0, 0);
                     ti.commit_string(Some(text.clone()));
                     inst.current_preedit = None;
                 }
-                TextInputEvent::SetPreeditString { text } => {
-                    // Show composing text with cursor at end.
-                    // cursor_begin=cursor_end=len means a caret at the end of
-                    // the preedit, which is where the user is typing.
-                    let len = text.len() as i32;
-                    ti.preedit_string(Some(text.clone()), len, len);
-                    inst.current_preedit = Some(text.clone());
+                TextInputEvent::SetPreeditString { text, delete_before, delete_after } => {
+                    // Same delete-then-replace pattern as CommitString, but
+                    // the new content lands as preedit, not committed text.
+                    let (before_bytes, after_bytes) = utf16_units_to_bytes(
+                        inst.surrounding.as_ref(),
+                        *delete_before,
+                        *delete_after,
+                    );
+                    if before_bytes > 0 || after_bytes > 0 {
+                        ti.delete_surrounding_text(before_bytes, after_bytes);
+                    }
+                    if text.is_empty() {
+                        // Empty composing text means "clear preedit" in the
+                        // Android model. Map it to preedit_string(None).
+                        ti.preedit_string(None, 0, 0);
+                        inst.current_preedit = None;
+                    } else {
+                        // Caret at end of preedit (cursor_begin == cursor_end == byte_len).
+                        let len = text.len() as i32;
+                        ti.preedit_string(Some(text.clone()), len, len);
+                        inst.current_preedit = Some(text.clone());
+                    }
                 }
                 TextInputEvent::FinishComposingText => {
-                    // Finalize the current composing text: commit it, then
-                    // clear the preedit. Without this, finishComposingText
-                    // would discard the composing text entirely.
-                    if let Some(ref preedit) = inst.current_preedit {
-                        ti.commit_string(Some(preedit.clone()));
+                    // Finalize current composing text: commit it as final,
+                    // then clear the preedit. Done ordering means the client
+                    // first removes the existing preedit, then inserts the
+                    // commit string in its place — net effect: preedit becomes
+                    // permanent text.
+                    //
+                    // current_preedit is cleared whenever the client
+                    // independently finalizes its preedit (cursor moved
+                    // by touch, etc.), so a stale finishComposingText after
+                    // a click no-ops here instead of duplicating text.
+                    if let Some(preedit) = inst.current_preedit.take() {
+                        if !preedit.is_empty() {
+                            ti.commit_string(Some(preedit));
+                        }
                     }
                     ti.preedit_string(None, 0, 0);
-                    inst.current_preedit = None;
                 }
                 TextInputEvent::DeleteSurroundingText { before, after } => {
-                    // Android sends character counts (UTF-16 code units).
-                    // The Wayland protocol requires UTF-8 byte counts.
-                    // Use the client's last reported surrounding text to convert.
-                    let (before_bytes, after_bytes) = chars_to_bytes(
+                    // Android sends UTF-16 code unit counts. Wayland needs
+                    // UTF-8 byte counts. Use the client's last reported
+                    // surrounding text to convert exactly.
+                    let (before_bytes, after_bytes) = utf16_units_to_bytes(
                         inst.surrounding.as_ref(),
                         *before,
                         *after,
                     );
+                    if before_bytes == 0 && after_bytes == 0 {
+                        // Nothing to delete; skip the round-trip entirely.
+                        continue;
+                    }
+                    // Per done ordering: existing preedit is replaced by
+                    // cursor (step 1), then surrounding text is deleted
+                    // relative to that cursor (step 2). We don't touch the
+                    // preedit here, so any active preedit is cleared as a
+                    // side-effect. That matches Android semantics, where
+                    // deleteSurroundingText typically applies after
+                    // finishing or replacing the composing region.
+                    ti.preedit_string(None, 0, 0);
                     ti.delete_surrounding_text(before_bytes, after_bytes);
+                    inst.current_preedit = None;
                 }
                 TextInputEvent::KeyPress { .. } => {
                     unreachable!("KeyPress handled in event_loop.rs")
@@ -415,44 +545,66 @@ impl TextInputState {
 // Utilities
 // ---------------------------------------------------------------------------
 
-/// Convert a UTF-8 byte offset within `text` to a character count.
-/// Clamps to the text length if offset is out of bounds.
-fn byte_offset_to_char_count(text: &str, byte_offset: usize) -> usize {
+/// Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit count
+/// (the unit Android uses for cursor and selection offsets). Clamps to text
+/// length if offset is out of bounds.
+fn byte_offset_to_utf16_count(text: &str, byte_offset: usize) -> usize {
     let clamped = byte_offset.min(text.len());
-    text[..clamped].chars().count()
+    text[..clamped].chars().map(|c| c.len_utf16()).sum()
 }
 
-/// Convert Android character counts (before/after cursor) to UTF-8 byte counts
-/// using the stored surrounding text for accurate conversion.
-/// Falls back to 1:1 mapping (ASCII assumption) if no surrounding text is available.
-fn chars_to_bytes(
+/// Convert Android UTF-16 code-unit counts (before/after cursor) to UTF-8
+/// byte counts, using the client's stored surrounding text. Falls back to
+/// 1:1 mapping (ASCII assumption) if no surrounding text is available.
+///
+/// Critical for non-BMP characters (emoji, etc.): a single emoji is 1 Rust
+/// `char` but 2 UTF-16 code units and 4 UTF-8 bytes. Android's
+/// `deleteSurroundingText(2, 0)` for an emoji must become `(4, 0)`.
+fn utf16_units_to_bytes(
     surrounding: Option<&SurroundingText>,
-    before_chars: u32,
-    after_chars: u32,
+    before_units: u32,
+    after_units: u32,
 ) -> (u32, u32) {
     let st = match surrounding {
         Some(st) => st,
-        // No surrounding text from client; assume 1 byte per char (ASCII).
-        // This is wrong for non-ASCII but we have no text to measure against.
         None => {
-            info!("chars_to_bytes: no surrounding text, assuming ASCII");
-            return (before_chars, after_chars);
+            // No surrounding text from client; assume 1 byte == 1 UTF-16 unit
+            // (true for ASCII). Wrong for non-ASCII but we have nothing to
+            // measure against — Android IMEs typically only send delete after
+            // we've reported surrounding text anyway.
+            info!("utf16_units_to_bytes: no surrounding text, assuming ASCII");
+            return (before_units, after_units);
         }
     };
     let cursor = st.cursor.min(st.text.len());
 
-    let before_bytes: usize = st.text[..cursor]
-        .chars()
-        .rev()
-        .take(before_chars as usize)
-        .map(|c| c.len_utf8())
-        .sum();
+    let mut before_remaining = before_units as usize;
+    let mut before_bytes: usize = 0;
+    for c in st.text[..cursor].chars().rev() {
+        let units = c.len_utf16();
+        if before_remaining < units {
+            break;
+        }
+        before_remaining -= units;
+        before_bytes += c.len_utf8();
+        if before_remaining == 0 {
+            break;
+        }
+    }
 
-    let after_bytes: usize = st.text[cursor..]
-        .chars()
-        .take(after_chars as usize)
-        .map(|c| c.len_utf8())
-        .sum();
+    let mut after_remaining = after_units as usize;
+    let mut after_bytes: usize = 0;
+    for c in st.text[cursor..].chars() {
+        let units = c.len_utf16();
+        if after_remaining < units {
+            break;
+        }
+        after_remaining -= units;
+        after_bytes += c.len_utf8();
+        if after_remaining == 0 {
+            break;
+        }
+    }
 
     (before_bytes as u32, after_bytes as u32)
 }

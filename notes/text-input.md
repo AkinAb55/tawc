@@ -82,7 +82,18 @@ Some keys must be real keyboard events, not text-input-v3 operations:
 
 ### BaseInputConnection and Editable
 
-`TawcInputConnection` extends `BaseInputConnection(view, true)` (fullEditor=true), which maintains an internal `Editable` buffer. We call `super` in all overridden methods so this buffer stays in sync with what we send to the Wayland client. This is critical because Gboard queries the buffer (`getTextBeforeCursor`, `getTextAfterCursor`, `getExtractedText`) to understand editor state for predictions, autocorrect, and cursor tracking.
+`TawcInputConnection` extends `BaseInputConnection(view, true)` (fullEditor=true), which maintains an internal `Editable` buffer. The IME (Gboard, OpenBoard, etc.) queries this buffer via `getTextBeforeCursor`, `getTextAfterCursor`, and `getExtractedText` to drive predictions, autocorrect, and word-boundary detection. **The Editable must mirror the Wayland client's actual text** for those features to work — otherwise the IME's internal model drifts from reality and autocorrect/composing/delete operate on the wrong positions.
+
+We keep the Editable in sync via two channels:
+
+1. **Outbound (Android → Wayland):** every overridden IME method calls `super` first to update the Editable, then JNI to forward to the compositor. This ensures the Editable predicts what the Wayland client will have right after our event takes effect.
+
+2. **Inbound (Wayland → Android):** when a client commits a `set_surrounding_text`, the compositor calls reverse-JNI `onUpdateEditableText(text, selStart, selEnd)`. That replaces the active `TawcInputConnection`'s Editable contents and selection so the IME sees the editor's truth, not just our predictions. This catches:
+   - Cursor moves caused by user touch / arrow keys (`change_cause=other`)
+   - Editor-side text changes (autocomplete in Firefox URL bar, paste, undo, mid-stream insertions)
+   - Drift between what we sent and what the client actually applied
+
+Without (2), the IME's text model silently desyncs after the first non-IME cursor move and every later operation lands at the wrong position. The single `TawcInputConnection` is cached on `NativeBridge.activeInputConnection` so reverse-JNI updates always hit the live IME session (and broadcast tests share state across multi-step flows).
 
 With `fullEditor=true`, `mFallbackMode=false`, so `sendCurrentText()` is a no-op — calling `super` does NOT cause duplicate input via key events.
 
@@ -147,7 +158,8 @@ Compositor processes commit:
 |---|---|
 | Any instance enabled (via sync_keyboard_visibility) | `InputMethodManager.showSoftInput()` |
 | No instances enabled | `InputMethodManager.hideSoftInputFromWindow()` |
-| Client commits with change_cause=other | `InputMethodManager.updateSelection()` |
+| Client commits a `set_surrounding_text` (any cause) | `TawcInputConnection.updateFromCompositor(text, selStart, selEnd)` — replaces Editable contents and selection |
+| Client commits with change_cause=other | Additionally `InputMethodManager.updateSelection()` so the IME drops its composing region |
 
 ### Text Input Focus
 
@@ -155,15 +167,55 @@ Text input focus follows keyboard focus (the first alive toplevel's wl_surface).
 
 ## Implementation Notes
 
+### Click during preedit: clear, don't follow
+
+When a preedit is active and the user taps elsewhere, GTK4 keeps rendering the preedit at the (now-moved) cursor position — so the typed-but-not-committed word visually follows the cursor, which is what the user perceives as "the active word moves".
+
+The compositor cannot commit the preedit at its old cursor: by the time `set_surrounding_text` with `cause=other` reaches us, the client's cursor has already moved, and Wayland's text-input-v3 protocol has no way to insert text at any position other than the current cursor. We also can't pre-emptively commit on touch DOWN — most touches don't move the cursor (button taps, scrolls, multi-touch gestures), and over-committing would silently insert the user's preedit into the buffer on every touch.
+
+The principled fix is to **clear the preedit on `cause=other`** — both compositor-side (`current_preedit = None`) and client-side (send `preedit_string(None) + done`). The client emits its `preedit-changed("")` signal, the overlay disappears, and the user's in-progress word is dropped. This matches every desktop text widget's behavior on click during composition: the in-progress word is abandoned, not silently inserted somewhere unexpected.
+
+### Why we don't propagate `setComposingRegion`-driven replacement
+
+Android's `setComposingRegion(start, end)` marks already-committed text as a composing region. The bytes stay in the editor; only the IME's annotation changes. A naive bridge would translate the next `setComposingText("X")` into `delete_surrounding_text + preedit_string` to physically replace the marked region.
+
+But IMEs (Gboard, OpenBoard) issue `setComposingRegion` aggressively — typically marking the word at the cursor on every cursor change, as a hint for predictive correction tracking. Propagating this as a real region replacement causes the "currently active word moves with the cursor" bug: every keystroke after a click moves the word the IME's predictor flagged into the user's typing position.
+
+`TawcInputConnection.setComposingText` therefore always emits `preedit_string` only, never `delete_surrounding_text`. The original committed text stays where it was; the preedit shows up at the cursor. Real autocorrect (commit-on-top-of-typed-preedit) still works because the protocol's done-ordering replaces existing preedit when a `commit_string` is sent.
+
+The compositor *does* still accept replacement deltas in the wire protocol — `TextInputEvent::SetPreeditString` and `CommitString` carry `delete_before`/`delete_after`. Test broadcasts use these to simulate explicit IME-driven word replacement (`test_compose_region_replaces_committed_text`). Real production IME use just doesn't trigger that path.
+
 ### finishComposingText
 
 Android's `finishComposingText()` means "commit the current composing text as-is." We track the last preedit text sent to each instance (`current_preedit`). On finishComposingText, we send `commit_string(tracked_preedit)` + `preedit_string(None)` + `done`. Without this, the composing text would just vanish.
 
-### UTF-8 byte counts vs character counts
+**`current_preedit` must be cleared when the Wayland client commits a `set_surrounding_text` with `cause=other`.** A non-IME cursor move (user touch, arrow keys) means the client has finalized any preedit on its side. If we keep our `current_preedit` tracking, a subsequent `finishComposingText` from the IME (which it issues defensively after cursor moves) re-commits the preedit at the new cursor — and "words randomly reappear" in the editor. Cause=other is the explicit signal from the protocol that the client's view has changed independently.
 
-The Wayland protocol uses UTF-8 byte offsets everywhere. Android's `deleteSurroundingText` uses Java character counts (UTF-16 code units). The compositor converts using the client's stored surrounding text when available, falling back to 1:1 (ASCII assumption) when not.
+### setComposingRegion + setComposingText (Gboard's "tap to retype")
 
-Backspace and forward-delete are sent as real `wl_keyboard` key events to avoid this conversion entirely — the client handles deletion natively with full knowledge of its own text encoding.
+Android's IME can mark already-committed text as a composing region via `setComposingRegion(start, end)`. The bytes stay in the editor's buffer; only the IME's annotation changes. The next `setComposingText("...", 1)` *replaces* that region with the new preedit.
+
+Wayland's text-input-v3 has no equivalent — preedit is overlay, not a span over committed text. To bridge, `TawcInputConnection` tracks a `composingRegionIsPreedit` flag:
+
+- `setComposingText(text)` → flag = `true` (the new region IS the new Wayland preedit).
+- `setComposingRegion(start, end)` → flag = `false` (the marked region is committed text on Wayland).
+- `commitText` / `finishComposingText` / `updateFromCompositor` → flag = `false` (no region after).
+
+When the next `setComposingText` or `commitText` runs and the flag is `false`, the IC computes (before, after) UTF-16 unit deltas around the cursor that span the existing composing region. These deltas travel as extra parameters on `nativeSetComposingText` / `nativeCommitText`. The compositor emits `delete_surrounding_text(before_bytes, after_bytes)` first, then the new preedit/commit string. Without this delete, the original word stays in committed text and the replacement becomes a duplicate.
+
+This only works when the cursor is *inside* the composing region — Wayland's `delete_surrounding_text` deletes around the cursor. IMEs typically pick a region that contains the cursor (the word at the click location), so the constraint is rarely violated. When the cursor sits outside the region, the IC falls back to plain preedit_string and accepts the divergence — `set_surrounding_text` from the client will reconcile the Editable.
+
+### UTF-8 bytes vs UTF-16 code units vs Unicode chars
+
+Three units are in play and they don't all agree:
+
+- **Wayland protocol:** UTF-8 byte offsets (`set_surrounding_text` cursor/anchor, `delete_surrounding_text` before/after).
+- **Android `InputConnection`:** UTF-16 code units (Java `char`). `deleteSurroundingText(2, 0)` for an emoji means 2 UTF-16 units, which is one non-BMP scalar = 4 UTF-8 bytes.
+- **Rust `char`:** Unicode scalar values. One emoji = 1 Rust char = 2 UTF-16 units = 4 UTF-8 bytes.
+
+`utf16_units_to_bytes` walks the stored surrounding text counting UTF-16 units (`char::len_utf16`) and accumulates UTF-8 bytes (`char::len_utf8`). Falls back to 1:1 mapping when no surrounding text is available. `byte_offset_to_utf16_count` does the inverse direction for selection updates pushed back to Android.
+
+Backspace and forward-delete are sent as real `wl_keyboard` key events instead of `delete_surrounding_text`, sidestepping the conversion entirely — the client deletes a character with full knowledge of its own text encoding.
 
 ### Keyboard visibility deferred
 
@@ -173,6 +225,12 @@ Backspace and forward-delete are sent as real `wl_keyboard` key events to avoid 
 
 1. **Content type forwarding**: `set_content_type` from clients is received but not forwarded to Android's EditorInfo. Would improve keyboard layout (URL keyboard for URL bars, etc.).
 
-2. **Surrounding text → InputConnection**: The compositor stores `set_surrounding_text` from clients, but doesn't forward it back to Android. Proper implementation would override `getTextBeforeCursor()` / `getTextAfterCursor()` in TawcInputConnection to return data from the compositor's stored state, rather than relying solely on the BaseInputConnection Editable.
+2. **Batch editing**: Android groups IME operations between `beginBatchEdit()` / `endBatchEdit()`. Currently each operation gets its own `done` event. Batching into a single `done` would be more correct but functionally the current approach works for simple cases.
 
-3. **Batch editing**: Android groups IME operations between `beginBatchEdit()` / `endBatchEdit()`. Currently each operation gets its own `done` event. Batching into a single `done` would be more correct but functionally the current approach works for simple cases.
+3. **Composing region preservation across cursor moves**: When the Wayland client moves the cursor mid-compose (`change_cause=other`), we drop any preedit. Strictly correct per spec but some IMEs might want to keep composing if the cursor stayed inside the preedit range.
+
+4. **Composing region replacement when cursor outside region**: `pendingComposingRegionReplacement` only emits a delete when the cursor sits inside the composing region. Outside that case the new preedit lands at the cursor without removing the old region; the next `set_surrounding_text` from the client reconciles the Editable but Wayland transiently shows the original word AND the new preedit. Real IMEs almost always pick regions containing the cursor, so this is acceptable in practice.
+
+## Test infrastructure note
+
+Test broadcasts (`me.phie.tawc.TEXT_INPUT`, `SET_COMPOSING_TEXT`, etc.) **bypass `TawcInputConnection`** and call the native bridge directly. The reason: the device's installed IME (Gboard, OpenBoard) binds to the SurfaceView's `InputConnection` and reacts to every Editable change with its own `setComposingRegion`/`setComposingText` calls, which makes integration tests non-deterministic. Bypassing the IC keeps tests focused on the compositor's text-input pipeline. Real IME usage still flows through `TawcInputConnection` — that's how the system IMM dispatches IME events. To simulate Gboard's "tap to retype" flow in tests, use `input_set_composing_with_delete(text, before, after)` / `input_text_with_delete(...)` which carry explicit replacement deltas.

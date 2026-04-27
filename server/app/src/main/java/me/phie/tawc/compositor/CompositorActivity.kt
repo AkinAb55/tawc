@@ -67,6 +67,30 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
      * QUERY_STATE lives on CompositorService instead — it has to work
      * even when no Activity is in the foreground.
      */
+    /**
+     * BroadcastReceiver for injecting test input.
+     *
+     * **These broadcasts bypass [TawcInputConnection] and call native
+     * directly.** The reason: the system IME (OpenBoard, Gboard, etc.) is
+     * also bound to our SurfaceView's InputConnection and reacts to every
+     * Editable change with its own `setComposingRegion`/`setComposingText`
+     * calls (e.g. marking the just-typed word as composing for autocorrect).
+     * That makes integration tests non-deterministic — a test broadcast
+     * that says "type X at cursor" gets amplified by the IME into "replace
+     * the whole word with X". Bypassing the InputConnection here means
+     * tests drive the compositor's text-input pipeline directly without
+     * any third-party IME in the loop.
+     *
+     * Real IME input still goes through [TawcInputConnection] — the system
+     * IMM picks the IC returned by `onCreateInputConnection`, and that
+     * path applies all the composing-region translation, Editable mirror,
+     * etc. that real Gboard usage needs.
+     *
+     * Test broadcasts mirror the [TawcInputConnection] surface but accept
+     * explicit `deleteBefore`/`deleteAfter` integers (UTF-16 code unit
+     * counts around the cursor). These let tests simulate Gboard's
+     * "replace the composing region" semantics without an IME present.
+     */
     private val testInputReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // With multi-window every CompositorActivity registers a
@@ -77,18 +101,40 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
                 Log.d(TAG, "${intent.action}: not focused, ignoring (activityId=$activityId)")
                 return
             }
-            val ic = surfaceView.onCreateInputConnection(EditorInfo()) ?: return
             when (intent.action) {
                 "me.phie.tawc.TEXT_INPUT" -> {
                     val text = intent.getStringExtra("text") ?: return
-                    Log.d(TAG, "TestInput: commitText \"$text\"")
-                    ic.commitText(text, 1)
+                    val before = intent.getIntExtra("deleteBefore", 0)
+                    val after = intent.getIntExtra("deleteAfter", 0)
+                    Log.d(TAG, "TestInput: commitText \"$text\" delete=$before/$after")
+                    if (text == "\n") {
+                        NativeBridge.nativeSendKeyEvent(android.view.KeyEvent.KEYCODE_ENTER)
+                    } else {
+                        NativeBridge.nativeCommitText(text, before, after)
+                    }
+                }
+                "me.phie.tawc.SET_COMPOSING_TEXT" -> {
+                    val text = intent.getStringExtra("text") ?: return
+                    val before = intent.getIntExtra("deleteBefore", 0)
+                    val after = intent.getIntExtra("deleteAfter", 0)
+                    Log.d(TAG, "TestInput: setComposingText \"$text\" delete=$before/$after")
+                    NativeBridge.nativeSetComposingText(text, before, after)
+                }
+                "me.phie.tawc.FINISH_COMPOSING_TEXT" -> {
+                    Log.d(TAG, "TestInput: finishComposingText")
+                    NativeBridge.nativeFinishComposingText()
+                }
+                "me.phie.tawc.DELETE_SURROUNDING_TEXT" -> {
+                    val before = intent.getIntExtra("before", 0)
+                    val after = intent.getIntExtra("after", 0)
+                    Log.d(TAG, "TestInput: deleteSurroundingText $before/$after")
+                    NativeBridge.nativeDeleteSurroundingText(before, after)
                 }
                 "me.phie.tawc.KEY_EVENT" -> {
                     val keycode = intent.getIntExtra("keycode", -1)
                     if (keycode >= 0) {
                         Log.d(TAG, "TestInput: sendKeyEvent $keycode")
-                        ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keycode))
+                        NativeBridge.nativeSendKeyEvent(keycode)
                     }
                 }
             }
@@ -143,6 +189,9 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         // Register test input receiver
         val filter = IntentFilter().apply {
             addAction("me.phie.tawc.TEXT_INPUT")
+            addAction("me.phie.tawc.SET_COMPOSING_TEXT")
+            addAction("me.phie.tawc.FINISH_COMPOSING_TEXT")
+            addAction("me.phie.tawc.DELETE_SURROUNDING_TEXT")
             addAction("me.phie.tawc.KEY_EVENT")
         }
         @Suppress("UnspecifiedRegisterReceiverFlag")
