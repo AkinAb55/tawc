@@ -136,21 +136,28 @@ object ChrootMounter {
      * Defensive cleanup: unmount anything that's currently bind-mounted
      * under [rootfs] in the global namespace and verify the dir is mount-
      * free. Called before deleting the rootfs so an `rm -rf` can never
-     * traverse a live bind mount into real system files.
+     * traverse a live bind mount into real system files (deleting the
+     * host's /dev/socket etc.).
      *
-     * Most invocations are no-ops because mounts are scoped to su's
-     * private namespace; this matters when external tooling (or a stray
-     * `su --mount-master`) leaked mounts globally.
+     * The path Kotlin gives us (`/data/user/0/<pkg>/...`) is a symlink
+     * target; /proc/mounts reports the canonical `/data/data/<pkg>/...`
+     * form. We `realpath` once before matching so both forms work, and
+     * use a strict prefix check (not regex) so paths with dots don't
+     * over-match.
      */
     fun unmount(rootfs: String): Su.Result {
         val script = """
-            for m in ${'$'}(awk -v r='$rootfs' '${'$'}2 ~ r {print ${'$'}2}' /proc/mounts | sort -r); do
+            CANON=${'$'}(realpath '$rootfs' 2>/dev/null || echo '$rootfs')
+            list_mounts() {
+                awk -v r="${'$'}CANON" '${'$'}2 == r || index(${'$'}2, r"/") == 1 {print ${'$'}2}' /proc/mounts
+            }
+            for m in ${'$'}(list_mounts | sort -r); do
                 umount "${'$'}m" 2>/dev/null || umount -l "${'$'}m" 2>/dev/null || true
             done
-            remaining=${'$'}(awk -v r='$rootfs' '${'$'}2 ~ r {print ${'$'}2}' /proc/mounts | wc -l)
+            remaining=${'$'}(list_mounts | wc -l)
             if [ "${'$'}remaining" -gt 0 ]; then
-                echo "ERROR: ${'$'}remaining mount(s) still active under $rootfs:" >&2
-                awk -v r='$rootfs' '${'$'}2 ~ r {print ${'$'}2}' /proc/mounts >&2
+                echo "ERROR: ${'$'}remaining mount(s) still active under ${'$'}CANON:" >&2
+                list_mounts >&2
                 exit 1
             fi
             echo OK

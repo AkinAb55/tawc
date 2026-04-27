@@ -95,7 +95,25 @@ package fork).
 
 `ChrootMounter.unmount` exists as a defensive cleanup — only relevant if
 mounts somehow leaked into the global namespace (e.g. via a stray
-`su --mount-master`).
+`su --mount-master`). It `realpath`s the rootfs before scanning
+`/proc/mounts`, because Kotlin's `File.absolutePath` returns the
+`/data/user/0/...` symlink form while `/proc/mounts` reports the
+canonical `/data/data/...` form — naive substring matching misses
+every entry. The match is also a strict prefix check (`==` or starts
+with `r"/"`) so paths containing `.` don't over-match other mounts.
+
+Uninstall belt-and-braces: even after `unmount` reports OK, the
+final delete uses `find <root> -xdev -depth -delete` (toybox `rm`
+has no `--one-file-system`). If anything ever leaks past unmount,
+`-xdev` keeps the delete from descending into a live `/dev`,
+`/proc`, or `/sys` bind mount and unlinking host system files. The
+historical bug here was an `rm -rf` that walked through a live
+`/dev` bind mount and deleted host `/dev/socket` entries, which
+crashed zygote — and zygote's `onrestart exec_background -- vdc
+volume abort_fuse` then pegged multiple cores in a respawn loop.
+Toybox `find -delete` prints every deleted path on stdout by
+default; we redirect that to `/dev/null` and let only stderr
+(actual errors) reach the log.
 
 ## Compositor socket
 

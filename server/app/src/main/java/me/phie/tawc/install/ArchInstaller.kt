@@ -201,45 +201,27 @@ class ArchInstaller(
             throw IOException("Unmount refused (active mounts):\n${ur.output}")
         }
 
-        // Forensic snapshot before delete: list anything in /proc/mounts
-        // that mentions the install dir or the app data dir, plus the
-        // file count we're about to delete and the FuseDaemon pid. This
-        // is what we want in logcat the next time uninstall freezes.
-        val forensics = Su.run(
-            """
-            TAWC_DATA=/data/data/me.phie.tawc
-            echo "[forensics] /proc/mounts hits (install dir or app data dir):"
-            awk -v p='${installDir.absolutePath}' -v d="${'$'}TAWC_DATA" '${'$'}2 ~ p || ${'$'}2 ~ d {print}' /proc/mounts || true
-            echo "[forensics] file count under install dir:"
-            find '${installDir.absolutePath}' 2>/dev/null | wc -l
-            echo "[forensics] FuseDaemon pids:"
-            pidof FuseDaemon || echo "(none)"
-            echo "[forensics] vdc count:"
-            ps -ef | grep -c 'vdc volume' || true
-            """.trimIndent()
-        )
-        forensics.output.lineSequence().forEach { log("pre-rm: $it") }
-
         progress(InstallProgress(InstallStage.DELETING, "Deleting rootfs…"))
-        // Plain `rm -rf` of the install dir. An earlier attempt tried to
-        // `mv` the dir to /data/local/tmp/ first (so the user-perceived
-        // delete was instant and so the slow rm wouldn't trip Android's
-        // FuseDaemon under /storage/emulated/0/Android/data/<pkg>) — but
-        // /data/data/<pkg>/ is a separate bind mount on the AVD and
-        // `rename(2)` can't cross mounts even on the same block device,
-        // so `mv` silently fell back to a recursive copy that doubled
-        // disk use and was orders of magnitude slower than just deleting.
-        // See git log for the move-then-delete attempt.
-        val script = """
-            rm -rf '${installDir.absolutePath}'
-            echo "[forensics] FuseDaemon pids after rm:"
-            pidof FuseDaemon || echo "(none — DIED during rm)"
-            echo "[forensics] vdc count after rm:"
-            ps -ef | grep -c 'vdc volume' || true
-        """.trimIndent()
-        val delRes = Su.run(script) { log("rm: $it") }
+        // `find -xdev -depth -delete` (toybox `rm` lacks --one-file-system):
+        // if a bind mount somehow leaked past `unmount` and survived the
+        // kill sweep, refuse to descend into it instead of unlinking
+        // through it. That guard is what separates "leaked empty
+        // mount-point dirs" from "host's /dev/socket got deleted and
+        // zygote can't restart". The empty mountpoint dirs are then
+        // orphaned but harmless and reclaimed on next install.
+        //
+        // (An earlier attempt to `mv` the dir to /data/local/tmp first
+        // is documented in git log; it didn't work because /data/data/
+        // is a separate bind mount on the AVD, so rename(2) crossed
+        // filesystems and silently fell back to a recursive copy.)
+        // Toybox `find -delete` prints every deleted path on stdout by
+        // default; silence that with `>/dev/null` and let only stderr
+        // (errors) reach the log callback.
+        val delRes = Su.run(
+            "find '${installDir.absolutePath}' -xdev -depth -delete >/dev/null"
+        ) { log("rm: $it") }
         if (!delRes.ok) {
-            throw IOException("rm -rf failed:\n${delRes.output}")
+            throw IOException("delete failed:\n${delRes.output}")
         }
 
         progress(InstallProgress(InstallStage.DONE, "Uninstalled."))
