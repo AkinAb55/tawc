@@ -142,6 +142,24 @@ pub fn run(
             TouchEvent::Down { id, x, y, time, .. } => {
                 let location: Point<f64, smithay::utils::Logical> =
                     (x as f64 / touch_scale, y as f64 / touch_scale).into();
+                // Finalize any active preedit *before* the touch reaches the
+                // client. Wayland text-input-v3 has no way to insert text at
+                // an "old cursor" — preedit is purely a cursor-relative
+                // overlay — so once the touch moves the cursor we'd have to
+                // either let the preedit visually follow the cursor (the
+                // Android `setComposingRegion` "active word follows" bug)
+                // or silently drop the typed text. Native clients (GTK, Qt,
+                // Firefox) reset their IM on cursor-move and the IM commits
+                // its pending text first; we are the IM, so we do that here.
+                //
+                // Same calloop callback, same compositor thread, same client
+                // socket — the commit_string + done is on the wire before
+                // touch.down's events, so the client commits at the old
+                // cursor and only afterwards processes the touch. No-op
+                // when there's no active preedit.
+                data.state.text_input_state.handle_android_event(
+                    crate::text_input::TextInputEvent::FinishComposingText,
+                );
                 // Set keyboard focus on touch to the target surface
                 if let (Some((ref surface, _)), Some(keyboard)) = (&focus, data.state.seat.get_keyboard()) {
                     keyboard.set_focus(&mut data.state, Some(surface.clone()), serial);

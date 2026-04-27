@@ -378,6 +378,14 @@ impl TextInputState {
     }
 
     fn leave(&mut self, surface: &WlSurface) {
+        // Per spec, leave invalidates all per-instance state — including
+        // any preedit we have outstanding. Without this finalize the user's
+        // typed-but-not-committed word would silently vanish on focus
+        // change. handle_android_event keys off `focused_surface`, which is
+        // still the leaving surface at this point, so it targets the right
+        // instances. No-op when no preedit is active.
+        self.handle_android_event(TextInputEvent::FinishComposingText);
+
         for ti in &self.instances {
             if ti.id().same_client_as(&surface.id()) {
                 ti.leave(surface);

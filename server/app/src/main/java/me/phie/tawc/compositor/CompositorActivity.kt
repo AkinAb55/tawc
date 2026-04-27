@@ -135,6 +135,49 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
                         NativeBridge.nativeSendKeyEvent(keycode)
                     }
                 }
+
+                // ---- IC-driven test broadcasts ----
+                // The above broadcasts bypass TawcInputConnection to avoid
+                // IME amplification. These ones do the opposite: they call
+                // the active TawcInputConnection's IME methods directly so
+                // tests can exercise the IC's own logic (composing-region
+                // delta computation, Editable mirror, etc.) — i.e. the
+                // path real Gboard takes. Use these only for tests that
+                // specifically need IC behaviour; they may be racy with the
+                // system IME's reactions.
+                "me.phie.tawc.IC_COMMIT_TEXT" -> {
+                    val text = intent.getStringExtra("text") ?: return
+                    val ic = NativeBridge.activeInputConnection
+                    Log.d(TAG, "TestInput[IC]: commitText \"$text\" (ic=${ic != null})")
+                    ic?.commitText(text, 1)
+                }
+                "me.phie.tawc.IC_SET_COMPOSING_TEXT" -> {
+                    val text = intent.getStringExtra("text") ?: return
+                    val ic = NativeBridge.activeInputConnection
+                    Log.d(TAG, "TestInput[IC]: setComposingText \"$text\" (ic=${ic != null})")
+                    ic?.setComposingText(text, 1)
+                }
+                "me.phie.tawc.IC_SET_COMPOSING_REGION" -> {
+                    val start = intent.getIntExtra("start", -1)
+                    val end = intent.getIntExtra("end", -1)
+                    if (start < 0 || end < 0) return
+                    val ic = NativeBridge.activeInputConnection
+                    Log.d(TAG, "TestInput[IC]: setComposingRegion $start..$end (ic=${ic != null})")
+                    ic?.setComposingRegion(start, end)
+                }
+                "me.phie.tawc.IC_FINISH_COMPOSING" -> {
+                    val ic = NativeBridge.activeInputConnection
+                    Log.d(TAG, "TestInput[IC]: finishComposingText (ic=${ic != null})")
+                    ic?.finishComposingText()
+                }
+                "me.phie.tawc.IC_SET_SELECTION" -> {
+                    val start = intent.getIntExtra("start", -1)
+                    val end = intent.getIntExtra("end", -1)
+                    if (start < 0 || end < 0) return
+                    val ic = NativeBridge.activeInputConnection
+                    Log.d(TAG, "TestInput[IC]: setSelection $start..$end (ic=${ic != null})")
+                    ic?.setSelection(start, end)
+                }
             }
         }
     }
@@ -190,6 +233,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             addAction("me.phie.tawc.FINISH_COMPOSING_TEXT")
             addAction("me.phie.tawc.DELETE_SURROUNDING_TEXT")
             addAction("me.phie.tawc.KEY_EVENT")
+            addAction("me.phie.tawc.IC_COMMIT_TEXT")
+            addAction("me.phie.tawc.IC_SET_COMPOSING_TEXT")
+            addAction("me.phie.tawc.IC_SET_COMPOSING_REGION")
+            addAction("me.phie.tawc.IC_FINISH_COMPOSING")
+            addAction("me.phie.tawc.IC_SET_SELECTION")
         }
         @Suppress("UnspecifiedRegisterReceiverFlag")
         registerReceiver(testInputReceiver, filter, RECEIVER_EXPORTED)

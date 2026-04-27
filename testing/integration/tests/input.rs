@@ -16,6 +16,10 @@ use tawc_integration::helpers::{assert_compositor_clean, start_text_input, TIMEO
 // Monospace 18pt ≈ 22 physical px per character.
 const TAP_TEXT_MID_X: u32 = 200;
 const TAP_TEXT_MID_Y: u32 = 250;
+// Just inside the left edge of the text content (text starts at ~x=80).
+// Tapping here should land the cursor at position 0 — matches the user's
+// "click at the very start of the line" repro.
+const TAP_TEXT_START_X: u32 = 85;
 
 /// Env passed to gtk4-debug-app for input tests. Currently empty — i.e.
 /// GTK4 uses its default GSK renderer (Vulkan/GL via libhybris on device).
@@ -440,27 +444,24 @@ fn test_full_compose_loop_with_click_in_middle() {
     assert_compositor_clean();
 }
 
-/// **Regression test for "active word moves with the cursor on click".**
+/// **Regression test for "tapping during preedit must not lose typed text"
+/// and "preedit must not visually follow the cursor".**
 ///
-/// When a preedit is active and the user clicks elsewhere, GTK4 keeps
-/// rendering the preedit at the (now-moved) cursor position. Without
-/// the fix, the compositor only clears its own `current_preedit` state
-/// on `cause=other` and never tells the client to drop its preedit, so
-/// the "currently active word" visually follows the cursor.
-///
-/// The fix: on `cause=other`, the compositor sends
-/// `preedit_string(None) + done` to the client. The client clears its
-/// preedit (and emits `preedit-changed("")` in GTK), so the word stops
-/// shadowing the cursor. The text-being-composed is lost, matching how
-/// every desktop text widget treats a click during composition.
+/// Wayland text-input-v3's preedit is a cursor-relative overlay; once the
+/// cursor moves out from under it, the preedit either has to be committed
+/// (so the bytes survive at their old position) or cleared (with the typed
+/// text discarded). Native desktop clients reset their IM on cursor-move
+/// and the IM commits — that's the behaviour every other text widget
+/// implements. We replicate it: on `TouchEvent::Down`, the compositor
+/// finalizes any active preedit *before* the touch reaches the client.
 ///
 /// We assert two things:
-/// 1. The buffer is unchanged by the click (the preedit was not silently
-///    committed at the new cursor location).
-/// 2. The client emits an empty PREEDIT event, confirming the preedit
-///    overlay is gone.
+/// 1. The preedit overlay is cleared after the click (no "active word
+///    follows the cursor" rendering glitch).
+/// 2. The buffer ends up containing the previously committed text *and*
+///    the previously-pending preedit — neither is silently dropped.
 #[test]
-fn test_click_during_preedit_clears_preedit() {
+fn test_click_during_preedit_commits_pending_text() {
     let mut app = start_text_input(INPUT_ENV);
 
     adb::input_text("world").expect("commit world");
@@ -485,12 +486,245 @@ fn test_click_during_preedit_clears_preedit() {
     app.wait_for_preedit("", TIMEOUT)
         .expect("Preedit should be cleared by the click");
 
-    // The buffer must not silently gain "hello" from the click — clicking
-    // during a preedit discards the in-progress word, it doesn't commit it.
+    // Allow the round-trip (compositor commit_string -> client commit ->
+    // client surrounding_text -> compositor commit() -> debug app
+    // TEXT_CHANGED) to settle.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Both the originally-committed "world" and the previously-pending
+    // "hello" must end up in the buffer. The pending text was committed
+    // at the *old* cursor (right after "world") before the touch moved
+    // the cursor — so the buffer reads "worldhello".
+    let text = app.last_text().unwrap_or_default();
+    assert!(
+        text.contains("world"),
+        "Original committed 'world' was lost; got buffer '{}'", text
+    );
+    assert!(
+        text.contains("hello"),
+        "Pending preedit 'hello' was dropped on cursor move; \
+         got buffer '{}' (expected to contain 'hello')", text
+    );
+
+    app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// **Bug repro: pending text vanishes when the cursor moves.**
+///
+/// User-reported scenario:
+///   1. type "hello " (committed),
+///   2. compose "world" (preedit, not yet committed),
+///   3. tap at the start of the line — cursor moves to position 0.
+///   Observed: "world" disappears entirely; buffer stays at "hello ".
+///   Expected: "world" must not be silently dropped — it should be committed
+///   somewhere (the desktop-standard behaviour is to commit the preedit at
+///   its old cursor position before the cursor moves, so the buffer becomes
+///   "hello world" and the cursor lands at 0).
+///
+/// This test deliberately asserts the *minimum* invariant — "the in-progress
+/// word ends up in the buffer". Where exactly it lands is left flexible so
+/// the test doesn't have to know the implementation detail. Anything that
+/// loses the pending text fails.
+#[test]
+fn test_click_during_preedit_preserves_pending_text() {
+    let mut app = start_text_input(INPUT_ENV);
+
+    adb::input_text("hello ").expect("commit 'hello '");
+    app.wait_for_text("hello ", TIMEOUT).expect("");
+
+    adb::input_set_composing("world").expect("set composing 'world'");
+    app.wait_for_preedit("world", TIMEOUT)
+        .expect("preedit 'world' should be visible");
+    // Sanity: preedit is overlay only — buffer is still just "hello ".
+    assert_eq!(
+        app.last_text().as_deref().unwrap_or(""),
+        "hello ",
+        "Preedit should not be in the buffer before any commit"
+    );
+
+    let cursor_count_before = app.cursor_pos_count();
+    adb::input_tap(TAP_TEXT_START_X, TAP_TEXT_MID_Y).expect("tap at line start");
+    let cursor = app
+        .wait_for_cursor_change(cursor_count_before, TIMEOUT)
+        .expect("Tap should change the cursor");
+    assert_eq!(cursor, 0, "Tap at line start should move cursor to 0, got {}", cursor);
+
+    // Allow the compositor + client a moment to settle (any pending commit
+    // from the cursor move needs to round-trip back as TEXT_CHANGED).
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let text = app.last_text().unwrap_or_default();
+    assert!(
+        text.contains("world"),
+        "Pending preedit 'world' was dropped on cursor move; \
+         buffer is '{}' (expected to still contain 'world' somewhere)",
+        text
+    );
+
+    app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// **Bug repro: typing `hello<space><backspace><space>` produces
+/// `hellohello` instead of `hello `.**
+///
+/// Drives the *real* InputConnection path (not the bypassing broadcasts)
+/// so the test exercises `TawcInputConnection`'s own delta-computation
+/// logic — the layer where the bug actually lives.
+///
+/// Sequence (mirrors Gboard's behaviour observed in the user trace):
+///   1. compose "hello" via setComposingText (preedit grows letter by letter)
+///   2. <space>: commitText("hello ", 1) — replaces the preedit and adds
+///      the trailing space. Editable's composing region is now gone.
+///   3. <backspace>: wl_keyboard backspace — deletes the trailing space.
+///      The Wayland buffer becomes "hello"; the round-trip
+///      `set_surrounding_text(cause=other)` re-syncs the Editable.
+///   4. setComposingRegion(0, 5) — Gboard re-marks "hello" for autocorrect
+///      tracking. The bytes stay on Wayland (preedit is overlay; this
+///      annotation is Android-side only).
+///   5. <space>: commitText("hello ", 1) — Gboard commits the marked word
+///      with a space. `super.commitText` *replaces* the (0, 5) region with
+///      "hello " in the Editable, so on the Editable side the buffer
+///      becomes "hello " (length 6).
+///
+/// On the Wayland side the (0, 5) bytes are still committed text. Without
+/// delta propagation, `nativeCommitText("hello ", 0, 0)` inserts at the
+/// current cursor (5) — the buffer becomes `"hellohello "`, length 11.
+/// With delta propagation, `nativeCommitText("hello ", 5, 0)` deletes 5
+/// before the cursor first, so the buffer is `"hello "`.
+///
+/// Asserts the final buffer is `"hello "` — a length-6 buffer rules out
+/// the `"hellohello "` (length 11) failure mode regardless of trailing
+/// whitespace handling in the debug app's logging.
+#[test]
+fn test_ic_space_backspace_space_no_duplicate() {
+    let mut app = start_text_input(INPUT_ENV);
+
+    // 1. Compose "hello" via the IC (single setComposingText is enough —
+    //    the bug doesn't require the letter-by-letter buildup).
+    adb::ic_set_composing_text("hello").expect("setComposingText hello");
+    app.wait_for_preedit("hello", TIMEOUT)
+        .expect("preedit 'hello'");
+
+    // 2. Space: commitText("hello ", 1) replaces the preedit + adds space.
+    let change_count = app.text_changed_count();
+    adb::ic_commit_text("hello ").expect("commitText 'hello '");
+    app.wait_for_text_change(change_count, TIMEOUT)
+        .expect("text change after 'hello '");
+
+    // 3. Backspace: wl_keyboard delete deletes the trailing space.
+    let change_count = app.text_changed_count();
+    adb::input_keyevent(adb::KEYCODE_DEL).expect("backspace");
+    app.wait_for_text_change(change_count, TIMEOUT)
+        .expect("text change after backspace");
+    let after_backspace = app.last_text().unwrap_or_default();
+    assert_eq!(
+        after_backspace.trim_end_matches(' ').len(), 5,
+        "After backspace buffer should be 'hello' (length 5 ignoring space): got '{}'",
+        after_backspace
+    );
+
+    // Let the round-trip sync the Editable (so step 4 sees the correct
+    // surrounding text). Without this, setComposingRegion may operate on
+    // a stale Editable still containing the deleted space.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 4. setComposingRegion(0, 5): mark "hello" as composing on the
+    //    Editable. No Wayland traffic — preedit-as-overlay has no analog.
+    adb::ic_set_composing_region(0, 5).expect("setComposingRegion 0..5");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // 5. Second space: commitText("hello ", 1). With the fix, the IC
+    //    computes (5, 0) deltas because the Editable's composing region
+    //    was set by setComposingRegion (i.e. it's committed text on the
+    //    Wayland side, not the preedit). delete_surrounding_text(5) +
+    //    commit_string("hello ") yields "hello ".
+    let change_count = app.text_changed_count();
+    adb::ic_commit_text("hello ").expect("commitText 'hello ' (over region)");
+    app.wait_for_text_change(change_count, TIMEOUT)
+        .expect("text change after second space");
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
     let text = app.last_text().unwrap_or_default();
     assert_eq!(
-        text, "world",
-        "Click during preedit should not commit; got buffer '{}'",
+        text.matches("hello").count(), 1,
+        "'hello' duplicated — got buffer '{}' (length {}). \
+         The IC didn't delete the composing region before commitText, \
+         so the new 'hello ' was appended instead of replacing the marked one.",
+        text, text.len()
+    );
+
+    app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// **Bug repro: IC.commitText after setComposingRegion + setSelection that
+/// moves the Editable cursor out of sync with the Wayland buffer's cursor.**
+///
+/// Mirrors the user-reported pattern where each Enter after a backspace
+/// prepends an extra `h` to the existing word. The IME (OpenBoard) on
+/// Enter does:
+///   1. `setComposingRegion(0, N)` — mark the previous word.
+///   2. `setSelection(N, N)` — move the *Editable*'s cursor back into
+///      the marked region. There is no Wayland equivalent for "move
+///      the cursor without changing text", so this move is invisible
+///      to the Wayland client.
+///   3. `commitText(<replacement>, 1)` — replace the marked region.
+///      `super.commitText` updates the Editable correctly. On the wire,
+///      our IC computes `(N, 0)` deltas because the Editable cursor sits
+///      at the end of the marked region. The compositor turns those into
+///      `delete_surrounding_text(N)` relative to *Wayland*'s cursor —
+///      which is at a different position. Wrong bytes get sliced and
+///      the new commit lands at the wrong place: in the user's repro,
+///      one character of the original word survives, plus the new commit
+///      gets appended to it.
+///
+/// Test setup: build "hello world" (so the buffer has more than one word),
+/// move the Editable cursor out of sync via setSelection, mark a region,
+/// then commit "X" over it. With the bug, "world" gets sliced; with the
+/// fix, the divergence check returns (0, 0) deltas and the commit lands
+/// at the synced cursor.
+#[test]
+fn test_ic_commit_after_diverged_cursor_no_byte_slicing() {
+    let mut app = start_text_input(INPUT_ENV);
+
+    // Build "hello world" via two commits so the buffer is long enough
+    // for both potential outcomes to be distinguishable.
+    adb::ic_commit_text("hello world").expect("commitText 'hello world'");
+    app.wait_for_text("hello world", TIMEOUT).expect("text 'hello world'");
+
+    // Round-trip should set lastSyncedCursor to 11 (end of buffer).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Mark the first word as composing, then move the Editable's cursor
+    // to position 5 (end of "hello"). The Wayland buffer's cursor stays
+    // at 11 — there is no protocol way to push the move.
+    adb::ic_set_composing_region(0, 5).expect("setComposingRegion 0..5");
+    adb::ic_set_selection(5, 5).expect("setSelection 5..5 (diverges Editable from Wayland)");
+
+    // Commit "X" over the marked region. Without the fix, the IC computes
+    // `(5, 0)` deltas (cursor==end of region in the Editable) and the wire
+    // sends `delete_surrounding_text(5) + commit_string("X")`. Wayland's
+    // cursor is at 11, so it deletes 5 chars before 11 = "world" → buffer
+    // "hello X". With the fix, the IC sees Editable cursor (5) ≠
+    // lastSyncedCursor (11) and refuses to propagate the deltas; the wire
+    // is just `commit_string("X")`, which lands at cursor 11 →
+    // "hello worldX".
+    let change_count = app.text_changed_count();
+    adb::ic_commit_text("X").expect("commitText 'X'");
+    app.wait_for_text_change(change_count, TIMEOUT)
+        .expect("text change after the IME's commit");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let text = app.last_text().unwrap_or_default();
+    assert!(
+        text.contains("world"),
+        "'world' was sliced by a diverged-cursor wire delete — \
+         got buffer '{}' (expected to still contain 'world'). \
+         The IC propagated composing-region deltas while the Editable's \
+         cursor was out of sync with the Wayland buffer's cursor.",
         text
     );
 

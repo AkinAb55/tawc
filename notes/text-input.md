@@ -167,23 +167,17 @@ Text input focus follows keyboard focus (the first alive toplevel's wl_surface).
 
 ## Implementation Notes
 
-### Click during preedit: clear, don't follow
+### Click during preedit: finalize at the OLD cursor before the touch reaches the client
 
-When a preedit is active and the user taps elsewhere, GTK4 keeps rendering the preedit at the (now-moved) cursor position — so the typed-but-not-committed word visually follows the cursor, which is what the user perceives as "the active word moves".
+Native desktop text widgets (GTK, Qt, Firefox's editor) reset their IM context when their cursor changes for a non-IME reason; the IM responds by committing whatever it had pending. The typed-but-not-committed word survives at its old position, and the cursor then moves to its new position. Our compositor is the IM in this system, so it has to do the same thing.
 
-The compositor cannot commit the preedit at its old cursor: by the time `set_surrounding_text` with `cause=other` reaches us, the client's cursor has already moved, and Wayland's text-input-v3 protocol has no way to insert text at any position other than the current cursor. We also can't pre-emptively commit on touch DOWN — most touches don't move the cursor (button taps, scrolls, multi-touch gestures), and over-committing would silently insert the user's preedit into the buffer on every touch.
+But by the time `set_surrounding_text` with `cause=other` reaches us, the client's cursor has already moved — and Wayland text-input-v3 has no way to commit text "at the old cursor". So `cause=other` is **too late**: the only thing we can do at that point is clear the now-mispositioned preedit and accept the loss of the typed word.
 
-The principled fix is to **clear the preedit on `cause=other`** — both compositor-side (`current_preedit = None`) and client-side (send `preedit_string(None) + done`). The client emits its `preedit-changed("")` signal, the overlay disappears, and the user's in-progress word is dropped. This matches every desktop text widget's behavior on click during composition: the in-progress word is abandoned, not silently inserted somewhere unexpected.
+The fix runs **earlier**: on `TouchEvent::Down` in the compositor's touch source, we synchronously emit `commit_string(<current_preedit>) + preedit_string(None) + done` for the focused text-input instance *before* dispatching `touch.down` to the client. Both events go out on the same client socket from the same calloop callback on the compositor thread, so wire order is FIFO — the client commits at its old cursor, and only afterwards processes the touch that moves the cursor. Same fix is applied to `leave` (focus change), since the protocol's `leave` invalidates all per-instance state, which would also drop pending preedit otherwise.
 
-### Why we don't propagate `setComposingRegion`-driven replacement
+The Android side does NOT make this decision — `nativeOnTouchEvent` and `nativeFinishComposingText` go through different calloop channels and there is no FIFO guarantee across sources. The decision must live in the same callback as the wire emission to be correct.
 
-Android's `setComposingRegion(start, end)` marks already-committed text as a composing region. The bytes stay in the editor; only the IME's annotation changes. A naive bridge would translate the next `setComposingText("X")` into `delete_surrounding_text + preedit_string` to physically replace the marked region.
-
-But IMEs (Gboard, OpenBoard) issue `setComposingRegion` aggressively — typically marking the word at the cursor on every cursor change, as a hint for predictive correction tracking. Propagating this as a real region replacement causes the "currently active word moves with the cursor" bug: every keystroke after a click moves the word the IME's predictor flagged into the user's typing position.
-
-`TawcInputConnection.setComposingText` therefore always emits `preedit_string` only, never `delete_surrounding_text`. The original committed text stays where it was; the preedit shows up at the cursor. Real autocorrect (commit-on-top-of-typed-preedit) still works because the protocol's done-ordering replaces existing preedit when a `commit_string` is sent.
-
-The compositor *does* still accept replacement deltas in the wire protocol — `TextInputEvent::SetPreeditString` and `CommitString` carry `delete_before`/`delete_after`. Test broadcasts use these to simulate explicit IME-driven word replacement (`test_compose_region_replaces_committed_text`). Real production IME use just doesn't trigger that path.
+Edge case: a touch that doesn't end up moving the cursor (button tap, scroll start, multi-touch gesture) still triggers a finalize. That converts the user's pending word from underlined to plain text — a strictly better failure mode than silently dropping it.
 
 ### finishComposingText
 
@@ -204,6 +198,18 @@ Wayland's text-input-v3 has no equivalent — preedit is overlay, not a span ove
 When the next `setComposingText` or `commitText` runs and the flag is `false`, the IC computes (before, after) UTF-16 unit deltas around the cursor that span the existing composing region. These deltas travel as extra parameters on `nativeSetComposingText` / `nativeCommitText`. The compositor emits `delete_surrounding_text(before_bytes, after_bytes)` first, then the new preedit/commit string. Without this delete, the original word stays in committed text and the replacement becomes a duplicate.
 
 This only works when the cursor is *inside* the composing region — Wayland's `delete_surrounding_text` deletes around the cursor. IMEs typically pick a region that contains the cursor (the word at the click location), so the constraint is rarely violated. When the cursor sits outside the region, the IC falls back to plain preedit_string and accepts the divergence — `set_surrounding_text` from the client will reconcile the Editable.
+
+### Cursor synchronisation gate on delta propagation
+
+The wire-side `delete_surrounding_text` is relative to the *Wayland client's cursor*, not the Editable's. Our IC computes deltas against the Editable cursor; the two have to agree for the deltas to land on the right bytes.
+
+They desync when the IME moves the Editable's cursor *without* going through any IC method that reaches the wire — most importantly `setSelection`. Wayland text-input-v3 has no "move the cursor" request, so we can't push a cursor change to the client; the Editable says cursor=N while the client still has cursor=M.
+
+OpenBoard's per-Enter handler does exactly this: after the user types `<word><space><backspace><enter>`, on each subsequent Enter it calls `setComposingRegion(0, len(word))` + `setSelection(len(word), len(word))` + `commitText(<word>\n, 1)`. The Editable side comes out fine — `super.commitText` replaces the (0, len) range — but on the wire the IC would emit `delete_surrounding_text(len)` relative to the client's still-end-of-buffer cursor, slicing the wrong bytes. The user-visible symptom: each Enter prepends an extra letter at the start of the buffer.
+
+The IC tracks `lastSyncedCursor`, set on every `updateFromCompositor` from the Wayland client. `computeReplaceDeltas` returns `(0, 0)` whenever the Editable's current cursor differs from `lastSyncedCursor` — i.e. when something moved the cursor under us. The safe fallback is to skip the delete and let `super.commitText` keep the Editable consistent locally; the next round-trip from the client reconciles the buffer.
+
+The trade-off: a tap-to-retype flow that moves the cursor (rare; IMEs usually mark the region without moving the cursor) won't get its delete propagated. The next round-trip recovers state, possibly leaving a transient duplicate; this is strictly better than slicing arbitrary bytes off the buffer.
 
 ### UTF-8 bytes vs UTF-16 code units vs Unicode chars
 
@@ -227,9 +233,7 @@ Backspace and forward-delete are sent as real `wl_keyboard` key events instead o
 
 2. **Batch editing**: Android groups IME operations between `beginBatchEdit()` / `endBatchEdit()`. Currently each operation gets its own `done` event. Batching into a single `done` would be more correct but functionally the current approach works for simple cases.
 
-3. **Composing region preservation across cursor moves**: When the Wayland client moves the cursor mid-compose (`change_cause=other`), we drop any preedit. Strictly correct per spec but some IMEs might want to keep composing if the cursor stayed inside the preedit range.
-
-4. **Composing region replacement when cursor outside region**: `pendingComposingRegionReplacement` only emits a delete when the cursor sits inside the composing region. Outside that case the new preedit lands at the cursor without removing the old region; the next `set_surrounding_text` from the client reconciles the Editable but Wayland transiently shows the original word AND the new preedit. Real IMEs almost always pick regions containing the cursor, so this is acceptable in practice.
+3. **Composing region replacement when cursor outside region**: `pendingComposingRegionReplacement` only emits a delete when the cursor sits inside the composing region. Outside that case the new preedit lands at the cursor without removing the old region; the next `set_surrounding_text` from the client reconciles the Editable but Wayland transiently shows the original word AND the new preedit. Real IMEs almost always pick regions containing the cursor, so this is acceptable in practice.
 
 ## Test infrastructure note
 

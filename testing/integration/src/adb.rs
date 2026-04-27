@@ -172,6 +172,57 @@ pub fn broadcast_query_state() -> io::Result<Output> {
     shell("am broadcast -a me.phie.tawc.QUERY_STATE")
 }
 
+// ---- IC-driven test broadcasts ----
+// These call methods on the active TawcInputConnection so tests can
+// exercise the same code path real Gboard takes (composing-region
+// delta computation, Editable mirror, etc.). Prefer the bypassing
+// `input_*` helpers above for compositor-pipeline tests; use these
+// only when the IC's own behaviour is what's under test.
+
+/// Call `TawcInputConnection.commitText(text, 1)` on the active IC.
+pub fn ic_commit_text(text: &str) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.IC_COMMIT_TEXT --es text '{}'",
+        text.replace('\'', "'\\''")
+    ))
+}
+
+/// Call `TawcInputConnection.setComposingText(text, 1)` on the active IC.
+pub fn ic_set_composing_text(text: &str) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.IC_SET_COMPOSING_TEXT --es text '{}'",
+        text.replace('\'', "'\\''")
+    ))
+}
+
+/// Call `TawcInputConnection.setComposingRegion(start, end)` on the active IC.
+/// Marks the given Editable range as composing without changing its content —
+/// the bridge between Android's "composing region annotates committed text"
+/// and Wayland's "preedit is overlay only".
+pub fn ic_set_composing_region(start: u32, end: u32) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.IC_SET_COMPOSING_REGION --ei start {} --ei end {}",
+        start, end
+    ))
+}
+
+/// Call `TawcInputConnection.finishComposingText()` on the active IC.
+pub fn ic_finish_composing() -> io::Result<Output> {
+    shell("am broadcast -a me.phie.tawc.IC_FINISH_COMPOSING")
+}
+
+/// Call `TawcInputConnection.setSelection(start, end)` on the active IC.
+/// Moves the Editable's cursor without going through any wire protocol —
+/// simulates an IME that "thinks" the cursor is somewhere different from
+/// where the Wayland client has it. Bypasses our delta-propagation logic
+/// because there's no wayland-side equivalent for "move the cursor".
+pub fn ic_set_selection(start: u32, end: u32) -> io::Result<Output> {
+    shell(&format!(
+        "am broadcast -a me.phie.tawc.IC_SET_SELECTION --ei start {} --ei end {}",
+        start, end
+    ))
+}
+
 // Common Android keycodes (used with input_keyevent)
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_ENTER: u32 = 66;
