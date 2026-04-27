@@ -97,7 +97,7 @@ event, so buffer-based retain logic would immediately remove new toplevels.
 | Smithay on Android | ✅ Solved | `default-features = false`, patched EGL loader. Proven in Phase 1. |
 | Phantom Process Killer (Android 12+) | Open | Users need Developer Options toggle for Termux processes. |
 | Vendor-specific GPU quirks | Open | Architecture is vendor-neutral. Each vendor needs testing. `wl_shm` fallback. |
-| Freeform windowing not universal | Accepted | Phones: fullscreen Activities. Freeform on DeX/ChromeOS/Android 15+. |
+| Freeform windowing not universal | Accepted | Phones: fullscreen Activities. Freeform on DeX/ChromeOS/Android 15+. See [multi-activity.md](multi-activity.md). |
 
 ## References
 

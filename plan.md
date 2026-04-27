@@ -105,6 +105,23 @@ clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 - Format negotiation: which VkFormats map to gralloc formats the compositor can import?
 - Real apps: Firefox WebGPU, games
 
+## Multi-Window
+See [notes/multi-activity.md](notes/multi-activity.md) for the full design.
+
+- Move compositor into a foreground `CompositorService`
+- Refactor to `OutputHost` (vec of length 1, no behaviour change)
+- `toplevel_to_host` assignment table, single host
+- Policy + reverse-JNI to spawn Activities, gated off behind
+  `single_activity_mode = true`
+- `CompositorActivity` per-document (`activityId` UUID in `intent.data`)
+- Flip the policy: spawn a new Activity per non-child toplevel
+- Per-host input/focus; fixes `touch-focus-single-window-only`
+- Lifecycle + suspend round-trip (Background hosts stop being fed
+  frame callbacks; Foreground/Background transitions send the
+  appropriate xdg-shell configures)
+- Polish: task labels/icons, refused-close handling, settings UI for
+  single-Activity mode, freeform story
+
 ## wl_keyboard (non-text keys)
 Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalent).
 
@@ -112,12 +129,6 @@ Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalen
 - seat.add_keyboard() with US layout
 - Map Android key events to wl_keyboard scancodes
 - Modifier state tracking, Bluetooth keyboard support
-
-## Multi-Window
-- JNI callback for new xdg_toplevels -> spawn Activities
-- One SurfaceView/EGLSurface per Activity
-- Window lifecycle (map, unmap, close, resize)
-- Popups composited onto parent (not separate Activities)
 
 ## Polish & Protocols
 - Server-side decorations (xdg-decoration)

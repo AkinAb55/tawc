@@ -10,6 +10,7 @@ The `notes/` directory contains architecture and implementation notes. Edit/crea
 - [gpu-strategy.md](notes/gpu-strategy.md) -- GPU driver strategy, libhybris, AHB buffer sharing
 - [wsi-layer.md](notes/wsi-layer.md) -- client-side EGL WSI layer
 - [rendering.md](notes/rendering.md) -- window management, coordinate system, SHM buffers
+- [multi-activity.md](notes/multi-activity.md) -- plan for one Android task per window
 - [input.md](notes/input.md) -- touch input architecture
 - [text-input.md](notes/text-input.md) -- text input design (Android IME <-> zwp_text_input_v3)
 - [firefox.md](notes/firefox.md) -- Firefox-specific setup and issues

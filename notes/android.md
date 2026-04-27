@@ -72,6 +72,9 @@ easily confused with the chroot's GNU bash.
 
 ## Multiple Activities
 
+See [multi-activity.md](multi-activity.md) for the full per-window-task plan.
+Background facts that informed it:
+
 - All Activities in one app share the same process (single heap, static state, threads)
 - One SurfaceView per Activity avoids Z-ordering issues
 - Single background render thread maintains list of active surfaces
