@@ -135,7 +135,7 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
 4. **CONFIGURING** — writes the same files the legacy create scripts do:
    - `/etc/resolv.conf` (8.8.8.8)
    - `/etc/pacman.conf` (`SigLevel=Never`, `DisableSandbox`, `#CheckSpace`, `IgnorePkg = linux …`)
-   - `/etc/pacman.d/mirrorlist` (x86_64 only — ALARM ships its own)
+   - `/etc/pacman.d/mirrorlist` (x86_64: geo-routed `geo.mirror.pkgbuild.com`; aarch64: a curated multi-mirror list — see *ALARM mirror failover* below)
    - `/etc/profile.d/00-path.sh` (PATH/TMPDIR/HOME)
    - `/etc/profile.d/01-tawc.sh` is *not* written here — `ChrootMounter`
      rewrites it on every chroot entry (Wayland env: `WAYLAND_DISPLAY`,
@@ -311,6 +311,20 @@ them. To do it by hand:
 tarball, so `res/xml/network_security_config.xml` carves out plaintext
 HTTP for `archlinuxarm.org` and **only** that domain. Everything else
 stays HTTPS-only.
+
+## ALARM mirror failover
+
+The aarch64 install path replaces ALARM's shipped one-Server mirrorlist
+(just `http://mirror.archlinuxarm.org/$arch/$repo`, the geo-IP redirector)
+with a curated list of explicit mirrors. The geo-IP redirector load-
+balances across regional mirrors, and any single regional mirror can be
+mid-sync at the moment pacman happens to hit it — observed failure mode
+is a stable 404 on a small handful of `*.pkg.tar.xz` files mid-
+transaction (e.g. `bubblewrap-0.11.2-1-aarch64.pkg.tar.xz`). With one
+Server line pacman has no fallback and the whole transaction aborts;
+with several explicit mirrors it skips past the stale one to the next.
+The list lives in `ArchInstaller.configure` and intentionally puts the
+geo-redirector first so the common case still uses the closest mirror.
 
 ## Android 14 FGS rules and why INSTALL/UNINSTALL aren't broadcasts
 

@@ -29,8 +29,11 @@ source "$ROOT_DIR/client/select-device.sh"
 PKGS=(
     # gtk4-debug-app build (compiled in chroot by ensure_debug_app)
     gtk4 pkg-config
-    # apps:: tests
-    gtk3 gtk3-demos
+    # apps:: tests — gtk3-demos provides gtk3-demo-application,
+    # gtk4-demos provides gtk4-widget-factory; firefox + supertuxkart
+    # are real-app tests on hardware buffers. supertuxkart is ~700 MB
+    # because of bundled assets, so this initial install is a long one.
+    gtk3 gtk3-demos gtk4-demos firefox supertuxkart
     # graphics:: tests
     mesa-utils weston vulkan-tools
 )

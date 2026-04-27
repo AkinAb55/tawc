@@ -238,8 +238,23 @@ class ArchInstaller(
         val mirrorList = if (arch == "x86_64") {
             "Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
         } else {
-            // ALARM ships its own working mirrorlist; leave it alone.
-            null
+            // ALARM's shipped mirrorlist has a single Server line —
+            // `http://mirror.archlinuxarm.org/$arch/$repo`, the geo-IP
+            // redirector. With ParallelDownloads it's possible (and
+            // observed) for one parallel request to land on a mirror
+            // that hasn't synced a particular package yet and 404. With
+            // only one Server entry pacman has nowhere to fall back to
+            // and the whole transaction aborts. Listing several specific
+            // mirrors (in addition to the redirector) lets pacman skip
+            // past a stale mirror to the next on 404.
+            listOf(
+                "Server = http://mirror.archlinuxarm.org/\$arch/\$repo",
+                "Server = http://nj.us.mirror.archlinuxarm.org/\$arch/\$repo",
+                "Server = http://fl.us.mirror.archlinuxarm.org/\$arch/\$repo",
+                "Server = http://ca.us.mirror.archlinuxarm.org/\$arch/\$repo",
+                "Server = http://de.mirror.archlinuxarm.org/\$arch/\$repo",
+                "Server = http://fr.mirror.archlinuxarm.org/\$arch/\$repo",
+            ).joinToString("\n")
         }
 
         val script = buildString {
@@ -263,14 +278,14 @@ class ArchInstaller(
             )
 
             if (mirrorList != null) {
-                appendLine(
-                    """
-                    # mirrorlist
-                    cat > "${'$'}ROOTFS/etc/pacman.d/mirrorlist" <<'MIRROR_EOF'
-                    $mirrorList
-                    MIRROR_EOF
-                    """.trimIndent()
-                )
+                // Kotlin's trimIndent() can't handle a multi-line $-substitution
+                // cleanly inside a triple-quoted heredoc (interpolated lines
+                // have no shared indent and break the trim), so write the
+                // heredoc explicitly line-by-line.
+                appendLine("# mirrorlist")
+                appendLine("cat > \"\$ROOTFS/etc/pacman.d/mirrorlist\" <<'MIRROR_EOF'")
+                appendLine(mirrorList)
+                appendLine("MIRROR_EOF")
             }
 
             appendLine(
