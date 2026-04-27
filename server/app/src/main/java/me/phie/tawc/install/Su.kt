@@ -49,11 +49,9 @@ object Su {
      *
      * Magisk runs each `su` invocation inside a private mount namespace
      * (`unshare(CLONE_NEWNS)`), so any bind mounts performed by [script]
-     * vanish when the call returns — this matches the legacy
-     * `arch-chroot-run` behaviour, which combines mount setup and the
-     * chroot exec into one `su -c "..."` invocation precisely so the
-     * mounts stay alive for the duration of that one shell. Callers that
-     * need mounts must keep mount + chroot in the same script.
+     * vanish when the call returns. Callers that need mounts must keep
+     * mount + chroot in the same script — the canonical entry point is
+     * `<installation-dir>/enter.sh`, rendered by [ChrootMounter.enterScript].
      */
     fun run(
         script: String,

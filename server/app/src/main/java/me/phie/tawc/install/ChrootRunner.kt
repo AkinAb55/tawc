@@ -9,7 +9,7 @@ import android.util.Base64
  * (see [ChrootMounter.enterScript]); we just refresh that file's
  * contents, then invoke it via `su -c '<enter.sh> <b64-cmd>'`. The
  * mounts come up inside enter.sh's `su` shell and disappear when it
- * exits, exactly like the legacy `client/arch-chroot-run`.
+ * exits.
  *
  * The user command is base64-encoded into `$1` so it can contain any
  * bytes (single quotes, heredoc markers, embedded newlines, …) without

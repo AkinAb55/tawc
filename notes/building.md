@@ -42,9 +42,9 @@ adb shell am start -n me.phie.tawc/.compositor.CompositorActivity
 
 ## Device Setup
 
-SELinux enforcing mode is supported. The `arch-chroot-run` script applies the
-needed SELinux policy rule (`type_transition magisk tmpfs file appdomain_tmpfs`)
-via `magiskpolicy --live` during chroot setup.
+SELinux enforcing mode is supported. `ChrootMounter` applies the needed
+SELinux policy rule (`type_transition magisk tmpfs file appdomain_tmpfs`)
+via `magiskpolicy --live` on every chroot entry.
 
 ## Chroot package gotchas
 
@@ -68,7 +68,7 @@ app's data dir on first launch. The data came from the chroot's
 
 To update from the chroot:
 ```bash
-adb shell "su -c 'cd /data/local/arch-chroot/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/xkb-data.tar .'"
+adb shell "su -c 'cd /data/data/me.phie.tawc/installations/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/xkb-data.tar .'"
 adb pull /data/local/tmp/xkb-data.tar /tmp/xkb-data.tar
 rm -rf server/app/src/main/assets/xkb
 mkdir -p server/app/src/main/assets/xkb

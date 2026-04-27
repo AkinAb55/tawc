@@ -11,7 +11,8 @@ libraries to prevent incompatible code paths:
 
 ## Chroot environment
 
-Set by `client/arch-chroot-run` via `/etc/profile.d/01-tawc.sh`:
+Set by `ChrootMounter` (rewritten on every chroot entry) via
+`/etc/profile.d/01-tawc.sh`:
 
 ```
 WAYLAND_DISPLAY=wayland-0

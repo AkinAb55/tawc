@@ -14,8 +14,7 @@ behaviour here — it's a Firefox-side startup problem (see
 ## Launching
 
 ```bash
-adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run \
-  'GDK_GL=gles:always firefox --no-remote'"
+bash client/tawc-chroot-run 'GDK_GL=gles:always firefox --no-remote'
 ```
 
 The only Firefox-specific env var we need is `GDK_GL=gles:always`, which

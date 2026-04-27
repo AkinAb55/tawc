@@ -1,6 +1,6 @@
 - Each `ChrootRunner.run` is a fresh `su` shell with a private mount
-  namespace, so the full mount setup runs every chroot entry. Legacy
-  `client/arch-chroot-run` had a fast path (`if /sys is mounted`)
+  namespace, so the full mount setup runs every chroot entry. Earlier
+  iterations of this project had a fast path (`if /sys is mounted`)
   that skipped ~400ms of mount setup on repeated invocations because
   mounts persisted in the global namespace.
 - The new design is deliberate (it avoids the zygote-fork crash from

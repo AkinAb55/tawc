@@ -130,9 +130,8 @@ object ChrootMounter {
         )
         // Refresh profile.d/01-tawc.sh on every chroot entry so changes to
         // the Wayland env (LD_LIBRARY_PATH, HYBRIS_EGLPLATFORM, …) take
-        // effect without reinstalling. Cheap (<1ms) and matches the legacy
-        // arch-chroot-run behaviour. 00-path.sh is install-time-only because
-        // it's identical for every install.
+        // effect without reinstalling. Cheap (<1ms). 00-path.sh is
+        // install-time-only because it's identical for every install.
         sb.appendLine(
             """
             mkdir -p "${'$'}ROOTFS/etc/profile.d"

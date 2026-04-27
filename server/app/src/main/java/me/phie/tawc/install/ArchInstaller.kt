@@ -6,9 +6,7 @@ import java.io.File
 import java.io.IOException
 
 /**
- * Installs Arch Linux into an [InstallationStore] entry. The stage
- * sequence intentionally matches the legacy `arch-chroot-create` /
- * `arch-chroot-create-emulator` scripts so behaviour is portable:
+ * Installs Arch Linux into an [InstallationStore] entry. Stages:
  *
  *  1. download bootstrap tarball  (DOWNLOADING)
  *  2. extract to rootfs           (EXTRACTING)
@@ -17,12 +15,14 @@ import java.io.IOException
  *  5. pacman -Syu + base-devel    (PACMAN_INSTALL)
  *
  * There's no separate mount stage — bind mounts are set up inside the
- * `su` shell that runs each chroot command (see ChrootRunner), the
- * same way `client/arch-chroot-run` does it.
+ * `su` shell that runs each chroot command (see [ChrootRunner] /
+ * [ChrootMounter.enterScript]).
  *
- * On a clean rerun (e.g. resumed after a crash) early stages skip work
- * already done — the tarball is cached, an existing rootfs is reused,
- * and base-devel installation is skipped if `make` is already present.
+ * On a clean rerun (e.g. resumed after a crash) the slow steps skip
+ * work already done — the tarball is cached and the keyring init +
+ * full pacman -Syu are skipped if `make` is already present. The
+ * package list is always reconciled with `pacman -S --needed` so new
+ * entries propagate without a reinstall.
  */
 class ArchInstaller(
     private val store: InstallationStore,
@@ -115,8 +115,8 @@ class ArchInstaller(
         )
         store.save(installation)
 
-        // No explicit mount step — ChrootRunner.run does mount + chroot
-        // in one su invocation (same as the legacy `arch-chroot-run`).
+        // No explicit mount step — ChrootRunner.run goes through enter.sh,
+        // which mounts + chroots in one su invocation.
         //
         // Stage 5–6: pacman keyring + system.
         //

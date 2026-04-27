@@ -102,7 +102,7 @@ per surface. Surfaces using the AHB channel protocol are never checked for SHM b
 
 Chroot processes run in the `magisk` SELinux context. By default, their memfds
 get label `u:object_r:tmpfs:s0`, which the compositor (`untrusted_app`) can't
-access. The `arch-chroot-run` script applies a `magiskpolicy` type_transition
+access. `ChrootMounter`'s mount script applies a `magiskpolicy` type_transition
 rule so that magisk-created memfds automatically get `appdomain_tmpfs:s0`
 instead — the same label that normal Android app memfds receive.
 

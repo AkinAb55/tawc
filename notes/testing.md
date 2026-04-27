@@ -63,7 +63,7 @@ manual runs.
 ### Running Manually
 
 ```bash
-adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"
+bash client/tawc-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'
 ```
 
 ## Integration Tests
@@ -92,12 +92,14 @@ Direct `cargo test` invocations work too — they just need
 `ANDROID_SERIAL`. Without it the harness's `adb` calls fail silently
 when more than one target is connected.
 
-Prerequisites: a phone (or emulator) connected via adb, the compositor
-APK installed, `arch-chroot-run` pushed to the device, and the test
-suite's chroot packages installed (run `bash testing/install-test-deps.sh`
-once per chroot install — covers gtk3/gtk4/weston/mesa-utils/vulkan-tools).
-Some modules have additional prerequisites (e.g. libhybris on a real
-device for the GPU-rendering tests); see each module's docstring.
+Prerequisites: a phone (or emulator) connected via adb, the tawc app
+installed, the in-app Arch chroot installed (via `am start … --es
+autoAction install --es id arch`; see [installation.md](installation.md)),
+and the test suite's chroot packages installed (run
+`bash testing/install-test-deps.sh` once per chroot install — covers
+gtk3/gtk4/weston/mesa-utils/vulkan-tools). Some modules have additional
+prerequisites (e.g. libhybris on a real device for the GPU-rendering
+tests); see each module's docstring.
 
 ### Test Input Mechanism
 

@@ -7,11 +7,13 @@ install/run/destroy logic that previously lived only in the
 - ship a "Manage installations" screen as a first-class feature
 - store the chroot inside its private data dir, so uninstalling the app
   reclaims everything
-- offer the same operations to adb / integration tests via broadcasts,
-  so non-UI workflows can be ported off the legacy scripts incrementally
+- offer the same operations to adb / integration tests via the
+  `client/tawc-chroot-run` host script (no broadcast surface)
 
-The legacy `client/arch-chroot-*` scripts still exist and still target
-`/data/local/arch-chroot/` — they're independent of this system.
+This is the *only* chroot system in the project. The earlier
+`client/arch-chroot-*` scripts (which targeted `/data/local/arch-chroot/`)
+have been deleted; their logic now lives in this package and the
+auto-generated `enter.sh`.
 
 ## On-disk layout
 
@@ -37,9 +39,9 @@ class, and [InstallationStore] already handle it.
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
 | `Archive.kt`                   | Tar extraction (decompresses zstd in-process to a sibling `.tar`, then hands it to `toybox tar` running as root). |
-| `ChrootMounter.kt`             | Builds the bind-mount shell snippet and provides defensive-cleanup `unmount`. Per `arch-chroot-run`, the mounts live inside a single `su` invocation's private namespace, not globally. |
+| `ChrootMounter.kt`             | Builds the bind-mount shell snippet, renders the canonical `enter.sh` (mount + chroot wrapper), and provides defensive-cleanup `unmount`. Mounts live inside a single `su` invocation's private namespace, not globally. |
 | `ChrootRunner.kt`              | Concatenates `ChrootMounter.mountScript(rootfs)` with the chroot exec into one `su -c` shell so the mounts and the command share that shell's mount namespace. Base64-encodes the command into the wrapper script to dodge quoting hell. |
-| `ArchInstaller.kt`             | Stage machine: download → extract → configure → pacman init → pacman install. Mirrors `arch-chroot-create*`. (No separate mount stage — see *Mount lifecycle*.) |
+| `ArchInstaller.kt`             | Stage machine: download → extract → configure → pacman init → pacman install. (No separate mount stage — see *Mount lifecycle*.) |
 | `InstallProgress.kt`           | Stage enum + progress event used by the service. |
 | `InstallationService.kt`       | Foreground service that runs install/uninstall in a coroutine and exposes `progress` (StateFlow) and `log` (SharedFlow). |
 | `ManageInstallationsActivity.kt`| Plain-Android UI: status, progress bar, log tail, install/uninstall/refresh buttons. Bound to the service for live updates. Recognises an `autoAction` extra (`install`/`uninstall`) so adb / scripts can drive it via `am start`. |
@@ -64,8 +66,7 @@ that opens `ManageInstallationsActivity`.
    - `/etc/profile.d/01-tawc.sh` is *not* written here — `ChrootMounter`
      rewrites it on every chroot entry (Wayland env: `WAYLAND_DISPLAY`,
      `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`, `HYBRIS_EGLPLATFORM`, `wayland-0`
-     symlink) so env changes pick up without a reinstall, matching legacy
-     `arch-chroot-run`.
+     symlink) so env changes pick up without a reinstall.
 4. **PACMAN_INIT** — `pacman-key --init`, `--populate archlinux` /
    `archlinuxarm` depending on arch. (Bind mounts are not a separate
    stage — they're set up inside the very `su` shell that runs each
@@ -83,13 +84,13 @@ skipped.
 
 Magisk runs each `su` invocation in a private mount namespace
 (`unshare(CLONE_NEWNS)`), so any bind mounts performed by one `su` call
-are torn down when that call exits. The legacy `arch-chroot-run`
-accommodates this by combining mount setup and the chroot exec into a
-single `su -c "..."` invocation; we follow exactly the same pattern.
+are torn down when that call exits. We accommodate this by combining
+mount setup and the chroot exec into a single `su -c "..."` invocation
+— that's what the on-disk `<installation-dir>/enter.sh` does.
 
-`ChrootMounter.mountScript(rootfs)` returns a shell snippet that
-performs the bind mounts; `ChrootRunner.run` concatenates it with the
-chroot exec and hands the whole thing to one `Su.run`. There is no
+`ChrootMounter.enterScript(rootfs)` renders the script body; the
+installer writes it after extraction and `ChrootRunner.run` rewrites it
+on every call so the mount logic is always current. There is no
 separate `MOUNT` operation because there can't be — the mounts only
 exist for the lifetime of that one shell. This avoids polluting the
 global mount table with stale entries (and avoids the zygote-fork crash
@@ -226,12 +227,12 @@ because every current caller can run `am start`.
 - **Multiple installs** — vary the id passed in via the `--es id …`
   extra. The store/service/activity already carry the id end-to-end.
 
-## Relationship to legacy scripts
+## Host-side bridge
 
-The `client/arch-chroot-create*`, `arch-chroot-destroy`, and
-`arch-chroot-run` scripts are intentionally untouched and continue to
-operate on `/data/local/arch-chroot/`. They're the established way to
-run integration tests today; the in-app installer is parallel
-infrastructure that operates on `/data/data/me.phie.tawc/installations/<id>/`.
-Porting the integration tests over to the new path is a separate task —
-the broadcast `RUN` command is the bridge.
+`client/tawc-chroot-run` is the host-driven counterpart to in-app
+`ChrootRunner.run`. Both invoke the same `<installation-dir>/enter.sh`
+written by `ChrootMounter.enterScript`, so the mount + chroot logic is
+defined exactly once (in Kotlin) and rendered to a script that adb
+shell + su can replay. Used by the integration tests
+(`testing/integration/src/adb.rs`), `testing/install-test-deps.sh`,
+`testing/build-debug-app.sh`, and `client/build-libhybris`.

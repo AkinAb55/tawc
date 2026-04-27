@@ -36,7 +36,7 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - Work autonomously when possible. If you need human help to set up your dev loop, ask
 - When analyzing screenshots, use a sub-agent so the image doesn't end up in main context
 - If `su` is available on the phone, use it instead of `adb root`
-- Use existing scripts (eg arch-chroot-run) instead of one-shotting commands
+- Use existing scripts (eg `client/tawc-chroot-run`) instead of one-shotting commands
 - Feel free to edit scripts/files that have problems
 - Only git commit when told to
 - Feel free to check out different commits/bisect/etc when needed, but always end up back where you started unless explicitly asked
@@ -58,7 +58,7 @@ I'm letting you play with my phone, try not to fuck it up.
 - The emulator is fair game — feel free to reboot, kill qemu, wipe the AVD, etc.
 
 ## Organization
-Avoid junking up devices (delete screenshots when done). On the phone, things stay in `/data/local/arch-chroot/`, `/data/local/claude-debug` (**NOT** `/data/local/tmp`).
+Avoid junking up devices (delete screenshots when done). On the phone, the chroot lives in the app's private data dir (`/data/data/me.phie.tawc/installations/<id>/rootfs/`); host-side scratch goes in `/data/local/claude-debug` (**NOT** `/data/local/tmp`).
 
 ## Libhybris fork
 - **libhybris fork:** https://github.com/wmww/libhybris -- clone to `./libhybris` if needed (`git clone https://github.com/wmww/libhybris.git ./libhybris`). Already in `.gitignore`.
