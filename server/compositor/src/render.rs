@@ -264,8 +264,11 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
         }
     }
 
-    // Collect (surface, buffer) pairs that need importing.
-    let mut to_import: Vec<(WlSurface, wl_buffer::WlBuffer)> = Vec::new();
+    // Collect (surface, buffer, buffer_scale, viewport_dst) tuples that need
+    // importing. We also pick up buffer_scale and viewport here so SHM
+    // surfaces start with the right values; the commit handler keeps these
+    // refreshed for state-only commits (set_buffer_scale, viewport changes).
+    let mut to_import: Vec<(WlSurface, wl_buffer::WlBuffer, i32, Option<(i32, i32)>)> = Vec::new();
 
     for root in &all_roots {
         with_surface_tree_downward(
@@ -278,19 +281,31 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
                 }
                 let mut guard = surf_states.cached_state.get::<SurfaceAttributes>();
                 let attrs = guard.current();
+                let buffer_scale = attrs.buffer_scale.max(1);
+                let new_shm_buf = match &attrs.buffer {
+                    Some(BufferAssignment::NewBuffer(buf))
+                        if matches!(buffer_type(buf), Some(BufferType::Shm)) =>
+                    {
+                        Some(buf.clone())
+                    }
+                    _ => None,
+                };
+                drop(guard);
+                let mut vp_guard = surf_states
+                    .cached_state
+                    .get::<smithay::wayland::viewporter::ViewportCachedState>();
+                let viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
 
-                if let Some(BufferAssignment::NewBuffer(ref buf)) = attrs.buffer {
-                    if matches!(buffer_type(buf), Some(BufferType::Shm)) {
-                        // Skip if we already imported this exact buffer
-                        if let Some(existing) = state.surface_shm.get(surf) {
-                            if let Some(ref current_buf) = existing.current_buffer {
-                                if current_buf.id() == buf.id() {
-                                    return;
-                                }
+                if let Some(buf) = new_shm_buf {
+                    // Skip if we already imported this exact buffer
+                    if let Some(existing) = state.surface_shm.get(surf) {
+                        if let Some(ref current_buf) = existing.current_buffer {
+                            if current_buf.id() == buf.id() {
+                                return;
                             }
                         }
-                        to_import.push((surf.clone(), buf.clone()));
                     }
+                    to_import.push((surf.clone(), buf, buffer_scale, viewport_dst));
                 }
             },
             |_, _, &()| true,
@@ -298,7 +313,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
     }
 
     let mut imported = false;
-    for (surface, buf) in to_import {
+    for (surface, buf, buffer_scale, viewport_dst) in to_import {
         let dims = smithay::wayland::shm::with_buffer_contents(&buf, |_, _, data| {
             (data.width, data.height)
         });
@@ -321,6 +336,8 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
                         current_buffer: None,
                         committed_width: 0,
                         committed_height: 0,
+                        buffer_scale: 1,
+                        viewport_dst: None,
                     });
                 // Don't call old_buf.release() here — smithay's
                 // SurfaceAttributes::merge_into has already released the
@@ -334,11 +351,13 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
                 shm_state.current_buffer = Some(buf);
                 shm_state.committed_width = width;
                 shm_state.committed_height = height;
+                shm_state.buffer_scale = buffer_scale;
+                shm_state.viewport_dst = viewport_dst;
                 imported = true;
                 if is_new {
                     info!(
-                        "SHM buffer imported: {}x{} for {:?}",
-                        width, height, surface.id()
+                        "SHM buffer imported: {}x{} scale={} viewport={:?} for {:?}",
+                        width, height, buffer_scale, viewport_dst, surface.id()
                     );
                 }
             }
@@ -352,13 +371,42 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
 // Frame rendering
 // ---------------------------------------------------------------------------
 
-/// A surface ready to draw: texture, logical position, and buffer dimensions.
+/// A surface ready to draw.
+///
+/// `buf_w`/`buf_h` are the buffer's pixel dimensions (used as the source
+/// rectangle). `logical_w`/`logical_h` is the surface's logical size (from
+/// `wp_viewport.set_destination` if set, else `buffer / buffer_scale`).
+/// `logical_x`/`logical_y` is the surface's absolute position in logical
+/// (surface-local) coordinates.
 struct SurfaceDraw {
     texture: GlesTexture,
     logical_x: i32,
     logical_y: i32,
+    logical_w: i32,
+    logical_h: i32,
     buf_w: i32,
     buf_h: i32,
+}
+
+/// Compute a surface's logical (on-screen, surface-local) size:
+/// `wp_viewport.set_destination` overrides if set, otherwise we fall back to
+/// `buffer_size / buffer_scale` per the wl_surface spec.
+///
+/// TODO: `wp_viewport.set_source` (sub-rect crop) is not honoured here —
+/// `draw_surfaces` always samples the full buffer. No current client
+/// (Firefox / GTK / vkcube / weston-simple-egl) uses `set_source`, so this
+/// is fine for now, but a client that does will see an uncropped result.
+fn logical_size(
+    buf_w: i32,
+    buf_h: i32,
+    buffer_scale: i32,
+    viewport_dst: Option<(i32, i32)>,
+) -> (i32, i32) {
+    if let Some((w, h)) = viewport_dst {
+        (w, h)
+    } else {
+        (buf_w / buffer_scale, buf_h / buffer_scale)
+    }
 }
 
 /// Walk a single surface tree, collecting drawable surfaces at their absolute
@@ -368,7 +416,7 @@ fn collect_tree_draws(
     root: &WlSurface,
     offset_x: i32,
     offset_y: i32,
-    surface_fn: &impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32)>,
+    surface_fn: &impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32, i32, i32)>,
     out: &mut Vec<SurfaceDraw>,
 ) {
     with_surface_tree_downward(
@@ -383,13 +431,15 @@ fn collect_tree_draws(
             TraversalAction::DoChildren((px + loc.x, py + loc.y))
         },
         |surf, _states, &(abs_x, abs_y)| {
-            if let Some((tex, w, h)) = surface_fn(surf) {
+            if let Some((tex, buf_w, buf_h, lw, lh)) = surface_fn(surf) {
                 out.push(SurfaceDraw {
                     texture: tex,
                     logical_x: abs_x,
                     logical_y: abs_y,
-                    buf_w: w,
-                    buf_h: h,
+                    logical_w: lw,
+                    logical_h: lh,
+                    buf_w,
+                    buf_h,
                 });
             }
         },
@@ -409,7 +459,7 @@ fn collect_tree_draws(
 /// Popup trees are appended after their parent toplevel, so they draw on top.
 fn collect_surface_draws(
     state: &TawcState,
-    surface_fn: impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32)>,
+    surface_fn: impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32, i32, i32)>,
 ) -> Vec<SurfaceDraw> {
     let mut draws = Vec::new();
 
@@ -432,12 +482,19 @@ fn collect_surface_draws(
 
 /// Draw collected surfaces with the logical→physical coordinate transform.
 ///
-/// Subsurface positions are in logical (surface-local) coords, but smithay's
-/// GlesRenderer uses a GL projection where Y=0 is at the screen bottom (not
-/// top). So we both scale logical→physical AND flip Y:
+/// Per the wl_surface spec, the surface's logical (surface-local) size is
+/// `buffer_size / buffer_scale`, optionally overridden by
+/// `wp_viewport.set_destination`. The on-screen physical size is that
+/// logical size times the output scale. So:
 ///
-///   physical_x = logical_x * scale
-///   physical_y = screen_h - logical_y * scale - buf_h
+///   dst_w = logical_w * output_scale
+///   dst_h = logical_h * output_scale
+///   dst_x = logical_x * output_scale
+///   dst_y = screen_h - logical_y * output_scale - dst_h
+///
+/// The Y flip is because smithay's GlesRenderer projection has Y=0 at the
+/// screen bottom; `Transform::Flipped180` then flips the texture's Y inside
+/// the destination rect (Wayland buffers are Y-down, GL is Y-up).
 fn draw_surfaces(
     draws: &[SurfaceDraw],
     frame: &mut GlesFrame<'_, '_>,
@@ -447,17 +504,19 @@ fn draw_surfaces(
     uniforms: &[Uniform],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for draw in draws {
+        let dst_w = draw.logical_w * scale;
+        let dst_h = draw.logical_h * scale;
         let src = Rectangle::from_size(
             Size::<i32, smithay::utils::Buffer>::from((draw.buf_w, draw.buf_h)).to_f64(),
         );
         let dst = Rectangle::new(
             Point::from((
                 draw.logical_x * scale,
-                screen_h - draw.logical_y * scale - draw.buf_h,
+                screen_h - draw.logical_y * scale - dst_h,
             )),
-            Size::from((draw.buf_w, draw.buf_h)),
+            Size::from((dst_w, dst_h)),
         );
-        let damage = Rectangle::from_size(Size::from((draw.buf_w, draw.buf_h)));
+        let damage = Rectangle::from_size(Size::from((dst_w, dst_h)));
 
         frame.render_texture_from_to(
             &draw.texture, src, dst, &[damage], &[], Transform::Flipped180, 1.0,
@@ -489,15 +548,17 @@ pub fn render_frame(
     let scale = state.output_scale;
     let screen_h = output_size.h;
 
-    // Draw wlegl (AHB-backed GPU) surfaces. Buffers are drawn 1:1 at their
-    // pixel dimensions; see SurfaceWleglState for why we don't honour
-    // wl_surface.set_buffer_scale here.
+    // Draw wlegl (AHB-backed GPU) surfaces.
     let wlegl_draws = collect_surface_draws(state, |surf| {
         let ws = state.surface_wlegl.get(surf)?;
         let buf = ws.current_buffer.as_ref()?;
         let data = buf.data::<WleglBufferData>()?;
         let tex = data.texture.lock().unwrap().clone()?;
-        Some((tex, ws.committed_width, ws.committed_height))
+        let (lw, lh) = logical_size(
+            ws.committed_width, ws.committed_height,
+            ws.buffer_scale, ws.viewport_dst,
+        );
+        Some((tex, ws.committed_width, ws.committed_height, lw, lh))
     });
     draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
 
@@ -506,7 +567,11 @@ pub fn render_frame(
         if state.surface_wlegl.contains_key(surf) { return None; }
         let ss = state.surface_shm.get(surf)?;
         let tex = ss.texture.as_ref()?.clone();
-        Some((tex, ss.committed_width, ss.committed_height))
+        let (lw, lh) = logical_size(
+            ss.committed_width, ss.committed_height,
+            ss.buffer_scale, ss.viewport_dst,
+        );
+        Some((tex, ss.committed_width, ss.committed_height, lw, lh))
     });
     draw_surfaces(&shm_draws, &mut frame, scale, screen_h, shm_shader.as_ref(),
         &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))])?;

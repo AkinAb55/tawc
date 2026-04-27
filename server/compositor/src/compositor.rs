@@ -43,6 +43,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::viewporter::ViewporterState;
+use smithay::delegate_viewporter;
 
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
 use crate::text_input::TextInputState;
@@ -68,13 +70,13 @@ use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::Z
 pub struct SurfaceWleglState {
     pub current_buffer: Option<wl_buffer::WlBuffer>,
     /// Buffer dimensions in buffer pixels (`wl_buffer.width/height`).
-    /// We render the buffer 1:1 at these physical dimensions — matching the
-    /// SHM draw path and what the legacy `surface_ahb` path did. Some
-    /// clients (Firefox/WebRender's main wl_surface) render at the output's
-    /// physical size but commit buffer_scale=1 anyway, so honouring
-    /// buffer_scale would draw them at 2× and run them off-screen.
     pub committed_width: i32,
     pub committed_height: i32,
+    /// `wl_surface.set_buffer_scale` value at last commit (default 1).
+    pub buffer_scale: i32,
+    /// `wp_viewport.set_destination` size in logical surface coords. When set
+    /// it overrides `buffer / buffer_scale` for computing the on-screen size.
+    pub viewport_dst: Option<(i32, i32)>,
 }
 
 /// Per-surface SHM buffer state.
@@ -87,6 +89,10 @@ pub struct SurfaceShmState {
     pub current_buffer: Option<wl_buffer::WlBuffer>,
     pub committed_width: i32,
     pub committed_height: i32,
+    /// `wl_surface.set_buffer_scale` value at last commit (default 1).
+    pub buffer_scale: i32,
+    /// `wp_viewport.set_destination` size in logical surface coords.
+    pub viewport_dst: Option<(i32, i32)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +160,14 @@ impl TawcState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, []);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        // wp_viewporter lets clients set a logical destination size separate
+        // from the buffer dimensions. Firefox/WebRender allocates HiDPI
+        // buffers with buffer_scale=1 and uses viewport.set_destination to
+        // tell the compositor the surface's logical size; without
+        // viewporter, Firefox falls back to a path that ends up oversizing
+        // the surface on a 2x output. The returned `ViewporterState` has no
+        // Drop impl — the global lives for the lifetime of the Display.
+        ViewporterState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "tawc");
         // Advertise pointer, keyboard, and touch capabilities
@@ -232,9 +246,12 @@ impl CompositorHandler for TawcState {
 
         let mut new_buf_info: Option<(wl_buffer::WlBuffer, i32, i32)> = None;
         let mut removed = false;
+        let mut commit_buffer_scale: i32 = 1;
+        let mut viewport_dst: Option<(i32, i32)> = None;
         with_states(surface, |surf_states| {
             let mut guard = surf_states.cached_state.get::<SurfaceAttributes>();
             let attrs = guard.current();
+            commit_buffer_scale = attrs.buffer_scale.max(1);
             match &attrs.buffer {
                 Some(BufferAssignment::NewBuffer(buf)) => {
                     if let Some(data) = wlegl::wlegl_buffer_data(buf) {
@@ -244,6 +261,11 @@ impl CompositorHandler for TawcState {
                 Some(BufferAssignment::Removed) => removed = true,
                 None => {}
             }
+            drop(guard);
+            let mut vp_guard = surf_states
+                .cached_state
+                .get::<smithay::wayland::viewporter::ViewportCachedState>();
+            viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
         });
 
         if let Some((buf, w, h)) = new_buf_info {
@@ -253,6 +275,8 @@ impl CompositorHandler for TawcState {
                     current_buffer: Some(buf),
                     committed_width: w,
                     committed_height: h,
+                    buffer_scale: commit_buffer_scale,
+                    viewport_dst,
                 },
             );
             // A wlegl surface replaces any prior SHM attachment.
@@ -261,6 +285,25 @@ impl CompositorHandler for TawcState {
         } else if removed {
             self.surface_wlegl.remove(surface);
             self.buffer_commit_pending = true;
+        } else {
+            // No buffer change — but buffer_scale or viewport may have moved.
+            // Refresh both on whichever surface entry exists, and request a
+            // redraw if anything actually changed (a viewport-only commit
+            // wouldn't otherwise wake the renderer).
+            if let Some(ws) = self.surface_wlegl.get_mut(surface) {
+                if ws.buffer_scale != commit_buffer_scale || ws.viewport_dst != viewport_dst {
+                    ws.buffer_scale = commit_buffer_scale;
+                    ws.viewport_dst = viewport_dst;
+                    self.buffer_commit_pending = true;
+                }
+            }
+            if let Some(ss) = self.surface_shm.get_mut(surface) {
+                if ss.buffer_scale != commit_buffer_scale || ss.viewport_dst != viewport_dst {
+                    ss.buffer_scale = commit_buffer_scale;
+                    ss.viewport_dst = viewport_dst;
+                    self.buffer_commit_pending = true;
+                }
+            }
         }
     }
 }
@@ -426,3 +469,4 @@ delegate_shm!(TawcState);
 delegate_xdg_decoration!(TawcState);
 delegate_xdg_shell!(TawcState);
 delegate_seat!(TawcState);
+delegate_viewporter!(TawcState);

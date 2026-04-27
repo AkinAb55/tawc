@@ -44,25 +44,38 @@ Popup trees are appended after their parent toplevel so they draw on top.
    The renderer works in physical pixels. Multiply positions by `output_scale`.
 
 2. **Y-axis flip:** Smithay's GlesRenderer uses a GL projection where Y=0 is at the
-   **bottom** of the screen, not the top. For SHM surfaces at non-origin positions:
-   `physical_y = screen_h - logical_y * scale - texture_h`. For AHB (android_wlegl)
-   surfaces drawn fullscreen at the origin the per-row offset cancels out, but the
-   buffer itself is still Y-down (Wayland convention) vs. Y-up (GL), so we pass
-   `Transform::Flipped180` to `Frame::render_texture_from_to` — same reason as SHM.
-   Getting this wrong flips the client's content upside down; Firefox and the
-   `weston-simple-egl` triangle both expose the bug.
+   **bottom** of the screen, not the top, so we compute
+   `physical_y = screen_h - logical_y * output_scale - dst_h`. The buffer
+   itself is also Y-down (Wayland convention) vs. Y-up (GL), so we pass
+   `Transform::Flipped180` to `Frame::render_texture_from_to`. Both are
+   needed — Firefox and the `weston-simple-egl` triangle expose the bug if
+   either is missing.
 
-3. **AHB buffers are drawn 1:1 at their pixel dimensions.** In theory,
-   `wl_surface.set_buffer_scale(n)` means the compositor should divide by `n`
-   and re-scale. In practice, Firefox/WebRender renders its main surface at
-   the output's physical resolution (1080×2400) but commits `buffer_scale=1`
-   — applying the spec formula `dst = buffer / buffer_scale × output_scale`
-   would draw it at 2× size and blow it off-screen. Since every libhybris
-   client we have allocates buffers that already match the intended
-   on-screen dimensions, we skip the buffer_scale math and draw at buffer
-   size. This matches the SHM draw path, which also uses buffer dimensions.
+3. **Surface size follows the wl_surface spec:**
+   - `surface_logical_size = wp_viewport.dst` if set, otherwise
+     `buffer_size / buffer_scale`.
+   - `surface_physical_size = surface_logical_size * output_scale`.
 
-The canonical scale factor lives in `TawcState::output_scale`. Do not hardcode `2` elsewhere.
+   Both `wp_viewporter` and `wl_surface.set_buffer_scale` matter here:
+   - **vkcube / weston-simple-egl** allocate buffers at the configured logical
+     size (540×1200) with `buffer_scale=1` and no viewport. Logical = 540×1200,
+     physical = 1080×2400 → full screen.
+   - **GTK** (Firefox / GTK3 / GTK4) allocates a HiDPI buffer (1080×2400) and
+     either commits `buffer_scale=2` (toplevel placeholder) or
+     `buffer_scale=1` plus `wp_viewport.set_destination(540,1200)` (Firefox's
+     WebRender subsurface). Both end up at 1080×2400 physical.
+
+   **Firefox specifically requires `wp_viewporter`** — Firefox's WebRender
+   renders into a HiDPI subsurface but commits `buffer_scale=1`, relying on
+   `wp_viewport.set_destination` to set the on-screen size. Without
+   viewporter Firefox triggers `FEATURE_FAILURE_REQUIRES_WPVIEWPORTER` and
+   ends up with a 2×-oversized surface.
+
+   `buffer_scale` and `viewport_dst` live on `SurfaceWleglState` /
+   `SurfaceShmState`; the `logical_size` helper in `render.rs` applies the
+   precedence rule.
+
+The canonical output scale factor lives in `TawcState::output_scale`. Do not hardcode `2` elsewhere.
 
 ## SHM Buffer Support
 

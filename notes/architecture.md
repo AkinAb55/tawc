@@ -41,6 +41,7 @@ The compositor (`server/compositor/src/`) is split into:
 ## Wayland Protocols Implemented
 
 - `wl_compositor`, `xdg_wm_base` (v6), `wl_shm`, `wl_seat`, `wl_output`
+- `wp_viewporter` (required by Firefox/WebRender — see rendering notes)
 - `xdg_decoration` (always requests server-side, no actual decorations drawn)
 - `wl_data_device_manager` (clipboard/DnD, stub implementations)
 - `zwp_text_input_v3` (custom impl bridging Android IME)
