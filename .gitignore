@@ -19,6 +19,7 @@ target/
 libhybris/
 smithay/
 rootAVD/
+libxkbcommon/
 
 # OS
 .DS_Store

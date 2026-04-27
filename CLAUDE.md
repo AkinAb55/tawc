@@ -60,6 +60,15 @@ I'm letting you play with my phone, try not to fuck it up.
 ## Organization
 Avoid junking up devices (delete screenshots when done). On the phone, the chroot lives in the app's private data dir (`/data/data/me.phie.tawc/installations/<id>/rootfs/`); host-side scratch goes in `/data/local/claude-debug` (**NOT** `/data/local/tmp`).
 
+Do not clone external repos into `$HOME/`. If you need a third-party
+checkout (e.g. for cross-compilation source like libxkbcommon, or
+tooling like rootAVD), clone it into the tawc project directory or a
+child path. When you're done, either `.gitignore` it (matching the
+existing `libhybris/`, `smithay/`, `rootAVD/` entries) or delete it.
+Do NOT leave it in `$HOME/` for future sessions to find — that has
+bitten us with hardcoded `/home/ai/libxkbcommon` paths in
+`compositor/build.rs`.
+
 ## Libhybris fork
 - **libhybris fork:** https://github.com/wmww/libhybris -- clone to `./libhybris` if needed (`git clone https://github.com/wmww/libhybris.git ./libhybris`). Already in `.gitignore`.
 - **Build libhybris from local source:** `bash client/build-libhybris [--clean]` — syncs `./libhybris` to phone and builds inside chroot.
@@ -76,6 +85,7 @@ Avoid junking up devices (delete screenshots when done). On the phone, the chroo
 ## Quick Reference
 - **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
 - **Build (libhybris):** `bash client/build-libhybris` (or `--clean` to reconfigure). Edit `./libhybris` locally, script syncs to phone.
+- **Build (libxkbcommon):** `bash client/build-libxkbcommon [--abi=aarch64|x86_64|both] [--clean]`. Clones a pinned upstream tag into `./libxkbcommon/` (gitignored) if missing — no patches. Run once after fresh clone or when bumping the version pin.
 - **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.compositor.CompositorActivity`
 - **Install chroot:** `adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity --es autoAction install --es id arch` (then `adb logcat -s tawc-install` to watch). The chroot lives at `/data/data/me.phie.tawc/installations/arch/rootfs/`.
 - **Chroot (interactive):** `bash client/tawc-chroot-run`

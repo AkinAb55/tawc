@@ -1,0 +1,140 @@
+#!/bin/bash
+# Cross-compile libxkbcommon for the Android NDK and stage the resulting
+# `libxkbcommon.a` where `compositor/build.rs` expects to link against it.
+# We do not patch xkbcommon — this is a pristine upstream build, only with
+# Android-specific meson cross-files. Pinned to a tag rather than tracking
+# master so behaviour is reproducible across machines.
+#
+# The checkout lives at ./libxkbcommon/ (gitignored, matching libhybris/
+# and smithay/). Run this once after a fresh `git clone` of tawc-emu, or
+# whenever you bump the LIBXKB_TAG below.
+#
+# Usage:
+#   bash client/build-libxkbcommon                  # build aarch64 (default)
+#   bash client/build-libxkbcommon --abi=x86_64     # emulator
+#   bash client/build-libxkbcommon --abi=both       # both arches
+#   bash client/build-libxkbcommon --clean          # wipe builddir(s) first
+
+set -euo pipefail
+
+LIBXKB_TAG="xkbcommon-1.7.0"
+LIBXKB_GIT="https://github.com/xkbcommon/libxkbcommon.git"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LIBXKB_DIR="$REPO_DIR/libxkbcommon"
+
+# NDK lookup: prefer ANDROID_NDK_HOME (set by run-integration-tests.sh
+# from the Gradle config), fall back to the SDK install location used
+# elsewhere in this repo (see notes/emulator.md "One-time setup").
+if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    DEFAULT_SDK="${ANDROID_HOME:-$HOME/android-sdk}"
+    if [ -d "$DEFAULT_SDK/ndk" ]; then
+        ANDROID_NDK_HOME="$DEFAULT_SDK/ndk/$(ls -1 "$DEFAULT_SDK/ndk" | sort -V | tail -1)"
+    fi
+fi
+if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
+    echo "ERROR: ANDROID_NDK_HOME not set and no NDK found under \$ANDROID_HOME/ndk." >&2
+    echo "       Install one with sdkmanager 'ndk;<version>'." >&2
+    exit 1
+fi
+NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+[ -x "$NDK_BIN/llvm-ar" ] || { echo "ERROR: NDK toolchain missing at $NDK_BIN" >&2; exit 1; }
+
+ABI="aarch64"
+CLEAN=0
+for arg in "$@"; do
+    case "$arg" in
+        --abi=aarch64) ABI="aarch64" ;;
+        --abi=x86_64)  ABI="x86_64" ;;
+        --abi=both)    ABI="both" ;;
+        --clean)       CLEAN=1 ;;
+        *) echo "ERROR: unknown arg: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# Clone the pinned tag if missing. We don't track upstream master — if you
+# need to bump, change LIBXKB_TAG above and rerun with --clean.
+if [ ! -d "$LIBXKB_DIR/.git" ]; then
+    echo "==> cloning $LIBXKB_GIT @ $LIBXKB_TAG -> $LIBXKB_DIR"
+    git clone --depth 1 --branch "$LIBXKB_TAG" "$LIBXKB_GIT" "$LIBXKB_DIR"
+else
+    cur=$(git -C "$LIBXKB_DIR" describe --tags --exact-match 2>/dev/null || echo "<no tag>")
+    if [ "$cur" != "$LIBXKB_TAG" ]; then
+        echo "WARNING: $LIBXKB_DIR is at '$cur', expected '$LIBXKB_TAG'." >&2
+        echo "         Delete ./libxkbcommon and re-run to refresh." >&2
+    fi
+fi
+
+# Cross-files: regenerate every run so they always reflect the current
+# NDK location. They live inside the libxkbcommon checkout (which is
+# gitignored), so this doesn't dirty our repo.
+gen_crossfile() {
+    local triple="$1" cpu_family="$2" out="$3"
+    cat >"$out" <<EOF
+[binaries]
+c = '$NDK_BIN/${triple}-clang'
+cpp = '$NDK_BIN/${triple}-clang++'
+ar = '$NDK_BIN/llvm-ar'
+strip = '$NDK_BIN/llvm-strip'
+
+[host_machine]
+system = 'android'
+cpu_family = '$cpu_family'
+cpu = '$cpu_family'
+endian = 'little'
+EOF
+}
+gen_crossfile aarch64-linux-android29 aarch64 "$LIBXKB_DIR/android-cross.txt"
+gen_crossfile x86_64-linux-android29  x86_64  "$LIBXKB_DIR/android-cross-x86_64.txt"
+
+# meson options used at the original configure (verified via
+# meson-info/intro-buildoptions.json on the previous builddir).
+MESON_OPTS=(
+    --cross-file ""
+    --buildtype release
+    -Ddefault_library=static
+    -Denable-x11=false
+    -Denable-docs=false
+    -Denable-tools=false
+    -Denable-wayland=false
+    -Denable-xkbregistry=false
+    -Denable-bash-completion=false
+)
+
+build_one() {
+    local abi="$1" crossfile build_dir
+    case "$abi" in
+        aarch64) crossfile="$LIBXKB_DIR/android-cross.txt";        build_dir="$LIBXKB_DIR/builddir" ;;
+        x86_64)  crossfile="$LIBXKB_DIR/android-cross-x86_64.txt"; build_dir="$LIBXKB_DIR/builddir-x86_64" ;;
+        *) echo "internal error: unknown abi $abi" >&2; exit 1 ;;
+    esac
+
+    if [ "$CLEAN" = "1" ] && [ -d "$build_dir" ]; then
+        echo "==> wiping $build_dir"
+        rm -rf "$build_dir"
+    fi
+
+    if [ ! -d "$build_dir" ]; then
+        echo "==> meson setup $abi -> $build_dir"
+        # shellcheck disable=SC2068
+        ( cd "$LIBXKB_DIR" && \
+          meson setup "$build_dir" --cross-file "$crossfile" \
+              --buildtype release \
+              -Ddefault_library=static \
+              -Denable-x11=false -Denable-docs=false \
+              -Denable-tools=false -Denable-wayland=false \
+              -Denable-xkbregistry=false -Denable-bash-completion=false )
+    fi
+
+    echo "==> ninja $abi"
+    ninja -C "$build_dir" libxkbcommon.a
+    echo "    -> $build_dir/libxkbcommon.a"
+}
+
+case "$ABI" in
+    aarch64|x86_64) build_one "$ABI" ;;
+    both)           build_one aarch64; build_one x86_64 ;;
+esac
+
+echo "==> done"

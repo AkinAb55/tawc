@@ -87,7 +87,9 @@ adb shell "rm /data/local/tmp/xkb-data.tar"
 - Rust compositor cross-compiled for `aarch64-linux-android` via `cargo-ndk`
 - Gradle invokes cargo-ndk, copies `.so` into `jniLibs/arm64-v8a/`
 - Target API level: 29 (Android 10) minimum
-- libxkbcommon cross-compiled from source with NDK toolchain
+- libxkbcommon cross-compiled from source with NDK toolchain (run
+  `bash client/build-libxkbcommon` once after fresh clone; clones a
+  pinned upstream tag into `./libxkbcommon/`, no patches)
 - wayland-rs uses pure Rust backend (no libwayland dependency)
 
 Client-side libraries (built inside the chroot, not cross-compiled):
@@ -105,6 +107,27 @@ bash client/build-libhybris --clean   # full reconfigure
 ```
 
 This tars the local `./libhybris` source, pushes it to the phone, and builds inside the chroot. Edit `./libhybris` locally, then re-run the script to deploy.
+
+## libxkbcommon
+
+We do not patch xkbcommon. The checkout at `./libxkbcommon/` (gitignored)
+is pure upstream at a pinned tag plus two Android meson cross-files
+generated at build time. The static `libxkbcommon.a` it produces gets
+linked into `libcompositor.so` via `compositor/build.rs`.
+
+Build for one or both Android ABIs (host-side, NDK toolchain):
+```bash
+bash client/build-libxkbcommon                  # aarch64 (default — real device)
+bash client/build-libxkbcommon --abi=x86_64     # emulator
+bash client/build-libxkbcommon --abi=both
+bash client/build-libxkbcommon --clean          # reconfigure from scratch
+```
+
+The script clones the pinned tag (see `LIBXKB_TAG` near the top of
+`client/build-libxkbcommon`) into `./libxkbcommon/` if missing. Bumping
+the version means changing `LIBXKB_TAG` and rerunning with `--clean`.
+NDK location is auto-detected via `$ANDROID_NDK_HOME` or the SDK install
+under `$ANDROID_HOME/ndk/` (matching the rest of the host scripts).
 
 ## Debug App & Integration Tests
 
