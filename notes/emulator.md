@@ -128,6 +128,13 @@ Post-boot it also brings the AVD into a known-good state for tawc dev:
 - `settings put secure immersive_mode_confirmations confirmed` to
   suppress the fresh-AVD "swipe down to exit fullscreen" education
   popup, which otherwise eats the first taps tests send.
+- `ime disable com.google.android.inputmethod.latin/...LatinIME` to
+  disable Gboard. Its `StylusEducationPopupDialog` pops a "Try out
+  your stylus" dialog on stylus-tool-type taps that covers the
+  compositor and eats touch events. tawc tests don't use Android's
+  IME (Wayland clients have zwp_text_input; TEXT_INPUT broadcasts
+  inject text directly into the compositor) so disabling Gboard is
+  fine.
 
 Windowed mode notes:
 - The emulator's bundled Qt only ships an xcb (X11) plugin, no wayland

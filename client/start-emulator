@@ -24,15 +24,6 @@ LOG="${TAWC_EMULATOR_LOG:-/tmp/emulator.log}"
 
 [ -x "$EMU" ] || { echo "ERROR: emulator not found at $EMU (set ANDROID_HOME?)" >&2; exit 1; }
 
-# Refuse if a real qemu instance for this AVD is running. Match the
-# binary path rather than the args, so unrelated shells that grep for
-# "tawc" don't trip the check.
-if pgrep -af '/qemu-system-x86_64 ' | grep -q -- "-avd $AVD_NAME\b"; then
-    echo "AVD '$AVD_NAME' already running. PIDs:" >&2
-    pgrep -af '/qemu-system-x86_64 ' | grep -- "-avd $AVD_NAME\b" >&2
-    exit 1
-fi
-
 ARGS=(-avd "$AVD_NAME" -no-audio -no-boot-anim)
 HEADLESS=0
 for arg in "$@"; do
@@ -42,6 +33,17 @@ for arg in "$@"; do
         *) echo "ERROR: unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
+
+# If a real qemu instance for this AVD is already running, skip the
+# launch and just (re-)apply the post-boot setup below. This makes the
+# script idempotent so other entry points (e.g. the integration test
+# runner) can call it unconditionally. Match the binary path rather
+# than the args so unrelated shells that grep for "tawc" don't match.
+ALREADY_RUNNING=0
+if pgrep -af '/qemu-system-x86_64 ' | grep -q -- "-avd $AVD_NAME\b"; then
+    echo "==> AVD '$AVD_NAME' already running; skipping launch, just refreshing setup"
+    ALREADY_RUNNING=1
+fi
 
 # Windowed mode: emulator's bundled Qt only has the xcb (X11) plugin, no
 # wayland plugin. On a Wayland session you need an Xwayland socket. If
@@ -66,24 +68,27 @@ if [ "$HEADLESS" = "0" ]; then
     fi
 fi
 
-echo "==> launching: $EMU ${ARGS[*]}"
-echo "    log: $LOG"
-nohup "$EMU" "${ARGS[@]}" >"$LOG" 2>&1 &
-EMU_PID=$!
-echo "    pid: $EMU_PID"
-echo
-echo "==> waiting for boot (Ctrl+C to background; AVD keeps running)"
 ADB="$ANDROID_HOME/platform-tools/adb"
 [ -x "$ADB" ] || ADB=adb
-until "$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
-    sleep 3
-    if ! kill -0 "$EMU_PID" 2>/dev/null; then
-        echo "ERROR: emulator died — see $LOG" >&2
-        tail -20 "$LOG" >&2
-        exit 1
-    fi
-done
-echo "==> booted: emulator-5554"
+
+if [ "$ALREADY_RUNNING" = "0" ]; then
+    echo "==> launching: $EMU ${ARGS[*]}"
+    echo "    log: $LOG"
+    nohup "$EMU" "${ARGS[@]}" >"$LOG" 2>&1 &
+    EMU_PID=$!
+    echo "    pid: $EMU_PID"
+    echo
+    echo "==> waiting for boot (Ctrl+C to background; AVD keeps running)"
+    until "$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do
+        sleep 3
+        if ! kill -0 "$EMU_PID" 2>/dev/null; then
+            echo "ERROR: emulator died — see $LOG" >&2
+            tail -20 "$LOG" >&2
+            exit 1
+        fi
+    done
+    echo "==> booted: emulator-5554"
+fi
 
 # rootAVD's Magisk doesn't ship magiskpolicy (see notes/emulator.md), so
 # arch-chroot-run can't install the SELinux type_transition that lets the
@@ -97,6 +102,14 @@ echo "==> booted: emulator-5554"
 # fresh AVDs. It otherwise eats the first taps tests send.
 "$ADB" -s emulator-5554 shell 'settings put secure immersive_mode_confirmations confirmed' >/dev/null 2>&1 || \
     echo "WARNING: failed to suppress immersive-mode confirmation popup" >&2
+
+# Disable Gboard. It pops a "Try out your stylus" first-time-education
+# dialog on stylus-tool-type taps (StylusEducationPopupDialog) that
+# covers the compositor and eats events. tawc tests don't use Android's
+# IME — Wayland clients have zwp_text_input, and TEXT_INPUT broadcasts
+# inject text directly into the compositor — so no IME is fine.
+"$ADB" -s emulator-5554 shell 'ime disable com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME' >/dev/null 2>&1 || \
+    echo "WARNING: failed to disable Gboard; stylus education popup may interfere with tests" >&2
 
 # tawc-app-specific runtime setup (no-op if APK isn't installed yet).
 # Both grants reset on emulator wipe; setenforce 0 above resets every
