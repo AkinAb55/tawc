@@ -9,7 +9,11 @@
 # Prerequisites:
 #   - Android device or emulator connected via adb with root (su) access
 #     (multiple targets: set TAWC_TARGET=device|emulator first)
-#   - Arch Linux ARM chroot installed at /data/local/arch-chroot
+#   - tawc app installed (this script reinstalls it during build)
+#   - In-app Arch chroot installed at
+#     /data/data/me.phie.tawc/installations/arch/. Install via:
+#       adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \
+#           --es autoAction install --es id arch
 #   - Test-suite chroot packages installed (run
 #     `bash testing/install-test-deps.sh` once per chroot install)
 #   - libhybris already built and installed in the chroot (run
@@ -73,12 +77,24 @@ if [ "$DO_BUILD" -eq 1 ]; then
     echo "=== Installing APK ==="
     adb install -r server/app/build/outputs/apk/debug/app-debug.apk
 
-    echo "=== Pushing arch-chroot-run ==="
-    adb push client/arch-chroot-run /data/local/tmp/
+    echo "=== Verifying in-app chroot is installed ==="
+    if ! adb shell "su -c 'test -x /data/data/me.phie.tawc/installations/arch/enter.sh'" >/dev/null 2>&1; then
+        cat >&2 <<'EOF'
+ERROR: in-app chroot not found at /data/data/me.phie.tawc/installations/arch/.
+
+Install it from the host:
+  adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity \
+      --es autoAction install --es id arch
+
+Then tail progress:
+  adb logcat -s tawc-install
+EOF
+        exit 1
+    fi
 
     echo "=== Pushing pidfile helper ==="
     adb push testing/tawc-pidfile-exec /data/local/tmp/
-    adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/local/arch-chroot/tmp/tawc-pidfile-exec && chmod +x /data/local/arch-chroot/tmp/tawc-pidfile-exec'"
+    adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/data/me.phie.tawc/installations/arch/rootfs/tmp/tawc-pidfile-exec && chmod +x /data/data/me.phie.tawc/installations/arch/rootfs/tmp/tawc-pidfile-exec'"
 
     case "$ANDROID_SERIAL" in
         emulator-*)

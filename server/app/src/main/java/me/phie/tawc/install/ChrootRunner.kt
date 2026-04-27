@@ -1,66 +1,46 @@
 package me.phie.tawc.install
 
 import android.util.Base64
-import java.util.UUID
 
 /**
  * Run a command inside an installed chroot.
  *
- * Mounts and the chroot exec live in the same `su` invocation so they
- * share Magisk's per-su mount namespace — exactly like the legacy
- * `client/arch-chroot-run` script does. The mounts come up before the
- * command runs and disappear when su exits, with no global leakage.
+ * Mount + chroot live in the canonical `<installation-dir>/enter.sh`
+ * (see [ChrootMounter.enterScript]); we just refresh that file's
+ * contents, then invoke it via `su -c '<enter.sh> <b64-cmd>'`. The
+ * mounts come up inside enter.sh's `su` shell and disappear when it
+ * exits, exactly like the legacy `client/arch-chroot-run`.
  *
- * To dodge quoting hell across host shell → su → chroot bash, the user
- * command is base64-encoded into the wrapper script and decoded inside
- * the chroot's `/tmp/`, so it can contain any bytes (single quotes,
- * heredoc markers, embedded newlines, …). Toybox `base64` is always
- * available on Android.
+ * The user command is base64-encoded into `$1` so it can contain any
+ * bytes (single quotes, heredoc markers, embedded newlines, …) without
+ * quoting through the host shell → su → chroot bash chain. Toybox
+ * `base64` decodes it on the device side.
  */
 object ChrootRunner {
 
     /**
-     * Execute [command] inside the chroot at [rootfs]. Uses `bash -lc`,
-     * which sources `/etc/profile.d/` scripts so PATH, TMPDIR and the
-     * tawc Wayland env are set up — same as in the legacy script.
-     *
-     * Set [usePosixSh] when running before bash exists in the chroot
-     * (early pacman bootstrap on a fresh tarball that only ships
-     * `/bin/sh`).
+     * Execute [command] inside the chroot at [rootfs]. Routes through
+     * the on-disk `enter.sh` (regenerated each call so code changes to
+     * the mount script take effect without a reinstall). [rootfs] is
+     * passed as a string for symmetry with the rest of the install
+     * package; the matching enter.sh path is derived by walking up one
+     * dir (rootfs lives at `<installation-dir>/rootfs/`, enter.sh at
+     * `<installation-dir>/enter.sh`).
      */
     fun run(
         rootfs: String,
         command: String,
-        usePosixSh: Boolean = false,
         onLine: ((String) -> Unit)? = null,
     ): Su.Result {
-        val shell = if (usePosixSh) "/bin/sh" else "/bin/bash"
-        val flag = if (usePosixSh) "-c" else "-lc"
-        val tmpName = "tawc-cmd-${UUID.randomUUID().toString().take(8)}.sh"
-        val cmdB64 = Base64.encodeToString(command.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        // Refresh enter.sh in case the mount logic has changed since
+        // last install. Cheap (<1 KB write to app-owned dir).
+        val enterFile = java.io.File(java.io.File(rootfs).parentFile, "enter.sh")
+        enterFile.writeText(ChrootMounter.enterScript(rootfs))
+        enterFile.setExecutable(true, false)
 
-        val script = buildString {
-            // 1. Bind mounts (live for the duration of this su shell only).
-            appendLine(ChrootMounter.mountScript(rootfs))
-            // 2. Drop the user command into the chroot's /tmp/ as a script.
-            appendLine(
-                """
-                TMP='$rootfs/tmp/$tmpName'
-                mkdir -p '$rootfs/tmp'
-                printf %s '$cmdB64' | base64 -d > "${'$'}TMP"
-                chmod 755 "${'$'}TMP"
-                """.trimIndent()
-            )
-            // 3. chroot + exec; remember exit code, clean up, exit with it.
-            appendLine(
-                """
-                chroot '$rootfs' $shell $flag '/tmp/$tmpName'
-                EC=${'$'}?
-                rm -f "${'$'}TMP"
-                exit ${'$'}EC
-                """.trimIndent()
-            )
-        }
-        return Su.run(script, onLine = onLine)
+        val cmdB64 = Base64.encodeToString(command.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        // Quote enter.sh's path single-quoted; the b64 payload is base64
+        // (no shell metacharacters) so embedding it bare is safe.
+        return Su.run("exec '${enterFile.absolutePath}' $cmdB64", onLine = onLine)
     }
 }

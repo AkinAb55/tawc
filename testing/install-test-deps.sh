@@ -10,7 +10,9 @@
 # Prerequisites:
 #   - Android device or emulator connected via adb (set TAWC_TARGET= if
 #     multiple targets are connected)
-#   - Arch Linux ARM chroot installed at /data/local/arch-chroot
+#   - In-app Arch chroot installed at
+#     /data/data/me.phie.tawc/installations/arch/ (install via the app's
+#     Manage installations screen, or `am start --es autoAction install`)
 #
 # Usage:
 #   bash testing/install-test-deps.sh
@@ -32,10 +34,7 @@ PKGS=(
     mesa-utils weston vulkan-tools
 )
 
-echo "=== Pushing arch-chroot-run ==="
-adb push "$ROOT_DIR/client/arch-chroot-run" /data/local/tmp/ >/dev/null
-
 echo "=== Installing chroot test deps: ${PKGS[*]} ==="
-adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run 'pacman -S --noconfirm --needed ${PKGS[*]}'"
+"$ROOT_DIR/client/tawc-chroot-run" "pacman -S --noconfirm --needed ${PKGS[*]}"
 
 echo "=== Done ==="

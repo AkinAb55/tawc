@@ -6,12 +6,16 @@ use crate::adb;
 
 const APP_NAME: &str = "gtk4-debug-app";
 
+/// Filesystem root of the in-app Arch chroot, as seen from outside.
+/// Inside the chroot the same dir is just `/`.
+const CHROOT_ROOTFS: &str = "/data/data/me.phie.tawc/installations/arch/rootfs";
+
 fn chroot_build_dir() -> String {
     format!("/tmp/{}", APP_NAME)
 }
 
 fn chroot_fs_build_dir() -> String {
-    format!("/data/local/arch-chroot/tmp/{}", APP_NAME)
+    format!("{}/tmp/{}", CHROOT_ROOTFS, APP_NAME)
 }
 
 fn host_staging() -> String {

@@ -93,9 +93,14 @@ class ArchInstaller(
             log("tar: $line")
         }
 
-        // Stage 3: configure. DNS, pacman.conf, mirrorlist, profile.d.
+        // Stage 3: configure. DNS, pacman.conf, mirrorlist, profile.d,
+        // and the auto-generated `enter.sh` (mount + chroot wrapper) the
+        // host-side `client/tawc-chroot-run` invokes via `adb shell su`.
+        // ChrootRunner.run also goes through enter.sh, so writing it here
+        // is a precondition for every later pacman step.
         progress(InstallProgress(InstallStage.CONFIGURING, "Configuring chroot…"))
         configure(rootfsPath, log)
+        writeEnterScript(rootfsPath, log)
 
         // Persist metadata now: even if the slow pacman steps fail, an
         // operator can recover (run again, run a manual command in the
@@ -291,6 +296,23 @@ class ArchInstaller(
     """.trimIndent()
 
     // -- helpers ----------------------------------------------------------
+
+    /**
+     * Render `<installation-dir>/enter.sh` from [ChrootMounter.enterScript].
+     * Owned by app uid, so a plain file write is enough — no `su` needed.
+     * Made +x so `su -c '<path>'` can exec it directly. Both
+     * [ChrootRunner.run] and host tooling call this single file, so the
+     * mount logic only lives in ChrootMounter.
+     */
+    private fun writeEnterScript(rootfsPath: String, log: (String) -> Unit) {
+        val file = store.enterScriptFile(id)
+        file.writeText(ChrootMounter.enterScript(rootfsPath))
+        if (!file.setExecutable(true, false)) {
+            log("warn: failed to chmod +x ${file.absolutePath}")
+        } else {
+            log("wrote ${file.absolutePath}")
+        }
+    }
 
     private fun primaryArch(): String =
         Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"

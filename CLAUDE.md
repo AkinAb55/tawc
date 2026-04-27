@@ -77,9 +77,10 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
 - **Build (libhybris):** `bash client/build-libhybris` (or `--clean` to reconfigure). Edit `./libhybris` locally, script syncs to phone.
 - **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.compositor.CompositorActivity`
-- **Chroot:** `adb push client/arch-chroot-run /data/local/tmp/ && adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run"`
-- **Run Wayland app:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '<command>'"` (env vars set by profile)
-- **Firefox:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run 'GDK_GL=gles:always firefox --no-remote'"`
+- **Install chroot:** `adb shell am start -n me.phie.tawc/.install.ManageInstallationsActivity --es autoAction install --es id arch` (then `adb logcat -s tawc-install` to watch). The chroot lives at `/data/data/me.phie.tawc/installations/arch/rootfs/`.
+- **Chroot (interactive):** `bash client/tawc-chroot-run`
+- **Run Wayland app:** `bash client/tawc-chroot-run '<command>'` (env vars set by profile)
+- **Firefox:** `bash client/tawc-chroot-run 'GDK_GL=gles:always MOZ_ENABLE_WAYLAND=1 MOZ_ACCELERATED=1 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 DISPLAY= firefox --no-remote'`
 - **Screenshot:** `adb shell "su -c 'screencap -p /sdcard/screenshot.png'" && adb pull /sdcard/screenshot.png /tmp/screenshot.png` (analyze with sub-agent, then clean up both files)
 - **Logs:** `adb logcat -s tawc-native` (Rust) or `adb logcat -s tawc` (Kotlin). Filter frame spam: `grep -v renderer_gles2_frame`
 - **Kill Firefox:** `adb shell "su -c 'killall firefox'"`
@@ -91,6 +92,6 @@ Avoid junking up devices (delete screenshots when done). On the phone, things st
 - **Integration tests (skip rebuild):** add `--no-build` to reuse the already-deployed APK / libhybris / chroot helpers
 - (`run-integration-tests.sh` sources `client/select-device.sh` itself; when both targets are connected, run with `TAWC_TARGET=device` or `TAWC_TARGET=emulator`.)
 - **Build debug app:** `bash testing/build-debug-app.sh` (gtk4-debug-app)
-- **Run GTK4 debug app:** `adb shell "/system/bin/sh /data/local/tmp/arch-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'"`
+- **Run GTK4 debug app:** `bash client/tawc-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'`
 - **Inject text (for testing):** `adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"`
 - **Inject keyevent (for testing):** `adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67`

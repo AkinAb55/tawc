@@ -1,6 +1,11 @@
 use std::io;
 use std::process::{Command, Output, Stdio};
 
+/// Path to the on-device chroot wrapper rendered by the in-app installer
+/// (see ChrootMounter.enterScript). Mount + chroot logic lives there;
+/// these helpers just shell into `su -c '<enter.sh> <b64-cmd>'`.
+const ENTER_SCRIPT: &str = "/data/data/me.phie.tawc/installations/arch/enter.sh";
+
 /// Run an adb shell command, wait for completion, return output.
 pub fn shell(cmd: &str) -> io::Result<Output> {
     Command::new("adb")
@@ -8,32 +13,64 @@ pub fn shell(cmd: &str) -> io::Result<Output> {
         .output()
 }
 
-/// Run a command inside the Arch Linux ARM chroot on the phone.
-/// The command runs as root via su, inside arch-chroot-run which sets up
-/// mounts and environment (WAYLAND_DISPLAY, XDG_RUNTIME_DIR, etc.).
+/// Run a command inside the in-app Arch chroot on the phone. The command
+/// runs as root via su, inside enter.sh which sets up mounts and
+/// environment (WAYLAND_DISPLAY, XDG_RUNTIME_DIR, etc.). The command is
+/// base64-encoded so it can contain any bytes (quotes, newlines, …)
+/// without quoting through host shell -> adb shell -> su -c -> bash.
 pub fn chroot_run(cmd: &str) -> io::Result<Output> {
-    let escaped = cmd.replace('\'', "'\\''");
-    shell(&format!(
-        "su -c \"/system/bin/sh /data/local/tmp/arch-chroot-run '{}'\"",
-        escaped
-    ))
+    shell(&chroot_invocation(cmd))
 }
 
 /// Spawn a command in the chroot with piped stdout/stderr (non-blocking).
 /// Returns the Child process. Caller is responsible for reading output.
 pub fn chroot_spawn(cmd: &str) -> io::Result<std::process::Child> {
-    let escaped = cmd.replace('\'', "'\\''");
     Command::new("adb")
-        .args([
-            "shell",
-            &format!(
-                "su -c \"/system/bin/sh /data/local/tmp/arch-chroot-run '{}'\"",
-                escaped
-            ),
-        ])
+        .args(["shell", &chroot_invocation(cmd)])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+}
+
+fn chroot_invocation(cmd: &str) -> String {
+    // Base64 alphabet has no shell metacharacters, so embedding the
+    // payload bare in the su -c '...' string is safe.
+    format!("su -c '{} {}'", ENTER_SCRIPT, b64_encode(cmd.as_bytes()))
+}
+
+/// Standard base64 (RFC 4648) with `=` padding, no line breaks. Inlined
+/// rather than pulling a crate in for ~25 lines that the test harness
+/// uses in exactly one place.
+fn b64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((data.len() + 2) / 3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::b64_encode;
+    #[test]
+    fn b64_matches_reference() {
+        // Spot-check against known values.
+        assert_eq!(b64_encode(b""), "");
+        assert_eq!(b64_encode(b"f"), "Zg==");
+        assert_eq!(b64_encode(b"fo"), "Zm8=");
+        assert_eq!(b64_encode(b"foo"), "Zm9v");
+        assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(b64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(b64_encode(b"\xff\xfe\xfd"), "//79");
+    }
 }
 
 /// Send text to the compositor via broadcast intent — equivalent to
