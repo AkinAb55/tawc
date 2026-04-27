@@ -38,6 +38,16 @@ android {
     }
 }
 
+dependencies {
+    // The install package extracts bootstrap tarballs (.tar.gz, .tar.zst)
+    // entirely in-process: commons-compress reads tar/gzip; zstd-jni decodes
+    // zstd. Together this keeps the install path tool-free.
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("com.github.luben:zstd-jni:1.5.6-9@aar")
+
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+}
+
 // Build the Rust compositor for one or both Android ABIs and copy the
 // resulting .so into jniLibs/. Override the default by setting the
 // `tawcAbis` Gradle property: `-PtawcAbis=arm64-v8a` or

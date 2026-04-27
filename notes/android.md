@@ -89,7 +89,7 @@ everything talking to the Rust compositor lives in its own package, separate fro
 the rest of the app's UI/management features.
 
 - `MainActivity.kt` — home screen. Plain Android UI (no fullscreen, no Wayland).
-  Hosts buttons that launch the compositor and (eventually) other features.
+  Hosts buttons that launch the compositor and the installation manager.
 - `compositor/` — everything that interacts with the Rust compositor:
   - `CompositorActivity.kt` — fullscreen immersive Activity that owns the
     `SurfaceView`, dispatches touch/IME, and registers the test broadcast
@@ -99,10 +99,16 @@ the rest of the app's UI/management features.
     `Java_me_phie_tawc_compositor_NativeBridge_*` and `find_class
     "me/phie/tawc/compositor/NativeBridge"` in `server/compositor/src/lib.rs`).
   - `TawcInputConnection.kt` — IME bridge.
+- `install/` — Kotlin re-implementation of the chroot install / run /
+  destroy logic that previously lived only in `client/arch-chroot-*`. The
+  rootfs is stored under `/data/data/me.phie.tawc/installations/<id>/rootfs/`
+  so uninstalling the app reclaims it. See
+  [installation.md](installation.md) for the package map, broadcast
+  command interface, and the Android 14 FGS-from-broadcast workaround.
 
-When adding new app features (chroot management, settings, app launcher, …),
-put them in their own packages under `me.phie.tawc.*` rather than mixing them
-into the compositor package.
+When adding new app features (settings, app launcher, …), put them in
+their own packages under `me.phie.tawc.*` rather than mixing them into
+the compositor or install packages.
 
 ## Audio (Out of Scope)
 

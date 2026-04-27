@@ -1,6 +1,17 @@
 #!/bin/bash
-# Launch the tawc AVD. Windowed by default; pass --headless for no UI.
+# Launch the tawc AVD and bring it to a known-good state for tawc
+# development. Windowed by default; pass --headless for no UI.
 # See notes/emulator.md for one-time setup (SDK, AVD, Magisk).
+#
+# After boot this script also:
+#   - drops SELinux to permissive (rootAVD's Magisk has no magiskpolicy)
+#   - if the tawc APK is already installed, grants Magisk `su` to the
+#     app's uid (so InstallationService can call `su` without a prompt)
+#     and grants POST_NOTIFICATIONS (so the install foreground-service
+#     notification displays). Both are no-ops when the APK isn't there
+#     yet — first install the APK with `gradlew assembleDebug && adb
+#     install -r ...`, then re-run this script (or just re-grant by
+#     hand; see notes/installation.md).
 #
 # Usage: bash client/start-emulator [--headless] [--cold]
 
@@ -81,3 +92,19 @@ echo "==> booted: emulator-5554"
 # up isolation by Magisk-rooting the AVD for dev.
 "$ADB" -s emulator-5554 shell 'su -c "setenforce 0"' >/dev/null 2>&1 || \
     echo "WARNING: failed to set SELinux permissive; SHM client surfaces will not render" >&2
+
+# tawc-app-specific runtime setup (no-op if APK isn't installed yet).
+# Both grants reset on emulator wipe; setenforce 0 above resets every
+# boot — re-run this script after `adb install` to refresh them all.
+TAWC_PKG=me.phie.tawc
+TAWC_UID=$("$ADB" -s emulator-5554 shell "pm list packages -U $TAWC_PKG" 2>/dev/null | awk -F: '/uid:/ {print $3}' | tr -d '\r')
+if [ -n "$TAWC_UID" ]; then
+    echo "==> granting Magisk su + POST_NOTIFICATIONS to $TAWC_PKG (uid=$TAWC_UID)"
+    "$ADB" -s emulator-5554 shell "su -c 'magisk --sqlite \"INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($TAWC_UID,2,0,1,0);\"'" >/dev/null 2>&1 || \
+        echo "WARNING: failed to grant Magisk su to $TAWC_PKG (uid=$TAWC_UID)" >&2
+    "$ADB" -s emulator-5554 shell "pm grant $TAWC_PKG android.permission.POST_NOTIFICATIONS" >/dev/null 2>&1 || \
+        echo "WARNING: failed to grant POST_NOTIFICATIONS to $TAWC_PKG" >&2
+else
+    echo "==> $TAWC_PKG not installed yet; skipping app-specific grants"
+    echo "    (install the APK then re-run this script to set them up)"
+fi

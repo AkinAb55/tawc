@@ -99,6 +99,20 @@ The script waits for `sys.boot_completed` then exits, leaving the
 emulator running in the background. Logs go to `/tmp/emulator.log`
 (override with `TAWC_EMULATOR_LOG`).
 
+Post-boot it also brings the AVD into a known-good state for tawc dev:
+
+- `setenforce 0` — rootAVD's Magisk has no `magiskpolicy` binary, so
+  the SELinux `type_transition` that lets the compositor mmap memfds
+  from chroot clients can't be installed; permissive mode is the
+  emulator-only workaround. Resets every reboot.
+- If `me.phie.tawc` is installed, grants Magisk `su` to its uid (so
+  `InstallationService` doesn't pop a prompt) and grants
+  `POST_NOTIFICATIONS` (so the install foreground-service notification
+  displays). Both grants reset on emulator wipe; the `su` policy
+  survives normal reboots, the notification grant survives upgrades.
+  These steps are no-ops when the APK isn't installed yet — install
+  the APK then re-run the script to apply them.
+
 Windowed mode notes:
 - The emulator's bundled Qt only ships an xcb (X11) plugin, no wayland
   plugin. On a Wayland desktop you need an Xwayland socket reachable as

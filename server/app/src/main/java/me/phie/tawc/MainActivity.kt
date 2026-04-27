@@ -6,9 +6,11 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import me.phie.tawc.compositor.CompositorService
+import me.phie.tawc.install.ManageInstallationsActivity
 
 /**
  * Home screen for the tawc app. Starts the [CompositorService] (which
@@ -50,10 +52,20 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
+        val manageInstallsBtn = Button(this).apply {
+            text = "Manage installations"
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, ManageInstallationsActivity::class.java))
+            }
+        }
+
         root.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
             bottomMargin = padding
         })
-        root.addView(status, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        root.addView(status, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+            bottomMargin = padding / 2
+        })
+        root.addView(manageInstallsBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         setContentView(root)
     }

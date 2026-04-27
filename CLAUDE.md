@@ -16,6 +16,7 @@ The `notes/` directory contains architecture and implementation notes. Edit/crea
 - [firefox.md](notes/firefox.md) -- Firefox-specific setup and issues
 - [android.md](notes/android.md) -- socket sharing, SELinux, chroot setup
 - [emulator.md](notes/emulator.md) -- AVD setup, Magisk root, x86_64 chroot, what works/doesn't
+- [installation.md](notes/installation.md) -- in-app Kotlin chroot installer (separate from `client/arch-chroot-*`); broadcast command interface for adb-driven workflows
 
 Keep notes up to date with new choices, discoveries and project state. This is an agent-written project, existing code/notes may be wrong. Stay vigilant, and fix/record problems as you find them (even when working on something else).
 
