@@ -46,6 +46,7 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::delegate_viewporter;
 
+use crate::host::{ActivityId, OutputHost};
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
 use crate::text_input::TextInputState;
 use crate::wlegl;
@@ -129,7 +130,42 @@ pub struct TawcState {
     pub output_scale: i32,
 
     /// Logical output size (physical pixels / scale), used to configure toplevels.
+    /// Tracks the primary display's geometry; per-host sizing is handled by
+    /// each `OutputHost.logical_size`. Phase 0/1 always uses the primary
+    /// display's metrics for both.
     pub output_logical_size: (i32, i32),
+
+    /// Per-Activity render targets. One entry per Android `CompositorActivity`
+    /// that has registered its `SurfaceView`. For phase 0-4 there is at most
+    /// one host (the `"primary"` Activity). Phase 5 onward populates this
+    /// with one entry per chroot toplevel that becomes a separate task.
+    ///
+    /// See `notes/multi-activity.md`.
+    pub hosts: HashMap<ActivityId, OutputHost>,
+
+    /// Toplevel → host assignment. Looked up by the render loop to decide
+    /// which host's `EGLSurface` a given toplevel paints into. Subsurfaces
+    /// and popups are NOT in this map — the renderer derives their host
+    /// from their root toplevel.
+    ///
+    /// Populated by `assign_toplevel_to_host` from
+    /// `XdgShellHandler::new_toplevel`. Cleaned up alongside dead toplevels
+    /// in the frame timer.
+    pub toplevel_to_host: HashMap<WlSurface, ActivityId>,
+
+    /// When true, the policy assigns every toplevel to the same Activity
+    /// (the existing host or the hardcoded `"primary"` if none exists yet)
+    /// rather than spawning a new Activity per toplevel. Defaults to false
+    /// (multi-window) since phase 5; will be exposed as a SharedPreference
+    /// in the polish pass.
+    pub single_activity_mode: bool,
+
+    /// ActivityId of the host Android currently shows in the foreground.
+    /// Used by per-host input / focus dispatch. Updated on
+    /// `SurfaceEvent::FocusChanged`. None when no Activity has reported
+    /// focus yet (e.g. cold start before the first
+    /// `onWindowFocusChanged(true)`).
+    pub foreground_host: Option<ActivityId>,
 
     /// Text input protocol state.
     pub text_input_state: TextInputState,
@@ -206,8 +242,59 @@ impl TawcState {
             client_count: Arc::new(AtomicU32::new(0)),
             toplevels_changed: false,
             buffer_commit_pending: false,
+            hosts: HashMap::new(),
+            toplevel_to_host: HashMap::new(),
+            // Phase 5: default to multi-window. Each non-child toplevel
+            // gets its own Android task / recents card.
+            single_activity_mode: false,
+            foreground_host: None,
         }
     }
+
+    /// Outcome of a host assignment: the host the toplevel ends up on,
+    /// and whether the policy decided a fresh Activity needs to be
+    /// spawned for it. Phase 5+ uses `spawn_activity` to fire the
+    /// reverse-JNI call after the borrow on `TawcState` is released.
+    pub fn assign_toplevel_to_host(&mut self, toplevel: &ToplevelSurface) -> HostAssignment {
+        let surface = toplevel.wl_surface().clone();
+
+        // Children of an existing toplevel always share that toplevel's
+        // host (e.g. a dialog opens in the same Android task as its parent).
+        if let Some(parent_surf) = toplevel.parent() {
+            if let Some(parent_host) = self.toplevel_to_host.get(&parent_surf).cloned() {
+                self.toplevel_to_host.insert(surface, parent_host.clone());
+                return HostAssignment { host: parent_host, spawn_activity: false };
+            }
+        }
+
+        if self.single_activity_mode {
+            // Collapse all toplevels onto the first existing host. If no
+            // Activity has registered yet, mint a fresh id and ask Kotlin
+            // to spawn one — single-Activity mode still needs at least
+            // one CompositorActivity to render into.
+            let (id, spawn_activity) = match self.hosts.keys().next().cloned() {
+                Some(id) => (id, false),
+                None => (crate::host::new_activity_id(), true),
+            };
+            self.toplevel_to_host.insert(surface, id.clone());
+            HostAssignment { host: id, spawn_activity }
+        } else {
+            // Multi-window: stage a fresh host id and ask Kotlin to spawn
+            // an Activity for it. The Activity will register its surface
+            // asynchronously via `nativeRegisterActivitySurface`.
+            let new_id = crate::host::new_activity_id();
+            self.toplevel_to_host.insert(surface, new_id.clone());
+            HostAssignment { host: new_id, spawn_activity: true }
+        }
+    }
+}
+
+/// Result of `TawcState::assign_toplevel_to_host`. Caller owns the
+/// reverse-JNI side-effect so it happens outside the `&mut TawcState`
+/// borrow.
+pub struct HostAssignment {
+    pub host: ActivityId,
+    pub spawn_activity: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +407,18 @@ impl XdgShellHandler for TawcState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         info!("New toplevel surface: {:?}", surface.wl_surface().id());
-        let (w, h) = self.output_logical_size;
+
+        // Run the assignment policy (which inserts into toplevel_to_host).
+        // The result tells us whether to spawn a new Activity (phase 5+).
+        let assignment = self.assign_toplevel_to_host(&surface);
+
+        // Configure with the host's logical size if it exists, otherwise
+        // fall back to the cached primary-output size.
+        let (w, h) = self
+            .hosts
+            .get(&assignment.host)
+            .map(|h| h.logical_size)
+            .unwrap_or(self.output_logical_size);
         surface.with_pending_state(|state| {
             state.states.set(
                 wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
@@ -331,13 +429,33 @@ impl XdgShellHandler for TawcState {
             state.size = Some((w, h).into());
         });
         surface.send_configure();
-        // Set keyboard focus to the new toplevel so text input works
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+
+        // Move keyboard focus to the new toplevel only if its host is
+        // currently in the foreground. Otherwise the FocusChanged event
+        // will set focus when the host's Activity gains focus.
+        //
+        // For phase 0-4 / single-Activity mode, foreground_host is None
+        // until the first Android focus event fires. To avoid losing
+        // focus during the brief startup window, fall back to "the
+        // first host" when foreground_host is unset — that matches the
+        // pre-multi-window behaviour and keeps text input working.
+        let host_is_foreground = match &self.foreground_host {
+            Some(fg) => *fg == assignment.host,
+            None => self.hosts.keys().next() == Some(&assignment.host),
+        };
+        if host_is_foreground {
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+            }
         }
         self.toplevels.push(surface);
         self.toplevels_changed = true;
+
+        // Reverse-JNI side effects after the &mut self borrow is released.
+        if assignment.spawn_activity {
+            crate::spawn_activity_from_native(&assignment.host);
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {

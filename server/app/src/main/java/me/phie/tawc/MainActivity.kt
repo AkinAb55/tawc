@@ -6,21 +6,28 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import me.phie.tawc.compositor.CompositorActivity
+import me.phie.tawc.compositor.CompositorService
 
 /**
- * Home screen for the tawc app. Shows a simple Android UI from which the
- * user can launch the Wayland compositor (and, eventually, manage the
- * chroot and other features). The compositor lives in a separate
- * [CompositorActivity] so its full-screen Wayland surface is isolated
- * from the rest of the app's UI.
+ * Home screen for the tawc app. Starts the [CompositorService] (which
+ * spawns the Rust compositor thread + Wayland socket) and shows a
+ * status page. There is no longer a "primary" CompositorActivity — each
+ * Wayland toplevel from the chroot is its own per-document
+ * `CompositorActivity` spawned by the compositor's policy. Without any
+ * windows, the service runs alongside this launcher and the recents
+ * list shows just one tawc card (this one).
  */
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Start the compositor as soon as the user opens the app. The
+        // service is START_STICKY + foreground, so it survives this
+        // Activity being closed and any chroot client's connection
+        // outlasts MainActivity dying.
+        startForegroundService(Intent(this, CompositorService::class.java))
 
         val padding = (24 * resources.displayMetrics.density).toInt()
 
@@ -37,17 +44,16 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        val openCompositorBtn = Button(this).apply {
-            text = "Open compositor"
-            setOnClickListener {
-                startActivity(Intent(this@MainActivity, CompositorActivity::class.java))
-            }
+        val status = TextView(this).apply {
+            text = "Compositor running.\n" +
+                "Open a Wayland app from the chroot to see it here."
+            gravity = Gravity.CENTER
         }
 
         root.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
             bottomMargin = padding
         })
-        root.addView(openCompositorBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        root.addView(status, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         setContentView(root)
     }

@@ -5,19 +5,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use jni::JNIEnv;
-use jni::objects::{GlobalRef, JClass, JObject, JValue};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::jobject;
 use jni::JavaVM;
 use log::info;
 
 use smithay::backend::egl::EGLContext;
-use smithay::backend::egl::EGLSurface;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::utils::{Size, Transform};
+use smithay::utils::Transform;
 use wayland_server::{Display, ListeningSocket};
 
 mod egl_android;
 mod gl_import;
+mod host;
 mod protocol;
 mod wlegl;
 mod compositor;
@@ -27,9 +27,9 @@ mod event_loop;
 mod input;
 mod text_input;
 
-use egl_android::AndroidNativeSurface;
 use gl_import::AhbTextureImporter;
 use compositor::TawcState;
+use host::{ActivityId, SurfaceEvent};
 use render::RenderState;
 
 /// Global flag shared between JNI calls to signal shutdown.
@@ -47,29 +47,21 @@ const WAYLAND_SOCKET_PATH: &str = "/data/data/me.phie.tawc/wayland-0";
 /// Global sender for state query requests. Replaced each time the compositor restarts.
 static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Sender<()>>> = Mutex::new(None);
 
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnSurfaceCreated(
-    mut env: JNIEnv,
-    _class: JClass,
-    surface: jobject,
-) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Debug)
-            .with_tag("tawc-native"),
-    );
+/// Tracks whether the compositor thread is currently running. Set true
+/// in `nativeStartCompositor`; cleared by the thread on exit. Used to
+/// make `nativeStartCompositor` idempotent (Service can call it on every
+/// `onCreate` after a process restart).
+static COMPOSITOR_RUNNING: AtomicBool = AtomicBool::new(false);
 
-    info!("nativeOnSurfaceCreated called");
-
-    // Cache JavaVM for reverse JNI calls from compositor thread
+/// Cache the JavaVM and NativeBridge class on the first JNI call so the
+/// compositor thread can do reverse-JNI from any thread later.
+fn cache_jni_globals(env: &mut JNIEnv) {
     if JAVA_VM.get().is_none() {
         match env.get_java_vm() {
             Ok(vm) => { let _ = JAVA_VM.set(vm); }
             Err(e) => log::error!("Failed to get JavaVM: {}", e),
         }
     }
-
-    // Cache NativeBridge class ref for static method callbacks
     if NATIVE_BRIDGE_CLASS.get().is_none() {
         if let Ok(class) = env.find_class("me/phie/tawc/compositor/NativeBridge") {
             let obj = JObject::from(class);
@@ -78,62 +70,164 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnSurface
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: compositor lifecycle (CompositorService)
+// ---------------------------------------------------------------------------
+
+/// Start the compositor thread. Called from `CompositorService.onCreate`.
+/// Idempotent: if a compositor thread is already running, this is a no-op.
+///
+/// The compositor sets up its EGL context, GlesRenderer, Wayland display,
+/// and listening socket up front, then enters its event loop with no
+/// `OutputHost`s. `nativeRegisterActivitySurface` adds hosts later.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartCompositor(
+    mut env: JNIEnv,
+    _class: JClass,
+) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("tawc-native"),
+    );
+    cache_jni_globals(&mut env);
+
+    if COMPOSITOR_RUNNING.swap(true, Ordering::SeqCst) {
+        info!("nativeStartCompositor: already running");
+        return;
+    }
+
+    info!("nativeStartCompositor: spawning compositor thread");
+    RUNNING.store(true, Ordering::SeqCst);
+
+    // Create the channels here, BEFORE the compositor thread starts,
+    // so JNI calls (especially `nativeRegisterActivitySurface`) can
+    // immediately enqueue events. The calloop channel is durable —
+    // events queue until the compositor thread plugs the receiver
+    // into its loop. Without this, the very first `surfaceCreated`
+    // (which fires within milliseconds of `bindService`) would race
+    // the compositor thread's `create_*_channel` calls and silently
+    // drop.
+    let touch_channel = input::create_touch_channel();
+    let text_input_channel = text_input::create_text_input_channel();
+    let surface_event_channel = host::create_surface_event_channel();
+    let (state_query_sender, state_query_channel) =
+        smithay::reexports::calloop::channel::channel();
+    *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
+
+    std::thread::spawn(move || {
+        if let Err(e) = run_compositor(
+            touch_channel,
+            text_input_channel,
+            surface_event_channel,
+            state_query_channel,
+        ) {
+            log::error!("Compositor failed: {}", e);
+        }
+        *STATE_QUERY_SENDER.lock().unwrap() = None;
+        host::clear_surface_event_sender();
+        COMPOSITOR_RUNNING.store(false, Ordering::SeqCst);
+        info!("Compositor thread exited");
+    });
+}
+
+/// Stop the compositor thread. Called from `CompositorService.onDestroy`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStopCompositor(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    info!("nativeStopCompositor");
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// JNI: per-Activity surface lifecycle (CompositorActivity)
+// ---------------------------------------------------------------------------
+
+fn jstring_to_id(env: &mut JNIEnv, s: JString) -> ActivityId {
+    env.get_string(&s).map(|s| s.into()).unwrap_or_else(|_| "primary".to_string())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeRegisterActivitySurface(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity_id: JString,
+    surface: jobject,
+    width: i32,
+    height: i32,
+) {
+    cache_jni_globals(&mut env);
+    let activity_id = jstring_to_id(&mut env, activity_id);
 
     let window_ptr = unsafe {
         let ptr = ndk_sys::ANativeWindow_fromSurface(env.get_raw(), surface);
         if ptr.is_null() {
-            log::error!("Failed to get ANativeWindow from Surface");
+            log::error!("Failed to get ANativeWindow from Surface for {}", activity_id);
             return;
         }
         ptr as *mut c_void
     };
 
-    let width = unsafe { ndk_sys::ANativeWindow_getWidth(window_ptr as *mut _) };
-    let height = unsafe { ndk_sys::ANativeWindow_getHeight(window_ptr as *mut _) };
-    info!("Native window: {}x{}", width, height);
+    let w = if width > 0 { width } else { unsafe { ndk_sys::ANativeWindow_getWidth(window_ptr as *mut _) } };
+    let h = if height > 0 { height } else { unsafe { ndk_sys::ANativeWindow_getHeight(window_ptr as *mut _) } };
+    info!("nativeRegisterActivitySurface({}): {}x{}", activity_id, w, h);
 
-    RUNNING.store(true, Ordering::SeqCst);
-
-    // ANativeWindow_fromSurface returns the window with a +1 refcount that
-    // the caller must release. Hand that reference directly to the render
-    // thread, which releases it on exit.
-    let window_addr = window_ptr as usize;
-    std::thread::spawn(move || {
-        let window_ptr = window_addr as *mut c_void;
-        info!("Compositor thread started");
-
-        if let Err(e) = run_compositor(window_ptr, width, height) {
-            log::error!("Compositor failed: {}", e);
-        }
-
-        unsafe { ndk_sys::ANativeWindow_release(window_ptr as *mut _) };
-        info!("Compositor thread exited");
+    host::send_surface_event(SurfaceEvent::Register {
+        activity_id,
+        native_window: window_ptr as usize,
+        width: w,
+        height: h,
     });
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnSurfaceChanged(
-    _env: JNIEnv,
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivitySurfaceChanged(
+    mut env: JNIEnv,
     _class: JClass,
-    _width: i32,
-    _height: i32,
+    activity_id: JString,
+    width: i32,
+    height: i32,
 ) {
-    info!("nativeOnSurfaceChanged: {}x{}", _width, _height);
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    info!("nativeOnActivitySurfaceChanged({}): {}x{}", activity_id, width, height);
+    host::send_surface_event(SurfaceEvent::SurfaceChanged { activity_id, width, height });
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnSurfaceDestroyed(
-    _env: JNIEnv,
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivitySurfaceDestroyed(
+    mut env: JNIEnv,
     _class: JClass,
+    activity_id: JString,
 ) {
-    info!("nativeOnSurfaceDestroyed");
-    RUNNING.store(false, Ordering::SeqCst);
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    info!("nativeOnActivitySurfaceDestroyed({})", activity_id);
+    host::send_surface_event(SurfaceEvent::SurfaceDestroyed { activity_id });
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivityDestroyed(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity_id: JString,
+) {
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    info!("nativeOnActivityDestroyed({})", activity_id);
+    host::send_surface_event(SurfaceEvent::ActivityDestroyed { activity_id });
+}
+
+// ---------------------------------------------------------------------------
+// JNI: input (touch). Per-Activity tagging arrives in phase 6.
+// ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnTouchEvent(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
+    activity_id: JString,
     action: i32,
     pointer_id: i32,
     x: f32,
@@ -147,14 +241,27 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnTouchEv
     const ACTION_POINTER_DOWN: i32 = 5;
     const ACTION_POINTER_UP: i32 = 6;
 
+    let activity_id = jstring_to_id(&mut env, activity_id);
     let time = event_time as u32;
     let event = match action {
-        ACTION_DOWN | ACTION_POINTER_DOWN => input::TouchEvent::Down { id: pointer_id, x, y, time },
-        ACTION_MOVE => input::TouchEvent::Motion { id: pointer_id, x, y, time },
-        ACTION_UP | ACTION_POINTER_UP => input::TouchEvent::Up { id: pointer_id, time },
+        ACTION_DOWN | ACTION_POINTER_DOWN => input::TouchEvent::Down { id: pointer_id, x, y, time, activity_id },
+        ACTION_MOVE => input::TouchEvent::Motion { id: pointer_id, x, y, time, activity_id },
+        ACTION_UP | ACTION_POINTER_UP => input::TouchEvent::Up { id: pointer_id, time, activity_id },
         _ => return,
     };
     input::send_touch_event(event);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivityFocusChanged(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity_id: JString,
+    has_focus: bool,
+) {
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    info!("nativeOnActivityFocusChanged({}, {})", activity_id, has_focus);
+    host::send_surface_event(SurfaceEvent::FocusChanged { activity_id, has_focus });
 }
 
 // ---------------------------------------------------------------------------
@@ -279,24 +386,93 @@ pub fn call_native_bridge_void(method: &str, sig: &str, args: &[JValue]) {
     }
 }
 
-/// Set up EGL, Wayland display, and output, then hand off to the calloop event loop.
+/// Reverse-JNI: ask Kotlin to start a new `CompositorActivity` for the
+/// given activity_id. The Activity will eventually call back via
+/// `nativeRegisterActivitySurface` once its `SurfaceView` is laid out.
+///
+/// Phase 3 wires this up; phase 5 starts using it (single_activity_mode
+/// is true through phase 4 so this path isn't taken yet).
+pub fn spawn_activity_from_native(activity_id: &str) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => { log::error!("JavaVM not cached for spawnActivity"); return; }
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => { log::error!("NativeBridge class not cached for spawnActivity"); return; }
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
+    };
+    let id_jstr = match env.new_string(activity_id) {
+        Ok(s) => s,
+        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(
+        class,
+        "spawnActivity",
+        "(Ljava/lang/String;)V",
+        &[(&id_jstr).into()],
+    ) {
+        log::error!("Reverse JNI spawnActivity({}) failed: {}", activity_id, e);
+    }
+}
+
+/// Reverse-JNI: ask Kotlin to finish (and remove from recents) the
+/// `CompositorActivity` for the given activity_id.
+pub fn finish_activity_from_native(activity_id: &str) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => { log::error!("JavaVM not cached for finishActivity"); return; }
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => { log::error!("NativeBridge class not cached for finishActivity"); return; }
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
+    };
+    let id_jstr = match env.new_string(activity_id) {
+        Ok(s) => s,
+        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(
+        class,
+        "finishActivity",
+        "(Ljava/lang/String;)V",
+        &[(&id_jstr).into()],
+    ) {
+        log::error!("Reverse JNI finishActivity({}) failed: {}", activity_id, e);
+    }
+}
+
+/// Default output scale used while no Activity has registered its size.
+/// Matches the historical hardcoded value.
+const DEFAULT_OUTPUT_SCALE: i32 = 2;
+
+/// Set up EGL context, renderer, Wayland display, and socket. Then hand off
+/// to the calloop event loop. The first `OutputHost` is added asynchronously
+/// when an Activity calls `nativeRegisterActivitySurface`.
 fn run_compositor(
-    window_ptr: *mut c_void,
-    width: i32,
-    height: i32,
+    touch_channel: smithay::reexports::calloop::channel::Channel<input::TouchEvent>,
+    text_input_channel: smithay::reexports::calloop::channel::Channel<text_input::TextInputEvent>,
+    surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
+    state_query_channel: smithay::reexports::calloop::channel::Channel<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // --- EGL + renderer setup ---
+    // --- EGL context (no surface yet — first Activity provides one) ---
     let (raw_display, raw_config, raw_context) =
         unsafe { egl_android::create_raw_egl_context()? };
     let egl_context = unsafe { EGLContext::from_raw(raw_display, raw_config, raw_context)? };
-    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
 
-    let native_surface = AndroidNativeSurface::new(window_ptr);
-    let display_ref = renderer.egl_context().display();
-    let pixel_format = renderer.egl_context().pixel_format().ok_or("No pixel format")?;
-    let config_id = renderer.egl_context().config_id();
-    let egl_surface =
-        unsafe { EGLSurface::new(display_ref, pixel_format, config_id, native_surface)? };
+    let egl_display = egl_context.display().clone();
+    let egl_pixel_format = egl_context.pixel_format().ok_or("No pixel format")?;
+    let egl_config_id = egl_context.config_id();
+
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
 
     let importer = AhbTextureImporter::new()
         .map_err(|e| format!("Failed to load AHB importer: {}", e))?;
@@ -308,22 +484,27 @@ fn run_compositor(
 
     let render_state = RenderState {
         renderer,
-        egl_surface,
         importer,
         shm_tint_shader,
         wlegl_opaque_shader,
         background,
         raw_egl_display: raw_display,
         raw_egl_context: raw_context,
+        egl_display,
+        egl_pixel_format,
+        egl_config_id,
     };
 
     // --- Wayland display + protocol state ---
+    // Initial sizing comes from the first registered Activity surface;
+    // until then, configure events use 0x0 which is fine as the wayland
+    // socket is open but no client has connected yet.
     let mut wl_display: Display<TawcState> = Display::new()?;
-    let scale = 2;
-    let logical_size = (width / scale, height / scale);
-    let state = TawcState::new(&mut wl_display, scale, logical_size);
+    let scale = DEFAULT_OUTPUT_SCALE;
+    let initial_logical = (0, 0);
+    let state = TawcState::new(&mut wl_display, scale, initial_logical);
 
-    // --- Output ---
+    // --- Output (geometry updated when first Activity surface arrives) ---
     let output = smithay::output::Output::new(
         "tawc-0".to_string(),
         smithay::output::PhysicalProperties {
@@ -333,21 +514,14 @@ fn run_compositor(
             model: "Android".into(),
         },
     );
-    let mode = smithay::output::Mode {
-        size: (width, height).into(),
-        refresh: 60_000,
-    };
     output.change_current_state(
-        Some(mode),
+        Some(smithay::output::Mode { size: (1, 1).into(), refresh: 60_000 }),
         Some(Transform::Normal),
-        Some(smithay::output::Scale::Integer(2)),
+        Some(smithay::output::Scale::Integer(scale)),
         Some((0, 0).into()),
     );
-    output.set_preferred(mode);
-    // GlobalId is not RAII — dropping it does NOT remove the Wayland global.
-    // The global lives as long as the Display. We just don't need the ID.
+    // GlobalId is not RAII — the global lives as long as the Display.
     let _output_global = output.create_global::<TawcState>(&state.display_handle);
-    info!("Wayland output: {}x{}", width, height);
 
     // --- Listening socket ---
     let _ = std::fs::remove_file(WAYLAND_SOCKET_PATH);
@@ -358,20 +532,10 @@ fn run_compositor(
     let _ = std::fs::set_permissions(WAYLAND_SOCKET_PATH, std::fs::Permissions::from_mode(0o777));
     info!("Wayland socket: {}", WAYLAND_SOCKET_PATH);
 
-    let output_size = Size::from((width, height));
-
-    // --- Touch input channel ---
-    let touch_channel = input::create_touch_channel();
-
-    // --- Text input channel ---
-    let text_input_channel = text_input::create_text_input_channel();
-
-    // --- State query channel ---
-    let (state_query_sender, state_query_channel) = smithay::reexports::calloop::channel::channel();
-    *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
-
     // --- Run ---
-    let result = event_loop::run(wl_display, state, render_state, listener, output_size, scale, touch_channel, text_input_channel, state_query_channel, &RUNNING);
-    *STATE_QUERY_SENDER.lock().unwrap() = None;
-    result
+    event_loop::run(
+        wl_display, state, render_state, listener, output, scale,
+        touch_channel, text_input_channel, state_query_channel, surface_event_channel,
+        &RUNNING,
+    )
 }

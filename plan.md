@@ -105,22 +105,42 @@ clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 - Format negotiation: which VkFormats map to gralloc formats the compositor can import?
 - Real apps: Firefox WebGPU, games
 
-## Multi-Window
-See [notes/multi-activity.md](notes/multi-activity.md) for the full design.
+## Multi-Window ✅ (2026-04-26, phases 0-7)
+Each Wayland toplevel becomes its own Android task / recents card.
+See [notes/multi-activity.md](notes/multi-activity.md) for the design and
+the as-built notes.
 
-- Move compositor into a foreground `CompositorService`
-- Refactor to `OutputHost` (vec of length 1, no behaviour change)
-- `toplevel_to_host` assignment table, single host
-- Policy + reverse-JNI to spawn Activities, gated off behind
-  `single_activity_mode = true`
-- `CompositorActivity` per-document (`activityId` UUID in `intent.data`)
-- Flip the policy: spawn a new Activity per non-child toplevel
-- Per-host input/focus; fixes `touch-focus-single-window-only`
-- Lifecycle + suspend round-trip (Background hosts stop being fed
-  frame callbacks; Foreground/Background transitions send the
-  appropriate xdg-shell configures)
-- Polish: task labels/icons, refused-close handling, settings UI for
-  single-Activity mode, freeform story
+- ✅ Compositor moved into foreground `CompositorService` (specialUse
+  type, `START_STICKY`). `nativeStartCompositor` runs once per process
+  and outlives any single Activity.
+- ✅ `OutputHost` per Activity (`server/compositor/src/host.rs`) owns
+  the EGLSurface + ANativeWindow + dimensions. Multiple hosts make
+  current per render via the calloop frame timer.
+- ✅ `toplevel_to_host: HashMap<WlSurface, ActivityId>` filters the
+  render walk; popups/subsurfaces inherit their root's host.
+- ✅ Policy in `TawcState::assign_toplevel_to_host` — child toplevels
+  ride on parent's host; otherwise mint a fresh `ActivityId` and ask
+  Kotlin to spawn an Activity for it. `single_activity_mode` flag
+  (default `false`) collapses everything onto the existing host.
+- ✅ `CompositorActivity` reads its id from `intent.data?.lastPathSegment`
+  (URI scheme `tawc://activity/<id>`). Manifest uses
+  `documentLaunchMode="intoExisting"` + `taskAffinity=""` so each id
+  gets its own task.
+- ✅ Touch input tagged with `activity_id` per event; routed to first
+  alive toplevel of THAT host. `nativeOnActivityFocusChanged` drives
+  per-host keyboard / text-input focus. (Removed the
+  `touch-focus-single-window-only` issue.)
+- ✅ Suspend round-trip: hosts carry a `foreground` bool; transitioning
+  it sends `Activated`/`Suspended` configures to assigned toplevels.
+  Backgrounded hosts skip rendering and frame callbacks. Last toplevel
+  per host dying calls `finishAndRemoveTask` so the recents card goes
+  away with the window.
+- Polish (TODO): per-task labels/icons via `set_title`/`set_app_id` →
+  `ActivityManager.TaskDescription`, refused-close handling, settings
+  UI for the single-Activity-mode toggle, freeform-windowing story.
+  Pending-host config (Activity exists, surface arrives later) is
+  smoothed over by the calloop channel buffering events; explicit
+  HostState::Pending might still be worth adding for diagnostics.
 
 ## wl_keyboard (non-text keys)
 Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalent).

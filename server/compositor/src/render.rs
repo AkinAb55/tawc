@@ -4,8 +4,12 @@
 //! TawcState (compositor.rs) owns Wayland protocol state; this module
 //! turns that protocol state into pixels.
 
+use std::ffi::c_void;
+
 use log::{error, info};
 
+use smithay::backend::egl::display::PixelFormat;
+use smithay::backend::egl::EGLDisplay;
 use smithay::backend::egl::EGLSurface;
 use smithay::backend::renderer::gles::{
     GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture,
@@ -22,7 +26,9 @@ use smithay::wayland::compositor::{
 
 use crate::background::BackgroundRenderer;
 use crate::compositor::TawcState;
+use crate::egl_android::AndroidNativeSurface;
 use crate::gl_import::AhbTextureImporter;
+use crate::host::OutputHost;
 use crate::wlegl::WleglBufferData;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 
@@ -30,9 +36,13 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 ///
 /// Lives in LoopData alongside TawcState. Anything that touches the
 /// GlesRenderer, EGL, or GL textures belongs here — not in TawcState.
+///
+/// `egl_surface` no longer lives here: each `OutputHost` owns its own
+/// EGLSurface bound to that Activity's `ANativeWindow`. Use
+/// `RenderState::create_egl_surface_for_window` to make a new one when an
+/// Activity registers its surface.
 pub struct RenderState {
     pub renderer: GlesRenderer,
-    pub egl_surface: EGLSurface,
     pub importer: AhbTextureImporter,
     pub shm_tint_shader: Option<GlesTexProgram>,
     /// Custom shader used for wlegl (EXTERNAL_OES AHB-backed) textures that
@@ -44,8 +54,55 @@ pub struct RenderState {
     /// `variant_for_format` in smithay/src/backend/renderer/gles/shaders/implicit/mod.rs.
     pub wlegl_opaque_shader: Option<GlesTexProgram>,
     pub background: Option<BackgroundRenderer>,
-    pub raw_egl_display: *const std::ffi::c_void,
-    pub raw_egl_context: *const std::ffi::c_void,
+    pub raw_egl_display: *const c_void,
+    pub raw_egl_context: *const c_void,
+    /// EGL config + display handles needed to create per-host EGLSurfaces
+    /// at any time after the renderer is initialized. `EGLDisplay` is a
+    /// cheap clone of the renderer's internal handle (Arc internally);
+    /// pixel_format and config_id are immutable for the life of the context.
+    pub egl_display: EGLDisplay,
+    pub egl_pixel_format: PixelFormat,
+    pub egl_config_id: *const c_void,
+}
+
+impl RenderState {
+    /// Create an `EGLSurface` bound to a freshly-acquired ANativeWindow.
+    /// The host takes ownership of the surface; on drop it calls
+    /// `eglDestroySurface`.
+    pub fn create_egl_surface_for_window(
+        &self,
+        native_window: *mut c_void,
+    ) -> Result<EGLSurface, smithay::backend::egl::EGLError> {
+        let native_surface = AndroidNativeSurface::new(native_window);
+        unsafe {
+            EGLSurface::new(
+                &self.egl_display,
+                self.egl_pixel_format,
+                self.egl_config_id,
+                native_surface,
+            )
+        }
+    }
+
+    /// Bind a freshly-created EGLSurface onto the given host. Errors are
+    /// logged and the host's `egl_surface` is left as `None`.
+    pub fn attach_host_surface(&self, host: &mut OutputHost) {
+        match self.create_egl_surface_for_window(host.native_window()) {
+            Ok(surf) => {
+                host.egl_surface = Some(surf);
+                info!(
+                    "Bound EGLSurface for host {} ({}x{})",
+                    host.activity_id, host.physical_size.w, host.physical_size.h
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to create EGLSurface for host {}: {:?}",
+                    host.activity_id, e
+                );
+            }
+        }
+    }
 }
 
 // SAFETY: Contains raw EGL pointers (raw_egl_display, raw_egl_context) which are
@@ -447,7 +504,8 @@ fn collect_tree_draws(
     );
 }
 
-/// Walk all toplevel and popup surface trees, collecting drawable surfaces.
+/// Walk all toplevel and popup surface trees assigned to the given host,
+/// collecting drawable surfaces.
 ///
 /// Each tree is independently reversed for correct z-order:
 /// `with_surface_tree_downward` processes children before parents (post-order),
@@ -459,12 +517,20 @@ fn collect_tree_draws(
 /// Popup trees are appended after their parent toplevel, so they draw on top.
 fn collect_surface_draws(
     state: &TawcState,
+    host_id: &crate::host::ActivityId,
     surface_fn: impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32, i32, i32)>,
 ) -> Vec<SurfaceDraw> {
     let mut draws = Vec::new();
 
     for toplevel in &state.toplevels {
         let root = toplevel.wl_surface();
+        // Skip toplevels not assigned to this host (phase 2 onward).
+        // For phase 0/1 with a single host this never filters anything;
+        // it's the correct behaviour once multi-window lands.
+        match state.toplevel_to_host.get(root) {
+            Some(assigned) if assigned == host_id => {}
+            _ => continue,
+        }
 
         let start = draws.len();
         collect_tree_draws(root, 0, 0, &surface_fn, &mut draws);
@@ -526,18 +592,26 @@ fn draw_surfaces(
     Ok(())
 }
 
-/// Render one frame: bind EGL surface, clear, draw all surfaces, swap.
+/// Render one frame for a single host: bind that host's EGL surface, clear,
+/// draw all surfaces assigned to it, swap. Caller skips hosts whose
+/// `egl_surface` is `None`.
 pub fn render_frame(
     state: &TawcState,
     render: &mut RenderState,
-    output_size: Size<i32, smithay::utils::Physical>,
+    host: &mut OutputHost,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let egl_surface = host
+        .egl_surface
+        .as_mut()
+        .expect("render_frame called for host without EGLSurface");
+
     // Clone shader refs up front — `frame` below takes an exclusive borrow on
     // `render.renderer` so we can't re-borrow render fields through it.
     let wlegl_shader = render.wlegl_opaque_shader.clone();
     let shm_shader = render.shm_tint_shader.clone();
-    let mut target = render.renderer.bind(&mut render.egl_surface)?;
+    let mut target = render.renderer.bind(egl_surface)?;
 
+    let output_size = host.physical_size;
     let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
 
     // Background gradient (black to dark turquoise)
@@ -549,7 +623,8 @@ pub fn render_frame(
     let screen_h = output_size.h;
 
     // Draw wlegl (AHB-backed GPU) surfaces.
-    let wlegl_draws = collect_surface_draws(state, |surf| {
+    let host_id = host.activity_id.clone();
+    let wlegl_draws = collect_surface_draws(state, &host_id, |surf| {
         let ws = state.surface_wlegl.get(surf)?;
         let buf = ws.current_buffer.as_ref()?;
         let data = buf.data::<WleglBufferData>()?;
@@ -563,7 +638,7 @@ pub fn render_frame(
     draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
 
     // Draw SHM fallback surfaces (magenta-tinted to make the fallback obvious)
-    let shm_draws = collect_surface_draws(state, |surf| {
+    let shm_draws = collect_surface_draws(state, &host_id, |surf| {
         if state.surface_wlegl.contains_key(surf) { return None; }
         let ss = state.surface_shm.get(surf)?;
         let tex = ss.texture.as_ref()?.clone();
@@ -578,7 +653,7 @@ pub fn render_frame(
 
     let _ = frame.finish()?;
     drop(target);
-    render.egl_surface.swap_buffers(None)?;
+    egl_surface.swap_buffers(None)?;
     Ok(())
 }
 
@@ -586,7 +661,11 @@ pub fn render_frame(
 // Frame callbacks
 // ---------------------------------------------------------------------------
 
-/// Send frame-done callbacks to all surfaces in all toplevel and popup surface trees.
+/// Send frame-done callbacks to all surfaces in foreground hosts'
+/// toplevel and popup trees. Backgrounded hosts (Phase 7) don't get
+/// callbacks — their clients sit on `Suspended` and shouldn't be
+/// asking for new frames. Without this gate a well-behaved client
+/// keeps drawing offscreen indefinitely on every Activity switch.
 pub fn send_frame_callbacks(state: &TawcState, time: u32) {
     let send_callbacks = |root: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface| {
         with_surface_tree_downward(
@@ -610,6 +689,19 @@ pub fn send_frame_callbacks(state: &TawcState, time: u32) {
 
     for toplevel in &state.toplevels {
         let wl = toplevel.wl_surface();
+        // Look up the host this toplevel paints into; skip if it isn't
+        // currently foreground. An orphaned toplevel (host removed
+        // because Activity was destroyed) is also skipped — we'll send
+        // close to it via the cleanup path.
+        let host_is_fg = state
+            .toplevel_to_host
+            .get(wl)
+            .and_then(|id| state.hosts.get(id))
+            .map(|h| h.foreground)
+            .unwrap_or(false);
+        if !host_is_fg {
+            continue;
+        }
         send_callbacks(wl);
         for (popup, _) in PopupManager::popups_for_surface(wl) {
             send_callbacks(popup.wl_surface());

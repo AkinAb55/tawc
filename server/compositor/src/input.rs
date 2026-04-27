@@ -8,11 +8,16 @@ use std::sync::Mutex;
 
 use smithay::reexports::calloop::channel;
 
+use crate::host::ActivityId;
+
 /// A touch event from Android, in physical pixel coordinates.
+/// `activity_id` identifies which `CompositorActivity`'s SurfaceView
+/// produced the touch — phase 6 uses this to route the touch to the
+/// foreground toplevel of THAT host instead of the global first toplevel.
 pub enum TouchEvent {
-    Down { id: i32, x: f32, y: f32, time: u32 },
-    Motion { id: i32, x: f32, y: f32, time: u32 },
-    Up { id: i32, time: u32 },
+    Down { id: i32, x: f32, y: f32, time: u32, activity_id: ActivityId },
+    Motion { id: i32, x: f32, y: f32, time: u32, activity_id: ActivityId },
+    Up { id: i32, time: u32, activity_id: ActivityId },
 }
 
 /// Global sender. Replaced each time the compositor restarts.

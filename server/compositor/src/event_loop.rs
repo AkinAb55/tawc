@@ -1,9 +1,11 @@
 //! Calloop-based event loop for the compositor.
 //!
-//! Integrates the Wayland display, client listener, and frame timer into
-//! a single calloop event loop. This is the standard smithay pattern —
-//! all real smithay compositors use calloop, not raw poll().
+//! Integrates the Wayland display, client listener, frame timer and
+//! per-Activity surface lifecycle into a single calloop event loop.
+//! All `OutputHost` mutation happens here on the compositor thread —
+//! JNI threads send events through channels.
 
+use std::ffi::c_void;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,9 +22,10 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::rustix;
-use smithay::utils::{Point, Size, SERIAL_COUNTER};
+use smithay::utils::{Point, SERIAL_COUNTER};
 use wayland_server::{Display, ListeningSocket};
 
+use crate::host::{ActivityId, OutputHost, SurfaceEvent};
 use crate::input::TouchEvent;
 use crate::text_input::TextInputEvent;
 
@@ -35,7 +38,11 @@ pub struct LoopData {
     pub state: TawcState,
     pub render: RenderState,
     pub display: Display<TawcState>,
-    pub output_size: Size<i32, smithay::utils::Physical>,
+    /// The single `wl_output` global advertised today. Mode / scale are
+    /// updated when the primary host's geometry changes; multi-output
+    /// support is left to a later phase (see `notes/multi-activity.md`).
+    pub output: smithay::output::Output,
+    pub scale: i32,
     pub start_time: Instant,
     pub frame_count: u64,
     /// Set when buffer contents change; cleared after rendering.
@@ -52,11 +59,12 @@ pub fn run(
     state: TawcState,
     render: RenderState,
     listener: ListeningSocket,
-    output_size: Size<i32, smithay::utils::Physical>,
+    output: smithay::output::Output,
     scale: i32,
     touch_channel: Channel<TouchEvent>,
     text_input_channel: Channel<TextInputEvent>,
     state_query_channel: Channel<()>,
+    surface_event_channel: Channel<SurfaceEvent>,
     running: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<LoopData> = EventLoop::try_new()?;
@@ -99,10 +107,15 @@ pub fn run(
     })?;
 
     // --- Source 3: Touch input channel ---
-    // Receives touch events from the Android UI thread via JNI.
-    // Coordinates arrive in physical pixels; we convert to logical (/ touch_scale).
-    let touch_scale = scale as f64;
-    loop_handle.insert_source(touch_channel, move |event, _, data: &mut LoopData| {
+    // Receives touch events from the Android UI thread via JNI, tagged
+    // with the activity_id of the SurfaceView that produced them.
+    // Coordinates arrive in physical pixels; we convert to logical
+    // (/ scale).
+    //
+    // Focus picks the first alive toplevel assigned to the touch's host —
+    // each Android task only has its own toplevels in the recents card,
+    // so this matches what the user sees.
+    loop_handle.insert_source(touch_channel, |event, _, data: &mut LoopData| {
         let evt = match event {
             ChannelEvent::Msg(e) => e,
             ChannelEvent::Closed => return,
@@ -113,16 +126,20 @@ pub fn run(
             None => return,
         };
 
-        // Find the first alive toplevel's surface as the focus target.
-        // All toplevels are maximized at (0,0), so surface-local coords = global coords.
-        let focus = data.state.toplevels.iter()
-            .find(|t| t.alive())
-            .map(|t| (t.wl_surface().clone(), Point::from((0.0, 0.0))));
+        // Identify the touch's host and its first alive assigned toplevel.
+        let activity_id = match &evt {
+            TouchEvent::Down { activity_id, .. }
+            | TouchEvent::Motion { activity_id, .. }
+            | TouchEvent::Up { activity_id, .. } => activity_id.clone(),
+        };
+        let focus = first_alive_toplevel_of_host(&data.state, &activity_id)
+            .map(|wl| (wl, Point::from((0.0, 0.0))));
 
+        let touch_scale = data.scale as f64;
         let serial = SERIAL_COUNTER.next_serial();
 
         match evt {
-            TouchEvent::Down { id, x, y, time } => {
+            TouchEvent::Down { id, x, y, time, .. } => {
                 let location: Point<f64, smithay::utils::Logical> =
                     (x as f64 / touch_scale, y as f64 / touch_scale).into();
                 // Set keyboard focus on touch to the target surface
@@ -141,7 +158,7 @@ pub fn run(
                 );
                 touch.frame(&mut data.state);
             }
-            TouchEvent::Motion { id, x, y, time } => {
+            TouchEvent::Motion { id, x, y, time, .. } => {
                 let location: Point<f64, smithay::utils::Logical> =
                     (x as f64 / touch_scale, y as f64 / touch_scale).into();
                 touch.motion(
@@ -155,7 +172,7 @@ pub fn run(
                 );
                 touch.frame(&mut data.state);
             }
-            TouchEvent::Up { id, time } => {
+            TouchEvent::Up { id, time, .. } => {
                 touch.up(
                     &mut data.state,
                     &UpEvent {
@@ -216,23 +233,43 @@ pub fn run(
     loop_handle.insert_source(state_query_channel, move |event, _, data: &mut LoopData| {
         if let ChannelEvent::Msg(()) = event {
             let clients = data.state.client_count.load(std::sync::atomic::Ordering::Relaxed);
+            let bound_hosts = data
+                .state
+                .hosts
+                .values()
+                .filter(|h| h.egl_surface.is_some())
+                .count();
             info!(
-                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={}",
+                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={}",
                 clients,
                 data.state.toplevels.len(),
                 data.state.surface_wlegl.len(),
                 data.state.surface_shm.len(),
                 data.frame_count,
                 data.last_rendered_toplevels,
+                data.state.hosts.len(),
+                bound_hosts,
             );
         }
     })?;
 
-    // --- Source 6: Frame timer (~60 fps) ---
+    // --- Source 6: Surface lifecycle events from Activities ---
+    loop_handle.insert_source(surface_event_channel, |event, _, data: &mut LoopData| {
+        let evt = match event {
+            ChannelEvent::Msg(e) => e,
+            ChannelEvent::Closed => return,
+        };
+        handle_surface_event(data, evt);
+        if let Err(e) = data.display.flush_clients() {
+            error!("flush_clients error after surface event: {}", e);
+        }
+    })?;
+
+    // --- Source 7: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
     //   1. Dispatch pending client messages (see note below)
     //   2. Import new buffers (AHB and SHM) as GL textures
-    //   3. Render the frame
+    //   3. Render the frame for each bound host
     //   4. Send frame-done callbacks
     //   5. Flush outgoing events to clients
     //   6. Clean up dead toplevels
@@ -274,18 +311,40 @@ pub fn run(
             data.needs_render = true;
         }
 
-        // 3. Render (only when content changed)
+        // 3. Render — once per bound host. Hosts without an EGLSurface
+        // (Activity backgrounded / surfaceDestroyed) are skipped.
         if data.needs_render {
             data.needs_render = false;
-            if let Err(e) = render::render_frame(
-                &data.state,
-                &mut data.render,
-                data.output_size,
-            ) {
-                error!("Render error: {}", e);
+            let mut rendered_any = false;
+            // Snapshot keys so we don't hold a borrow on data.state.hosts
+            // across the render call. We only render *foreground* hosts
+            // (Phase 7) — backgrounded hosts have already been told to
+            // suspend via the configure event in `set_host_foreground`,
+            // so painting them would just burn cycles on pixels nobody
+            // sees.
+            let host_ids: Vec<ActivityId> = data
+                .state
+                .hosts
+                .iter()
+                .filter(|(_, h)| h.egl_surface.is_some() && h.foreground)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for id in host_ids {
+                // Take the host out of the map so render_frame can hold
+                // a `&mut OutputHost` while still passing `&TawcState`.
+                if let Some(mut host) = data.state.hosts.remove(&id) {
+                    if let Err(e) = render::render_frame(&data.state, &mut data.render, &mut host) {
+                        error!("Render error on host {}: {}", id, e);
+                    } else {
+                        rendered_any = true;
+                    }
+                    data.state.hosts.insert(id, host);
+                }
             }
-            data.frame_count += 1;
-            data.last_rendered_toplevels = data.state.toplevels.len();
+            if rendered_any {
+                data.frame_count += 1;
+                data.last_rendered_toplevels = data.state.toplevels.len();
+            }
         }
 
         // 4. Frame callbacks (always sent so clients can
@@ -305,17 +364,25 @@ pub fn run(
 
         // 5. Cleanup — collect dead toplevels first, then remove their state.
         // (Two-pass avoids borrowing toplevels and surface maps simultaneously.)
-        let dead_surfaces: Vec<_> = data.state.toplevels.iter()
+        // Also remember each dead toplevel's host so we can finish the
+        // Android Activity when its last toplevel goes away (multi-window:
+        // the recents card disappears with the window).
+        let dead: Vec<(_, Option<crate::host::ActivityId>)> = data.state.toplevels.iter()
             .filter(|t| !t.alive())
-            .map(|t| t.wl_surface().clone())
+            .map(|t| {
+                let surf = t.wl_surface().clone();
+                let host = data.state.toplevel_to_host.get(&surf).cloned();
+                (surf, host)
+            })
             .collect();
-        if !dead_surfaces.is_empty() {
+        if !dead.is_empty() {
             data.state.toplevels_changed = true;
         }
-        for wl in &dead_surfaces {
+        for (wl, _) in &dead {
             info!("Removing dead toplevel");
             data.state.surface_shm.remove(wl);
             data.state.surface_wlegl.remove(wl);
+            data.state.toplevel_to_host.remove(wl);
         }
         data.state.toplevels.retain(|t| t.alive());
 
@@ -324,6 +391,26 @@ pub fn run(
         // wl_surface, but subsurfaces (e.g. Firefox WebRender) live separately.
         data.state.surface_wlegl.retain(|surface, _| surface.is_alive());
         data.state.surface_shm.retain(|surface, _| surface.is_alive());
+        data.state.toplevel_to_host.retain(|surface, _| surface.is_alive());
+
+        // For each host that just lost a toplevel: if no toplevels remain
+        // assigned to it, ask Kotlin to finishAndRemoveTask the matching
+        // Activity so its recents card disappears. There is no special
+        // launcher / bootstrap Activity to exempt — every
+        // CompositorActivity exists for exactly one Wayland window.
+        let mut already_finished: std::collections::HashSet<crate::host::ActivityId> =
+            std::collections::HashSet::new();
+        for (_, host_id) in dead {
+            let Some(host_id) = host_id else { continue };
+            if already_finished.contains(&host_id) {
+                continue;
+            }
+            let still_used = data.state.toplevel_to_host.values().any(|h| h == &host_id);
+            if !still_used {
+                already_finished.insert(host_id.clone());
+                crate::finish_activity_from_native(&host_id);
+            }
+        }
 
         data.state.popup_manager.cleanup();
         data.state.text_input_state.cleanup();
@@ -341,13 +428,18 @@ pub fn run(
             error!("flush_clients error: {}", e);
         }
 
-        if data.frame_count % 300 == 0 {
+        // Periodic heartbeat — every 300 actual frames. Guard on
+        // frame_count > 0 so the log doesn't fire every tick when the
+        // compositor is idle (no foreground host means rendering is
+        // skipped entirely and frame_count stays at 0 forever).
+        if data.frame_count > 0 && data.frame_count % 300 == 0 {
             info!(
-                "Compositor: {} frames, {} toplevels, {} wlegl, {} shm",
+                "Compositor: {} frames, {} toplevels, {} wlegl, {} shm, {} hosts",
                 data.frame_count,
                 data.state.toplevels.len(),
                 data.state.surface_wlegl.len(),
                 data.state.surface_shm.len(),
+                data.state.hosts.len(),
             );
         }
 
@@ -358,7 +450,8 @@ pub fn run(
         state,
         render,
         display,
-        output_size,
+        output,
+        scale,
         start_time: Instant::now(),
         frame_count: 0,
         needs_render: true, // render background on first frame
@@ -373,4 +466,187 @@ pub fn run(
 
     info!("Event loop exited after {} frames", loop_data.frame_count);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Surface event handling (per-Activity SurfaceView lifecycle)
+// ---------------------------------------------------------------------------
+
+fn handle_surface_event(data: &mut LoopData, evt: SurfaceEvent) {
+    match evt {
+        SurfaceEvent::Register { activity_id, native_window, width, height } => {
+            let nw = native_window as *mut c_void;
+            let scale = data.scale;
+            // If this Activity already has a host, replace its native_window
+            // (Activity recreated, e.g. after rotation). Otherwise create a
+            // fresh host record.
+            match data.state.hosts.get_mut(&activity_id) {
+                Some(host) => host.replace_native_window(nw, width, height, scale),
+                None => {
+                    let host = OutputHost::new(activity_id.clone(), nw, width, height, scale);
+                    data.state.hosts.insert(activity_id.clone(), host);
+                }
+            }
+            // Bind the EGLSurface (separate step: needs &RenderState).
+            if let Some(host) = data.state.hosts.get_mut(&activity_id) {
+                data.render.attach_host_surface(host);
+            }
+            // Update primary-output mode + the cached logical_size that
+            // configure events use. Phase 0/1 advertises only one
+            // wl_output, so we just track the first/most recent host.
+            data.state.output_logical_size = (width / scale, height / scale);
+            data.output.change_current_state(
+                Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
+                Some(smithay::utils::Transform::Normal),
+                Some(smithay::output::Scale::Integer(scale)),
+                Some((0, 0).into()),
+            );
+            data.output.set_preferred(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 });
+            // Reconfigure existing toplevels with the new logical size.
+            reconfigure_all_toplevels(&mut data.state);
+            data.needs_render = true;
+            info!(
+                "Host registered: {} ({}x{}) — bound={}, total hosts={}",
+                activity_id, width, height,
+                data.state.hosts.get(&activity_id).map(|h| h.egl_surface.is_some()).unwrap_or(false),
+                data.state.hosts.len(),
+            );
+        }
+        SurfaceEvent::SurfaceChanged { activity_id, width, height } => {
+            let scale = data.scale;
+            if let Some(host) = data.state.hosts.get_mut(&activity_id) {
+                host.update_size(width, height, scale);
+            } else {
+                info!("SurfaceChanged for unknown host {}", activity_id);
+                return;
+            }
+            data.state.output_logical_size = (width / scale, height / scale);
+            data.output.change_current_state(
+                Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
+                None, None, None,
+            );
+            reconfigure_all_toplevels(&mut data.state);
+            data.needs_render = true;
+        }
+        SurfaceEvent::SurfaceDestroyed { activity_id } => {
+            if let Some(host) = data.state.hosts.get_mut(&activity_id) {
+                host.drop_surface();
+                info!("Host {} surface dropped (record retained)", activity_id);
+            }
+        }
+        SurfaceEvent::ActivityDestroyed { activity_id } => {
+            // Send xdg_toplevel.close to every toplevel assigned to this
+            // host. Well-behaved clients then destroy the toplevel; we
+            // clean up via the dead-toplevel pass on the next frame.
+            // (Phase 7 polish: handle clients that refuse to close.)
+            let assigned: Vec<_> = data
+                .state
+                .toplevels
+                .iter()
+                .filter(|t| {
+                    data.state.toplevel_to_host.get(t.wl_surface()) == Some(&activity_id)
+                })
+                .cloned()
+                .collect();
+            for t in &assigned {
+                t.send_close();
+            }
+            if data.state.hosts.remove(&activity_id).is_some() {
+                info!("Host {} removed (closed {} toplevels)", activity_id, assigned.len());
+            }
+            if data.state.foreground_host.as_ref() == Some(&activity_id) {
+                data.state.foreground_host = None;
+            }
+            data.state.toplevels_changed = true;
+        }
+        SurfaceEvent::FocusChanged { activity_id, has_focus } => {
+            // Update host state + send Activated/Suspended configures.
+            set_host_foreground(&mut data.state, &activity_id, has_focus);
+            // Refresh wider TawcState bookkeeping (foreground_host pointer,
+            // keyboard / text input focus).
+            if has_focus {
+                data.state.foreground_host = Some(activity_id.clone());
+                let target = first_alive_toplevel_of_host(&data.state, &activity_id);
+                if let Some(keyboard) = data.state.seat.get_keyboard() {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    keyboard.set_focus(&mut data.state, target.clone(), serial);
+                }
+                data.state.text_input_state.update_focus(target.as_ref());
+                data.needs_render = true;
+            } else if data.state.foreground_host.as_ref() == Some(&activity_id) {
+                data.state.foreground_host = None;
+                if let Some(keyboard) = data.state.seat.get_keyboard() {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    keyboard.set_focus(&mut data.state, None, serial);
+                }
+                data.state.text_input_state.update_focus(None);
+            }
+        }
+    }
+}
+
+/// Flip a host's foreground state and notify all assigned toplevels
+/// via `Activated`/`Suspended` configure events. Smithay's
+/// `send_configure` is idempotent on no-op state changes so re-firing
+/// the same focus event is cheap.
+fn set_host_foreground(state: &mut TawcState, host_id: &crate::host::ActivityId, foreground: bool) {
+    use wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
+
+    let toplevels: Vec<_> = state
+        .toplevels
+        .iter()
+        .filter(|t| state.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+        .cloned()
+        .collect();
+    for t in toplevels {
+        t.with_pending_state(|s| {
+            if foreground {
+                s.states.set(XdgState::Activated);
+                s.states.unset(XdgState::Suspended);
+            } else {
+                s.states.unset(XdgState::Activated);
+                // xdg-shell v6 introduced `Suspended`. Smithay only emits
+                // it to clients on protocol version >= 6; for older
+                // clients the unset Activated is the signal.
+                s.states.set(XdgState::Suspended);
+            }
+        });
+        t.send_configure();
+    }
+    if let Some(host) = state.hosts.get_mut(host_id) {
+        host.foreground = foreground;
+    }
+}
+
+/// Find the first alive toplevel assigned to the given host. Used for
+/// touch fallback (no per-coordinate hit-testing yet) and keyboard focus
+/// when a host comes to the foreground.
+fn first_alive_toplevel_of_host(
+    state: &TawcState,
+    host_id: &crate::host::ActivityId,
+) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+    state
+        .toplevels
+        .iter()
+        .filter(|t| t.alive())
+        .find(|t| state.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+        .map(|t| t.wl_surface().clone())
+}
+
+fn reconfigure_all_toplevels(state: &mut TawcState) {
+    // Each toplevel uses ITS OWN host's logical_size if known, else the
+    // primary-output cached size as a fallback.
+    let primary = state.output_logical_size;
+    for toplevel in &state.toplevels {
+        let (w, h) = state
+            .toplevel_to_host
+            .get(toplevel.wl_surface())
+            .and_then(|id| state.hosts.get(id))
+            .map(|host| host.logical_size)
+            .unwrap_or(primary);
+        toplevel.with_pending_state(|s| {
+            s.size = Some((w, h).into());
+        });
+        toplevel.send_configure();
+    }
 }

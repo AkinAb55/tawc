@@ -8,17 +8,27 @@ The compositor (`server/compositor/src/`) is split into:
   output, and listening socket, then hands off to the event loop.
 - **event_loop.rs** -- Calloop-based event loop. Sources: Wayland display fd
   (dispatch client messages), listener socket (accept connections), touch input channel
-  (Android touch -> wl_touch), text-input channel, state-query channel, frame timer
-  (~60 fps render loop).
+  (Android touch -> wl_touch), text-input channel, state-query channel, surface-event
+  channel (per-Activity `SurfaceView` lifecycle), frame timer (~60 fps render loop).
+  Also owns `set_host_foreground` and the per-host render iteration.
+- **host.rs** -- `OutputHost` (per-Activity render target — owns ANativeWindow + EGLSurface
+  + foreground bool), `SurfaceEvent` (Register / SurfaceChanged / SurfaceDestroyed /
+  ActivityDestroyed / FocusChanged), and the JNI -> compositor surface-event channel.
+  See [multi-activity.md](multi-activity.md).
 - **input.rs** -- Touch input delivery from Android JNI to the compositor via calloop
-  channel. Global `OnceLock<Sender>` allows JNI callbacks to send events cross-thread.
+  channel. Events carry the `ActivityId` of the SurfaceView that produced them.
+  Global `OnceLock<Sender>` allows JNI callbacks to send events cross-thread.
 - **text_input.rs** -- `zwp_text_input_v3` server impl bridging Android InputConnection.
-- **compositor.rs** -- `TawcState` (Wayland protocol state) and all Smithay handler trait
-  impls. Does NOT hold rendering state.
+- **compositor.rs** -- `TawcState` (Wayland protocol state, including `hosts`,
+  `toplevel_to_host`, `single_activity_mode`, `foreground_host`) and all Smithay handler
+  trait impls including `assign_toplevel_to_host` (the multi-window policy). Does NOT
+  hold rendering state.
 - **render.rs** -- `RenderState` (GPU/EGL state), buffer import (AHB + SHM -> GL textures),
-  frame rendering, frame callbacks, and the SHM magenta tint / wlegl-opaque shaders.
+  per-host frame rendering, foreground-gated frame callbacks, the SHM magenta tint /
+  wlegl-opaque shaders, and `create_egl_surface_for_window` for binding new hosts.
 - **background.rs** -- Black-to-turquoise gradient drawn behind every frame.
-- **egl_android.rs** -- Raw EGL context creation and `AndroidNativeSurface` for Smithay.
+- **egl_android.rs** -- Raw EGL context creation (with `EGL_KHR_surfaceless_context`
+  default-current) and `AndroidNativeSurface` for Smithay.
 - **wlegl.rs** -- `android_wlegl` server: reconstruct client-allocated gralloc buffers
   into AHardwareBuffers via the C helper, expose them as wl_buffers.
 - **gl_import.rs** -- GL/EGL extension loading and texture import. Imports AHardwareBuffers
@@ -26,6 +36,20 @@ The compositor (`server/compositor/src/`) is split into:
 - **protocol.rs** -- wayland-scanner generated code for `android_wlegl`.
 - **native/wlegl_import.c** -- ~50-line C helper calling
   `AHardwareBuffer_createFromHandle(REGISTER)` (dlsym'd from libnativewindow.so).
+
+Kotlin side (`server/app/src/main/java/me/phie/tawc/`):
+
+- **MainActivity.kt** -- Launcher (only Activity in `category.LAUNCHER`); a button starts
+  `CompositorActivity` for the primary host.
+- **compositor/CompositorService.kt** -- Foreground service (`specialUse` type) that owns
+  the Rust compositor thread. Activities bind to it; it tracks them by `activityId` so
+  reverse-JNI calls can find the right Activity.
+- **compositor/CompositorActivity.kt** -- One per Wayland window. Reads `activityId` from
+  `intent.data?.lastPathSegment` (UUID under `tawc://activity/<id>`); falls back to
+  `"primary"` for the launcher path. Forwards `SurfaceHolder` / touch / focus events
+  to native tagged with the id.
+- **compositor/NativeBridge.kt** -- JNI surface, `attachService` to capture app context
+  for the `spawnActivity` / `finishActivity` reverse-JNI callbacks.
 
 ## Key Design Decisions
 

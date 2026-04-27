@@ -128,48 +128,59 @@ pub fn wait_for_rendered_toplevels(
     }
 }
 
-/// Ensure the tawc compositor is running and visible on the phone.
-/// Restarts it if not running or if backgrounded/paused. The harness
-/// never stops the compositor itself — `run-integration-tests.sh` does
-/// the final force-stop after the suite, and leaving it running between
+/// Ensure the tawc compositor is running on the phone. Starts the
+/// `CompositorService` (which owns the compositor thread + Wayland
+/// socket) if it isn't already up. The harness never stops the
+/// compositor itself — `run-integration-tests.sh` does the final
+/// force-stop after the suite, and leaving the service running between
 /// test binaries lets the next one hit the already-running fast-path.
+///
+/// Liveness is determined by the tawc app process, not by an Android
+/// Activity: per-window CompositorActivities only exist for the
+/// duration of an actual Wayland toplevel and are absent between tests.
+/// The socket file alone isn't a good signal — `am force-stop` leaves
+/// the bound socket file behind, so subsequent `test -e` checks would
+/// pass against a dead compositor.
 pub fn ensure_running() -> io::Result<()> {
-    let output = adb::shell("dumpsys activity activities | grep me.phie.tawc")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Check for both presence AND visibility. A paused/backgrounded compositor
-    // won't have a functioning Wayland socket or receive touch events.
-    let is_running = stdout.contains("me.phie.tawc/.compositor.CompositorActivity");
-    let is_visible = stdout.contains("visible=true");
-
-    if is_running && is_visible {
+    if compositor_alive()? {
         return Ok(());
     }
 
-    if is_running {
-        eprintln!("Compositor paused/backgrounded, restarting...");
-        adb::shell("am force-stop me.phie.tawc")?;
-        thread::sleep(Duration::from_millis(500));
-    } else {
-        eprintln!("Starting compositor...");
-    }
+    eprintln!("Starting compositor (via MainActivity → CompositorService)...");
+    // The Service is `exported="false"`, so `am start-foreground-service`
+    // fails over adb with "Requires permission not exported." Launch
+    // MainActivity instead — its onCreate calls startForegroundService
+    // unconditionally, which has the same effect from inside the app.
+    // Force-stop first so any leftover socket file from a previous
+    // run is cleared before the new compositor binds.
+    adb::shell("am force-stop me.phie.tawc")?;
+    thread::sleep(Duration::from_millis(300));
+    adb::shell("am start -n me.phie.tawc/.MainActivity")?;
 
-    adb::shell("am start -n me.phie.tawc/.compositor.CompositorActivity")?;
-    // Poll for the Wayland socket to appear (compositor is ready).
-    // The socket symlink target is in the app's private data dir, so
-    // we need root to follow it.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let output = adb::shell("su -c 'test -e /data/local/arch-chroot/tmp/wayland-0 && echo ready'")?;
-        if String::from_utf8_lossy(&output.stdout).contains("ready") {
-            break;
+        if compositor_alive()? {
+            return Ok(());
         }
         if std::time::Instant::now() > deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Wayland socket did not appear within 15s",
+                "Compositor did not become ready within 15s",
             ));
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Ok(())
+}
+
+/// True iff the tawc app process is alive AND the chroot-visible
+/// Wayland socket exists. Both conditions matter: `am force-stop`
+/// leaves the unix-domain socket file behind on disk even though no
+/// process is listening, so the file alone would falsely indicate
+/// readiness on the very next test run.
+fn compositor_alive() -> io::Result<bool> {
+    let output = adb::shell(
+        "pidof me.phie.tawc >/dev/null && \
+         su -c 'test -e /data/local/arch-chroot/tmp/wayland-0' && echo ready",
+    )?;
+    Ok(String::from_utf8_lossy(&output.stdout).contains("ready"))
 }

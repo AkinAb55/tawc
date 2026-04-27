@@ -1,11 +1,13 @@
 # Multi-Activity Window Manager
 
-Plan for replacing the single `CompositorActivity` with one Android task per
-"window," so each window appears as its own card in the system app switcher.
+Each Wayland toplevel that the chroot user sees becomes its own Android
+task — one card per window in the system app switcher, the way Chrome's
+"merge tabs and apps" mode shows each tab.
 
-Status: design notes, not yet implemented. Cross-reference from
-[architecture.md](architecture.md), [android.md](android.md), and the
-"Multi-Window" item in [plan.md](../plan.md).
+Status: phases 0-7 shipped (2026-04-26). Polish (task labels, icons,
+refused-close handling, settings UI) is the remaining work. The design
+intent is preserved below; the "As built" section captures where the
+implementation diverged.
 
 ## Goal
 
@@ -27,7 +29,23 @@ closes that window.
   The first implementation does something reasonable and well-defined; we
   refine later.
 
-## Prerequisite: compositor moves to a foreground Service
+## Bootstrap: there is no "primary" CompositorActivity
+
+`MainActivity` is the launcher entry. Its `onCreate` calls
+`startForegroundService(CompositorService)` and then renders a tiny
+status page — that's it. The compositor thread + Wayland socket live
+in `CompositorService` for the duration of the app process; from that
+point on, every `CompositorActivity` instance corresponds 1:1 to a
+real Wayland toplevel (spawned by the policy via reverse-JNI, killed
+by `finishActivity` when the toplevel dies). The recents view shows
+`MainActivity` (the launcher card) plus one card per window. There is
+no separate "compositor" / "primary" task to confuse the user.
+
+For tests, `compositor::ensure_running` checks `pidof me.phie.tawc`
+AND the chroot-side socket symlink, so a leftover socket file from a
+prior `am force-stop` doesn't get mistaken for a live compositor.
+
+## Why not just keep the compositor in an Activity?
 
 Today the compositor thread is started by `CompositorActivity.surfaceCreated`
 and would die with the Activity. That breaks the moment we start spawning
@@ -520,6 +538,105 @@ Each phase is independently testable; nothing assumes a future phase exists.
 Phases 0-3 are pure refactors and should keep all existing integration
 tests green. Phase 4 onward needs new tests (multi-toplevel scenarios) per
 the Tests section above.
+
+## As built (2026-04-26)
+
+Files of interest:
+- `server/compositor/src/host.rs` — `OutputHost` + `SurfaceEvent` channel
+  + `new_activity_id()`. The activity-id minter uses an epoch-nanos /
+  counter combo instead of UUIDs to avoid pulling in the `uuid` crate;
+  the values are guaranteed unique within and across runs.
+- `server/compositor/src/lib.rs` — `nativeStartCompositor` /
+  `nativeRegisterActivitySurface` / `nativeOnActivitySurfaceChanged` /
+  `nativeOnActivitySurfaceDestroyed` / `nativeOnActivityDestroyed` /
+  `nativeOnActivityFocusChanged` JNI plus `spawn_activity_from_native`
+  / `finish_activity_from_native` reverse-JNI.
+- `server/compositor/src/event_loop.rs` — surface-event source, focus
+  set/clear via `set_host_foreground`, per-host render loop
+  iteration, `first_alive_toplevel_of_host` for touch fallback,
+  `finishActivity` cleanup when a host loses its last toplevel.
+- `server/compositor/src/compositor.rs` — `TawcState::hosts` /
+  `toplevel_to_host` / `single_activity_mode` / `foreground_host`,
+  `assign_toplevel_to_host` policy returning `HostAssignment`,
+  per-host configure sizing in `new_toplevel`.
+- `server/app/src/main/java/me/phie/tawc/compositor/CompositorService.kt`
+  — foreground-service shell, posts `specialUse` notification, holds
+  the Activity registry.
+- `server/app/src/main/java/me/phie/tawc/compositor/CompositorActivity.kt`
+  — reads `activityId` from `intent.data?.lastPathSegment`, binds to
+  Service in `onCreate`, forwards surface / touch / focus events
+  tagged with the id, gates the test BroadcastReceiver on
+  `hasWindowFocus()` so multi-Activity test runs don't fan out.
+- `server/app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt`
+  — `attachService` captures application context for `spawnActivity`
+  reverse-JNI; `finishActivity` looks up the matching Activity via
+  the Service and calls `finishAndRemoveTask`.
+- `server/app/src/main/AndroidManifest.xml` — foreground-service
+  permissions (`SPECIAL_USE`), `documentLaunchMode="intoExisting"` +
+  `taskAffinity=""` on `CompositorActivity`, `tawc://activity` intent
+  filter.
+
+### Channel-creation ordering (Phase 0/1 race)
+
+`SurfaceHolder.surfaceCreated` fires within milliseconds of
+`bindService`; if the compositor thread hadn't yet installed the
+surface-event channel sender, that first registration would be
+silently dropped and the Activity would render nothing.
+
+Resolution: `nativeStartCompositor` creates ALL calloop channel pairs
+(touch, text-input, surface-event, state-query) BEFORE spawning the
+compositor thread, then moves the receivers into the closure. Channel
+senders go into global `Mutex<Option<…>>` slots; events queue safely
+in the channel buffer until the compositor thread plugs the receivers
+into its event loop.
+
+### Deferred EGL surface creation
+
+The compositor thread sets up its EGL display + context up front via
+`create_raw_egl_context()` (which leaves the context current with
+`NO_SURFACE` — Adreno + emulator gfxstream both support
+`EGL_KHR_surfaceless_context`). `RenderState::create_egl_surface_for_window`
+makes a per-host `EGLSurface` later, when an Activity's
+`nativeRegisterActivitySurface` reaches the event-loop handler.
+`OutputHost::Drop` releases the `ANativeWindow` reference acquired by
+`ANativeWindow_fromSurface`.
+
+### Foreground / suspend semantics
+
+`OutputHost.foreground: bool` is the single source of truth.
+`set_host_foreground` walks toplevels assigned to the host and sets /
+unsets `XdgState::Activated` + `XdgState::Suspended` in their pending
+state, then `send_configure`. Smithay short-circuits no-op configures,
+so toggling is cheap and idempotent.
+
+Render loop iterates `hosts.iter().filter(|(_, h)| h.egl_surface.is_some()
+&& h.foreground)`. Frame callbacks check the same predicate per
+toplevel via `toplevel_to_host` lookup. Backgrounded clients stop
+producing frames as soon as Smithay-aware clients (GTK4, recent
+Firefox, Qt6) honour `Suspended`; legacy clients see only cleared
+`Activated` and behave as if minimised. We don't import textures for
+backgrounded surfaces — the calloop frame timer just leaves their
+`buffer_commit_pending` flag pending until the host returns to
+foreground.
+
+### Activity cleanup on last toplevel
+
+The frame-timer cleanup pass collects each dead toplevel along with
+its `(_, Option<ActivityId>)`; once the dead-toplevel removal is done
+it walks the unique host IDs and, for any host with no remaining
+assigned toplevels, calls `finish_activity_from_native(host_id)`.
+Every `CompositorActivity` exists for exactly one Wayland window — when
+the window goes away the recents card disappears with it.
+
+### Test broadcast deduplication
+
+The TEXT_INPUT / KEY_EVENT broadcast goes to every alive
+`CompositorActivity`'s `BroadcastReceiver` — N receivers means N
+`commitText` calls and the test sees the text repeated N times. The
+receiver now early-returns when `!hasWindowFocus()`, so only the one
+foreground Activity acts on the broadcast. (QUERY_STATE doesn't need
+this gate; multiple `COMPOSITOR_STATE` log lines are a no-op for the
+test parser.)
 
 ## What this design preserves
 
