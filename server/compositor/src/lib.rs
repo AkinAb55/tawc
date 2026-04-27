@@ -94,6 +94,25 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
             .with_max_level(log::LevelFilter::Debug)
             .with_tag("tawc-native"),
     );
+    // The default Rust panic handler writes to stderr, which Bionic
+    // routes to /dev/null for app processes — so a panic in the
+    // compositor thread vanishes silently and is misdiagnosed as a
+    // hang. Route panics through `error!` (i.e. android_logger /
+    // logcat) and then abort: the compositor is the only thing this
+    // process is for, so a panic here is fatal and we'd rather show
+    // up as a clean SIGABRT with a useful message than leave the JVM
+    // running on a dead native worker.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let msg = info.payload()
+            .downcast_ref::<&'static str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+        log::error!("compositor panic at {}: {}", location, msg);
+        std::process::abort();
+    }));
     cache_jni_globals(&mut env);
 
     if COMPOSITOR_RUNNING.swap(true, Ordering::SeqCst) {
