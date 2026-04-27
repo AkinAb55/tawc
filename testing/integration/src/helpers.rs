@@ -88,6 +88,32 @@ pub fn saw_ahb_import(logs: &str) -> bool {
     logs.contains("wlegl: imported ANativeWindowBuffer as texture")
 }
 
+/// Assert that an animating client is actually committing new frames, not
+/// stuck on its swapchain. The compositor's `frames` counter only advances
+/// when a client commits — either via a new buffer import or a re-attach
+/// of an existing wl_buffer (`buffer_commit_pending`). A client blocked in
+/// `vkAcquireNextImageKHR` or otherwise wedged keeps the counter flat.
+///
+/// Samples `frames` twice over `window`. Fails if the delta is below
+/// `min_frames`, which should be set well below the steady-state rate
+/// (~60 fps × window) but high enough that "0 frames" is unambiguous.
+pub fn assert_client_animating(name: &str, window: Duration, min_frames: u64) {
+    let before = compositor::query_state(TIMEOUT)
+        .unwrap_or_else(|e| panic!("query compositor state before {name} animation check: {e}"));
+    thread::sleep(window);
+    let after = compositor::query_state(TIMEOUT)
+        .unwrap_or_else(|e| panic!("query compositor state after {name} animation check: {e}"));
+
+    let delta = after.frames.saturating_sub(before.frames);
+    assert!(
+        delta >= min_frames,
+        "{name} appears stuck — compositor rendered {delta} frames in {window:?} \
+         (expected >= {min_frames}). before={before:?} after={after:?}. \
+         Likely the client is blocked on its swapchain (no buffer release / \
+         frame callback from the compositor)."
+    );
+}
+
 /// True if compositor logcat shows an SHM buffer import.
 pub fn saw_shm_import(logs: &str) -> bool {
     logs.contains("SHM buffer imported")

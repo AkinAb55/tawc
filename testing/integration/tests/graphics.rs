@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use tawc_integration::chroot_process::ChrootProcess;
 use tawc_integration::helpers::{
-    assert_compositor_clean, ensure_compositor, launch_and_wait_for_ahb, saw_ahb_import,
-    saw_shm_import, TIMEOUT,
+    assert_client_animating, assert_compositor_clean, ensure_compositor, launch_and_wait_for_ahb,
+    saw_ahb_import, saw_shm_import, TIMEOUT,
 };
 use tawc_integration::{adb, chroot, compositor};
 
@@ -163,6 +163,8 @@ fn test_weston_simple_shm_uses_shm_buffers() {
         state
     );
 
+    assert_client_animating("weston-simple-shm", Duration::from_millis(1500), 10);
+
     app.stop()
         .expect("weston-simple-shm failed to stop cleanly");
     assert_compositor_clean();
@@ -189,6 +191,8 @@ fn test_weston_simple_egl_uses_hardware_buffers() {
         state
     );
 
+    assert_client_animating("weston-simple-egl", Duration::from_millis(1500), 10);
+
     app.stop()
         .expect("weston-simple-egl failed to stop cleanly");
     assert_compositor_clean();
@@ -204,8 +208,10 @@ fn test_vulkan_client_uses_hardware_buffers() {
     chroot::ensure_pkgs(&["vulkan-tools"]).expect("install vulkan-tools");
     // `--c` caps the frame count; we still kill via stop() so the value
     // mostly just guards against the test runner hanging if stop() fails.
+    // Cap is set well above what the animation check below needs so vkcube
+    // doesn't naturally exit mid-test and falsely flag as stuck.
     let mut app = launch_and_wait_for_ahb(
-        "vkcube --wsi wayland --c 600",
+        "vkcube --wsi wayland --c 3000",
         "vkcube",
         VKCUBE_LAUNCH_TIMEOUT,
     );
@@ -217,6 +223,8 @@ fn test_vulkan_client_uses_hardware_buffers() {
         "Compositor should see at least 1 toplevel, got {:?}",
         state
     );
+
+    assert_client_animating("vkcube", Duration::from_millis(1500), 10);
 
     app.stop().expect("vkcube failed to stop cleanly");
     assert_compositor_clean();
