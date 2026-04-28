@@ -75,9 +75,9 @@ See [notes/testing.md](notes/testing.md) for details.
 - ✅ libhybris built with `--enable-wayland --disable-wayland_serverside_buffers` (no glvnd; pulling Mesa GLX in breaks Firefox).
 - ✅ `android_wlegl` protocol dispatch in compositor (Rust + ~50-line C helper calling `AHardwareBuffer_createFromHandle`)
 - ✅ libhybris fork: AHB gralloc backend (`AHardwareBuffer_*` via libnativewindow.so) to produce modern-format handles — without it the stock vendor gralloc1 path returns handles the Android-side mapper rejects on Android 12+ devices. Plus shared-queue and `queueBuffer`-attach patches needed by Firefox/Adreno. See `libhybris/TAWC_FORK.md`.
-- ✅ Chroot env: `HYBRIS_EGLPLATFORM=wayland`, `LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib`.
+- ✅ Chroot env: `HYBRIS_EGLPLATFORM=wayland`, `LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib`.
 - ✅ Dead code removed: `client/tawc-wsi/` directory (tawc-egl.c ~1500 lines), `server/compositor/protocols/tawc_buffer_v1.xml`, `src/ahb.rs`, the Unix-socket side-channel, the `surface_ahb` HashMap, the legacy `import_pending_ahbs` render path.
-- ✅ Tiny GL shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`, ~30 lines each) built as part of `bash client/build-libhybris`. Firefox/glxtest and GTK/libepoxy probe libGL.so/libGLESv2.so by name and need GLX symbols stubbed so Mesa GLX (broken in chroot) doesn't get reached. See `notes/wsi-layer.md` "Why GL shims still exist".
+- ✅ Tiny GL shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`, ~30 lines each) built host-side by `bash client/build-libhybris-aarch64` and shipped in the APK. Firefox/glxtest and GTK/libepoxy probe libGL.so/libGLESv2.so by name and need GLX symbols stubbed so Mesa GLX (broken in chroot) doesn't get reached. See `notes/wsi-layer.md` "Why GL shims still exist".
 - ✅ Integration tests (text-input SHM, click-cursor AHB, firefox AHB) all pass.
 
 ## Vulkan WSI ✅ (2026-04-20)
@@ -87,7 +87,7 @@ libhybris has built-in Wayland Vulkan WSI (`vulkanplatform_wayland.so`). It inte
 Wayland platform migration is done and the compositor serves `android_wlegl`, Vulkan
 clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 
-- ✅ `vulkan` subdir built by `bash client/build-libhybris`; installs `libvulkan.so.1`
+- ✅ `vulkan` subdir built by `bash client/build-libhybris-aarch64`; ships `libvulkan.so.1`
   (shadows `vulkan-icd-loader` via `LD_LIBRARY_PATH`) and `libhybris/vulkanplatform_wayland.so`
 - ✅ `vulkan.c` compiles with vulkan-headers 1.4.341 (Cuda NV extension guard switched
   from `VK_HEADER_VERSION >= 269` to `#ifdef VK_NV_cuda_kernel_launch` — the NV Cuda

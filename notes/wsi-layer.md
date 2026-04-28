@@ -5,8 +5,8 @@ Wayland apps set `HYBRIS_EGLPLATFORM=wayland`, libhybris's
 `libEGL.so` at `/usr/local/lib` is loaded by name, and buffer sharing
 goes over the `android_wlegl` Wayland protocol. We carry no custom
 client-side EGL code — the only local changes are inside our libhybris
-fork. GL shim libraries in `/tmp/gl-shims/` sit in front of distro
-libraries to prevent incompatible code paths:
+fork. GL shim libraries in `/usr/local/lib/gl-shims/` sit in front of
+distro libraries to prevent incompatible code paths:
 - `libGL.so`, `libGLESv2.so.2`: GLX stubs + GLES forwarding (see below)
 
 ## Chroot environment
@@ -17,22 +17,28 @@ Set by `ChrootMounter` (rewritten on every chroot entry) via
 ```
 WAYLAND_DISPLAY=wayland-0
 XDG_RUNTIME_DIR=/tmp
-LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib
+LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib
 HYBRIS_EGLPLATFORM=wayland
 ```
 
-`/tmp/gl-shims` holds the shim libraries (built by
-`client/build-libhybris-chroot.sh`). `/usr/local/lib` is where
-`bash client/build-libhybris` installs libhybris (libEGL.so,
+`/usr/local/lib/gl-shims` holds the GL shim libraries — populated by
+the chroot installer as a directory symlink to the APK-extracted
+libhybris tree (`/data/data/me.phie.tawc/files/libhybris/lib/gl-shims/`,
+generated host-side by `client/build-libhybris-aarch64`).
+`/usr/local/lib` is where libhybris's main `.so`s live as per-file
+symlinks pointing at the same APK-extracted tree (libEGL.so,
 libGLESv2.so, libGLESv1_CM.so, libvulkan.so.1, plus eglplatform_*.so
-and vulkanplatform_*.so plugins under `/usr/local/lib/libhybris/`).
+and vulkanplatform_*.so plugins under `/usr/local/lib/libhybris/`,
+also a directory symlink). See `notes/installation.md`'s CONFIGURING
+stage for the exact wiring (`LibhybrisLinker.kt`).
 
 We deliberately build libhybris **without** `--enable-glvnd` (see
-`client/build-libhybris`): the glvnd path drags `libglvnd` in as a hard
-runtime dep, which in turn drags `libGLX_mesa.so` — that can't init
-without a DRI render node and breaks Firefox's startup probes. So
-libhybris installs as plain `libEGL.so`, and putting `/usr/local/lib`
-on `LD_LIBRARY_PATH` ahead of the system path picks it up by name.
+`client/build-libhybris-aarch64`): the glvnd path drags `libglvnd` in
+as a hard runtime dep, which in turn drags `libGLX_mesa.so` — that
+can't init without a DRI render node and breaks Firefox's startup
+probes. So libhybris installs as plain `libEGL.so`, and putting
+`/usr/local/lib` on `LD_LIBRARY_PATH` ahead of the system path picks
+it up by name.
 
 ## Client flow
 
@@ -66,12 +72,14 @@ name, it picks up the distro's libglvnd dispatcher. libglvnd routes
   detect context type, and `abort()`s if the symbol is found in a
   vendor that doesn't actually serve GLX.
 
-The shims (`client/libgl-shim.c`,
-`client/libglesv2-shim.c`) export NULL-returning `glX*`
-stubs and DT_NEEDED-link to a renamed copy of libhybris's GLES
-(`libGLESv2_real.so`) so `dlsym(handle, "glBindTexture")` still
-resolves through the dependency chain. Built and pushed to
-`/tmp/gl-shims` by `bash client/build-libhybris`.
+The shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`) export
+NULL-returning `glX*` stubs and DT_NEEDED-link to a renamed copy of
+libhybris's GLES (`libGLESv2_hybris.so`) so `dlsym(handle,
+"glBindTexture")` still resolves through the dependency chain. Built
+host-side by `client/build-libhybris-aarch64`; ship as part of the
+APK's `libhybris/<abi>.tar` asset, extracted at runtime, and exposed
+in the chroot at `/usr/local/lib/gl-shims/` (directory symlink to the
+extracted tree).
 
 If we ever switch back on `--enable-glvnd` in libhybris and arrange
 for libglvnd to be present *without* Mesa (or with Mesa neutered),
@@ -209,4 +217,4 @@ Prior to migration we carried:
 
 Both are gone. The tiny GL shims (libgl-shim, libglesv2-shim) are
 all that's left (`client/libgl-shim.c`, `client/libglesv2-shim.c`,
-built as part of `bash client/build-libhybris`).
+built as part of `bash client/build-libhybris-aarch64`).

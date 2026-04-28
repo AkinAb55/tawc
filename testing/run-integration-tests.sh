@@ -1,23 +1,23 @@
 #!/bin/bash
 # Run the tawc integration test suite.
 #
-# Builds all components (compositor APK, debug app, libhybris on device),
-# deploys to the target, then runs the cargo integration tests. Pass an
-# optional libtest substring filter to narrow the run; pass --no-build
-# to skip the rebuild/redeploy phase.
+# Builds all components (compositor APK including libhybris asset, debug
+# app), deploys to the target, then runs the cargo integration tests.
+# Pass an optional libtest substring filter to narrow the run; pass
+# --no-build to skip the rebuild/redeploy phase.
 #
 # Prerequisites:
 #   - Android device or emulator connected via adb with root (su) access
 #     (multiple targets: set TAWC_TARGET=device|emulator first)
-#   - tawc app installed (this script reinstalls it during build)
+#   - tawc app installed (this script reinstalls it during build).
+#     libhybris ships inside the APK as an asset and is symlinked into
+#     each rootfs at install time — no on-device libhybris build step.
 #   - In-app Arch chroot installed at
 #     /data/data/me.phie.tawc/distros/arch/. Install via:
 #       adb shell am start -n me.phie.tawc/.install.InstallActivity \
 #           --es autoStart true --es id arch
 #   - Test-suite chroot packages installed (run
 #     `bash testing/install-test-deps.sh` once per chroot install)
-#   - libhybris already built and installed in the chroot (run
-#     `bash client/build-libhybris` once); skipped on emulator
 #   - JAVA_HOME set or java-21-openjdk installed at default path
 #
 # Usage:
@@ -95,16 +95,6 @@ EOF
     echo "=== Pushing pidfile helper ==="
     adb push testing/tawc-pidfile-exec /data/local/tmp/
     adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec /data/data/me.phie.tawc/distros/arch/rootfs/tmp/tawc-pidfile-exec && chmod +x /data/data/me.phie.tawc/distros/arch/rootfs/tmp/tawc-pidfile-exec'"
-
-    case "$ANDROID_SERIAL" in
-        emulator-*)
-            echo "=== Skipping libhybris build (emulator has no Android GPU drivers) ==="
-            ;;
-        *)
-            echo "=== Building libhybris + GL shims (if sources changed) ==="
-            bash client/build-libhybris --if-needed
-            ;;
-    esac
 fi
 
 # Launch the compositor once for the whole suite. Tests assert it is

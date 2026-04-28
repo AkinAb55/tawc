@@ -111,3 +111,51 @@ tawcAbis.forEach { abi ->
         dependsOn(copyTask)
     }
 }
+
+// Cross-compile libhybris for aarch64 glibc on the host and pack it
+// (with symlinks preserved) as an APK asset. Extracted at runtime by
+// CompositorService.ensureLibhybrisExtracted into the app's filesDir
+// and symlinked into each chroot rootfs at install time.
+//
+// Only aarch64 — libhybris is unsupported on the x86_64 emulator
+// (notes/emulator.md). If the user runs with `-PtawcAbis=x86_64`
+// only, we silently skip libhybris bundling.
+//
+// The actual cross-compile lives in client/build-libhybris-aarch64 so
+// it can be run by hand for development. This Gradle task just invokes
+// it and packs the result.
+if ("arm64-v8a" in tawcAbis) {
+    // The tawc repo root is one level up from the Gradle root (which
+    // is `server/`). client/build-* and build/libhybris-* live there.
+    val tawcRoot = rootProject.projectDir.parentFile
+    val libhybrisAbi = "arm64-v8a"
+    val libhybrisInstallDir = "$tawcRoot/build/libhybris-aarch64/install/usr/local"
+    val libhybrisAssetFile = "src/main/assets/libhybris/$libhybrisAbi.tar"
+
+    val buildLibhybrisTask = tasks.register<Exec>("buildLibhybris") {
+        workingDir = tawcRoot
+        commandLine("bash", "client/build-libhybris-aarch64")
+    }
+
+    val packLibhybrisTask = tasks.register<Exec>("packLibhybris") {
+        dependsOn(buildLibhybrisTask)
+        // Use tar(1) on the host because the Android packager strips
+        // symlinks from individual assets, but happily ships an opaque
+        // .tar that the runtime can untar with symlinks intact. We use
+        // `--format=ustar` for portability and chdir into the install
+        // tree so paths in the tar are relative ("lib/libhybris-...",
+        // not "/home/ai/...").
+        doFirst { mkdir(file(libhybrisAssetFile).parentFile) }
+        workingDir = file(libhybrisInstallDir)
+        // Exclude libtool's `.la` archives and pkg-config metadata —
+        // they reference host-side cross-toolchain paths that don't
+        // exist on-device and aren't read at runtime.
+        commandLine("tar", "--format=ustar",
+            "--exclude=*.la", "--exclude=pkgconfig",
+            "-cf", "${project.projectDir}/$libhybrisAssetFile", "lib")
+    }
+
+    tasks.named("preBuild") {
+        dependsOn(packLibhybrisTask)
+    }
+}

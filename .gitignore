@@ -10,6 +10,9 @@ target/
 # JNI libs (built artifacts, not source)
 **/jniLibs/
 
+# libhybris asset (built by the buildLibhybris Gradle task)
+server/app/src/main/assets/libhybris/
+
 # IDE
 .idea/
 *.iml
@@ -21,6 +24,7 @@ libhybris/
 smithay/
 rootAVD/
 libxkbcommon/
+android-headers/
 
 # OS
 .DS_Store

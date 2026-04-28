@@ -3,6 +3,9 @@ Hi Claude! This project is Tess's Android Wayland Compositor (tawc). It's an And
 ## Plan
 [plan.md](plan.md) has the implementation roadmap.
 
+## Building
+**[notes/building.md](notes/building.md) is the source of truth for build-time dependencies and the fresh-system build flow.** Consult it before building on a new machine, and **update it in the same change** whenever you add or change a build-time dep (host package, vendored repo, env var, toolchain version). The Quick Reference at the bottom of this file is a cheat sheet for already-set-up systems — building.md is the doc to follow when setting up.
+
 ## Notes
 The `notes/` directory contains architecture and implementation notes. Edit/create/split/merge/rename notes as needed without being asked. Key files:
 - [architecture.md](notes/architecture.md) -- compositor module layout, design decisions, Smithay integration
@@ -73,7 +76,7 @@ bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 
 ## Libhybris fork
 - **libhybris fork:** https://github.com/wmww/libhybris -- clone to `./libhybris` if needed (`git clone https://github.com/wmww/libhybris.git ./libhybris`). Already in `.gitignore`.
-- **Build libhybris from local source:** `bash client/build-libhybris [--clean]` — syncs `./libhybris` to phone and builds inside chroot.
+- **Build:** `bash client/build-libhybris-aarch64 [--clean]`. Cross-compiles for aarch64 glibc using the host toolchain — see [notes/building.md](notes/building.md) for deps. Output staged in `build/libhybris-aarch64/install/` and packed into the APK as `assets/libhybris/arm64-v8a.tar` by Gradle's `packLibhybris` task. The Kotlin installer extracts the asset on first compositor start and symlinks the tree into `<rootfs>/usr/local/lib/` at chroot install time (`LibhybrisLinker.kt`).
 - **Fork docs:** `libhybris/TAWC_FORK.md` documents the fork's lineage and our changes. Keep it up to date when modifying libhybris.
 - Our libhybris fork is a set of clean, self-contained commits on top of https://github.com/libhybris/libhybris
 - We combine commits that are logically part of the same change, unless the commits originally came from other forks (not written by us)
@@ -85,8 +88,9 @@ bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 - Git can be tricky, and this is an atypical workflow. Be careful and think things true when updating the libhybris git history
 
 ## Quick Reference
-- **Build (compositor):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug`
-- **Build (libhybris):** `bash client/build-libhybris` (or `--clean` to reconfigure). Edit `./libhybris` locally, script syncs to phone.
+- **Building from a fresh system:** see [notes/building.md](notes/building.md) for host packages, env, vendored repos, and the full walkthrough. Keep that doc in sync as you change build deps.
+- **Build (compositor + libhybris asset):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug` — Gradle invokes `client/build-libhybris-aarch64` automatically.
+- **Build (libhybris standalone):** `bash client/build-libhybris-aarch64 [--clean]`. Aarch64 glibc cross-build, output in `build/libhybris-aarch64/install/`; bundled into the APK by the Gradle `packLibhybris` task.
 - **Build (libxkbcommon):** `bash client/build-libxkbcommon [--abi=aarch64|x86_64|both] [--clean]`. Clones a pinned upstream tag into `./libxkbcommon/` (gitignored) if missing — no patches. Run once after fresh clone or when bumping the version pin.
 - **Install & launch:** `adb install -r server/app/build/outputs/apk/debug/app-debug.apk && adb shell am force-stop me.phie.tawc && adb shell am start -n me.phie.tawc/.compositor.CompositorActivity`
 - **Install chroot:** `adb shell am start -n me.phie.tawc/.install.InstallActivity --es autoStart true --es id arch` (then `adb logcat -s tawc-install` to watch). The chroot lives at `/data/data/me.phie.tawc/distros/arch/rootfs/`.

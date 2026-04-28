@@ -64,7 +64,9 @@ allowing glibc programs to load bionic-linked Android shared libraries. Used by 
 OS and Ubuntu Touch. **Actively maintained** -- Android 16 support merged March 2026.
 
 We use [our fork](https://github.com/wmww/libhybris) with stock Android TLS fixes.
-Local checkout: `./libhybris`. Build/deploy: `bash client/build-libhybris`.
+Local checkout: `./libhybris`. Host-side cross-build (output ships in
+the APK as an asset, symlinked into each rootfs at install time):
+`bash client/build-libhybris-aarch64`.
 
 Loading chain in a client:
 ```
@@ -158,8 +160,9 @@ performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_su
 in `vulkanplatform_wayland.so`, presents via `android_wlegl`. Used in Sailfish OS.
 
 **Status on tawc (OnePlus 9 / Adreno 660 / Android 16 LineageOS):** ✅ working.
-- `bash client/build-libhybris` builds the `vulkan` subdir and installs
-  `/usr/local/lib/libvulkan.so.1` and `/usr/local/lib/libhybris/vulkanplatform_wayland.so`.
+- `bash client/build-libhybris-aarch64` builds the `vulkan` subdir and stages
+  `libvulkan.so.1` and `libhybris/vulkanplatform_wayland.so` in the APK asset
+  tree; the chroot installer symlinks them into `/usr/local/lib/`.
 - `vulkaninfo --summary` works end-to-end: `android_dlopen("libvulkan.so")` succeeds,
   the Adreno Vulkan driver enumerates as GPU0, `VK_KHR_wayland_surface` is advertised.
   Covered by `test_vulkaninfo_loads_android_driver`.

@@ -65,7 +65,7 @@ internal object ArchPacmanCommon {
     /**
      * `NoExtract` glob patterns appended to `/etc/pacman.conf`. These
      * keep future `pacman -S` invocations from re-creating the trees
-     * we just deleted (test-deps install, libhybris build, etc) and
+     * we just deleted (test-deps install, etc) and
      * also skip newly-pulled docs/locales/firmware so the rootfs
      * doesn't grow back to its bootstrap size.
      *
@@ -386,12 +386,11 @@ PACMAN_EOF
 
     /**
      * Common base package set for every Arch flavour. Kept minimal —
-     * specific subsystems (debug app, libhybris build) install their
+     * specific subsystems (debug app, integration tests) install their
      * own deps via `testing/install-test-deps.sh` etc.
      */
     val DEFAULT_BASE_PACKAGES: List<String> = listOf(
-        "base-devel", "git", "libtool", "wayland", "wayland-protocols",
-        "pkg-config", "autoconf", "automake", "patchelf",
+        "base-devel", "git", "wayland",
         "weston", "gtk3", "gtk3-demos",
     )
 }

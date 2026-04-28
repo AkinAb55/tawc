@@ -149,6 +149,11 @@ class Installer(
         progress(InstallProgress(InstallStage.CONFIGURING, "Configuring chroot…"))
         distro.configure(rootfsPath, log)
         writeEnterScript(rootfsPath, log)
+        // Symlink the APK-bundled libhybris tree into /usr/local/lib.
+        // Must follow distro.configure (which may create /usr/local
+        // structure) and precede package-manager bootstrap (so any
+        // package that touches /usr/local/lib sees a coherent state).
+        LibhybrisLinker.link(context, rootfsPath, log)
 
         // Stage 4: package-manager bootstrap. State stays INSTALLING
         // throughout — if either pacman invocation fails the service

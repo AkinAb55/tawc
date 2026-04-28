@@ -139,7 +139,7 @@ object ChrootMounter {
             # tawc Wayland compositor environment (refreshed each chroot entry)
             export WAYLAND_DISPLAY=wayland-0
             export XDG_RUNTIME_DIR=/tmp
-            export LD_LIBRARY_PATH=/tmp/gl-shims:/usr/local/lib
+            export LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib
             export HYBRIS_EGLPLATFORM=wayland
             ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
             TAWC_PROF_EOF

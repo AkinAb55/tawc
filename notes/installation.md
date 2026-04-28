@@ -186,6 +186,17 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
      rewrites it on every chroot entry (Wayland env: `WAYLAND_DISPLAY`,
      `XDG_RUNTIME_DIR`, `LD_LIBRARY_PATH`, `HYBRIS_EGLPLATFORM`, `wayland-0`
      symlink) so env changes pick up without a reinstall.
+   - `LibhybrisLinker.link` symlinks the APK-bundled libhybris tree
+     into `<rootfs>/usr/local/lib/`. The source tree at
+     `/data/data/me.phie.tawc/files/libhybris/lib/` is extracted from
+     `assets/libhybris/<abi>.tar` by `CompositorService.ensureLibhybris‐
+     Extracted` (called from both compositor service start and here,
+     so the chroot install never sees a half-extracted tree). Each
+     entry under `lib/` becomes a symlink in `/usr/local/lib/`,
+     including the `libhybris/` plugin subdir (EGL/Vulkan platform
+     plugins + bionic-linker plugin) and the `gl-shims/` subdir.
+     `LD_LIBRARY_PATH` (in `01-tawc.sh`) is
+     `/usr/local/lib/gl-shims:/usr/local/lib`.
    - `rm -rf` of bootstrap cruft: `/boot`, `/usr/lib/firmware`,
      `/usr/lib/modules`, `/var/cache/pacman/pkg`, and the docs/locale
      trees under `/usr/share`. ~1.8 GB of immediate reclaim before
@@ -726,4 +737,4 @@ written by `ChrootMounter.enterScript`, so the mount + chroot logic is
 defined exactly once (in Kotlin) and rendered to a script that adb
 shell + su can replay. Used by the integration tests
 (`testing/integration/src/adb.rs`), `testing/install-test-deps.sh`,
-`testing/build-debug-app.sh`, and `client/build-libhybris`.
+and `testing/build-debug-app.sh`.

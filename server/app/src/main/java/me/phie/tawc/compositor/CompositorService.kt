@@ -13,10 +13,12 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.system.Os
 import android.util.Log
 import android.view.WindowManager
 import java.io.File
 import java.lang.ref.WeakReference
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 /**
  * Foreground service that owns the Rust Wayland compositor thread for the
@@ -76,6 +78,13 @@ class CompositorService : Service() {
         // (skips when files/xkb/.version matches the package version), so
         // it's a no-op on subsequent service restarts.
         ensureXkbDataExtracted()
+
+        // libhybris ships in the APK as a tarball asset (one tree per ABI)
+        // and is extracted into the app data dir. The chroot installer
+        // symlinks individual files in /usr/local/lib/ at install time —
+        // extracting before the chroot install means the symlinks always
+        // land on a complete tree. Idempotent on the same versionCode.
+        ensureLibhybrisExtracted(this)
 
         // Hand the application context + service to NativeBridge so its
         // reverse-JNI spawnActivity/finishActivity entry points work even
@@ -202,5 +211,90 @@ class CompositorService : Service() {
         private const val TAG = "tawc"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "tawc_compositor"
+
+        /**
+         * Extract `assets/libhybris/<abi>.tar` into `filesDir/libhybris/`,
+         * preserving symlinks. Idempotent — versioned by `longVersionCode`
+         * via a `.version` stamp written last, so a partial extract is
+         * indistinguishable from "never extracted" and gets retried.
+         *
+         * Static so [me.phie.tawc.install.InstallActivity] can call it
+         * before any rootfs symlinking — the chroot install step needs
+         * the tree to exist (and be complete) before it points symlinks
+         * at it. Without that, an APK upgrade racing a chroot install
+         * could end up with chroot symlinks pointing at half-extracted
+         * libhybris.
+         *
+         * Returns true if extracted (or was already up-to-date), false
+         * if no asset is shipped for this ABI (e.g. emulator build).
+         */
+        fun ensureLibhybrisExtracted(context: Context): Boolean {
+            val abi = Build.SUPPORTED_ABIS.firstOrNull()
+                ?: return false
+            val assetPath = "libhybris/$abi.tar"
+            val available = try {
+                context.assets.open(assetPath).close()
+                true
+            } catch (_: java.io.IOException) {
+                false
+            }
+            if (!available) {
+                Log.i(TAG, "No libhybris asset shipped for ABI $abi; skipping extract")
+                return false
+            }
+
+            val destDir = File(context.filesDir, "libhybris")
+            val versionFile = File(destDir, ".version")
+            val currentVersion = try {
+                context.packageManager
+                    .getPackageInfo(context.packageName, 0).longVersionCode.toString()
+            } catch (_: PackageManager.NameNotFoundException) { "0" }
+
+            if (versionFile.exists() && versionFile.readText().trim() == currentVersion) {
+                return true
+            }
+
+            // Stage into `.new` and swap, so a partial extract from a
+            // prior interrupted run gets cleaned up rather than read.
+            val stagingDir = File(context.filesDir, "libhybris.new")
+            stagingDir.deleteRecursively()
+            stagingDir.mkdirs()
+
+            context.assets.open(assetPath).use { raw ->
+                TarArchiveInputStream(raw).use { tar ->
+                    while (true) {
+                        val entry = tar.nextEntry ?: break
+                        val outFile = File(stagingDir, entry.name)
+                        when {
+                            entry.isDirectory -> outFile.mkdirs()
+                            entry.isSymbolicLink -> {
+                                outFile.parentFile?.mkdirs()
+                                // Os.symlink errors if target exists; in
+                                // a fresh staging dir it never does.
+                                Os.symlink(entry.linkName, outFile.absolutePath)
+                            }
+                            else -> {
+                                outFile.parentFile?.mkdirs()
+                                outFile.outputStream().use { out -> tar.copyTo(out) }
+                                if ((entry.mode and 0b001_001_001) != 0) {
+                                    outFile.setExecutable(true, false)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            destDir.deleteRecursively()
+            if (!stagingDir.renameTo(destDir)) {
+                // Best-effort fallback for filesystems where rename
+                // across the same parent is somehow refused.
+                stagingDir.copyRecursively(destDir, overwrite = true)
+                stagingDir.deleteRecursively()
+            }
+            File(destDir, ".version").writeText(currentVersion)
+            Log.i(TAG, "Extracted libhybris ($abi) to $destDir")
+            return true
+        }
     }
 }
