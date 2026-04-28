@@ -28,6 +28,7 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - Include detailed steps to reproduce if relevant
 - Delete issues when they are confirmed fully solved
 - If an issue has important info that remains relevant after its solved, integrate that info into your notes when deleting it
+- Issues should be markdown documents starting with a title and one-line explanation, followed by a complete description with all relevant details
 
 ## Workflow
 - Debugging against both a real Android phone via adb or an emulator (x86_64 AVD with Magisk) are supported
