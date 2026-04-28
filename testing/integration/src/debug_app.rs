@@ -119,14 +119,23 @@ impl DebugApp {
         self.wait_for("READY", Duration::from_secs(30)).map(|_| ())
     }
 
-    /// Get the value from the most recent TEXT_CHANGED line.
+    /// Get the value from the most recent TEXT_CHANGED line. The debug app
+    /// emits `TAWC_DEBUG:TEXT_CHANGED` (no colon) when the buffer is empty,
+    /// so we accept both the bare-tag and `TAG:value` forms — without this,
+    /// a buffer transition to "" is invisible to callers polling last_text.
     pub fn last_text(&self) -> Option<String> {
         self.lines
             .lock()
             .unwrap()
             .iter()
             .rev()
-            .find_map(|l| l.strip_prefix("TEXT_CHANGED:").map(|s| s.to_string()))
+            .find_map(|l| {
+                if l == "TEXT_CHANGED" {
+                    Some(String::new())
+                } else {
+                    l.strip_prefix("TEXT_CHANGED:").map(|s| s.to_string())
+                }
+            })
     }
 
     /// Get the most recent preedit text reported by the debug app.
@@ -195,7 +204,9 @@ impl DebugApp {
         let mut last_text = None;
         let mut last_cursor = None;
         for line in lines.iter() {
-            if let Some(t) = line.strip_prefix("TEXT_CHANGED:") {
+            if line == "TEXT_CHANGED" {
+                last_text = Some(String::new());
+            } else if let Some(t) = line.strip_prefix("TEXT_CHANGED:") {
                 last_text = Some(t.to_string());
             }
             if let Some(c) = line.strip_prefix("CURSOR_POS:") {
@@ -207,13 +218,15 @@ impl DebugApp {
         (last_text, last_cursor)
     }
 
-    /// Count how many TEXT_CHANGED events have been received so far.
+    /// Count how many TEXT_CHANGED events have been received so far. The
+    /// bare `TAWC_DEBUG:TEXT_CHANGED` line (empty-buffer form) counts the
+    /// same as the `:value` form.
     pub fn text_changed_count(&self) -> usize {
         self.lines
             .lock()
             .unwrap()
             .iter()
-            .filter(|l| l.starts_with("TEXT_CHANGED:"))
+            .filter(|l| *l == "TEXT_CHANGED" || l.starts_with("TEXT_CHANGED:"))
             .count()
     }
 

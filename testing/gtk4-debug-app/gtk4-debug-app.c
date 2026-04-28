@@ -118,12 +118,14 @@ static void on_map(GtkWidget *widget, gpointer user_data)
     g_idle_add(emit_ready, widget);
 }
 
-/* Match gtk3-debug-app's Monospace 18pt text. GTK4 dropped
- * gtk_widget_override_font, so we install a CSS rule on the default display. */
+/* Big Monospace text — readable on a phone screen at arm's length. GTK4
+ * dropped gtk_widget_override_font, so we install a CSS rule on the default
+ * display. The size is also documented in tests/input.rs's tap-coord block,
+ * since changing it affects how `input tap` maps to character offsets. */
 static void apply_big_monospace_css(void)
 {
     static const char *css =
-        "textview, textview text { font-family: Monospace; font-size: 18pt; }";
+        "textview, textview text { font-family: Monospace; font-size: 28pt; }";
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider, css);
     gtk_style_context_add_provider_for_display(
