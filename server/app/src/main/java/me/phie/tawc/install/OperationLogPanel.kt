@@ -55,11 +55,6 @@ class OperationLogPanel(private val activity: Activity) {
         }
         view.addView(progressBar, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
-        TextView(activity).apply {
-            text = "Log:"
-            textSize = 14f
-        }.also { view.addView(it, lp(MATCH_PARENT, WRAP_CONTENT)) }
-
         logScroll = ScrollView(activity)
         logText = TextView(activity).apply {
             typeface = Typeface.MONOSPACE

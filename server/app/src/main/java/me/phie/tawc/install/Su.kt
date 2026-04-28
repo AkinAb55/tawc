@@ -104,15 +104,26 @@ object Su {
             }
         }.also { it.start() }
 
-        val finished = if (timeoutSeconds > 0) {
-            proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        } else {
-            proc.waitFor(); true
-        }
-        if (!finished) {
+        try {
+            val finished = if (timeoutSeconds > 0) {
+                proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            } else {
+                proc.waitFor(); true
+            }
+            if (!finished) {
+                proc.destroyForcibly()
+                readerThread.join(2000)
+                throw IOException("su script timed out after ${timeoutSeconds}s")
+            }
+        } catch (e: InterruptedException) {
+            // Caller (typically `runInterruptible`) cancelled. Kill the
+            // subprocess so a long-running `du`/`pacman` doesn't outlive
+            // the request, then re-raise so the coroutine machinery
+            // translates this back into CancellationException.
             proc.destroyForcibly()
             readerThread.join(2000)
-            throw IOException("su script timed out after ${timeoutSeconds}s")
+            Thread.currentThread().interrupt()
+            throw e
         }
         readerThread.join(2000)
         return Result(proc.exitValue(), sb.toString())

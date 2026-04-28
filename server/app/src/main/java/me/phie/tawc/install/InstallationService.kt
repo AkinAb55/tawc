@@ -62,6 +62,8 @@ class InstallationService : Service() {
     private val _log = MutableSharedFlow<String>(replay = 200, extraBufferCapacity = 1024)
     val log: SharedFlow<String> = _log.asSharedFlow()
 
+    private var lastLoggedStage: InstallStage? = null
+
     inner class LocalBinder : Binder() {
         val service: InstallationService get() = this@InstallationService
     }
@@ -195,8 +197,12 @@ class InstallationService : Service() {
         // Re-issue the foreground notification so its text stays current.
         val nm = getSystemService(NotificationManager::class.java)
         nm?.notify(NOTIFICATION_ID, buildNotification(p.message))
-        // Stage transitions are also useful in logcat for CLI workflows.
-        appendLog("[stage:${p.stage}] ${p.message}")
+        // Only log on stage transitions; downloading streams progress
+        // every 256 KiB and we don't want each chunk in logcat.
+        if (p.stage != lastLoggedStage) {
+            appendLog("[stage:${p.stage}] ${p.message}")
+            lastLoggedStage = p.stage
+        }
     }
 
     private fun appendLog(line: String) {

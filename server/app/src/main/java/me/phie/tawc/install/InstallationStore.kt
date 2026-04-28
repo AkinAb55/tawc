@@ -2,6 +2,8 @@ package me.phie.tawc.install
 
 import android.content.Context
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * On-disk layout for per-distro installations under
@@ -47,9 +49,22 @@ class InstallationStore(context: Context) {
         return runCatching { Installation.fromJson(f.readText()) }.getOrNull()
     }
 
+    /**
+     * Persist [installation] to its `metadata.json`. The write is atomic:
+     * we stage the JSON in a sibling `metadata.json.tmp` and `rename(2)`
+     * it into place, so a crash mid-write leaves either the old contents
+     * or the new ones — never a half-written file that fromJson can't
+     * parse. All writes go through this one method (including
+     * [setState]'s read-modify-write), and [InstallationService]
+     * serialises jobs via `currentJob`, so concurrent writers don't
+     * exist.
+     */
     fun save(installation: Installation) {
         installationDir(installation.id).mkdirs()
-        metadataFile(installation.id).writeText(installation.toJson())
+        val finalFile = metadataFile(installation.id)
+        val tmpFile = File(finalFile.parentFile, finalFile.name + ".tmp")
+        tmpFile.writeText(installation.toJson())
+        Files.move(tmpFile.toPath(), finalFile.toPath(), StandardCopyOption.ATOMIC_MOVE)
     }
 
     /**

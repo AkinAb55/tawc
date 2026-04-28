@@ -21,7 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.destructiveButton
 import me.phie.tawc.ui.verticalLp
@@ -159,7 +159,11 @@ class DistroInfoActivity : AppCompatActivity() {
         sizeScope = cs
         sizeValue.text = "computing…"
         cs.launch {
-            val bytes = withContext(Dispatchers.IO) { store.computeSizeBytes(targetId) }
+            // `runInterruptible` maps coroutine cancellation onto thread
+            // interrupt; Su.run catches that and `destroyForcibly`s the
+            // child `su` so a backgrounded `du -sk` doesn't keep
+            // pounding storage after the user leaves this screen.
+            val bytes = runInterruptible(Dispatchers.IO) { store.computeSizeBytes(targetId) }
             sizeValue.text = when {
                 bytes < 0 -> "?"
                 else -> Formatter.formatFileSize(this@DistroInfoActivity, bytes)
