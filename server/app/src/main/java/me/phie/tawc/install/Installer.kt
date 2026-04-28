@@ -65,6 +65,14 @@ class Installer(
         // writeText is a plain Java file write — no su needed.
         store.installationDir(id).mkdirs()
         AppOwnership.chownAppDirNonRecursive(store.installationDir(id))
+        // Stamp the app version that performed this install. The rootfs
+        // is treated as immutable across app updates (see
+        // notes/installation.md "Upgrade policy"), so this is the
+        // version whose `Distro.configure` output the rootfs carries —
+        // useful later for "if installed before vN, do X" gating.
+        val appVersionCode = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
+        } catch (_: android.content.pm.PackageManager.NameNotFoundException) { 0L }
         store.save(
             Installation(
                 id = id,
@@ -74,6 +82,7 @@ class Installer(
                 installedAtMillis = System.currentTimeMillis(),
                 sourceUrl = distro.bootstrap.url,
                 state = Installation.State.INSTALLING,
+                installedAtAppVersionCode = appVersionCode,
             )
         )
 

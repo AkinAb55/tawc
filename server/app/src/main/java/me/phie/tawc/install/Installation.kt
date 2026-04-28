@@ -22,16 +22,20 @@ data class Installation(
     val sourceUrl: String,
     val state: State = State.READY,
     val failure: String? = null,
+    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+    val installedAtAppVersionCode: Long = 0L,
 ) {
     fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
 
     fun toJson(): String = JSONObject().apply {
+        put("schemaVersion", schemaVersion)
         put("id", id)
         put("distro", distro)
         put("arch", arch)
         put("method", method)
         put("installedAtMillis", installedAtMillis)
+        put("installedAtAppVersionCode", installedAtAppVersionCode)
         put("sourceUrl", sourceUrl)
         put("state", state.name)
         if (failure != null) put("failure", failure)
@@ -49,12 +53,23 @@ data class Installation(
         const val DISTRO_ARCH = "arch"
         const val METHOD_CHROOT = "chroot"
 
+        // Bump when adding a field that downstream code can't safely
+        // default. Pure additive fields with safe defaults don't need a
+        // bump — fromJson tolerates them. See notes/installation.md
+        // "Upgrade policy" for what changes warrant a bump and how to
+        // handle one.
+        const val CURRENT_SCHEMA_VERSION = 1
+
         fun fromJson(text: String): Installation {
             val obj = JSONObject(text)
             // distro / method default to the historical-only values
             // ("arch" / "chroot") so any pre-distro-field record loads
             // without a hard error. arch has no sensible default; if
             // it's missing the record is too broken to use.
+            // schemaVersion defaults to 1 (the only version that exists
+            // today); installedAtAppVersionCode defaults to 0 for pre-
+            // version-tracking records, which downstream "if older than
+            // X" checks will read as "very old, treat conservatively".
             return Installation(
                 id = obj.getString("id"),
                 distro = obj.optString("distro", DISTRO_ARCH),
@@ -65,6 +80,8 @@ data class Installation(
                 state = obj.optString("state", State.READY.name)
                     .let { runCatching { State.valueOf(it) }.getOrDefault(State.READY) },
                 failure = if (obj.has("failure") && !obj.isNull("failure")) obj.getString("failure") else null,
+                schemaVersion = obj.optInt("schemaVersion", 1),
+                installedAtAppVersionCode = obj.optLong("installedAtAppVersionCode", 0L),
             )
         }
     }

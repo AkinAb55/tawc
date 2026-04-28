@@ -81,6 +81,15 @@ class DistroInfoActivity : AppCompatActivity() {
             rowLp(pad),
         )
         content.addView(
+            infoRow(
+                "App version at install:",
+                if (installation.installedAtAppVersionCode > 0) {
+                    installation.installedAtAppVersionCode.toString()
+                } else "unknown",
+            ),
+            rowLp(pad),
+        )
+        content.addView(
             infoRow("Rootfs path:", store.rootfsDir(installation.id).absolutePath),
             rowLp(pad),
         )
