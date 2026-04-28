@@ -78,6 +78,18 @@ import android.util.Log
  * is to skip the delete and let `super.commitText` update the Editable;
  * the next round-trip from the client reconciles the buffer.
  *
+ * `lastSyncedCursor` does NOT catch the case where the Wayland buffer's
+ * cursor has moved without our model knowing — for instance after we sent
+ * a `commit_string("\n")` whose effect GTK doesn't include in the next
+ * `set_surrounding_text` (it reports the previous line as context with
+ * cursor at end-of-line, hiding the trailing newline). Editable cursor
+ * and `lastSyncedCursor` both say 5; the actual wire cursor is at 6.
+ * For OpenBoard's per-Enter "re-commit the previous word" pattern that
+ * relies on this — `setComposingRegion(0, N)` + `commitText(word, 1)` +
+ * `commitText("\n", 1)` — `commitText` short-circuits when the new text
+ * equals the marked region: the buffer already contains those bytes, so
+ * no wire `delete_surrounding_text` is needed (and would be wrong).
+ *
  * `BaseInputConnection(view, true)` (`fullEditor=true`) means
  * `mFallbackMode=false`, so `sendCurrentText()` is a no-op — calling
  * `super` does NOT cause duplicate input via key events.
@@ -121,6 +133,33 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
 
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val str = text?.toString() ?: return false
+        // OpenBoard's per-Enter handler — after the user types <word><space>
+        // <backspace><enter> — fires `setComposingRegion(0, len(word))` then
+        // `commitText(word, 1)` then `commitText("\n", 1)` for every later
+        // Enter, treating the previous word as composing and "re-committing"
+        // it. The bytes are unchanged, but the IC's normal path would emit
+        // `delete_surrounding_text(len(word))` + `commit_string(word)`. That
+        // delete is wrong on the wire whenever the actual buffer cursor has
+        // moved past the marked region (e.g. it's now past a `\n` GTK didn't
+        // include in surrounding text), and we'd slice arbitrary bytes off
+        // the buffer — the user-visible "extra h prepended on each Enter".
+        // Since the commit text equals the bytes already there, skip the
+        // wire round-trip entirely; the buffer is already correct. Real
+        // tap-to-retype with different text falls through to the normal path.
+        if (!composingRegionIsPreedit) {
+            val ed = editable
+            if (ed != null) {
+                val composingStart = BaseInputConnection.getComposingSpanStart(ed)
+                val composingEnd = BaseInputConnection.getComposingSpanEnd(ed)
+                if (composingStart >= 0 && composingEnd > composingStart &&
+                    str == ed.subSequence(composingStart, composingEnd).toString()) {
+                    Log.d(TAG, "InputConnection.commitText: \"$str\" no-op (matches composing region)")
+                    super.commitText(text, newCursorPosition)
+                    composingRegionIsPreedit = false
+                    return true
+                }
+            }
+        }
         val (before, after) = computeReplaceDeltas()
         Log.d(TAG, "InputConnection.commitText: \"$str\" cursorPos=$newCursorPosition delete=$before/$after")
         super.commitText(text, newCursorPosition)

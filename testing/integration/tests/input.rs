@@ -732,6 +732,68 @@ fn test_ic_commit_after_diverged_cursor_no_byte_slicing() {
     assert_compositor_clean();
 }
 
+/// **Bug repro: OpenBoard's per-Enter "re-commit the previous word" pattern.**
+///
+/// User-reported scenario: type `hello`, space, backspace, then Enter, Enter,
+/// Enter, Enter. Expected: `hello` followed by four newlines. Observed (pre-fix):
+/// each Enter from the second onward prepended a stray `h` to the word →
+/// `hhello`, `hhhello`, `hhhhello`.
+///
+/// Root cause: on every Enter after `<word><space><backspace>`, OpenBoard
+/// fires `setComposingRegion(0, len(word))` + `commitText(word, 1)` +
+/// `commitText("\n", 1)`. The IC's normal path turns the second call into
+/// `delete_surrounding_text(len(word))` + `commit_string(word)` on the wire.
+/// On the first Enter that's a no-op (deletes `hello` then re-commits it),
+/// but on the second it slices the wrong bytes: GTK's last `set_surrounding_text`
+/// from the first Enter dropped the trailing `\n`, so our model says cursor=5
+/// in `"hello"` while the wire's actual cursor is 6 in `"hello\n"`. A delete of
+/// 5 bytes before cursor 6 chops `"ello\n"` and the commit lands at position 1.
+///
+/// The `lastSyncedCursor` gate doesn't catch this — Editable cursor and
+/// `lastSyncedCursor` both equal 5 (matching what GTK reported); they just
+/// don't match the wire. Fix: when `commitText`'s text equals the marked
+/// composing region's content, short-circuit — the bytes are already correct
+/// on the wire, no `delete_surrounding_text` needed.
+#[test]
+fn test_ic_recommit_word_then_newline_no_h_prepend() {
+    let mut app = start_text_input(INPUT_ENV);
+
+    // Seed the buffer with "hello" via the IC. Round-trip so the Editable,
+    // lastSyncedCursor, and the Wayland buffer all agree on cursor=5.
+    adb::ic_commit_text("hello").expect("commitText 'hello'");
+    app.wait_for_text("hello", TIMEOUT).expect("text 'hello'");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Mimic OpenBoard's per-Enter sequence three times. Each iteration is the
+    // exact triple it dispatches: mark "hello" composing, re-commit "hello",
+    // commit "\n". With the fix the re-commit is a no-op on the wire and only
+    // the "\n" travels; without it, the second iteration onward slices bytes
+    // off the buffer. The debug app escapes newlines as `\n` so we can assert
+    // on the buffer content directly.
+    for i in 1..=3 {
+        let change_count = app.text_changed_count();
+        adb::ic_set_composing_region(0, 5).expect("setComposingRegion 0..5");
+        adb::ic_commit_text("hello").expect("commitText 'hello' (re-commit)");
+        adb::ic_commit_text("\n").expect("commitText '\\n'");
+        app.wait_for_text_change(change_count, TIMEOUT)
+            .expect("text change after Enter");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let expected = format!("hello{}", "\\n".repeat(i));
+        let text = app.last_text().unwrap_or_default();
+        assert_eq!(
+            text, expected,
+            "Enter #{i}: expected buffer '{}' but got '{}'. Without the fix \
+             the IC propagates composing-region deltas, slicing bytes off the \
+             buffer (visible as a stray 'h' prepended on each Enter).",
+            expected, text
+        );
+    }
+
+    app.stop().expect("Debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
 /// Test deleteSurroundingText: Gboard's path for trimming chars without
 /// using a key event (e.g. word-correcting backspace, suggestion deletion).
 #[test]

@@ -21,10 +21,27 @@
 
 static void debug_emit(const char *tag, const char *value)
 {
-    if (value && value[0])
-        printf("TAWC_DEBUG:%s:%s\n", tag, value);
-    else
+    if (!value || !value[0]) {
         printf("TAWC_DEBUG:%s\n", tag);
+        fflush(stdout);
+        return;
+    }
+    /* Escape so multi-line values stay on a single TAWC_DEBUG line — the
+     * harness parses one value per stdout line. \n -> \\n, \r -> \\r,
+     * \\ -> \\\\. The harness's stripping is plain-text so no further
+     * decoding is needed for ordinary asserts. */
+    fputs("TAWC_DEBUG:", stdout);
+    fputs(tag, stdout);
+    fputc(':', stdout);
+    for (const char *p = value; *p; p++) {
+        switch (*p) {
+        case '\n': fputs("\\n", stdout); break;
+        case '\r': fputs("\\r", stdout); break;
+        case '\\': fputs("\\\\", stdout); break;
+        default: fputc(*p, stdout); break;
+        }
+    }
+    fputc('\n', stdout);
     fflush(stdout);
 }
 
