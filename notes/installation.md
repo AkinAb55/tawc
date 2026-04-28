@@ -23,7 +23,7 @@ Everything lives under the app's private data dir:
       cache/install/                 # owned by BootstrapCache (see below):
       cache/install/bootstrap-<arch>.tar.zst    # canonical Arch x86_64 bootstrap (7-day TTL)
       cache/install/bootstrap-<arch>.tar.gz     # canonical ALARM aarch64 bootstrap (7-day TTL)
-      cache/install/bootstrap-<arch>.tar.tmp                  # transient zstd decompression target (Archive owns lifecycle; sweep evicts unconditionally)
+      cache/install/bootstrap-<arch>.tar.fifo                 # transient zstd→tar streaming pipe (Archive owns lifecycle; sweep evicts unconditionally)
       cache/install/bootstrap-<arch>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
       distros/
         arch/
@@ -108,8 +108,8 @@ The package is split into three layers:
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
 | `SignatureVerifier.kt`         | Sealed `BootstrapVerification` (`None` / `Pgp` / `CrossMirrorMd5`) and `verify(...)`. Called from [Installer] between download and extract — see *Bootstrap integrity* below. Uses BouncyCastle (`bcpg-jdk18on` + `bcprov-jdk18on`) for the OpenPGP layer. Treat as load-bearing security code. |
-| `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempPlainTarFor(arch)` for [Archive]'s zstd-decompression target so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<arch>.tar.{zst,gz}`; unconditional deletion of `*.tmp` and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
-| `Archive.kt`                   | Tar extraction (decompresses zstd in-process to a sibling `.tar`, then hands it to `toybox tar` running as root). Never wipes — install only runs against an empty slot. |
+| `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempFifoFor(arch)` for [Archive]'s zstd→tar streaming FIFO so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<arch>.tar.{zst,gz}`; unconditional deletion of `*.fifo`, legacy `*.tmp`, and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
+| `Archive.kt`                   | Tar extraction. Plain `.tar` / `.tar.gz` get handed to `toybox tar` directly; `.tar.zst` is streamed in-process through a named pipe (`bootstrap-<arch>.tar.fifo`) so the ~700 MB plaintext never lands on disk. Never wipes — install only runs against an empty slot. |
 | `RootfsCleaner.kt`             | The one and only delete path: kill chroot processes → unmount strictly → `find -xdev -depth -delete`. Used by uninstall; never by install. |
 | `ChrootMounter.kt`             | Builds the bind-mount shell snippet, renders the canonical `enter.sh` (mount + chroot wrapper), and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
 | `ChrootRunner.kt`              | Concatenates `ChrootMounter.mountScript(rootfs)` with the chroot exec into one `su -c` shell so the mounts and the command share that shell's mount namespace. Base64-encodes the command into the wrapper script to dodge quoting hell. |
@@ -165,9 +165,13 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
    extractor sees it. Throws on mismatch / forged blob and the
    install lands in `FAILED` before any byte hits the rootfs. See
    *Bootstrap integrity* below for what each distro declares.
-4. **EXTRACTING** — root-owned via toybox tar. Zstd is decompressed
-   in-process to a sibling `.tar` first because piping data into a
-   shell's stdin loses bytes (the shell pre-buffers past the script).
+4. **EXTRACTING** — root-owned via toybox tar. Zstd is streamed in-
+   process through a named pipe (`bootstrap-<arch>.tar.fifo` in the
+   cache dir): a writer thread feeds zstd-decompressed bytes into the
+   FIFO while tar reads `tar -xf <fifo>` as a positional argument
+   (not stdin — the shell pre-buffers past the script body and tar
+   would see garbage). The plaintext tar never lands on disk, so peak
+   install-time disk usage stays at `compressed tarball + rootfs`.
    The destination is a freshly-mkdir'd directory; the install gate
    guarantees nothing else lives there.
 5. **CONFIGURING** — writes the same files the legacy create scripts do, then
@@ -229,19 +233,22 @@ background thread on every cold start. The sweep is a two-pass janitor:
    from a size-match cache hit inside [Downloader]). `setLastModifiedTime`
    is the NIO variant — `File.setLastModified` silently no-ops on some
    Android FS/SDK combos.
-2. **Unconditional pass** — `bootstrap-<arch>.tar.tmp` ([Archive]'s
-   zstd-decompression transient) and `bootstrap-<arch>.tar.{zst,gz}.part`
+2. **Unconditional pass** — `bootstrap-<arch>.tar.fifo` ([Archive]'s
+   zstd→tar streaming FIFO; legacy `*.tmp` from older builds is also
+   matched for safety) and `bootstrap-<arch>.tar.{zst,gz}.part`
    ([Downloader]'s in-flight suffix) are deleted regardless of mtime,
    since neither is ever meaningful across processes — they only exist
    inside one `Archive.extractAsRoot` / `Downloader.download` call's
    `try/finally`. Anything found at app start is by definition stranded
-   by a crash.
+   by a crash. (`File.isFile` is false for FIFOs, so the sweep filters
+   on `!isDirectory` rather than `isFile`.)
 
-During an x86_64 install the cache dir briefly *triples* in apparent
-size: ~200 MB compressed `tar.zst`, plus the ~800 MB decompressed `.tmp`
-that [Archive] writes for toybox tar to consume. The `.tmp` is deleted
-in [Archive.extractAsRoot]'s `finally`; if that delete fails (e.g. FS
-error) the next sweep evicts the leftover unconditionally.
+During an x86_64 install the cache dir holds the ~200 MB compressed
+`.tar.zst` plus a zero-byte `.tar.fifo` inode — the decompressed bytes
+flow through the kernel pipe buffer straight into `tar` and never
+materialise on disk. The FIFO is removed in [Archive.extractAsRoot]'s
+`finally`; if that delete fails (e.g. FS error) the next sweep evicts
+the leftover unconditionally.
 
 The sweep is best-effort. There's a tiny window where it could race a
 concurrent install — sweep stat()s the canonical tarball, decides to

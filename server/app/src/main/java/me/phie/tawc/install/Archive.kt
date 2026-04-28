@@ -1,9 +1,14 @@
 package me.phie.tawc.install
 
+import android.system.Os
+import android.system.OsConstants
+import android.util.Log
 import com.github.luben.zstd.ZstdInputStream
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Bootstrap-tarball helpers.
@@ -12,12 +17,15 @@ import java.io.IOException
  * via [Su] so every file lands with root ownership and tar's special-file
  * handling (symlinks, hardlinks, devices) Just Works inside the chroot.
  *
- * We can't pipe the decompressed tar into the shell's stdin because the
- * shell pre-buffers stdin past the script and tar then sees garbage
- * ("tar: Not tar"). So if the source is compressed with zstd (which
- * toybox tar can't read), we decompress it to a transient `.tar` file
- * (path supplied by [BootstrapCache.tempPlainTarFor]) first, hand that
- * to tar, and delete it after.
+ * Toybox tar reads gzip natively but not zstd, and we can't pipe the
+ * decompressed bytes into the shell's stdin (the shell pre-buffers past
+ * the script body, tar then sees garbage — "tar: Not tar"). So for
+ * `.tar.zst` inputs we stream the decompressed bytes through a named
+ * pipe: a writer thread on the app side feeds zstd → FIFO, while tar
+ * reads `tar -xf <fifo>` as a positional argument (not stdin, so the
+ * shell never touches the bytes). Peak install-time disk usage stays
+ * at `compressed tarball + rootfs` — we never materialise the ~700 MB
+ * uncompressed tar on disk.
  *
  * Toybox tar can't `--strip-components`, so when the bootstrap is wrapped
  * in a single top-level dir (`root.x86_64/`) we extract verbatim and
@@ -32,11 +40,10 @@ object Archive {
      * pipeline's state-machine gate guarantees we only ever run against
      * a `(no dir)` slot. Root permissions are required.
      *
-     * For `.tar.zst` inputs the decompressed bytes are written to
-     * [tempPlainTar] (owned by the cache); the file is deleted on entry
-     * (so a crash leftover never gets reused — those used to be silently
-     * accepted on `length() != 0L`) and again in the `finally`. For
-     * `.tar` / `.tar.gz` inputs [tempPlainTar] is unused.
+     * For `.tar.zst` inputs the bytes flow through [tempFifo] (a named
+     * pipe owned by the cache); the FIFO is recreated on entry (so a
+     * crash leftover never gets reused) and deleted in the `finally`.
+     * For `.tar` / `.tar.gz` inputs [tempFifo] is unused.
      *
      * (Wiping is the sole job of [RootfsCleaner], called from the
      * uninstall path. If install ever wiped here, a single missed
@@ -52,70 +59,166 @@ object Archive {
     fun extractAsRoot(
         tarball: File,
         destDir: String,
-        tempPlainTar: File,
+        tempFifo: File,
         stripPrefix: String? = null,
         onLine: (String) -> Unit = {},
     ) {
         require(tarball.exists()) { "Tarball not found: $tarball" }
-
-        val (tarFile, isTransient) = decompressIfNeeded(tarball, tempPlainTar)
-
-        try {
-            val script = buildString {
-                appendLine("mkdir -p '$destDir'")
-                // -z is autodetected by toybox tar when the file's first
-                // bytes look like gzip; we don't need to spell it out.
-                appendLine("tar -xf '${tarFile.absolutePath}' -C '$destDir'")
-                if (stripPrefix != null) {
-                    appendLine("if [ -d '$destDir/$stripPrefix' ]; then")
-                    appendLine("    cd '$destDir/$stripPrefix'")
-                    appendLine("    for entry in * .[!.]* ..?*; do")
-                    appendLine("        [ -e \"\$entry\" ] || continue")
-                    appendLine("        mv -- \"\$entry\" '$destDir/'")
-                    appendLine("    done")
-                    appendLine("    cd '$destDir'")
-                    appendLine("    rmdir '$destDir/$stripPrefix'")
-                    appendLine("fi")
-                }
-                appendLine("echo OK")
+        val name = tarball.name.lowercase()
+        when {
+            name.endsWith(".tar") ||
+            name.endsWith(".tar.gz") ||
+            name.endsWith(".tgz") -> {
+                runTarScript(tarball.absolutePath, destDir, stripPrefix, onLine)
             }
-            val result = Su.run(script, onLine = onLine)
-            if (!result.ok) {
-                throw IOException(
-                    "Tar extraction failed (exit=${result.exitCode}). Output:\n${result.output}"
-                )
+            name.endsWith(".tar.zst") || name.endsWith(".tzst") -> {
+                extractZstdViaFifo(tarball, destDir, tempFifo, stripPrefix, onLine)
             }
-            if (!result.output.lineSequence().any { it.trim() == "OK" }) {
-                throw IOException("Tar extraction did not report OK. Output:\n${result.output}")
-            }
-        } finally {
-            if (isTransient) tempPlainTar.delete()
+            else -> throw IOException("Unsupported tarball extension: ${tarball.name}")
         }
     }
 
     /**
-     * Returns `(tarFile, isTransient)`. For `.tar` / `.tar.gz` inputs
-     * `tarFile = src` and `isTransient = false`. For `.tar.zst` decompresses
-     * into [plainTmp] and returns it with `isTransient = true` — caller's
-     * `finally` deletes. [plainTmp] is unconditionally deleted before write
-     * so a crashed previous run can't get reused as if complete.
+     * Stream zstd-decompressed bytes through a FIFO so tar consumes them
+     * straight out of the kernel pipe buffer without ever touching disk.
+     * The shell-stdin trick (where the shell pre-buffers past our script
+     * and tar then sees garbage) is bypassed because the shell never
+     * sees the tar bytes — tar opens the FIFO directly via the path we
+     * pass on its command line.
+     *
+     * Failure modes the cleanup must cope with:
+     *   - tar fails fast / never opens the FIFO → writer is blocked on
+     *     `open(O_WRONLY)` waiting for a reader. The `finally` opens
+     *     the FIFO `O_RDONLY|O_NONBLOCK` and closes it, which both
+     *     unblocks the writer's open() and signals "no readers" so its
+     *     subsequent write() returns EPIPE.
+     *   - writer throws (e.g. corrupt zstd) → tar sees EOF mid-stream
+     *     and fails; the script's non-OK exit (with full tar/su output)
+     *     surfaces as the primary error and the writer's exception is
+     *     attached as a suppressed cause. If the script somehow ran OK
+     *     but the writer still failed, the writer error is thrown
+     *     directly.
      */
-    private fun decompressIfNeeded(src: File, plainTmp: File): Pair<File, Boolean> {
-        val name = src.name.lowercase()
-        return when {
-            name.endsWith(".tar") -> src to false
-            name.endsWith(".tar.gz") || name.endsWith(".tgz") -> src to false
-            name.endsWith(".tar.zst") || name.endsWith(".tzst") -> {
-                plainTmp.delete()
-                BufferedInputStream(src.inputStream(), 256 * 1024).use { raw ->
+    private fun extractZstdViaFifo(
+        tarball: File,
+        destDir: String,
+        fifo: File,
+        stripPrefix: String?,
+        onLine: (String) -> Unit,
+    ) {
+        // mkfifo refuses if the target already exists — clear any
+        // crash leftover (and a regular file too, just in case).
+        fifo.delete()
+        Os.mkfifo(fifo.absolutePath, OsConstants.S_IRUSR or OsConstants.S_IWUSR)
+
+        val writerError = AtomicReference<Throwable?>(null)
+        val writer = Thread({
+            try {
+                BufferedInputStream(tarball.inputStream(), 256 * 1024).use { raw ->
                     ZstdInputStream(raw).use { zin ->
-                        plainTmp.outputStream().use { out -> zin.copyTo(out) }
+                        FileOutputStream(fifo).use { out ->
+                            zin.copyTo(out)
+                        }
                     }
                 }
-                plainTmp to true
+            } catch (t: Throwable) {
+                writerError.set(t)
             }
-            else -> throw IOException("Unsupported tarball extension: ${src.name}")
+        }, "tawc-bootstrap-zstd")
+        writer.isDaemon = true
+        writer.start()
+
+        var primary: Throwable? = null
+        try {
+            runTarScript(fifo.absolutePath, destDir, stripPrefix, onLine)
+        } catch (t: Throwable) {
+            primary = t
+            throw t
+        } finally {
+            // If the script never opened the FIFO (su unavailable,
+            // tar binary missing, script aborted before the tar line,
+            // …) the writer is still blocked on open(O_WRONLY). A
+            // brief O_RDONLY|O_NONBLOCK open + close lets the writer's
+            // open() return; closing our reader fd then makes its
+            // next write() get EPIPE — either way the thread terminates.
+            if (writer.isAlive) {
+                try {
+                    val fd = Os.open(
+                        fifo.absolutePath,
+                        OsConstants.O_RDONLY or OsConstants.O_NONBLOCK,
+                        0,
+                    )
+                    Os.close(fd)
+                } catch (_: Exception) {
+                    // best-effort
+                }
+            }
+            writer.join(FIFO_JOIN_TIMEOUT_MILLIS)
+            if (writer.isAlive) {
+                // Should be unreachable — flag it loudly if it fires so
+                // we notice the leaked daemon thread instead of silently
+                // proceeding.
+                Log.w(TAG, "zstd writer thread still alive after ${FIFO_JOIN_TIMEOUT_MILLIS}ms join")
+            }
+            fifo.delete()
+            // The tar/su error is the rich diagnostic; a writer error
+            // is almost always its downstream effect (corrupt zstd →
+            // tar EOF → both throw). Throwing from `finally` would
+            // *replace* the in-flight `primary`, so when both fail we
+            // attach the writer error as suppressed and let the tar
+            // error propagate. Only if the script returned cleanly do
+            // we throw the writer error directly.
+            val werr = writerError.get()
+            if (werr != null) {
+                if (primary != null) primary.addSuppressed(werr)
+                else throw IOException("zstd decompression into FIFO failed", werr)
+            }
         }
     }
 
+    private fun runTarScript(
+        tarPath: String,
+        destDir: String,
+        stripPrefix: String?,
+        onLine: (String) -> Unit,
+    ) {
+        val script = buildString {
+            appendLine("mkdir -p '$destDir'")
+            // -z is autodetected by toybox tar when the file's first
+            // bytes look like gzip; we don't need to spell it out.
+            appendLine("tar -xf '$tarPath' -C '$destDir'")
+            if (stripPrefix != null) {
+                appendLine("if [ -d '$destDir/$stripPrefix' ]; then")
+                appendLine("    cd '$destDir/$stripPrefix'")
+                appendLine("    for entry in * .[!.]* ..?*; do")
+                appendLine("        [ -e \"\$entry\" ] || continue")
+                appendLine("        mv -- \"\$entry\" '$destDir/'")
+                appendLine("    done")
+                appendLine("    cd '$destDir'")
+                appendLine("    rmdir '$destDir/$stripPrefix'")
+                appendLine("fi")
+            }
+            appendLine("echo OK")
+        }
+        val result = Su.run(script, onLine = onLine)
+        if (!result.ok) {
+            throw IOException(
+                "Tar extraction failed (exit=${result.exitCode}). Output:\n${result.output}"
+            )
+        }
+        if (!result.output.lineSequence().any { it.trim() == "OK" }) {
+            throw IOException("Tar extraction did not report OK. Output:\n${result.output}")
+        }
+    }
+
+    /**
+     * Generous bound — even a 700 MB decompressed tar streams through
+     * the FIFO in well under a minute on real devices. The join only
+     * approaches this timeout if a prior step left the writer thread
+     * stuck despite the FIFO-drain unblock; better to bail than block
+     * the install thread forever.
+     */
+    private const val FIFO_JOIN_TIMEOUT_MILLIS: Long = 60_000
+
+    private const val TAG = "tawc-install"
 }

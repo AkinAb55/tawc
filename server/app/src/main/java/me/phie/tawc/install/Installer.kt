@@ -119,14 +119,14 @@ class Installer(
         // gate only invokes install on a `(no dir)` slot — so tar lays
         // everything onto a fresh tree. Archive.extractAsRoot does not
         // wipe; never has reason to. For zstd bootstraps we pass the
-        // cache-owned transient path so all `cache/install/` files
-        // have one owner.
+        // cache-owned FIFO path so all `cache/install/` files have
+        // one owner.
         progress(InstallProgress(InstallStage.EXTRACTING, "Extracting rootfs…"))
         log("extract: ${cacheFile.name} -> $rootfsPath (strip=${distro.bootstrap.stripPrefix})")
         Archive.extractAsRoot(
             tarball = cacheFile,
             destDir = rootfsPath,
-            tempPlainTar = cache.tempPlainTarFor(distro.linuxArch),
+            tempFifo = cache.tempFifoFor(distro.linuxArch),
             stripPrefix = distro.bootstrap.stripPrefix,
         ) { line ->
             log("tar: $line")

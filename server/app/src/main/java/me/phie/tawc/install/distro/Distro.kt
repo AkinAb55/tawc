@@ -80,8 +80,9 @@ interface Distro {
  *
  * @property url HTTP(S) URL of the tarball.
  * @property format compression format ([BootstrapCache] uses this for
- *   the cache filename and [me.phie.tawc.install.Archive] consults it
- *   to decide whether to decompress to a transient `.tar` first).
+ *   the cache filename; [me.phie.tawc.install.Archive] dispatches on
+ *   the file extension to either stream zstd through a FIFO or hand
+ *   gzip / plain `.tar` straight to toybox tar).
  * @property stripPrefix single top-level directory inside the tarball
  *   to flatten into the rootfs (`"root.x86_64"` for the Arch x86_64
  *   bootstrap; `null` for tarballs that are already flat). Toybox tar
