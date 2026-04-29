@@ -16,7 +16,7 @@ use tawc_integration::helpers::{
     assert_compositor_clean, launch_and_wait_for_ahb, require_compositor, saw_ahb_import,
     saw_shm_import, TIMEOUT,
 };
-use tawc_integration::{adb, compositor};
+use tawc_integration::{adb, chroot, compositor};
 
 const FIREFOX_CMD: &str = "GDK_GL=gles:always firefox --no-remote";
 
@@ -345,5 +345,35 @@ fn test_xwayland_xclock_renders_via_shm() {
     );
 
     app.stop().expect("xclock failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// TAWC-DRI Phase 1: a chroot-side xcb client opens :0, calls
+/// QueryExtension("TAWC-DRI"), then sends one TAWCDRIQueryVersion and
+/// one TAWCDRIPresentBuffer with a fabricated buffer-id. This proves
+/// the X server's extension wiring is in place and dispatch routes
+/// the requests — no real buffers, no GL. See notes/xwayland.md for
+/// the larger Phase 2 plan this gates.
+#[test]
+fn test_tawc_dri_extension_round_trip() {
+    require_compositor();
+
+    let bin = chroot::ensure_tawc_dri_test().expect("build tawc-dri-test");
+    let cmd = format!("DISPLAY=:0 {}", bin);
+    let output = adb::chroot_run(&cmd).expect("run tawc-dri-test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "tawc-dri-test exited non-zero ({:?}). \
+         The TAWC-DRI extension or its dispatch wiring is broken.\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert!(
+        stderr.contains("tawc-dri-test: OK"),
+        "tawc-dri-test exited 0 but didn't reach the OK line — \
+         did the binary or DISPLAY change?\nstderr: {stderr}"
+    );
     assert_compositor_clean();
 }

@@ -11,13 +11,23 @@ of the box.
   Xwayland-24.1.11 shipped in the APK, spawned by the compositor; X
   clients connect to `:0` and render via `wl_shm`. No GLAMOR.
   Server-rendered pixmaps stay magenta-tinted on purpose.
-- **Phase 2 — planned, not yet started.** libhybris EGL-on-X11
-  platform plugin (chroot-side) + new `xwayland-tawc.c` (server-side
-  AHB allocation + `android_wlegl` buffer transport) + new `TAWC-DRI`
-  X11 extension (AHB-shipping client→server protocol). Closes the "X
-  clients can use GL/Vulkan" gap. See "Buffer transport plan" below
-  for the file-by-file shape and "Phase 2 implementation order" for
-  the build sequence.
+- **Phase 2 step 1 — done (2026-04-29).** `-Dtawc=true` meson option
+  + stub `hw/xwayland/xwayland-tawc.c` (returns NULL) + `TAWC-DRI`
+  X11 extension scaffolding: protocol header
+  (`Xext/tawcdriproto.h`), server-side stub
+  (`Xext/tawc-dri.c` with `QueryVersion` reply + `PresentBuffer`
+  no-op ack), registered via `mi/miinitext.c`. All vendored as
+  `xwayland-patches/xwayland/02-tawc-extension-step1.patch`. The
+  Xwayland binary still builds and runs identically; the new
+  extension is advertised on the wire and dispatches requests.
+  Verification: `apps::test_tawc_dri_extension_round_trip` exercises
+  `QueryExtension` + `QueryVersion` + `PresentBuffer` from a chroot
+  xcb client (`testing/tawc-dri-test/`).
+- **Phase 2 steps 2–5 — pending.** `xwayland-tawc.c` real
+  implementation (`android_wlegl` bind + libnativewindow AHB
+  alloc + `xwl_tawc_pixmap_get_wl_buffer`), glue
+  `TAWCDRIPresentBuffer` to it, libhybris `eglplatform_x11.cpp`,
+  real-app shakedown. See "Phase 2 implementation order" below.
 - **Phase 3 — probably skip.** Server-side EGL acceleration
   (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
   that nobody runs on a phone.

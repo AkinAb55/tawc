@@ -482,6 +482,7 @@ stage_xwayland() {
     build_meson xwayland \
         -Dxvfb=false \
         -Dglamor=false \
+        -Dtawc=true \
         -Ddri3=false \
         -Ddrm=false \
         -Dglx=false \
