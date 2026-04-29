@@ -180,14 +180,12 @@ class CompositorService : Service() {
 
     private fun ensureXkbDataExtracted() {
         val destDir = File(filesDir, "xkb")
-        val versionFile = File(destDir, ".version")
-        val currentVersion = try {
-            packageManager.getPackageInfo(packageName, 0).longVersionCode
-        } catch (_: PackageManager.NameNotFoundException) { 0L }
+        val currentStamp = currentExtractStamp(this)
+        if (!isStampStale("xkb", destDir, currentStamp)) return
 
-        if (versionFile.exists() && versionFile.readText().trim() == currentVersion.toString()) return
-
-        destDir.deleteRecursively()
+        val stagingDir = File(filesDir, "xkb.new")
+        stagingDir.deleteRecursively()
+        stagingDir.mkdirs()
         fun extractDir(assetPath: String, destPath: File) {
             val children = assets.list(assetPath) ?: return
             if (children.isEmpty()) {
@@ -201,8 +199,9 @@ class CompositorService : Service() {
                 }
             }
         }
-        extractDir("xkb", destDir)
-        versionFile.writeText(currentVersion.toString())
+        extractDir("xkb", stagingDir)
+        atomicReplaceDir(stagingDir, destDir)
+        File(destDir, ".version").writeText(currentStamp)
         Log.d(TAG, "Extracted xkb data to $destDir")
     }
 
@@ -267,8 +266,80 @@ class CompositorService : Service() {
         private val XWAYLAND_EXTRACT_LOCK = Any()
 
         /**
+         * Stamp value written to `<destDir>/.version` to gate
+         * re-extraction. Combines `longVersionCode` and `lastUpdateTime`
+         * (epoch ms): the former gives a human-readable bump on real
+         * version changes, the latter ensures `adb install -r` of the
+         * same `versionCode` still triggers re-extraction (the system
+         * bumps `lastUpdateTime` on every reinstall). Without the
+         * `lastUpdateTime` component, devs iterating on Xwayland /
+         * libhybris / xkb without bumping `versionCode` silently run
+         * against the previous build's binary.
+         */
+        private fun currentExtractStamp(context: Context): String {
+            val info = try {
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            } catch (_: PackageManager.NameNotFoundException) {
+                return "v0@0"
+            }
+            return "v${info.longVersionCode}@${info.lastUpdateTime}"
+        }
+
+        /**
+         * Returns true if `<destDir>/.version` is missing or doesn't
+         * match [currentStamp]. Logs the comparison so a stale extract
+         * is one logcat line away if this ever misfires again.
+         */
+        private fun isStampStale(name: String, destDir: File, currentStamp: String): Boolean {
+            val versionFile = File(destDir, ".version")
+            val onDisk = if (versionFile.exists()) versionFile.readText().trim() else "missing"
+            val stale = onDisk != currentStamp
+            Log.i(TAG, "$name extract: stamp=$currentStamp on-disk=$onDisk extracting=$stale")
+            return stale
+        }
+
+        /**
+         * Atomically swap [stagingDir] into place at [destDir]. If
+         * [destDir] already has contents, move it aside via `rename`
+         * (which works at the directory-entry level, regardless of
+         * whether the tree has un-walkable / un-deletable entries) and
+         * delete it as a best-effort cleanup afterwards.
+         *
+         * `File.deleteRecursively()` followed by `renameTo` was the
+         * obvious encoding, but `deleteRecursively` returns Boolean
+         * silently — when it can't traverse into a legacy symlink tree
+         * (e.g. SELinux quirks, fs context oddities) it leaves the
+         * destDir half-populated and the subsequent rename fails with
+         * EEXIST / ENOTEMPTY. The rename-aside path doesn't depend on
+         * walking the contents.
+         */
+        private fun atomicReplaceDir(stagingDir: File, destDir: File) {
+            val asideDir = File(destDir.parentFile, "${destDir.name}.old")
+            asideDir.deleteRecursively()
+            if (destDir.exists() && !destDir.renameTo(asideDir)) {
+                throw java.io.IOException(
+                    "Could not move $destDir aside to $asideDir prior to swap " +
+                        "(SELinux denial? cross-fs?). Try clearing app storage."
+                )
+            }
+            if (!stagingDir.renameTo(destDir)) {
+                // Best-effort restore so we don't leave an empty destDir
+                // that the next start would treat as "extracted".
+                asideDir.renameTo(destDir)
+                throw java.io.IOException(
+                    "rename $stagingDir -> $destDir failed; refusing to fall back to a " +
+                        "symlink-flattening copy. Try clearing app storage and reinstalling."
+                )
+            }
+            // The aside dir may still contain legacy entries we couldn't
+            // delete via Java; that's fine — the rename has already
+            // taken effect, and a stuck `.old` only costs disk.
+            asideDir.deleteRecursively()
+        }
+
+        /**
          * Extract `assets/libhybris/<abi>.tar` into `filesDir/libhybris/`,
-         * preserving symlinks. Idempotent — versioned by `longVersionCode`
+         * preserving symlinks. Idempotent — gated by [currentExtractStamp]
          * via a `.version` stamp written last, so a partial extract is
          * indistinguishable from "never extracted" and gets retried.
          *
@@ -297,13 +368,8 @@ class CompositorService : Service() {
             }
 
             val destDir = File(context.filesDir, "libhybris")
-            val versionFile = File(destDir, ".version")
-            val currentVersion = try {
-                context.packageManager
-                    .getPackageInfo(context.packageName, 0).longVersionCode.toString()
-            } catch (_: PackageManager.NameNotFoundException) { "0" }
-
-            if (versionFile.exists() && versionFile.readText().trim() == currentVersion) {
+            val currentStamp = currentExtractStamp(context)
+            if (!isStampStale("libhybris", destDir, currentStamp)) {
                 return true
             }
 
@@ -350,20 +416,12 @@ class CompositorService : Service() {
                 }
             }
 
-            destDir.deleteRecursively()
-            // No copy fallback for the rename: `copyRecursively` follows
-            // symlinks instead of preserving them, which would silently
-            // turn libhybris's symlink topology into duplicate file
-            // copies. rename(2) within the same parent dir works on
-            // every Android filesystem we ship on; if it ever fails we
-            // want to fail loudly and investigate, not paper over it.
-            if (!stagingDir.renameTo(destDir)) {
-                throw java.io.IOException(
-                    "rename $stagingDir -> $destDir failed; refusing to fall back to a " +
-                        "symlink-flattening copy. Try clearing app storage and reinstalling."
-                )
-            }
-            File(destDir, ".version").writeText(currentVersion)
+            // Swap stagingDir into place. No copy fallback: `copyRecursively`
+            // follows symlinks instead of preserving them, which would
+            // silently turn libhybris's symlink topology into duplicate
+            // file copies.
+            atomicReplaceDir(stagingDir, destDir)
+            File(destDir, ".version").writeText(currentStamp)
             Log.i(TAG, "Extracted libhybris ($abi) to $destDir")
             return true
         }
@@ -401,13 +459,8 @@ class CompositorService : Service() {
             }
 
             val destDir = File(context.filesDir, "xwayland")
-            val versionFile = File(destDir, ".version")
-            val currentVersion = try {
-                context.packageManager
-                    .getPackageInfo(context.packageName, 0).longVersionCode.toString()
-            } catch (_: PackageManager.NameNotFoundException) { "0" }
-
-            if (versionFile.exists() && versionFile.readText().trim() == currentVersion) {
+            val currentStamp = currentExtractStamp(context)
+            if (!isStampStale("xwayland", destDir, currentStamp)) {
                 return true
             }
 
@@ -444,14 +497,8 @@ class CompositorService : Service() {
                 }
             }
 
-            destDir.deleteRecursively()
-            if (!stagingDir.renameTo(destDir)) {
-                throw java.io.IOException(
-                    "rename $stagingDir -> $destDir failed; refusing to fall back to a " +
-                        "symlink-flattening copy. Try clearing app storage and reinstalling."
-                )
-            }
-            File(destDir, ".version").writeText(currentVersion)
+            atomicReplaceDir(stagingDir, destDir)
+            File(destDir, ".version").writeText(currentStamp)
             Log.i(TAG, "Extracted Xwayland ($abi) to $destDir")
             return true
         }
