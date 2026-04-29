@@ -65,7 +65,15 @@ class InstallActivity : AppCompatActivity() {
         // saved selection.
         selectedMethod = savedInstanceState?.getString(KEY_METHOD)
             ?: intent?.getStringExtra(EXTRA_METHOD)
-        started = savedInstanceState?.getBoolean(KEY_STARTED) == true
+        // The form is only useful against an empty slot. If the slot is
+        // already in any state (INSTALLING / READY / FAILED / …) the
+        // form's Install button would just be the disabled "in progress"
+        // / "delete first" hint — show the live OperationLogPanel
+        // instead so the user can watch the in-flight job (or see the
+        // last terminal status). `started` therefore tracks "this id has
+        // a job worth watching," not just "we kicked one off here."
+        val occupiedOnEntry = InstallationStore(this).load(targetId) != null
+        started = savedInstanceState?.getBoolean(KEY_STARTED) == true || occupiedOnEntry
 
         val scaffold = buildChildScreen("Install distro")
 
@@ -85,7 +93,7 @@ class InstallActivity : AppCompatActivity() {
         // savedInstanceState and skip this path. A fresh `am start`
         // produces a null savedInstanceState (Android creates a new
         // activity instance), so the CLI keeps working.
-        if (savedInstanceState == null && autoStartRequested(intent)) {
+        if (savedInstanceState == null && intent.requestsAutoStart()) {
             beginInstall()
         }
     }
@@ -99,7 +107,7 @@ class InstallActivity : AppCompatActivity() {
             return
         }
         targetId = newId
-        if (autoStartRequested(intent)) {
+        if (intent.requestsAutoStart()) {
             beginInstall()
         }
     }
@@ -108,14 +116,6 @@ class InstallActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_STARTED, started)
         selectedMethod?.let { outState.putString(KEY_METHOD, it) }
-    }
-
-    // `am start --es autoStart true` sends a string extra; `--ez autoStart
-    // true` sends a boolean. Accept either so the CLI is forgiving.
-    private fun autoStartRequested(intent: Intent?): Boolean {
-        intent ?: return false
-        if (intent.getBooleanExtra(EXTRA_AUTO_START, false)) return true
-        return intent.getStringExtra(EXTRA_AUTO_START)?.equals("true", ignoreCase = true) == true
     }
 
     override fun onStart() {
@@ -260,7 +260,6 @@ class InstallActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_ID = "id"
         const val EXTRA_METHOD = "method"
-        const val EXTRA_AUTO_START = "autoStart"
         private const val KEY_STARTED = "tawc.install.started"
         private const val KEY_METHOD = "tawc.install.method"
     }

@@ -145,8 +145,13 @@ class DistroInfoActivity : AppCompatActivity() {
             .setMessage(message)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Delete") { _, _ ->
+                // autoStart=true is the explicit trigger contract —
+                // UninstallActivity won't kick off the operation on a
+                // bare launch. The dialog "Delete" press is the user's
+                // confirmation, so we promote it to an autoStart intent.
                 val i = Intent(this, UninstallActivity::class.java)
                     .putExtra(UninstallActivity.EXTRA_ID, installation.id)
+                    .putExtra(EXTRA_AUTO_START, true)
                 startActivity(i)
             }
             .show()

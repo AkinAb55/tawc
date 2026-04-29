@@ -7,7 +7,7 @@ following a fresh proot install + `install-test-deps.sh`, then
 ## Repro
 
 ```
-adb shell am start -n me.phie.tawc/.install.UninstallActivity --es id arch
+adb shell am start -n me.phie.tawc/.install.UninstallActivity --es autoStart true --es id arch
 # wait for uninstall
 adb shell am start -n me.phie.tawc/.install.InstallActivity --es autoStart true --es id arch --es method proot
 # wait ~6 min for install

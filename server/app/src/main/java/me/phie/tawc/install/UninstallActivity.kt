@@ -12,9 +12,21 @@ import me.phie.tawc.ui.buildChildScreen
  * Live "uninstall in progress" screen — just an [OperationLogPanel]
  * bound to [InstallationService]. The Are-You-Sure step lives on
  * [DistroInfoActivity] as an AlertDialog now, so this activity has
- * no in-page form: it kicks off the uninstall in `onCreate` and
- * watches the service from there. `am start … --es id <id>` is the
- * headless/test entry point.
+ * no in-page form: it kicks off the uninstall when launched with
+ * `--es autoStart true` and watches the service from there.
+ *
+ * **Opening the activity is not a trigger.** Like [InstallActivity],
+ * the uninstall fires only when the launching intent explicitly
+ * carries `autoStart=true` (see [requestsAutoStart] / [EXTRA_AUTO_START]).
+ * Otherwise the page just renders the panel showing the bound service's
+ * last operation status — opening from the app switcher or a recents
+ * card never re-runs an operation that already finished. The intent
+ * extra is paired with `savedInstanceState == null` so a config-change
+ * recreate doesn't re-fire either.
+ *
+ * `am start … --es autoStart true --es id <id>` is the headless / test
+ * entry point and the same shape DistroInfoActivity's "Delete" dialog
+ * uses internally.
  */
 class UninstallActivity : AppCompatActivity() {
 
@@ -39,10 +51,12 @@ class UninstallActivity : AppCompatActivity() {
         scaffold.content.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         setContentView(scaffold.root)
 
-        // Only kick off on the very first onCreate; a process-death
-        // recreate restores from savedInstanceState and just re-binds
-        // to the (still-running) service.
-        if (savedInstanceState == null) {
+        // Fire the uninstall only on a first-time onCreate that's also
+        // carrying an explicit autoStart trigger. Recreations (rotation,
+        // process-death restore) re-deliver the launch intent — the
+        // savedInstanceState gate is what stops the trigger from being
+        // re-honoured.
+        if (savedInstanceState == null && intent.requestsAutoStart()) {
             beginUninstall(reLaunch = false)
         }
     }
@@ -56,7 +70,9 @@ class UninstallActivity : AppCompatActivity() {
             return
         }
         targetId = newId
-        beginUninstall(reLaunch = true)
+        if (intent.requestsAutoStart()) {
+            beginUninstall(reLaunch = true)
+        }
     }
 
     override fun onStart() {

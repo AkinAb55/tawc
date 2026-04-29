@@ -125,8 +125,9 @@ The package is split into three layers:
 | `InstallProgress.kt`           | Stage enum + progress event used by the service. The pkg-manager-bootstrap stages are `PKG_KEYRING` and `PKG_INSTALL` (distro-agnostic names). |
 | `InstallationService.kt`       | The state-machine gate. Foreground service that consults [InstallationStore], resolves the right [Distro] from [DistroRegistry], and exposes `progress` (StateFlow) + `log` (SharedFlow). |
 | `OperationLogPanel.kt`         | Reusable Android view (status line + progress bar + scrolling log) that binds to the service's `progress`/`log` flows. Used by both [InstallActivity] and [UninstallActivity] so the per-operation UI lives in one place. |
+| `AutoStart.kt`                 | Shared `EXTRA_AUTO_START` constant + `Intent?.requestsAutoStart()` extension. The single contract that lets [InstallActivity] / [UninstallActivity] tell "this launch is the user / CLI explicitly asking to fire the operation" from "this launch is just opening the page." |
 | `InstallActivity.kt`           | Install flow: read-only summary (Distro display name, Linux arch, install path) → Install button → swap to [OperationLogPanel] for live progress. Recognises `autoStart=true` to skip the form and start immediately. The button is disabled (with state-aware label) when the gate would refuse. |
-| `UninstallActivity.kt`         | Uninstall flow: confirmation prompt → Uninstall button → swap to [OperationLogPanel]. Recognises `autoStart=true` to skip the confirmation. |
+| `UninstallActivity.kt`         | Live uninstall progress page bound to [InstallationService]. Has no in-page button — confirmation lives on [DistroInfoActivity]. The uninstall fires only when the launching intent carries `autoStart=true` (same contract as [InstallActivity]); a bare launch / recents reopen just shows the bound service's last status. |
 | `DistroInfoActivity.kt`        | Per-distro detail page (id, registry-resolved distro/arch, method, source URL, installed-at, state/failure, full rootfs path) + an async `du -sk` size readout (only for `READY`) + a red Uninstall button (which opens [UninstallActivity]). Reached from a tap on a home-screen row. |
 
 The `MainActivity` home screen lists the on-disk installations
@@ -381,11 +382,25 @@ adb shell am start \
     --es autoStart true --es id arch
 ```
 
-`autoStart` fires once per launch, gated on `savedInstanceState ==
-null`. A process-death recreation of the activity does not re-trigger;
-a fresh `am start` (which delivers a new launch intent) does. Combined
-with the service-level gate, even a leaked auto-start is at worst a
-no-op rejection.
+`autoStart` is the *only* way the activities trigger a mutating
+operation as a side-effect of being launched — opening either activity
+without it (e.g. tapping a recents card whose Activity instance was
+destroyed and recreated, or `am start ... InstallActivity` with no
+extras) just renders the page; nothing runs. Inside the activity, the
+in-page Install button is the other trigger; UninstallActivity has no
+such button because the confirmation dialog lives on
+[DistroInfoActivity], which then launches UninstallActivity *with*
+`autoStart=true`. The autoStart fire is also gated on
+`savedInstanceState == null` so a config-change recreate doesn't
+re-honour the same launch intent. A fresh `am start` (which delivers a
+new launch intent) does re-fire. Combined with the service-level gate,
+even a leaked auto-start is at worst a no-op rejection.
+
+The shared `autoStart` plumbing lives in `AutoStart.kt`
+(`EXTRA_AUTO_START` + `Intent?.requestsAutoStart()`); both activities
+read it via the extension function. New activities that perform
+mutating operations should follow the same pattern instead of running
+work directly out of `onCreate`.
 
 Listing existing installations from the host: read the metadata
 directly with root.
