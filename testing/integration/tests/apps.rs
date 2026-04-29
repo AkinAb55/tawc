@@ -60,21 +60,35 @@ fn test_firefox_launches_with_hardware_buffers() {
     // committed every chrome frame through cairo/SHM (the
     // gfx-platform-disables-acceleration regression that the
     // `firefox.cfg` autoconfig from `testing/install-test-deps.sh`
-    // works around). Clear the log, wait through several frames,
-    // then assert that what came in during that window is wlegl-only.
+    // works around).
+    //
+    // The signal we actually want is "no SHM imports in steady state".
+    // Watching for fresh AHB imports is unreliable: imports are
+    // first-touch events per `wl_buffer` object, and once Firefox's
+    // WebRender swapchain stabilises it cycles a small set of buffers
+    // via re-attach (no new import logs even though frames keep
+    // flowing). Pair the SHM check with a frame-counter delta so we
+    // also catch the case where Firefox crashed/froze and isn't
+    // committing anything at all.
     adb::logcat_clear().expect("Failed to clear logcat after Firefox launch");
+    let before = compositor::query_state(TIMEOUT)
+        .expect("query compositor state before Firefox steady-state check");
     std::thread::sleep(Duration::from_secs(2));
+    let after = compositor::query_state(TIMEOUT)
+        .expect("query compositor state after Firefox steady-state check");
     let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-    assert!(
-        saw_ahb_import(&logs),
-        "Firefox stopped emitting AHB imports after launch — fell back to SHM mid-run?\nlogs:\n{logs}"
-    );
     assert!(
         !saw_shm_import(&logs),
         "Firefox committed wl_shm buffers during steady-state rendering — \
          GPU process / WebRender disabled, chrome falling back to cairo?\n\
          Re-check `testing/firefox.cfg` autoconfig and the chroot's \
          `/usr/lib/firefox/defaults/pref/autoconfig.js`.\nlogs:\n{logs}"
+    );
+    let frames = after.frames.saturating_sub(before.frames);
+    assert!(
+        frames >= 5,
+        "Firefox stalled in steady state — compositor rendered only {frames} frames in 2s \
+         (before={before:?}, after={after:?}). Likely Firefox crashed or its swapchain wedged."
     );
 
     firefox.stop().expect("Firefox process group failed to stop cleanly");
