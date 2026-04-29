@@ -175,6 +175,31 @@ under gcc 15 (a `format string` mismatch the upstream code never
 fixed); skipping it avoids the build break in code we don't ship.
 The build script invokes `make` per-subdir to control this.
 
+### Xwayland (binary + libs → ships in APK as asset)
+
+Cross-built once. NDK clang against bionic — same toolchain as the
+Rust compositor. Aarch64-only.
+
+```bash
+bash client/build-xwayland-aarch64           # incremental
+bash client/build-xwayland-aarch64 --clean   # wipe install + builddirs
+bash client/build-xwayland-aarch64 --only=libx11   # rebuild one stage
+```
+
+Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`,
+packed into `assets/xwayland/arm64-v8a.tar` by Gradle's `packXwayland`
+task and extracted on-device by
+`CompositorService.ensureXwaylandExtracted`. ~12 MB asset.
+
+Host packages (in addition to the always-required set above): `perl`
+(needed by xorgproto/libxcb/font-util autotools macros). Everything
+else (meson, ninja, autoconf, automake, libtool, pkg-config, python3)
+is already required for libhybris.
+
+Bionic-built (NDK), not glibc — see `notes/xwayland.md` "Why bionic"
+for the rationale and the "Glibc alternative" section for the V4
+toolchain swap that we tried and reverted.
+
 ### Rust compositor (.so → bundled in APK by Gradle)
 
 NDK clang against bionic, via `cargo-ndk`. Invoked by Gradle

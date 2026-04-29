@@ -5,10 +5,62 @@ inside the chroot, displayed via tawc's Wayland compositor through an
 Xwayland server. Smithay supports the compositor side of XWayland out
 of the box.
 
+## Status at a glance
+
+- **Phase 1 (bionic baseline) — done.** Bionic-cross-compiled
+  Xwayland-24.1.11 shipped in the APK, spawned by the compositor; X
+  clients connect to `:0` and render via `wl_shm`. No GLAMOR.
+  Server-rendered pixmaps stay magenta-tinted on purpose.
+- **Phase 2 — planned, not yet started.** libhybris EGL-on-X11
+  platform plugin (chroot-side) + new `xwayland-tawc.c` (server-side
+  AHB allocation + `android_wlegl` buffer transport) + new `TAWC-DRI`
+  X11 extension (AHB-shipping client→server protocol). Closes the "X
+  clients can use GL/Vulkan" gap. See "Buffer transport plan" below
+  for the file-by-file shape and "Phase 2 implementation order" for
+  the build sequence.
+- **Phase 3 — probably skip.** Server-side EGL acceleration
+  (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
+  that nobody runs on a phone.
+
+## Why bionic
+
+We briefly went glibc (the V4 experiment) under the assumption that
+everything had to share libhybris's libc. Reverting was the right
+call once we worked through Phase 2 carefully:
+
+- The libhybris EGL-on-X11 plugin lives on the **client** side, in
+  the chroot (which is glibc Arch). The X server is a separate
+  process; libcs don't need to match across an X protocol connection.
+- The X server's role in Phase 2 is allocating AHBs and shipping them
+  to the compositor via `android_wlegl`. AHBs come from
+  `libnativewindow.so`, a **bionic** library. From a bionic Xwayland
+  we can `dlopen("libnativewindow.so")` directly. From a glibc
+  Xwayland we'd have to load libhybris *into* the X server itself to
+  bridge — which is the V3-style "bionic + libhybris-in-server" path
+  the original notes flagged as having "larger unknowns."
+- Bionic Xwayland needs ~5 small source patches (`FIONREAD` declared,
+  `link()` → `symlink()`, `/tmp` prefix swap, `OPEN_MAX` fallback,
+  Android `passwd` shape, `setgid`/`setuid` drop). Glibc Xwayland
+  needs zero source patches but seven binary patches against
+  `libc.so.6` and `ld-linux-aarch64.so.1` to silence syscalls the
+  Android app-zygote seccomp filter SIGSYSes (`set_robust_list`,
+  `rseq`, `clone3`, `accept`). The source-patch route is more honest
+  and better-bounded.
+- Bionic Xwayland is built and proven (the 2026-04-28 V1 baseline
+  rendered xclock end-to-end through `wl_shm`). The glibc swap was
+  reverted on 2026-04-29 once the Phase 2 design clarified what the
+  server actually has to do.
+
+The "Glibc alternative (not used)" section near the bottom preserves
+the V4 toolchain-swap, seccomp binary patches, and packaging so we
+don't have to re-derive any of it if a future workload ever needs a
+glibc X server inside the APK.
+
 ## Architecture: bionic-build Xwayland into the APK
 
 We **cross-compile Xwayland and its X11/font/render dependencies for
-aarch64 bionic** and ship them in the APK as assets, extracted to
+aarch64 bionic** (NDK `aarch64-linux-android29-clang`) and ship them
+in the APK as assets, extracted to
 `/data/data/me.phie.tawc/files/xwayland/` on first run. The
 compositor process exec's `Xwayland` from that directory — so the
 binary is a direct child of the Android app process, with no
@@ -22,12 +74,18 @@ the Android side: standard libc, standard `Command::new("Xwayland")`,
 and the bind into the chroot is a one-way symlink of `/tmp/.X11-unix`
 so X clients can find the socket.
 
-## Build status (2026-04-28)
+## Build status
 
 **Xwayland-24.1.11 binary builds cleanly for aarch64-linux-android29.**
-1.8 MB ELF, DT_NEEDED on `libpixman-1`, `libXfont2`,
+~1.8 MB ELF, DT_NEEDED on `libpixman-1`, `libXfont2`,
 `libwayland-client`, `libxcvt`, `libxshmfence`, `libmd`, `libXau`,
-`libm`, `libc`. All staged into `build/xwayland-aarch64/install/`.
+`libm`, `libc`. Configured with `-Dglamor=false`. All staged into
+`build/xwayland-aarch64/install/`.
+
+**End-to-end verified on device:** xclock connects to `:0`, maps a
+window, renders into a wl_shm buffer (magenta-tinted per the SHM
+fallback policy) on top of the compositor's gradient background.
+Covered by `apps::test_xwayland_xclock_renders_via_shm`.
 
 Build script: `client/build-xwayland-aarch64`. Pinned upstream tags
 cloned into `./xwayland-src/<lib>/`, patches in
@@ -54,6 +112,7 @@ termux's pinned versions to our slightly-newer upstream tags. The
 | `xtrans` | socket dir prefix swap (×2) | Android can't write `/tmp` |
 | `libxfont2` | `OPEN_MAX` fallback | bionic doesn't define `NOFILES_MAX` or `NOFILE` |
 | `wayland` | XDG_RUNTIME_DIR fallback to `/tmp` prefix | defense-in-depth; libwayland-client fails ENOENT otherwise |
+| `xwayland` | drop `setgid()`/`setuid()` from `Popen()` on `__ANDROID__` | Android's seccomp filter SIGKILLs those calls; we run as the app uid anyway |
 
 ### Stages built (in dep order)
 
@@ -79,23 +138,14 @@ termux's pinned versions to our slightly-newer upstream tags. The
 | `libdrm` | mesa/drm | libdrm-2.4.125 |
 | `libxshmfence` | xorg/lib/libxshmfence | libxshmfence-1.3.3 |
 | `libmd` | hadrons.org tarball | 1.1.0 |
-| `libepoxy` | anholt/libepoxy | 1.5.10 |
-| `expat` | libexpat | R_2_6_4 |
-| `libxext` | xorg/lib/libxext | libXext-1.3.6 |
-| `libxfixes` | xorg/lib/libxfixes | libXfixes-6.0.1 |
-| `libxxf86vm` | xorg/lib/libxxf86vm | libXxf86vm-1.1.6 |
-| `libxrender` | xorg/lib/libxrender | libXrender-0.9.12 |
-| `libxrandr` | xorg/lib/libxrandr | libXrandr-1.5.4 |
-| `libxdamage` | xorg/lib/libxdamage | libXdamage-1.1.6 |
-| `cutils-stub` | tawc-local | (header-only no-op for `<cutils/trace.h>`) |
-| `mesa` | mesa/mesa | mesa-25.1.6 (Zink-only, Vulkan-backed) |
-| `xwayland` | xorg/xserver | xwayland-24.1.11 |
+| `xkeyboard-config` | xkeyboard-config | xkeyboard-config-2.45 |
+| `xkbcomp` | xorg/app/xkbcomp | xkbcomp-1.4.7 |
+| `xwayland` | xorg/xserver | xwayland-24.1.11 (`-Dglamor=false`) |
 
 ### Out-of-scope features (disabled at configure time)
 
-- **DRI3 / present-pixmap.** OFF. DRI3 wants buffer passing via real
-  dmabuf fds; we route X11 GL through GLAMOR + zwp_linux_dmabuf
-  instead.
+- **GLAMOR / GLX / DRI3.** Disabled in the bionic baseline. See
+  Phase 2 below for the AHB-passthrough plan that replaces them.
 - **MIT-MAGIC-COOKIE auth.** Single-user on-device server; any client
   can use `:0` without auth.
 - **XDMCP, secure-rpc, xselinux, xinerama, xres, xv, xshmfence-as-futex,
@@ -106,224 +156,363 @@ termux's pinned versions to our slightly-newer upstream tags. The
 small generic `libdrm.so` (no vendor drivers) for the few struct
 definitions Xwayland needs at the type level.
 
-## X11 GL acceleration: chosen plan
+## Buffer transport plan: AHB-everywhere, GBM nowhere
 
-**Plan (committed): glibc-Xwayland + libhybris, in two phases.**
+The original plan's "Phase 1 = GLAMOR + Phase 2 = EGL-on-X11" framing
+chased a desktop-Linux abstraction (GBM render-nodes, dmabuf-fds,
+`zwp_linux_dmabuf_v1`) that doesn't fit the device. After several
+days exploring it, the cleaner shape — informed by what tawc already
+does on the Wayland side — is:
 
-- **Phase 1: GLAMOR-only** (no GLX, no client-side GL). Cross-compile
-  Xwayland + its X11/font/render dep tree against **glibc-aarch64**
-  using the same toolchain as `client/build-libhybris-aarch64`. Link
-  Xwayland's GLAMOR against libhybris's libEGL + libGLESv2. Ship the
-  binary alongside libhybris in the APK; compositor execs it as a
-  child via the glibc dynamic loader. Output: server-side 2D / Render
-  / glyph / Cairo acceleration. X clients without GL needs (xterm,
-  xclock, xeyes, GIMP-2D, classic Render-heavy apps) get a real
-  speedup; X clients with GL needs don't run yet.
-- **Phase 2: EGL-on-X11.** Add an X11 platform plugin to
-  libhybris's libEGL (~Mesa-reference-1500-lines, multi-day, isolated
-  project). Solve the DRI3 render-node question. Output: X clients
-  do `eglGetDisplay(EGL_PLATFORM_X11_KHR, …)` and get direct GLES
-  rendering through libhybris+vendor blob, just like Wayland clients
-  already do.
+> Every X-server-managed buffer that lives on the GPU is an
+> AHardwareBuffer. Every GPU-resident buffer is shipped to the
+> compositor via `android_wlegl.create_buffer_v2` (the same
+> protocol the compositor already imports for Wayland-app
+> clients). Server-software-rendered pixmaps stay in `wl_shm`,
+> exactly as today, and the compositor's magenta-tint debug
+> rendering on those buffers stays as a load-bearing diagnostic.
+> No GBM, no `/dev/dri/render*`, no `zwp_linux_dmabuf_v1`, no
+> dmabuf fds appear anywhere.
 
-Project policy: **our devices do not support desktop GL, therefore
-X clients do not get desktop GL.** GLES is the only client GL. This
-is consistent with `gl-shims/libGL.so`'s existing chroot-side stance
-(returns NULL for `glX*` so probes fall through to EGL). It removes
-GLX, libGL-stub-extensions, indirect-rendering, and Mesa from the
-plan entirely.
+This re-shapes the work into two phases that don't depend on each
+other for correctness, and a third we may never do.
 
-### Why GLAMOR without GLX
+### Phase 1 (done — bionic baseline). Server-software Xwayland.
 
-GLX server-side would force a `xserver/glx/` link against a libGL
-exporting ~80 desktop-GL-only entry points (`glAccum`, `glBegin`,
-`glRasterPos`, `glCallList`, …) that libhybris's GLESv2 doesn't have.
-The workaround is a libGL-stub with no-op desktop-GL entry points
-plus DT_NEEDED on libGLESv2 — buildable, but it only earns its keep
-if real apps actually use indirect GLX. **They don't.** Modern X
-clients that need GL either:
-- use GLES via EGL-on-X11 (the path phase 2 unlocks), or
-- use the GLES-overlapping subset of GLX, which would run identically
-  through EGL-on-X11 anyway.
+- NDK `aarch64-linux-android29-clang` toolchain.
+- Bionic compat patches above.
+- Asset packaging + Kotlin extractor: tarball ships in the APK,
+  extracts to `<filesDir>/xwayland/`.
+- **No further Xwayland source patches required for SHM clients.**
+  Server-rendered pixmaps flow through `xwayland-shm.c` → `wl_shm`
+  → compositor → magenta tint. xclock, xeyes, xterm, xwd, GIMP-2D,
+  anything that pixman-renders works, and the diagnostic that "this
+  came from the CPU" is preserved.
 
-The set of apps that genuinely need desktop-GL-only features over
-indirect GLX is tiny, shrinking, and slow when it works. Not worth
-shipping a parallel server-side dispatch path for. Configure with
-`-Dglamor=true -Dglx=false`.
+End-to-end verified on device: `apps::test_xwayland_xclock_renders_via_shm`.
 
-### Why glibc, not bionic — the actual blocker is Wayland-EGL, not GLX
+### Phase 2 (next big chunk). EGL-on-X11 client GL through libhybris.
 
-Bionic Xwayland (V1) is what's shipped today. Bionic + Mesa-Zink (V2)
-got built but is dmabuf-blocked. Bionic + libhybris (V3) was the
-attractive shortcut. The real reason bionic isn't viable for phase
-1 isn't GLX / Mesa — it's that **Android's native libEGL has
-`EGL_PLATFORM_ANDROID`, not `EGL_PLATFORM_WAYLAND`**, and Xwayland's
-GLAMOR is hard-wired as a Wayland client (`xwayland-glamor.c` /
-`xwayland-glamor-gbm.c` expect `eglGetDisplay(EGL_PLATFORM_WAYLAND_KHR,
-wl_display)`, create `wl_egl_window`s on `wl_surface`s, call
-`eglSwapBuffers`).
+Goal: `eglGetDisplay(EGL_PLATFORM_X11_KHR, …)` from a chroot client
+returns a working EGL display, GL/Vulkan rendering happens via the
+vendor blob through libhybris, the rendered frames travel client→X-
+server→compositor as AHBs and present at the speed of every other
+GPU app on the device.
 
-The bridge that takes a `wl_egl_window` and gets a buffer onto a
-`wl_surface` via `android_wlegl` is **libhybris's libwayland-egl**,
-not anything Android provides. Bionic Xwayland would need *one of*:
+**Three components, all roughly independent:**
 
-1. libhybris's wayland-egl bridge consumed in a bionic process.
-   libhybris is partly bionic-loader-in-glibc (irrelevant in bionic)
-   and partly the wayland-egl-to-`android_wlegl` bridge (still needed).
-   Splitting them works in principle, but libhybris's wayland-egl is
-   built to integrate with libhybris's *loaded* libEGL, not the system
-   libEGL. **Untried** in a bionic host. Multi-day exploratory debug.
-2. A bionic-native wayland-egl shim we write from scratch. Allocate
-   AHBs, send via `android_wlegl`, integrate with Android EGL via
-   `EGL_PLATFORM_ANDROID` + ANativeWindow semantics. Few hundred lines
-   of new code we own.
-3. Patch Xwayland's GLAMOR to use `EGL_PLATFORM_ANDROID`. Big upstream
-   delta, hard to maintain across Xwayland releases.
+1. **`xwayland-tawc.c`** — new file in the X server, modeled on
+   `xwayland-shm.c` (376 LoC) and `xwayland-glamor-gbm.c`'s
+   buffer-shipping helpers. Owns:
+   - Binding the `android_wlegl` Wayland global on the X server's
+     wl_registry.
+   - Allocating server-side AHBs by `dlopen("libnativewindow.so")`
+     directly — bionic-native, no libhybris bridge needed in the
+     server. (`AHardwareBuffer_allocate` / `_lock` / `_describe`,
+     same calls `compositor/src/wlegl.rs` already uses on the
+     compositor side.)
+   - `xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)`: builds a
+     `wl_buffer` for an AHB-backed pixmap by sending it to the
+     compositor over `android_wlegl.create_buffer_v2`. Buffer-
+     release and buffer-destroy listeners.
+2. **`Xext/tawc-dri.c`** + protocol XML — new file in the X server,
+   modeled on `dri3/dri3_request.c`. Implements a `TAWC-DRI` X11
+   protocol extension that's the AHB equivalent of DRI3:
+   - `TAWCDRIPresentBuffer(window, ahb_handle, width, height,
+     format)` — clients send an AHB handle (or our own opaque
+     buffer-id) to the X server.
+   - Server side wraps the AHB as a pixmap, hands off to
+     `xwayland-tawc.c` for compositor delivery.
+   - Why a tawc-specific extension and not stock DRI3: DRI3's wire
+     format passes a dmabuf fd plus stride/format/modifier. AHB
+     handles aren't dmabuf fds (the gralloc fd isn't publicly
+     exposed); modifier semantics are made-up if we tried to fake
+     one. A bespoke protocol speaks our actual buffer ABI honestly.
+3. **libhybris `eglplatform_x11.cpp`** — new file in libhybris (the
+   client-side glibc-built libhybris that already ships in the
+   chroot), parallel to the existing `eglplatform_wayland.cpp`.
+   Implements the X11-side EGL platform plugin: client calls
+   `eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, Display *, …)`,
+   plugin returns an EGL display rooted in the X connection, and on
+   `eglSwapBuffers` allocates an AHB via
+   `AHardwareBuffer_allocate`, renders into it via vendor GLES,
+   sends to the X server via `TAWC-DRI`. Big-shape work but
+   bounded.
 
-glibc + libhybris sidesteps all three: libhybris-on-glibc is the
-*proven* path for `wayland-egl → android_wlegl`. Every Wayland client
-in the chroot uses it daily. Zero new bridge code; ship Xwayland into
-the same lane.
+**Plus small modifications to existing Xwayland files** (all
+conditional on `-Dtawc=true`):
 
-Phase 2 also wants libhybris-glibc anyway — the EGL-on-X11 platform
-addition lives inside the chroot-side libhybris (where the X clients
-run). A bionic phase 1 would mean **two libhybris variants on disk**
-(bionic for Xwayland, glibc for chroot clients), with phase-2 work
-landing on only one. glibc phase 1 keeps it to one variant, used in
-two places.
+- `xwayland-pixmap.c:xwl_pixmap_get_wl_buffer` — extra branch
+  that routes AHB-backed pixmaps through the tawc path before the
+  existing GLAMOR/SHM split.
+- `xwayland-screen.c:registry_global` — bind `android_wlegl` and
+  stash on `xwl_screen->tawc_wlegl`.
+- `xwayland-screen.h` / `xwayland-types.h` — new fields.
+- `xwayland-glamor.c` — third configuration axis: `XWL_HAS_TAWC
+  && !XWL_HAS_GLAMOR`. Most of the pixmap-flow code today is
+  `#ifdef XWL_HAS_GLAMOR`-gated; we want a clean "no GLAMOR but
+  yes Wayland-EGL-via-tawc" mode.
+- `meson.build` — `-Dtawc=true` option, conditional sources.
 
-Bionic might be revisited later if a libhybris-in-bionic configuration
-gets validated elsewhere, or if shipping the glibc sysroot turns out
-to be painful for a reason we don't yet see. For now: not phase 1.
+### Phase 2 implementation order
 
-### What gets built (phase 1)
+The three components are *technically* independent (each compiles
+without the others), but there's a clear order that de-risks the
+plan fastest and gives a working end-to-end pipe at the earliest
+possible step. Build in this order:
 
-Server side — runs as a child of the compositor, no chroot crossing:
+**1. `TAWC-DRI` protocol XML + minimal X server stub.** Define the
+wire (request: `TAWCDRIPresentBuffer(window, buffer-id, w, h,
+format)`; events: buffer-release). Implement the server side as a
+no-op that just accepts and acks the request, plus a synthetic
+client (test harness in `testing/`) that opens an X connection,
+sends `TAWCDRIPresentBuffer` with a fabricated buffer-id, and
+verifies the round-trip. **Verification:** integration test that
+exercises the protocol with no real buffers and no GL anywhere.
+This proves the extension wiring before any AHB code exists.
 
-- Xwayland binary, glibc-aarch64, configured with `-Dglamor=true
-  -Dglx=false -Ddri3=true -Dxwayland_eglstream=false`.
-  - `-Ddri3=true` is harmless for phase 1 (no clients use it yet) and
-    is the wire we'll need for phase 2 EGL-on-X11.
-- X11 / font / Render dep tree, glibc-aarch64. Re-stage of the V2
-  bionic stages onto the glibc toolchain. The patches in
-  `xwayland-patches/` are mostly forward-portable; some bionic-only
-  patches (e.g. `libxfont2`'s `OPEN_MAX` fallback) will be irrelevant.
-- libepoxy, glibc-aarch64. New stage; GLAMOR uses it for GL symbol
-  dispatch.
-- Minimal glibc-aarch64 sysroot extracted alongside the binary:
-  ld-linux-aarch64.so.1, libc.so.6, libdl, libpthread, libm, libresolv,
-  librt. Few MB, bounded.
+**2. `xwayland-tawc.c` against a server-allocated test AHB.** Wire
+up `android_wlegl` binding on the X server's `wl_registry`, the AHB
+allocation helpers (loaded directly from bionic's
+`libnativewindow.so`), and `xwl_tawc_pixmap_get_wl_buffer`. Add a
+debug X server command-line flag (`-tawc-test-pattern`) that, on
+startup, allocates an AHB, CPU-fills it with a known pattern (a
+gradient, distinct from the compositor's magenta SHM tint),
+attaches it to a virtual root pixmap, and triggers a present.
+**Verification:** an X server started with that flag produces a
+known-pattern window on the compositor with no client involvement.
+Proves AHB → `android_wlegl.create_buffer_v2` → `wl_buffer` →
+compositor import works end-to-end *before* the libhybris client
+plugin exists. Also gives us the
+`present_check_flip()` instrumentation hook (see "Why GLAMOR-off
+doesn't block GL-client zero-copy" below): with the test pattern
+attached as a Present source, confirm flip is chosen.
 
-Client side — chroot-side, X clients reaching the GLAMOR-accelerated
-2D server:
+**3. Glue step 1 to step 2.** Make `TAWCDRIPresentBuffer` actually
+turn the buffer-id into an AHB-backed pixmap, then route to the
+step-2 `xwl_tawc_pixmap_get_wl_buffer` path. **Verification:** the
+synthetic client from step 1, upgraded to allocate a real AHB
+itself (using libnativewindow loaded directly, not yet via libhybris
+EGL) and CPU-fill it, sends the AHB through TAWC-DRI and sees the
+gradient on the compositor. **At this point everything except the
+libhybris EGL plugin is done and proven.**
 
-- No new code in phase 1. X clients without GL needs already work
-  through the existing bionic-V1 server; glibc-V4 is a drop-in
-  replacement that adds 2D acceleration.
-- `gl-shims/libGL.so` keeps its current stance (returns NULL for
-  `glX*`, falls through to libhybris EGL+GLES for the rest).
+**4. libhybris `eglplatform_x11.cpp`.** This is the biggest single
+piece and the riskiest unknown, but by the time we start it, the
+*destination* of its rendered buffers is fully working. Implement
+`eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, …)`, surface creation
+backed by AHB, and `eglSwapBuffers` shipping via `TAWCDRIPresentBuffer`.
+**Verification:** a chroot-side `glxgears`-equivalent EGL-on-X11
+test program renders to the compositor at native frame rate with
+zero CPU readback (verify via `present_check_flip` instrumentation
++ render path tracing on the compositor side).
 
-### What gets built (phase 2)
+**5. Real-app shakedown.** `glmark2-x11`, then a Wine GL game
+(picks up X subwindows / `XGetImage` edge cases). Land integration
+tests for the GL-X11 path: an analog of
+`apps::test_xwayland_xclock_renders_via_shm` that asserts an EGL-X11
+client renders via AHB (not SHM, not magenta-tinted).
 
-- **X11 platform plugin in libhybris's libEGL**. Implements
-  `eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR, Display*, …)` and the
-  X11-specific `eglCreateWindowSurface` / `eglSwapBuffers` bits.
-  Allocates AHBs for surfaces, hands them to the X server via
-  DRI3+Present so they end up in `xwayland-window-buffers.c`'s
-  pipeline and back out via `android_wlegl` to the compositor.
-- **DRI3 render-node decision.** DRI3 wants a render node fd that
-  libhybris doesn't expose. Options to be explored when phase 2 lands:
-  (a) a stub fd that the libhybris EGL-X11 platform recognizes and
-  routes appropriately; (b) opening `/dev/kgsl-3d0` or `/dev/mali0`
-  directly as the protocol-visible render node, while real GPU access
-  still goes via libhybris; (c) bypass DRI3 entirely with XShm or a
-  simpler buffer-passing path. Not designed yet.
+Why this order:
+- Step 1 is cheap and proves the protocol-extension scaffolding
+  before either of the substantive pieces commits to a buffer
+  ABI.
+- Step 2 proves the buffer-shipping plumbing without requiring
+  client GL to exist. If any of the AHB-via-`android_wlegl`
+  assumptions are wrong (sizing, sync, format negotiation), we
+  find out without having written a single line of libhybris
+  plugin.
+- Step 3 closes the X server side completely. After this step the
+  X server can carry an AHB end-to-end on demand; only the client
+  side is missing.
+- Step 4 is then the long pole, but with the entire downstream
+  pipe instrumented and known-good. When the libhybris plugin
+  doesn't render correctly, we know the bug is in the plugin —
+  not in the protocol, not in the pixmap glue, not in the
+  compositor.
 
-### Phase-1 build/work breakdown
+What can land in parallel without blocking:
+- The `TAWC-DRI` XML + protocol headers can be generated and
+  vendored into both `xwayland-src/xwayland/` and `libhybris/` early.
+- The `meson.build` `-Dtawc=true` option and stub `xwayland-tawc.c`
+  (returns NULL until step 2 fills it in) lands in step 1 so the
+  Xwayland binary keeps building through the whole sequence.
 
-1. New build script `client/build-xwayland-aarch64-glibc` (or fold
-   into `build-libhybris-aarch64`) using the libhybris cross toolchain
-   to build Xwayland + epoxy + the X11 dep tree against glibc.
-2. New stage building libepoxy.
-3. New stage building Xwayland with `-Dglamor=true -Dglx=false
-   -Ddri3=true` linking against libhybris's libEGL+libGLESv2.
-4. Compositor-side: rewire `compositor/src/xwayland.rs` to invoke the
-   glibc dynamic loader on the Xwayland binary; ensure
-   `LD_LIBRARY_PATH` points at the staged glibc tree + libhybris.
-5. Pack the glibc-Xwayland tree (binary + sysroot + xkb data) into
-   the APK; extend `packXwayland`.
-6. Delete the V2 bionic-NDK stages (`expat`, all bionic X11 libs,
-   `cutils-stub`, `mesa`) and their patches. Useful as git-history
-   reference; not needed on disk.
+### Phase 3 (probably never). Server-side GL acceleration.
 
-Realistic estimate: a few days of focused work, dominated by
-cross-compile / dynamic-loader / `DT_NEEDED` debugging.
+i.e. the original "GLAMOR" idea — the X server holds an EGL context
+and renders RENDER glyphs / cursor / Cairo ops onto AHB-backed
+pixmaps server-side. The set of apps that benefit is small and
+shrinking (xterm, GIMP-2.10's pre-GTK3 paths, KDE-3-era stuff). The
+buffer-transport piece is already solved by `xwayland-tawc.c`; what
+Phase 3 adds is "give the X server an EGL context with no rooted
+window/device". libhybris doesn't currently expose that without a
+`wl_display` or `ANativeWindow`, and the upstream-Linux idiom for
+it (`EGL_PLATFORM_GBM`) doesn't apply.
 
-### Things to verify on the way
+If we ever need this, the cleanest path is to give Xwayland its
+own bonus `wl_display` — Xwayland is already a Wayland client and
+already has one — and use `EGL_PLATFORM_WAYLAND_KHR` against
+libhybris-loaded-into-the-server to get an EGL display, then render
+to FBOs on AHB-backed EGLImages. No GBM needed; just an extra chunk
+in `xwayland-tawc.c` and a vtable rerouting in `xwayland-glamor.c`.
+But: if Phase 2 lands and the modern-app set works at native
+speed, Phase 3 has no addressable bottleneck.
 
-- **Sysroot extraction.** Today libhybris is consumed from inside the
-  chroot. Phase-1 Xwayland needs it from outside any chroot. The
-  glibc sysroot has to be extracted to the app's data dir and loaded
-  via the explicit `ld-linux-aarch64.so.1` invocation.
-- **GLAMOR-on-GLES quirks.** libhybris-driven Adreno is well-trodden
-  for Wayland clients; Xwayland-server calling the same stack is less
-  so. Plan for some empirical vendor-blob debugging.
-- **xkb.** Phase-1 Xwayland's `share/X11` and `share/xkeyboard-config`
-  data carry over from the bionic build (data, not code). Pathing
-  must match the new prefix.
-- **`-ac` + SO_PEERCRED.** Server runs as the app uid; chroot X
-  clients run as root. Same situation as bionic-V1; the smithay
-  tawc-patches `-ac` argv addition still applies.
+### What this lets us delete from the plan
 
-### Existing pieces that compose with phase 1
+- All references to `EGL_PLATFORM_GBM_MESA`, `gbm_create_device`,
+  `gbm_bo`, `EGL_LINUX_DMA_BUF_EXT`, `zwp_linux_dmabuf_v1`,
+  `wl_drm`, `/dev/dri/render*`. None of those concepts apply.
+- The "AHB-backed libgbm shim" idea — the GBM API was the wrong
+  shape; we don't need to satisfy it.
+- The "patch libhybris to alias EGL_PLATFORM_GBM_MESA" idea — same.
+- The Mesa-Zink experiment. Already deleted.
+- Indirect GLX, libGL stub, all GLX server-side discussion — never
+  needed in either phase, and the no-desktop-GL policy makes it
+  not worth shipping anyway.
 
-- **libhybris fork patches in `libhybris/TAWC_FORK.md`** —
-  `__cfi_slowpath` hooking, TLS-slot reservation, etc. Inherited.
-- **`android_wlegl` Wayland protocol** — already implemented in
-  `server/compositor/src/wlegl.rs`. Phase 1 piggybacks.
-- **Compositor-side AHB import** (`server/compositor/src/render.rs`'s
-  `wlegl: imported ANativeWindowBuffer` path). Phase 1 piggybacks.
-- **`xwayland-patches/`** — most patches forward-port to the glibc
-  build with no change; a few bionic-only ones drop out.
+## Why GLAMOR-off doesn't block GL-client zero-copy
 
-### Alternatives considered and rejected
+The instinct is that "Xwayland with no GL of its own" can't carry GL
+buffers without touching them. It can. The asymmetry to keep in mind:
+GLAMOR is for the *server's own* drawing (XRender, server-side
+`XCopyArea`, software-X-client acceleration, Cairo-over-X). It is not
+on a GL client's swap path. A pure-GL X client renders into its own
+buffer (in our case, an AHB allocated through the libhybris EGL-on-X11
+plugin) and asks the server to *carry* that buffer to the screen. The
+server doesn't need a GL context to carry.
 
-- **V1 (bionic, no GLAMOR).** Status quo. Functional baseline; X
-  clients with no GL needs work, anything wanting 2D acceleration
-  doesn't. Phase 1 supersedes this.
-- **V2 (bionic + Mesa-Zink).** Built, blocked on dmabuf import:
-  Xwayland's GLAMOR requires `wl_drm` or `zwp_linux_dmabuf_v1` v4
-  from the compositor; bionic Android EGL has no
-  `EGL_EXT_image_dma_buf_import` to import what Mesa-Zink would emit.
-  Mesa is also ~17 MB unstripped (Zink = full GL state tracker on
-  Vulkan; not a thin shim). Build wiring will be deleted as part of
-  phase 1.
-- **V3 (bionic + libhybris).** The "shortcut" that turns out to need
-  custom wayland-egl integration in a bionic host. Untried, larger
-  unknowns than V4. Revisit only if V4 ever proves painful.
-- **V5 (chroot Xwayland).** Rejected at the original Xwayland landing.
-  Xwayland is logically compositor-side, not chroot-side; would break
-  multi-/zero-chroot scenarios.
-- **AHB-backed libgbm shim** (commit `200980a`). Wrote a tiny
-  `libgbm.so` that allocates AHBs to flip Mesa-less GLAMOR on.
-  Rejected because Xwayland's GLX server-side then wants Mesa libGL
-  anyway; the libgbm shim didn't close the symbol gap. Removed in
-  `b6dafd1` in favor of Mesa-Zink, which itself is now superseded.
-- **chroot-Mesa-as-X-client-libEGL.** Vanilla Arch Mesa expects
-  `/dev/dri/renderDxxx` + an upstream DRM kernel driver matching the
-  chip. Stock Android phones have neither (Adreno via `/dev/kgsl-3d0`,
-  Mali via `/dev/mali0`, both closed). Mesa probe falls through to
-  llvmpipe (software-only) without `gl-shims/` masking. Phase 2's
-  X11-platform-in-libhybris is the actual answer to the same question.
-- **libhybris-as-Mesa-DRI-driver.** A `libhybris_dri.so` satisfying
-  Mesa's DRI loader interface but routing to libhybris GLES. Lindroid
-  has explored. Substantial new code on a dense interface; nothing in
-  it for our plan. Parked indefinitely.
-- **Indirect GLX with libGL-stub** (the V4 + libGL-stub idea from an
-  earlier iteration of this doc). Buys nothing the GLES-overlapping
-  subset of EGL-on-X11 doesn't get faster, and the apps that genuinely
-  need desktop-GL-only features can't be served by stubs anyway.
-  Dropped as part of the no-desktop-GL policy above.
+The mechanism is `Present.PresentPixmap` in flip mode. Xwayland
+implements it (`hw/xwayland/xwayland-present.c`) by calling
+`xwl_pixmap_get_wl_buffer(pixmap)` and doing
+`wl_surface.attach(wl_buffer); commit` on the toplevel's surface. With
+`xwayland-tawc.c` returning an AHB-backed `wl_buffer` (shipped via
+`android_wlegl`), that's the entire fast path: client → AHB → X server
+holds it as opaque pixmap storage → wl_buffer attached to wl_surface →
+compositor imports as GL texture. No `glReadPixels`, no pixman touch,
+no GL context anywhere in the server.
+
+### Where CPU readback could sneak in (and whether real workloads hit it)
+
+| Path | Triggered by | Without GLAMOR | Real-world impact |
+| --- | --- | --- | --- |
+| Present **copy mode** (instead of flip) | partial damage with `PresentOptionCopy`, size/format mismatch, pixmap busy in another presentation | pixman copy → CPU | `eglSwapBuffers` defaults to full-window flip; almost never trips for GL apps |
+| `XGetImage` / `XShmGetImage` / `XCopyArea` reading the buffer | client explicitly asks for pixels | server CPU-reads the AHB | Pure GL apps never do this. Wine does in narrow paths (screenshot, drag thumbnails) — eats one slow op, fast path unaffected |
+| X subwindows composited over the GL drawable | child X windows in front of the GL surface | pixman composite → CPU | Pure GL apps don't have subwindows. Wine simulating Win32 child controls *can* — manifests as "slow when window has child widgets", not "GL broken" |
+| Software cursor over the buffer | — | — | Non-issue: Xwayland delegates to compositor via `wl_pointer.set_cursor`. No buffer touch. |
+| DMA fence / sync | every swap | `xshmfence` (futex-on-shm); works under bionic | None |
+
+### The actual thing to verify on Phase 2
+
+The real concern isn't *whether* the X server has a slow path (it
+does, for the workloads above), it's whether **Present picks flip
+mode reliably** for the libhybris-EGL-on-X11 buffers. Flip vs copy is
+decided by `present_check_flip()` in
+`Xext/present/present_scmd.c` (in `xserver`). That predicate checks:
+window region == buffer region (full-window), depth/format match,
+no `PresentOptionCopy`, no async-flip weirdness, pixmap not currently
+in use elsewhere.
+
+Instrument `present_check_flip` (one printf at each early-return) and
+confirm the GL client's path goes flip. If it doesn't, fix the
+buffer-allocation predicate in the libhybris plugin or
+`xwayland-tawc.c` until it does. If it does flip, the swap path is
+end-to-end zero-copy by construction — no further verification needed
+beyond "compositor sees the AHB and binds it as a texture", which we
+already do for Wayland clients. This is the explicit verification
+hook for steps 2 and 4 of the implementation order above.
+
+Recording it here so we don't re-derive the answer.
+
+## X11 surface ↔ Android Activity assignment
+
+X11 toplevels go through the same host-and-Activity model as Wayland
+toplevels (see [multi-activity.md](multi-activity.md)) — every X11
+toplevel gets its own Android task, except for child-style windows
+that ride on a parent.
+
+Policy in `pick_host_for_x11`, mirroring Wayland's
+`assign_toplevel_to_host`:
+
+- **Override-redirect popups** (menus, tooltips, dropdowns, splash
+  screens) ride on the parent toplevel's host. These are
+  client-controlled, briefly-mapped windows; spawning a recents card
+  per dropdown would be ridiculous.
+- **`transient_for` windows** (modal dialogs, file pickers, "About"
+  boxes) likewise ride on the parent's host — same logic as
+  Wayland's `toplevel.parent()` short-circuit.
+- **Plain toplevels** (e.g. `xterm`, `xeyes`, `glxgears`, the main
+  window of a Wine app) each mint a fresh `ActivityId` and trigger
+  `spawn_activity_from_native(&host)` — the same reverse-JNI to
+  `NativeBridge.spawnActivity` that Wayland's `assign_toplevel_to_host`
+  uses. Kotlin opens `CompositorActivity` with
+  `tawc://activity/<id>`, which registers as that host on creation.
+- **`single_activity_mode`** (config flag, off by default) collapses
+  everything onto the first existing host, matching the same flag's
+  effect on Wayland toplevels.
+
+Net effect: spawning 5 xterms from a chroot session gives 5 recents
+cards, same as 5 Wayland-native terminals would. A right-click menu
+inside one of those xterms doesn't spawn anything — it lives on the
+xterm's task. xclock-style single-window apps still appear as one
+recents card.
+
+### The X11Surface ↔ wl_surface association race
+
+xclock's first commit on its wl_surface can land *before* smithay's
+`WL_SURFACE_SERIAL` handler binds the X11Surface to that wl_surface.
+If we tried to look up "the X11Surface for this committing
+wl_surface" inside the commit hook, the lookup would miss and we'd
+record no host association. xclock then attaches no further buffer
+for ~1s (xclock-update-1 cadence), and the renderer skips the
+surface for that window — visible as "test passes (SHM import was
+logged) but xclock never appears on screen" or "test sometimes
+fails because the second commit doesn't fire before the test gives
+up".
+
+Fix: `associate_pending_x11_surfaces(state)` scans *all*
+x11_surfaces every commit, picking up any whose wl_surface is now
+set but whose host entry is missing. The same helper also runs
+once per render frame from `import_shm_buffers`, so the gap is
+closed even if no further commits fire after smithay's belated
+binding.
+
+## SELinux: app exec of bundled binaries
+
+Modern Android (10+) denies `execute_no_trans` from `untrusted_app`
+onto `app_data_file` — i.e. an app can extract a binary into its own
+files dir and chmod it 0755, but `Command::new("Xwayland")` returns
+EACCES when fork+exec actually fires. The denial appears in dmesg as:
+
+```
+avc: denied { execute_no_trans }
+  for path="/data/data/me.phie.tawc/files/xwayland/bin/Xwayland"
+  scontext=u:r:untrusted_app:...  tcontext=u:object_r:app_data_file:...
+  tclass=file permissive=0
+```
+
+Fix: apply a `magiskpolicy --live` rule before `nativeStartCompositor`:
+
+```sh
+magiskpolicy --live "allow untrusted_app app_data_file file execute_no_trans"
+```
+
+`CompositorService.applyXwaylandExecPolicy()` runs this via Magisk's
+`su` on every compositor cold-start. The `--live` flag patches the
+in-kernel policy; the rule does not persist across reboots or Magisk
+policy reloads, so re-applying on each start is correct. Devices
+without Magisk silently fail the call and X11 clients won't work
+(Wayland clients are unaffected).
+
+The rule grants the permission to *any* `untrusted_app`, not just
+ours — narrower targeting (`allow me.phie.tawc app_data_file …`)
+isn't directly expressible because all third-party apps share the
+`untrusted_app` SELinux domain. The marginal additional risk is "any
+app on the device can now exec a binary it dropped in its own data
+dir" — already true on most pre-Android-10 devices, and Magisk's
+own bash + busybox bundling rests on the same loophole at the
+`magisk` domain.
 
 ## Compositor-side wiring (done; on-disk in this branch)
 
@@ -377,7 +566,7 @@ TAWC compositor` (separate commit from the older Android support one):
 
 Gradle's `packXwayland` task tars the cross-compiled
 `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share/X11,share/xkeyboard-config-2}`
-into `assets/xwayland/arm64-v8a.tar` (~12 MB). On first
+into `assets/xwayland/arm64-v8a.tar`. On first
 `CompositorService.onCreate` after install / app upgrade,
 `ensureXwaylandExtracted` extracts that tarball into
 `<filesDir>/xwayland/` preserving symlinks (matching the existing
@@ -407,14 +596,283 @@ it at the bottom of the script. Each stage clones into
 `./xwayland-src/<name>/`, optionally applies patches from
 `./xwayland-patches/<name>/`, and installs into the shared `$PREFIX`.
 
+## Project policies that constrain the plan
+
+**No desktop GL.** Our devices don't support it, so X clients don't
+get it. GLES via EGL is the only client GL. This matches
+`gl-shims/libGL.so`'s existing stance (returns NULL for `glX*` so
+probes fall through to EGL). It removes GLX, libGL-stub-extensions,
+indirect-rendering, and Mesa from the plan entirely.
+
+**No GBM, no DRI3-style dmabuf passing.** Stock Android phones don't
+expose `/dev/dri/renderD*` or dmabuf fds for AHB. Every protocol
+seam in the X-server stack that wants a dmabuf is replaced with
+`android_wlegl` (server↔compositor) or our `TAWC-DRI` extension
+(client↔server). Both are AHB-shaped end-to-end.
+
+**Magenta tint stays.** The compositor's magenta tint on `wl_shm`
+buffers is a debug diagnostic, not a styling bug. Server-software
+pixmaps stay in `wl_shm` so the tint is visible exactly when the X
+server CPU-rendered. xclock-with-software-Render appearing magenta
+is *correct and informative* — it's the signal that a code path
+hasn't been GPU-accelerated yet.
+
+**Phase 1 = transport + plumbing. Phase 2 = client GL. Phase 3 =
+optional server-side GL acceleration that we may never bother
+with.** See "Buffer transport plan" above for the file-by-file
+shape.
+
+## Glibc alternative (not used, documented for the future)
+
+Recording the V4 toolchain-swap so a future workload that genuinely
+needs a glibc binary in the APK doesn't have to re-derive any of
+this. **Not the path we're on.** The bionic substrate above is
+simpler for Phase 2 (direct AHB API access in the server, no
+seccomp binary patches) and that's what's currently shipping.
+
+### Toolchain swap
+
+Cross-compile against `aarch64-linux-gnu-gcc` (the same toolchain as
+`client/build-libhybris-aarch64`), not the NDK. Set
+`CFLAGS=-D_GNU_SOURCE` not `-DANDROID`. Drop the bionic-only patches
+(`libxfont2/01-bionic-open-max`, `xorgproto/01-xos_r-android-passwd`,
+the FIONREAD-inline form of the libx11 patch) and replace them with
+a smaller libx11 patch that pulls `<sys/ioctl.h>` out from under
+`#ifdef XTHREADS` so the include fires regardless of libc.
+
+### Glibc sysroot in the APK
+
+Bundle the cross toolchain's loader + libc alongside the binaries:
+
+- `lib/glibc/ld-linux-aarch64.so.1`
+- `lib/glibc/libc.so.6`
+- `lib/glibc/libstdc++.so.6`
+- `lib/glibc/libgcc_s.so.1`
+- `lib/glibc/libpthread.so.0`, `libdl.so.2`, `libm.so.6`,
+  `libresolv.so.2`, `librt.so.1`
+
+Strip aggressively — `libstdc++.so.6` is ~20 MB unstripped. Total
+glibc sysroot weight after `--strip-unneeded` was ~11 MB on top of
+the otherwise-bionic-sized X11 dep tree.
+
+### patchelf the binaries
+
+The compositor exec's `Xwayland` directly — no chroot crossing, no
+ld.so.conf tweaking. So set the ELF interpreter and rpath at build
+time:
+
+- `PT_INTERP` → `<install>/lib/glibc/ld-linux-aarch64.so.1`
+- `DT_RUNPATH` → `<install>/lib:<install>/lib/glibc:<libhybris>/lib`
+
+Apply the same to `bin/xkbcomp` (which Xwayland exec's at startup to
+build its keymap) and to every `lib/*.so` that has a baked-in
+RUNPATH from libtool/meson.
+
+### Seccomp binary patches: the actual blocker
+
+When the V4 toolchain swap first landed, `Xwayland` spawned by the
+compositor (i.e. inheriting the Android app seccomp filter) died
+within ~1 ms with `signal: 31 (SIGSYS)`.
+
+How chroot and proot avoid this:
+
+- The **chroot** path runs everything via Magisk `su`. Magisk's su
+  daemon forks fresh from its own non-app context, so su's children
+  never inherit the app filter. Pure escape hatch.
+- **proot** runs as the app uid with the app filter intact, but
+  attaches as a ptrace tracer to every tracee. Android's
+  `untrusted_app` filter uses `SECCOMP_RET_TRAP` for the deprecated
+  syscalls glibc still emits — `RET_TRAP` raises a *catchable*
+  SIGSYS. Termux's proot fork ships a SIGSYS handler that, on each
+  trap, reads the tracee's registers, rewrites the syscall number
+  to its `*at`-equivalent, and resumes. See `notes/proot.md`.
+
+The compositor's `Command::new("Xwayland")` is neither — it inherits
+the app filter and runs glibc, no su, no ptrace tracer. So the trap
+fires in glibc's early init and there's no handler to catch it,
+and the child dies.
+
+**Diagnosis.** `strace -f` couldn't catch the offender (the child
+dies before any syscall can be intercepted; status 0x1f = WIFSIGNALED
+SIGSYS). Bisection via raw-asm single-syscall test binaries
+identified four offenders that glibc 2.43 emits during early init /
+first thread setup / first X client accept, and that aren't in the
+app-zygote BPF allowlist:
+
+| syscall | nr | when |
+| --- | --- | --- |
+| `set_robust_list` | 99 | every `__libc_start_main` and `_Fork` |
+| `rseq` | 293 | every `__libc_start_main` (and the dynamic loader) |
+| `clone3` | 435 | first `pthread_create` |
+| `accept` | 202 | every accept of an X11 client connection |
+
+bionic doesn't issue any of those on the main thread, so the filter
+never had to whitelist them.
+
+**Fix.** Binary-patch the cross-toolchain's `libc.so.6` and
+`ld-linux-aarch64.so.1` at build time, in `stage_glibc_sysroot`.
+Driver was `client/build-xwayland-patch-glibc-seccomp.py` (deleted
+along with V4 — re-derive from this section if needed).
+
+| Patch | Replacement | Why |
+| --- | --- | --- |
+| `set_robust_list` `svc #0` (×2 in libc, ×1 in ld) | `mov x0, #0` | glibc ignores the return value; robust futexes work fine without registration as long as nothing tries to recover from a thread crashing while holding one (we don't). |
+| `rseq` `svc #0` (×1 in libc, ×1 in ld) | `mov x0, #-ENOSYS` | engages glibc's "kernel doesn't support rseq" fallback path; restartable sequences are an optimisation, not a requirement. |
+| `clone3` `svc #0` (×1 in libc) | `mov x0, #-ENOSYS` | glibc falls back to legacy `clone` for thread creation when clone3 returns ENOSYS. |
+| `accept` entry: `mov x6, #0xca` | `mov x6, #0xf2` | retargets glibc's `accept()` libc wrapper at syscall 242 (`accept4`) instead of 202. The wrappers' arg layouts only differ by a `flags=0` that the wrapper already loads into x3. |
+
+That's 7 four-byte patches across two ELFs. The patcher disassembles
+both files via `aarch64-linux-gnu-objdump`, locates the three svc
+sites by their preceding `mov x8, #imm`, locates the accept-entry
+patch via the `--disassemble=accept` symbol view, and rewrites in
+place. Re-running on a fresh extract is safe — assert expected bytes
+before writing.
+
+### Approaches considered and rejected for the seccomp problem
+
+- **LD_PRELOAD shim.** Tried `accept` → `accept4` as an LD_PRELOAD
+  shim first; it broke because Xwayland Popens the system shell
+  (bionic) which inherited LD_LIBRARY_PATH/LD_PRELOAD and tried
+  to load our glibc lib and the shim into the bionic linker, which
+  errored on the version-script symbols. Binary-patching libc keeps
+  the env clean for child processes.
+- **Rebuild glibc.** Considered a glibc fork that strips the
+  offending calls at the source level. The binary patch is two
+  orders of magnitude smaller.
+- **proot's approach (SIGSYS-handler in a tracer).** Fully general,
+  handles every future deprecated syscall automatically. But
+  requires Xwayland to be a ptrace tracee of a tawc-owned tracer
+  process — extra moving part, extra performance cost (every syscall
+  stops the tracee at signal-stop), and we'd need to bring the
+  tracer up before exec. The four-instruction patch handled the
+  actual offenders Xwayland 24.1 issued.
+- **Pre-init SIGSYS handler in DT_NEEDED library.** Attempted (early
+  on) — DT_NEEDED'd a tiny shim that runs in DT_INIT, installs a
+  SIGSYS handler with raw `rt_sigaction`, and modifies
+  `ucontext->uc_mcontext.regs[0] / .pc` to fake a return. Two
+  reasons it lost out:
+
+  * ld-linux runs *before* any DT_INIT processes, so its own startup
+    syscalls (`set_robust_list`, `rseq`) still have to be statically
+    patched.
+  * Once ld-linux's two syscalls are patched into "lie to glibc
+    about kernel support", glibc and the kernel disagree on whether
+    those features are registered. For a `printf("hello"); exit;`
+    binary the disagreement is invisible. For xkbcomp's keymap
+    compile pass, glibc segfaults somewhere downstream of that
+    state mismatch (and not via SIGSYS, so the handler doesn't
+    even run).
+
+  Patching `libc.so.6` directly with the same NOPs avoids the
+  ld.so-vs-libc state divergence: libc never thinks the syscall
+  happened.
+
+The list of svcs to patch is empirical — if a future Xwayland code
+path SIGSYSes on some other syscall, the fix is to add it to the
+patcher script alongside the existing four.
+
+## Alternatives considered and rejected
+
+- **V2 (bionic + Mesa-Zink).** Built, blocked on dmabuf import:
+  Xwayland's GLAMOR requires `wl_drm` or `zwp_linux_dmabuf_v1` v4
+  from the compositor; bionic Android EGL has no
+  `EGL_EXT_image_dma_buf_import` to import what Mesa-Zink would emit.
+  Mesa is also ~17 MB unstripped. Build wiring deleted.
+- **V3 (bionic + libhybris-loaded-into-server).** Loading libhybris
+  into the X server itself for a server-side EGL context (the path
+  Phase 3 would take if we ever do server-side GL). Larger unknowns
+  than just dlopening `libnativewindow.so` for AHB allocation, which
+  is all Phase 2 actually needs.
+- **V4 (glibc Xwayland).** See the "Glibc alternative" section
+  above. Built and verified end-to-end, then reverted in favour of
+  bionic for Phase 2.
+- **V5 (chroot Xwayland).** Rejected at the original Xwayland landing.
+  Xwayland is logically compositor-side, not chroot-side; would break
+  multi-/zero-chroot scenarios.
+- **chroot-Mesa-as-X-client-libEGL.** Vanilla Arch Mesa expects
+  `/dev/dri/renderDxxx` + an upstream DRM kernel driver matching the
+  chip. Stock Android phones have neither (Adreno via `/dev/kgsl-3d0`,
+  Mali via `/dev/mali0`, both closed). Mesa probe falls through to
+  llvmpipe (software-only) without `gl-shims/` masking. Phase 2's
+  X11-platform-in-libhybris is the actual answer to the same question.
+- **libhybris-as-Mesa-DRI-driver.** A `libhybris_dri.so` satisfying
+  Mesa's DRI loader interface but routing to libhybris GLES. Lindroid
+  has explored. Substantial new code on a dense interface; nothing in
+  it for our plan. Parked indefinitely.
+- **Indirect GLX with libGL-stub.** Buys nothing the GLES-overlapping
+  subset of EGL-on-X11 doesn't get faster, and the apps that genuinely
+  need desktop-GL-only features can't be served by stubs anyway.
+  Dropped as part of the no-desktop-GL policy above.
+- **AHB-backed libgbm shim.** The original idea for plugging
+  Xwayland's GLAMOR-via-GBM expectation into AHB-land. Reverted: GBM
+  is an abstraction we don't need *anywhere* in the new plan, since
+  `xwayland-tawc.c` ships AHBs to the compositor directly via
+  `android_wlegl` and `TAWC-DRI` ships AHBs from clients to the
+  X server directly. There is no protocol seam left that needs to
+  speak GBM, so there's nothing to shim.
+- **Patching libhybris to alias `EGL_PLATFORM_GBM_MESA` to
+  `EGL_PLATFORM_ANDROID_KHR`.** Considered for getting Xwayland's
+  GLAMOR-via-GBM init to work against libhybris. Same fate as the
+  libgbm shim — there's no GBM seam left in the plan that needs
+  this alias. If Phase 3 ever does want a server-side EGL context,
+  the route is `EGL_PLATFORM_WAYLAND_KHR` against a wl_display the
+  X server already has, not a GBM-platform alias.
+- **Mesa-with-no-driver-just-for-libgbm.** Considered as a way
+  to satisfy GBM API surface without a DRI render-node, using
+  Mesa's softpipe allocator. Same fate: the new plan has no
+  GBM seam to satisfy.
+- **"GLAMOR with the buffer transport replaced under it"** —
+  i.e. flip `-Dglamor=true`, ship a fake libgbm that satisfies
+  link, replace `xwl_glamor_pixmap_get_wl_buffer` with our AHB
+  variant. Plausible but the value calculus argues against it:
+  Phase 2 (libhybris-EGL-on-X11) gives modern apps the path that
+  actually matters; the apps GLAMOR would help are ones nobody
+  runs on a phone. Reconsider only if a real bottleneck appears
+  on a real workload.
+
 ## Refactor history
 
-- **2026-04-28** — initial scaffolding through libxcb (clean), then
-  hit libX11's bionic-`FIONREAD` issue. Adopted termux-packages' patch
-  series (vendored to `xwayland-patches/`) and forward-ported to our
-  pinned versions. All 21 stages incl. Xwayland-24.1.11 binary
-  cross-compile cleanly. Shipped to phone, hooked into compositor
-  via `xwayland.rs` + smithay tawc-patches additions; xclock renders
-  end-to-end (verified with `apps::test_xwayland_xclock_renders_via_shm`).
-  Setuid-in-Popen seccomp issue worked around with a tawc patch
-  (`xwayland-patches/xwayland/01-bionic-no-setuid.patch`).
+- **2026-04-28** — initial bionic scaffolding through libxcb (clean),
+  hit libX11's bionic-`FIONREAD` issue. Adopted termux-packages'
+  patch series and forward-ported. All stages incl.
+  Xwayland-24.1.11 binary cross-compiled cleanly. Shipped to phone,
+  hooked into compositor via `xwayland.rs` + smithay tawc-patches
+  additions; xclock rendered end-to-end via SHM (verified with
+  `apps::test_xwayland_xclock_renders_via_shm`).
+- **2026-04-28** — V2 (bionic + Mesa-Zink) built but never shipped
+  (dmabuf import gap). Source stayed in tree behind unflipped flags.
+- **2026-04-28** — V4 baseline: switched the cross toolchain from NDK
+  bionic to `aarch64-linux-gnu` glibc, dropped the V2 Mesa stages,
+  added a `glibc-sysroot` stage and a `patchelf` stage. End-to-end
+  re-verified on device with xclock through the V4 binary.
+- **2026-04-28/29** — Seccomp diagnosis + binary patches:
+  bisected glibc 2.43's startup syscalls against the app-zygote
+  filter, found `set_robust_list`, `rseq`, `clone3`, and `accept`
+  trapped, landed binary patches in
+  `client/build-xwayland-patch-glibc-seccomp.py`. xclock works fully
+  end-to-end through the compositor's `Command::new("Xwayland")`
+  spawn.
+- **2026-04-29** — Pre-init SIGSYS handler experiment:
+  attempted to replace the libc-side static patches with a
+  DT_NEEDED'd shim that installs a SIGSYS handler in DT_INIT.
+  Mechanics work but ld-linux runs before any DT_INIT and the
+  necessary ld.so patches leave glibc in a "thinks robust-list is
+  registered, kernel disagrees" state that crashes xkbcomp. Reverted
+  to all-binary-patch.
+- **2026-04-29** — Plan re-shape from "GLAMOR-first" to
+  "AHB-everywhere". After scoping the actual Xwayland source
+  (xwayland-pixmap.c is a 2-way `glamor || shm` hardcoded branch,
+  `xwayland-glamor-gbm.c` bakes in DRI3+`zwp_linux_dmabuf_v1` end
+  to end), realised every protocol seam GLAMOR wants is the wrong
+  shape for this device. Rebuilt the plan around AHB+`android_wlegl`
+  end-to-end.
+- **2026-04-29** — Reverted from V4 (glibc) back to bionic
+  Xwayland. The libc-on-the-server doesn't actually have to match
+  libhybris's libc (libhybris lives on the chroot/client side, not
+  in the X server), and bionic gives us direct
+  `dlopen("libnativewindow.so")` access for Phase 2's server-side
+  AHB allocation — no libhybris-in-server bridge needed. Dropped the
+  glibc sysroot, patchelf stage, and seccomp binary patcher; restored
+  the bionic source patches. The V4 work is preserved in this doc
+  ("Glibc alternative") in case we ever need a glibc binary in the
+  APK for some other reason.

@@ -142,6 +142,28 @@ the as-built notes.
   smoothed over by the calloop channel buffering events; explicit
   HostState::Pending might still be worth adding for diagnostics.
 
+## Xwayland (bionic baseline) ✅
+Bionic-cross-compiled Xwayland-24.1.11 spawned by the compositor; X
+clients connect via `:0` and render through the `wl_shm` path. See
+[notes/xwayland.md](notes/xwayland.md) for the dep tree, bionic
+patches, packaging, and the AHB-everywhere Phase 2 plan that follows.
+
+- ✅ Cross-compile against the NDK `aarch64-linux-android29` toolchain.
+- ✅ Vendored bionic compat patches (FIONREAD inline, `link()`→`symlink()`,
+  `/tmp` prefix swap, libxfont2 OPEN_MAX, xorgproto passwd shape,
+  Xwayland setuid drop). Mostly forward-ports of termux-packages.
+- ✅ Pack into the APK (`packXwayland`), extract from
+  `CompositorService.onCreate`.
+- ✅ Compositor-side `XWayland::spawn` + `X11Wm` wiring; tawc-patches
+  on smithay for the runtime-dir + `-ac` argv.
+- Server-rendered X pixmaps flow as `wl_shm` (preserves magenta tint).
+- Phase 2 (next): libhybris EGL-on-X11 platform plugin (chroot-side) +
+  `xwayland-tawc.c` (server-side AHB shipping via `android_wlegl`) +
+  `TAWC-DRI` X11 extension. AHBs end-to-end. See the "Phase 2
+  implementation order" section in `notes/xwayland.md` for the build
+  sequence.
+- Phase 3 (probably skip): server-side GL acceleration.
+
 ## wl_keyboard (non-text keys)
 Arrow keys, escape, tab, Ctrl+C/V/Z need wl_keyboard (no text-input-v3 equivalent).
 

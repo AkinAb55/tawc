@@ -371,11 +371,11 @@ impl CompositorHandler for TawcState {
 
     fn commit(&mut self, surface: &WlSurface) {
         self.popup_manager.commit(surface);
-        // Cache the host placement we picked at map_window_request.
-        // Smithay drives the X11Surface ↔ wl_surface association inside
-        // the xwayland_shell protocol handlers; we just need to read it
-        // out once it's set.
-        crate::xwayland::associate_x11_surface_if_pending(self, surface);
+        // Catch up on any X11Surface ↔ wl_surface ↔ host associations
+        // that smithay's xwayland_shell handler has resolved since the
+        // last commit. Helper scans all x11_surfaces internally — it
+        // doesn't need the committed wl_surface to do its work.
+        crate::xwayland::associate_pending_x11_surfaces(self);
         // Track the attached android_wlegl (AHB) buffer so the renderer can
         // find its texture. Smithay's `SurfaceAttributes::merge_into` already
         // sent `wl_buffer.release` for the old buffer before this handler runs

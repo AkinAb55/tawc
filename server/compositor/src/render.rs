@@ -307,6 +307,12 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
     use smithay::wayland::compositor::BufferAssignment;
     use smithay::reexports::wayland_server::protocol::wl_buffer;
 
+    // Catch up on any X11 surface ↔ host associations that the commit
+    // hook missed because smithay's `WL_SURFACE_SERIAL` handler hadn't
+    // yet bound the X11Surface to its wl_surface when the commit fired.
+    // No-op if every x11_surface is already in `x11_to_host`.
+    crate::xwayland::associate_pending_x11_surfaces(state);
+
     let toplevel_surfaces: Vec<_> = state
         .toplevels
         .iter()

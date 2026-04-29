@@ -219,8 +219,16 @@ if ("arm64-v8a" in tawcAbis) {
         // build-only artefacts that we don't need on-device.
         doFirst { mkdir(file(xwaylandAssetFile).parentFile) }
         workingDir = file(xwaylandInstallDir)
+        // Excludes:
+        //   *.la, *.a — libtool / static archive files; build-only.
+        //   pkgconfig — .pc files for downstream cross-compiles only.
+        //   python3.14 — xcb-proto's Python module; only needed when
+        //                running libxcb-codegen at build time.
+        //   cmake — meson-generated CMake module files.
         commandLine("tar", "--format=ustar",
             "--exclude=*.la", "--exclude=*.a",
+            "--exclude=pkgconfig", "--exclude=cmake",
+            "--exclude=python3.*",
             "-cf", "${project.projectDir}/$xwaylandAssetFile",
             "bin/Xwayland", "bin/xkbcomp",
             "lib",

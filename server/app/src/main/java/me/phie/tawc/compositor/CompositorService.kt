@@ -18,6 +18,7 @@ import android.util.Log
 import android.view.WindowManager
 import java.io.File
 import java.lang.ref.WeakReference
+import me.phie.tawc.install.Su
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 /**
@@ -92,6 +93,19 @@ class CompositorService : Service() {
         // exec it as a child process; PATH + LD_LIBRARY_PATH are set
         // by the Rust side in `compositor::xwayland::start_xwayland`.
         ensureXwaylandExtracted(this)
+
+        // Modern Android (10+) denies `execute_no_trans` from
+        // `untrusted_app` onto `app_data_file`, which means the compositor
+        // can extract a binary into its own files dir but cannot exec it
+        // — `Command::new("Xwayland")` returns EACCES with a SELinux AVC
+        // denial. Apply a `magiskpolicy --live` rule via su to lift that
+        // single restriction. Best-effort: on devices without Magisk we
+        // silently fail and the Xwayland spawn will return EACCES, which
+        // the Rust side already logs and tolerates (Wayland clients keep
+        // working). The rule is not persistent across SELinux policy
+        // reloads (Magisk reapplies its own policy on boot), so we
+        // re-issue it on every compositor cold-start.
+        applyXwaylandExecPolicy()
 
         // Hand the application context + service to NativeBridge so its
         // reverse-JNI spawnActivity/finishActivity entry points work even
@@ -190,6 +204,34 @@ class CompositorService : Service() {
         extractDir("xkb", destDir)
         versionFile.writeText(currentVersion.toString())
         Log.d(TAG, "Extracted xkb data to $destDir")
+    }
+
+    /**
+     * Grant the `execute_no_trans` SELinux permission needed for the
+     * compositor (running as `untrusted_app`) to fork+exec the Xwayland
+     * binary in our own filesDir. Without this, modern Android refuses
+     * the exec with EACCES even though the file is mode 0755 owned by
+     * the calling uid.
+     *
+     * Applied via `magiskpolicy --live`, which is an in-kernel patch
+     * that doesn't persist across reboots or Magisk policy reloads —
+     * so we re-apply on every compositor cold-start. On devices
+     * without Magisk we silently fail and the Xwayland spawn will hit
+     * EACCES; Wayland clients keep working, only X11 clients are
+     * affected.
+     */
+    private fun applyXwaylandExecPolicy() {
+        if (!Su.rootAvailable()) {
+            Log.i(TAG, "magiskpolicy: skipping Xwayland exec rule (no root)")
+            return
+        }
+        val rule = "allow untrusted_app app_data_file file execute_no_trans"
+        val r = Su.run("magiskpolicy --live \"$rule\"", timeoutSeconds = 5)
+        if (r.ok) {
+            Log.i(TAG, "magiskpolicy: applied Xwayland exec rule")
+        } else {
+            Log.w(TAG, "magiskpolicy: failed to apply Xwayland exec rule: ${r.output}")
+        }
     }
 
     private fun ensureNotificationChannel() {

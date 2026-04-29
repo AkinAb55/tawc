@@ -2,10 +2,13 @@
 //! routing X11 surfaces through tawc's host/toplevel model, and feeding
 //! the X11 window manager loop.
 //!
-//! The Xwayland binary itself, plus its DT_NEEDED libs, are extracted
-//! from the APK to `/data/data/me.phie.tawc/files/xwayland/` by
-//! `CompositorService.ensureXwaylandExtracted` (Kotlin). The compositor
-//! sets `PATH` and `LD_LIBRARY_PATH` to find them.
+//! The Xwayland binary and its DT_NEEDED libs are extracted from the
+//! APK to `/data/data/me.phie.tawc/files/xwayland/` by
+//! `CompositorService.ensureXwaylandExtracted` (Kotlin). It's a plain
+//! aarch64-linux-android binary, so it loads under the system bionic
+//! linker — we just have to put `<install>/bin` on `PATH` for
+//! `Command::new("Xwayland")`, and set `LD_LIBRARY_PATH` so the linker
+//! finds `<install>/lib/*.so.*`.
 //!
 //! The X11 socket lives at `/data/data/me.phie.tawc/xtmp/.X11-unix/X{N}`
 //! and the lockfile at `/data/data/me.phie.tawc/xtmp/.X{N}-lock`. Smithay
@@ -33,12 +36,18 @@ use crate::event_loop::LoopData;
 use crate::host::ActivityId;
 
 /// Where Xwayland's listening socket / lockfile live. Patched smithay
-/// reads `TAWC_XWL_RUNTIME_DIR` from env; bionic-built libxcb / xtrans
-/// have this baked in (see `client/build-xwayland-aarch64`).
+/// reads `TAWC_XWL_RUNTIME_DIR` from env; cross-compiled libxcb /
+/// xtrans have this baked in (see `client/build-xwayland-aarch64`).
 pub const XWL_RUNTIME_DIR: &str = "/data/data/me.phie.tawc/xtmp";
 
 /// Where the in-app extractor stages the Xwayland binary + libs.
 pub const XWL_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/xwayland";
+
+/// Where libhybris is extracted by `ensureLibhybrisExtracted`. The
+/// bionic Xwayland baseline doesn't load libhybris itself (no GLAMOR,
+/// no AHB allocation in the server yet); when Phase 2 lands the server
+/// will dlopen libnativewindow.so directly, which is bionic-native.
+pub const LIBHYBRIS_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/libhybris";
 
 /// Spawn Xwayland and insert it as a calloop event source. On the
 /// `Ready` event the X11 window manager is constructed and stashed on
@@ -65,9 +74,7 @@ pub fn start_xwayland(
 
     // Tell our patched smithay where to put X11 sockets.
     std::env::set_var("TAWC_XWL_RUNTIME_DIR", XWL_RUNTIME_DIR);
-    // Tell Xwayland (via execve) where to find its bionic libs and
-    // friends. PATH is consumed by `Command::new("Xwayland")` lookup;
-    // LD_LIBRARY_PATH by the runtime linker for the spawned binary.
+    // PATH is consumed by `Command::new("Xwayland")` lookup.
     let path_with_xwl = match std::env::var("PATH") {
         Ok(p) => format!("{}/bin:{}", XWL_INSTALL_DIR, p),
         Err(_) => format!("{}/bin", XWL_INSTALL_DIR),
@@ -77,7 +84,11 @@ pub fn start_xwayland(
     let dh = state.display_handle.clone();
     let envs: Vec<(String, String)> = vec![(
         "LD_LIBRARY_PATH".to_string(),
-        format!("{}/lib", XWL_INSTALL_DIR),
+        format!(
+            "{xwl}/lib:{lh}/lib",
+            xwl = XWL_INSTALL_DIR,
+            lh = LIBHYBRIS_INSTALL_DIR,
+        ),
     )];
 
     // Pipe Xwayland's stderr/stdout to a log file under our xtmp dir so
@@ -193,7 +204,7 @@ impl XwmHandler for TawcState {
             window.geometry(),
         );
         // Pick a host the same way xdg toplevels do.
-        let host = pick_host_for_x11(self);
+        let (host, spawn_activity) = pick_host_for_x11(self, &window);
         if let Err(e) = window.set_mapped(true) {
             warn!("xwayland: set_mapped(true) failed: {}", e);
             return;
@@ -216,16 +227,22 @@ impl XwmHandler for TawcState {
         // wl_surface (commit hook captures it). For now record the
         // pending host on the X11Surface's user_data so we don't lose
         // it.
-        window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host))));
+        window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host.clone()))));
         self.toplevels_changed = true;
+        if spawn_activity {
+            crate::spawn_activity_from_native(&host);
+        }
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
         info!("xwayland: mapped_OR {:?}", window);
-        let host = pick_host_for_x11(self);
+        let (host, spawn_activity) = pick_host_for_x11(self, &window);
         self.x11_surfaces.push(window.clone());
-        window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host))));
+        window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host.clone()))));
         self.toplevels_changed = true;
+        if spawn_activity {
+            crate::spawn_activity_from_native(&host);
+        }
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -411,59 +428,121 @@ impl XwmHandler for LoopData {
 /// `state.x11_to_host`.
 pub struct PendingHost(pub std::cell::RefCell<Option<ActivityId>>);
 
-/// Pick a host for a freshly-mapped X11 surface using the same policy
-/// as xdg toplevels. Currently single-Activity for X11 clients (every
-/// X11 toplevel is a child of the same Android task) — XWayland is one
-/// glibc-style display and most X clients assume DISPLAY identity, so
-/// per-window Activity spawning would be confusing.
-fn pick_host_for_x11(state: &mut TawcState) -> ActivityId {
-    if let Some(fg) = &state.foreground_host {
-        if state.hosts.contains_key(fg) {
-            return fg.clone();
+/// Look up the host an existing X11Surface is on. Tries the live
+/// wl_surface→host map first, falls back to the `PendingHost` user_data
+/// stamped at `map_window_request` time (for surfaces that have a host
+/// reserved but haven't yet had their wl_surface bound).
+fn parent_host(state: &TawcState, parent: &X11Surface) -> Option<ActivityId> {
+    if let Some(wl) = parent.wl_surface() {
+        if let Some(h) = state.x11_to_host.get(&wl) {
+            return Some(h.clone());
         }
     }
-    if let Some(any) = state.hosts.keys().next().cloned() {
-        return any;
-    }
-    // No host registered yet — mint a fresh id and let the surface's
-    // host stay pending until an Activity arrives.
-    crate::host::new_activity_id()
+    parent
+        .user_data()
+        .get::<PendingHost>()
+        .and_then(|p| p.0.borrow().clone())
 }
 
-/// Called from CompositorHandler::commit when an X11 surface's
-/// wl_surface gets associated. Promotes the PendingHost user_data slot
-/// to a real entry in `state.x11_to_host`.
-pub fn associate_x11_surface_if_pending(state: &mut TawcState, wl: &WlSurface) {
+/// Pick a host for a freshly-mapped X11 surface, mirroring the
+/// `assign_toplevel_to_host` policy that xdg toplevels use.
+///
+/// - **Override-redirect** popups (menus, tooltips, dropdowns) and
+///   **transient_for** dialogs ride on the parent toplevel's host.
+///   This keeps a Wine right-click menu or an xterm tooltip from
+///   spawning its own recents card.
+/// - **single_activity_mode**: collapse onto the first existing host;
+///   if none exists, mint+spawn one.
+/// - **Default (multi-window)**: every X11 toplevel gets its own
+///   Activity, same as Wayland.
+///
+/// Returns `(host_id, should_spawn_activity)`. The caller fires
+/// `spawn_activity_from_native(&host)` when the second component is
+/// true. The reverse-JNI call doesn't borrow `state`, so it's fine to
+/// invoke while still holding `&mut TawcState`.
+fn pick_host_for_x11(state: &mut TawcState, surface: &X11Surface) -> (ActivityId, bool) {
+    // Children/transients ride on the parent's host. Skip if we can't
+    // find the parent (e.g. it was destroyed before the child mapped)
+    // or if it has no host yet — fall through to the regular policy.
+    if surface.is_override_redirect() || surface.is_transient_for().is_some() {
+        let parent_id = surface.is_transient_for();
+        if let Some(parent) = state
+            .x11_surfaces
+            .iter()
+            .find(|s| Some(s.window_id()) == parent_id)
+            .cloned()
+        {
+            if let Some(h) = parent_host(state, &parent) {
+                return (h, false);
+            }
+        }
+    }
+
+    if state.single_activity_mode {
+        let (id, spawn) = match state.hosts.keys().next().cloned() {
+            Some(id) => (id, false),
+            None => (crate::host::new_activity_id(), true),
+        };
+        return (id, spawn);
+    }
+
+    // Multi-window: every X11 toplevel gets its own Activity, exactly
+    // as a Wayland toplevel would.
+    (crate::host::new_activity_id(), true)
+}
+
+/// Called from `CompositorHandler::commit` for every wl_surface commit
+/// (and from the render path before SHM imports). Scans
+/// `state.x11_surfaces` and promotes any X11Surface whose wl_surface
+/// is set but missing from `state.x11_to_host` into the host map
+/// (using its `PendingHost` user_data, or `pick_host_for_x11` as
+/// fallback).
+///
+/// We scan all x11_surfaces (rather than matching on the committing
+/// wl_surface specifically) because there's a real race between
+/// xclock's first commit and smithay's `WL_SURFACE_SERIAL` handler
+/// setting `X11Surface.wl_surface`. If the commit lands first, no
+/// X11Surface yet has the wl_surface bound; smithay sets it
+/// asynchronously and the next commit might not fire before the
+/// renderer needs the host mapping. Calling this from the render path
+/// too closes the gap.
+pub fn associate_pending_x11_surfaces(state: &mut TawcState) {
     if state.x11_surfaces.is_empty() {
         return;
     }
-    if state.x11_to_host.contains_key(wl) {
-        return;
-    }
-    let surface = match state
+    // Two passes: collect unassociated surfaces, then process. Avoids
+    // mutating state.x11_to_host while iterating state.x11_surfaces.
+    let pending: Vec<X11Surface> = state
         .x11_surfaces
         .iter()
-        .find(|s| s.wl_surface().as_ref() == Some(wl))
-    {
-        Some(s) => s.clone(),
-        None => {
-            log::debug!(
-                "xwayland: commit doesn't match any of {} X11 surfaces",
-                state.x11_surfaces.len()
-            );
-            return;
+        .filter(|s| match s.wl_surface() {
+            Some(wl) => !state.x11_to_host.contains_key(&wl),
+            None => false,
+        })
+        .cloned()
+        .collect();
+    for surface in pending {
+        let wl = match surface.wl_surface() {
+            Some(s) => s,
+            None => continue,
+        };
+        let (host, spawn_activity) = match surface
+            .user_data()
+            .get::<PendingHost>()
+            .and_then(|p| p.0.borrow_mut().take())
+        {
+            Some(h) => (h, false),
+            None => pick_host_for_x11(state, &surface),
+        };
+        info!(
+            "xwayland: associated X11 surface {} to host {}",
+            surface.window_id(),
+            host,
+        );
+        state.x11_to_host.insert(wl, host.clone());
+        state.toplevels_changed = true;
+        if spawn_activity {
+            crate::spawn_activity_from_native(&host);
         }
-    };
-    let host = surface
-        .user_data()
-        .get::<PendingHost>()
-        .and_then(|p| p.0.borrow_mut().take())
-        .unwrap_or_else(|| pick_host_for_x11(state));
-    info!(
-        "xwayland: associated X11 surface {} to host {}",
-        surface.window_id(),
-        host,
-    );
-    state.x11_to_host.insert(wl.clone(), host);
-    state.toplevels_changed = true;
+    }
 }
