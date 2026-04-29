@@ -158,6 +158,14 @@ object ChrootMounter {
             export LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib
             export HYBRIS_EGLPLATFORM=wayland
             export DISPLAY=:0
+            # Bias SDL2 toward the Wayland backend. SDL2 normally tries X11
+            # first if `DISPLAY` is set (which it is now, for X-only clients
+            # like xclock/xeyes), but our Xwayland is built without GLAMOR
+            # so any SDL app that needs GL acceleration through X11 dies on
+            # createWindow. Listing wayland first with x11 as fallback gives
+            # SDL apps the libhybris/EGL path while leaving X11 reachable
+            # for clients that genuinely need it.
+            export SDL_VIDEODRIVER=wayland,x11
             ln -sf /data/data/me.phie.tawc/wayland-0 /tmp/wayland-0 2>/dev/null
             TAWC_PROF_EOF
             chmod 644 "${'$'}ROOTFS/etc/profile.d/01-tawc.sh"

@@ -118,7 +118,13 @@ definitions Xwayland needs at the type level.
   ones. AHB path doesn't touch them — Xwayland is software-only here.
 - `ChrootMounter` bind-mounts `<tawc-data>/xtmp/.X11-unix` into the
   chroot at `/tmp/.X11-unix` so X clients inside the chroot find `:0`
-  at the standard path. `01-tawc.sh` now also exports `DISPLAY=:0`.
+  at the standard path. `01-tawc.sh` now also exports `DISPLAY=:0`
+  and `SDL_VIDEODRIVER=wayland,x11` — without the SDL hint, SDL2
+  apps (supertuxkart, anything Irrlicht-based) silently pick X11
+  whenever `DISPLAY` is set, hit the GLAMOR-disabled X server, and
+  die in `createWindow`. Wayland-first with X11 fallback keeps SDL
+  apps on the libhybris/EGL path while leaving X11 reachable for
+  the X-only clients that genuinely need it.
 
 ## Smithay fork patches
 
