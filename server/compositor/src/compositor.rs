@@ -112,6 +112,10 @@ pub struct TawcState {
     pub compositor_state: CompositorState,
     pub shm_state: ShmState,
     pub xdg_shell_state: XdgShellState,
+    // Held to keep the zxdg_decoration_manager_v1 global registered for the
+    // life of the display; smithay's delegate macro reaches it via the
+    // `XdgDecorationHandler` impl, never through this field.
+    #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
