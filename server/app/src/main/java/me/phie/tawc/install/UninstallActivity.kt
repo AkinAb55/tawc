@@ -48,6 +48,23 @@ class UninstallActivity : AppCompatActivity() {
         val scaffold = buildChildScreen("Delete")
         panel = OperationLogPanel(this)
         panel.view.visibility = View.VISIBLE
+        // No confirm dialog here. The user might be tapping Cancel
+        // quickly to stop a delete they didn't mean to start; another
+        // dialog in the way risks finishing the wipe before they can
+        // confirm. The state machine catches this safely:
+        // UNINSTALLING → FAILED leaves whatever survives on disk for
+        // a manual recovery, and the two-pass wipe in
+        // RootfsCleaner / ProotMethod keeps metadata.json around
+        // until the rootfs is fully gone.
+        panel.onCancelClicked = {
+            val svc = panel.boundService
+            if (svc == null) {
+                panel.appendLog("[ui] cancel ignored: service not bound yet")
+            } else {
+                panel.appendLog("[ui] user requested uninstall cancel")
+                svc.cancelUninstall(targetId)
+            }
+        }
         scaffold.content.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         setContentView(scaffold.root)
 

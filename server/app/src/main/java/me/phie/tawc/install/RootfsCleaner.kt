@@ -26,6 +26,16 @@ import java.io.IOException
  *      `rm` has no `--one-file-system`. `-xdev` is belt-and-braces
  *      against any mount [ChrootMounter.unmount] missed (e.g. a leak
  *      via `client/tawc-chroot-run` that bound `/dev` at runtime).
+ *      The delete is split into **two passes** so a cancel mid-wipe
+ *      can never strand the slot without `metadata.json`: pass 1
+ *      walks the rootfs subtree only, pass 2 tears down `metadata.json`
+ *      / `enter.sh` / the parent dir once we know the heavy work is
+ *      done. `find -depth` already orders deletion leaf-first within a
+ *      single tree, but the install-dir-level ordering between
+ *      `rootfs/` and its sibling `metadata.json` depends on `readdir`,
+ *      so we make it explicit. Recovery from a cancelled pass-1: home
+ *      screen still lists the slot (metadata is intact) and a second
+ *      uninstall picks up cleanly because pass 1 is idempotent.
  *
  * `find -delete` prints every deleted path on stdout; we silence that
  * with `>/dev/null` so only stderr (real errors) reach the log.
@@ -34,9 +44,10 @@ object RootfsCleaner {
 
     /**
      * Wipe [installDir] and everything inside it. Idempotent — a
-     * missing dir is a successful wipe. Throws [IOException] on the
-     * first sub-step failure; the caller is expected to record `FAILED`
-     * state if the dir survives.
+     * missing dir is a successful wipe, a leftover-from-cancelled-pass-1
+     * dir (rootfs gone, metadata still there) re-runs cleanly. Throws
+     * [IOException] on the first sub-step failure; the caller is
+     * expected to record `FAILED` state if the dir survives.
      */
     fun wipe(installDir: File, log: (String) -> Unit = {}) {
         if (!installDir.exists()) return
@@ -57,9 +68,40 @@ object RootfsCleaner {
             throw IOException("Unmount refused (active mounts):\n${ur.output}")
         }
 
-        val delRes = Su.run("find '$installPath' -xdev -depth -delete >/dev/null") { log("rm: $it") }
-        if (!delRes.ok) {
-            throw IOException("delete failed:\n${delRes.output}")
+        // Pass 1: rootfs only. The bulk of the deletion lives here. If
+        // a cancel arrives we want to tip over before metadata.json
+        // gets touched, so the slot still shows up on the home screen
+        // and a second uninstall can finish the job.
+        if (File(rootfsPath).exists()) {
+            log("rm: rootfs subtree at $rootfsPath")
+            val rfRes = Su.run("find '$rootfsPath' -xdev -depth -delete >/dev/null") {
+                log("rm: $it")
+            }
+            if (!rfRes.ok) {
+                throw IOException("rootfs delete failed:\n${rfRes.output}")
+            }
+        }
+
+        // Pass 2: explicit ordering — `enter.sh` first, then any
+        // half-written `metadata.json.tmp`, then `metadata.json`,
+        // then `rmdir`. `find -depth -delete` would leave readdir-
+        // order between siblings undefined, which means a cancel
+        // between two arbitrary unlinks could orphan the slot
+        // (installDir present, metadata.json gone — invisible on the
+        // home screen). Explicit order makes metadata.json the
+        // second-to-last visible artefact, with only the empty dir
+        // remaining and `rmdir` finishing the job near-atomically.
+        log("rm: container at $installPath (enter.sh, metadata.json, rmdir)")
+        val finalRes = Su.run(
+            buildString {
+                appendLine("rm -f '$installPath/enter.sh'")
+                appendLine("rm -f '$installPath/metadata.json.tmp'")
+                appendLine("rm -f '$installPath/metadata.json'")
+                appendLine("rmdir '$installPath'")
+            }
+        ) { log("rm: $it") }
+        if (!finalRes.ok || installDir.exists()) {
+            throw IOException("metadata delete failed:\n${finalRes.output}")
         }
     }
 

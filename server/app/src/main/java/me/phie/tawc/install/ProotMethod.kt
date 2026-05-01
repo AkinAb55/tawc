@@ -252,6 +252,7 @@ class ProotMethod(context: Context) : InstallationMethod {
         if (!installDir.exists()) return
         val installPathQ = shellQuote(installDir.absolutePath)
         val rootfsPath = File(installDir, "rootfs").absolutePath
+        val rootfsPathQ = shellQuote(rootfsPath)
 
         // Best-effort: kill any proot processes whose argv mentions
         // this rootfs. pkill -f scans /proc/<pid>/cmdline; we can only
@@ -281,8 +282,12 @@ class ProotMethod(context: Context) : InstallationMethod {
             if (!r.ok) log("chmod: warning, exit=${r.exitCode}")
         }
 
-        // `find -xdev -depth -delete` rather than `rm -rf` or
-        // File.deleteRecursively():
+        // Two-pass delete (rootfs subtree, then metadata + container)
+        // for the same reason as [RootfsCleaner.wipe]: a cancel
+        // mid-wipe must leave `metadata.json` intact so the home
+        // screen still shows the slot and a follow-up uninstall picks
+        // up cleanly. `find -xdev -depth -delete` rather than `rm -rf`
+        // or `File.deleteRecursively()`:
         //   - -xdev refuses to cross filesystem boundaries, so even if
         //     something ever leaked a bind mount into this tree
         //     (proot itself doesn't, but a future regression / manual
@@ -292,23 +297,54 @@ class ProotMethod(context: Context) : InstallationMethod {
         //     emptied before unlink, which neither `rm -rf` legacy
         //     toyboxes nor `File.deleteRecursively()` (which aborts
         //     on the first un-deletable child) can match.
-        // Mirrors RootfsCleaner.wipe on the chroot side. Quoting
-        // flows through shellQuote to keep a hostile `id` (already
-        // rejected by Installation.isValidId, but defence in depth)
-        // from breaking out of the wrapper.
-        log("delete: $installDir")
-        val rmScript = "find $installPathQ -xdev -depth -delete 2>&1"
-        val r = runShell(listOf("/system/bin/sh"), rmScript) { log("rm: $it") }
+        // Quoting flows through shellQuote to keep a hostile `id`
+        // (already rejected by Installation.isValidId, but defence in
+        // depth) from breaking out of the wrapper.
+        log("delete: rootfs subtree at $rootfsPath")
+        if (File(rootfsPath).exists()) {
+            val rfRes = runShell(
+                listOf("/system/bin/sh"),
+                "find $rootfsPathQ -xdev -depth -delete 2>&1",
+            ) { log("rm: $it") }
+            if (!rfRes.ok || File(rootfsPath).exists()) {
+                if (Su.rootAvailable()) {
+                    log("delete: app-uid rootfs find failed, retrying via su")
+                    val sr = Su.run("find $rootfsPathQ -xdev -depth -delete") { log("rm (su): $it") }
+                    if (!sr.ok || File(rootfsPath).exists()) {
+                        throw IOException(
+                            "rootfs delete failed (su retry exit=${sr.exitCode}): ${sr.output}"
+                        )
+                    }
+                } else {
+                    throw IOException(
+                        "rootfs delete failed (exit=${rfRes.exitCode}): ${rfRes.output}"
+                    )
+                }
+            }
+        }
+
+        // Pass 2: explicit `enter.sh` → `metadata.json.tmp` →
+        // `metadata.json` → `rmdir` order so the `metadata.json`
+        // unlink is the second-to-last visible artefact, with only
+        // the empty installDir left and `rmdir` finishing things
+        // near-atomically. See RootfsCleaner.wipe for the same
+        // reasoning.
+        log("delete: container at $installDir (enter.sh, metadata.json, rmdir)")
+        val pass2Script = buildString {
+            appendLine("rm -f $installPathQ/enter.sh")
+            appendLine("rm -f $installPathQ/metadata.json.tmp")
+            appendLine("rm -f $installPathQ/metadata.json")
+            appendLine("rmdir $installPathQ")
+        }
+        val r = runShell(listOf("/system/bin/sh"), pass2Script) { log("rm: $it") }
         if (r.ok && !installDir.exists()) return
 
         // App-uid delete failed — almost certainly a residual
-        // root-owned subtree from a `su -c '<enter.sh>'` invocation.
-        // Try once more via `su` before giving up. -xdev still
-        // applies, so even as root we won't escape the rootfs's
-        // filesystem.
+        // root-owned file from a `su -c '<enter.sh>'` invocation.
+        // Retry once via `su`. The same explicit order applies.
         if (Su.rootAvailable()) {
-            log("delete: app-uid find -delete failed, retrying via su")
-            val sr = Su.run("find $installPathQ -xdev -depth -delete") { log("rm (su): $it") }
+            log("delete: app-uid pass-2 failed, retrying via su")
+            val sr = Su.run(pass2Script) { log("rm (su): $it") }
             if (sr.ok && !installDir.exists()) return
             throw IOException("Recursive delete failed (su retry exit=${sr.exitCode}): ${sr.output}")
         }

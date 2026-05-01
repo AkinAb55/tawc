@@ -1,5 +1,6 @@
 package me.phie.tawc.install
 
+import android.content.DialogInterface
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
@@ -13,6 +14,9 @@ import android.widget.RadioGroup
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import me.phie.tawc.R
 import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
@@ -84,6 +88,19 @@ class InstallActivity : AppCompatActivity() {
         panel = OperationLogPanel(this)
         panel.view.visibility = if (started) View.VISIBLE else View.GONE
         if (started) formSection.visibility = View.GONE
+        // Cancel during install requires a confirm: it triggers a
+        // follow-up uninstall (INSTALLING → FAILED → UNINSTALLING),
+        // which wipes the freshly-laid-down rootfs. There's no user
+        // data at risk yet (gate guarantees an empty slot at install
+        // start) but the time loss alone is worth a confirm tap.
+        //
+        // After a cancelled install, the service flips into
+        // UNINSTALLING for the follow-up wipe — at that point a
+        // second tap of the still-visible Cancel button should behave
+        // like UninstallActivity's Cancel: no confirm dialog, just
+        // abort the wipe directly. Dispatch on the service's current
+        // job kind so we do the right thing in both phases.
+        panel.onCancelClicked = { dispatchCancel() }
         scaffold.content.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(scaffold.root)
@@ -171,9 +188,12 @@ class InstallActivity : AppCompatActivity() {
     }
 
     /**
-     * Build the method picker (chroot / proot radio group). Default
-     * follows host capability — `su` available picks chroot, otherwise
-     * proot. The intent extra `method` and saved-instance state both
+     * Build the method picker (chroot / proot / tawcroot radio group).
+     * Default follows host capability — `su` available picks chroot,
+     * otherwise proot (the established rootless path). tawcroot is
+     * exposed as an opt-in for now: phase-2 host validation passes but
+     * real-Android coverage is still landing, so we don't auto-default
+     * onto it. The intent extra `method` and saved-instance state both
      * override the default; the user can still flip the radio after.
      */
     private fun buildMethodPicker(): LinearLayout {
@@ -189,6 +209,7 @@ class InstallActivity : AppCompatActivity() {
         // future R.id.* once we add a layout XML.
         val chrootId = View.generateViewId()
         val prootId = View.generateViewId()
+        val tawcrootId = View.generateViewId()
 
         val chroot = RadioButton(this).apply {
             id = chrootId
@@ -202,22 +223,32 @@ class InstallActivity : AppCompatActivity() {
             id = prootId
             text = "proot (rootless)"
         }
+        val tawcroot = RadioButton(this).apply {
+            id = tawcrootId
+            text = "tawcroot (systrap, rootless)"
+        }
         methodGroup.addView(chroot, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 16 })
-        methodGroup.addView(proot, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        methodGroup.addView(proot, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 16 })
+        methodGroup.addView(tawcroot, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         container.addView(methodGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         // Initial selection: explicit override → use it; else default
         // for host (chroot if su works, proot if not).
         val initial = selectedMethod
             ?: if (rootAvailable) ChrootMethod.KEY else ProotMethod.KEY
-        methodGroup.check(if (initial == ChrootMethod.KEY) chrootId else prootId)
+        methodGroup.check(when (initial) {
+            ChrootMethod.KEY    -> chrootId
+            TawcrootMethod.KEY  -> tawcrootId
+            else                -> prootId
+        })
         selectedMethod = initial
 
         methodGroup.setOnCheckedChangeListener { _, checkedId ->
             selectedMethod = when (checkedId) {
-                chrootId -> ChrootMethod.KEY
-                prootId -> ProotMethod.KEY
-                else -> selectedMethod
+                chrootId    -> ChrootMethod.KEY
+                prootId     -> ProotMethod.KEY
+                tawcrootId  -> TawcrootMethod.KEY
+                else        -> selectedMethod
             }
         }
         return container
@@ -255,6 +286,54 @@ class InstallActivity : AppCompatActivity() {
                         else "[ui] starting install of '$targetId' via $methodKey")
         started = true
         InstallationService.startInstall(this, targetId, methodKey)
+    }
+
+    private fun dispatchCancel() {
+        val service = panel.boundService
+        if (service == null) {
+            panel.appendLog("[ui] cancel ignored: service not bound yet")
+            return
+        }
+        when (service.currentKind) {
+            InstallationService.JobKind.INSTALL -> confirmCancelInstall(service)
+            InstallationService.JobKind.UNINSTALL -> {
+                // Follow-up uninstall phase from a previous cancel-
+                // install (or the user opened the install activity
+                // while an uninstall was already in flight). Match
+                // UninstallActivity's behaviour: no confirm.
+                panel.appendLog("[ui] cancelling in-flight uninstall")
+                service.cancelUninstall(targetId)
+            }
+            null -> panel.appendLog("[ui] cancel: no active job")
+        }
+    }
+
+    private fun confirmCancelInstall(service: InstallationService) {
+        // Note: the "no data will be lost" wording is correct because
+        // the install gate only runs against an empty slot (see
+        // notes/installation.md). If a future refactor adds in-place
+        // reconfigure/migration the message must be revisited.
+        val message = "Cancelling will stop the install and remove the partially " +
+            "extracted rootfs at\n${store.installationDir(targetId).absolutePath}.\n" +
+            "Nothing of yours has been written there yet, so no data will be lost."
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Cancel install of '$targetId'?")
+            .setMessage(message)
+            .setNegativeButton("Keep installing", null)
+            .setPositiveButton("Cancel install") { _, _ ->
+                panel.appendLog("[ui] user confirmed cancel")
+                service.cancelInstallAndUninstall(targetId)
+            }
+            .show()
+        // Match the destructive-action coloring on DistroInfoActivity:
+        // accent red on the destructive option, neutral on the keep-
+        // going one so it doesn't compete.
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.tawc_danger))
+        dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.let { btn ->
+            btn.setTextColor(
+                MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
+            )
+        }
     }
 
     companion object {

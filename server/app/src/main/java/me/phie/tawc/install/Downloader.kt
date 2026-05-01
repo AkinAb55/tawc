@@ -3,6 +3,7 @@ package me.phie.tawc.install
 import android.util.Log
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -59,6 +60,19 @@ object Downloader {
                 tmp.outputStream().use { out ->
                     val buf = ByteArray(CHUNK_BYTES)
                     while (true) {
+                        // HttpURLConnection's stream isn't an
+                        // interruptible NIO channel, so a thread
+                        // interrupt by `runInterruptible` doesn't
+                        // abort `input.read(buf)` directly. Check the
+                        // flag explicitly between chunks so cancel
+                        // takes effect at the next 64 KiB boundary
+                        // (≤ a few hundred ms over LTE). The
+                        // `conn.disconnect()` in `finally` then frees
+                        // the socket; the `.part` file is left for
+                        // the next attempt to overwrite.
+                        if (Thread.currentThread().isInterrupted) {
+                            throw InterruptedIOException("download cancelled")
+                        }
                         val n = input.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)

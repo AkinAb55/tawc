@@ -83,6 +83,47 @@ Two consequences shape every other piece of the system:
    historical `rm -rf` walking through a live `/dev` bind mount is
    structurally impossible.
 
+### Cancellation
+
+The bound UI exposes a Cancel button on the in-progress panel
+([OperationLogPanel]). The state-machine consequences:
+
+- **Cancel install**: `INSTALLING → FAILED` (catch handler), then a
+  follow-up uninstall fires automatically (`FAILED → UNINSTALLING →
+  (no dir)`). The install gate guarantees an empty slot at install
+  start, so the only files in the rootfs are bootstrap + freshly
+  installed packages — no user data at risk. Confirm dialog before
+  the cancel because the time loss is non-trivial.
+- **Cancel uninstall**: `UNINSTALLING → FAILED`. The slot stays on
+  disk in whatever partial state it was in; user can re-trigger
+  uninstall to finish, or pull leftover files manually first. **No
+  confirm dialog** — the user might be quickly aborting to save data
+  they didn't mean to delete; another dialog in the way risks
+  finishing the wipe before they can react.
+
+The cancel mechanism has three layers:
+
+1. **Coroutine cancellation** — [InstallationService] wraps the job
+   body in `runInterruptible(Dispatchers.IO)` so a `Job.cancel()`
+   translates into a thread interrupt. [Su.run],
+   [ProotMethod.runShell], and [Downloader.download] all honour
+   thread interrupts (`destroyForcibly` of subprocess /
+   `InterruptedIOException` from the HTTP read loop).
+2. **Defensive process kill** — Magisk's `su` doesn't reliably
+   forward signals to the remote shell's grandchildren (tar / pacman
+   / find), so [InstallationService.runCancelKillScript] fires in
+   parallel with the cancel: a /proc sweep that SIGKILLs anything
+   chrooted into the rootfs (by `/proc/<pid>/root` dev:ino) or whose
+   argv mentions the install path (catches host-side helpers).
+3. **Two-pass wipe** — [RootfsCleaner.wipe] / [ProotMethod.wipe]
+   delete the rootfs subtree first, then `metadata.json` + the
+   container dir as a separate `find` invocation. A cancel mid-pass-1
+   leaves `metadata.json` intact so the slot still shows up on the
+   home screen and a follow-up uninstall picks up cleanly. Without
+   this split, `find`'s readdir order between `rootfs/` and its
+   sibling `metadata.json` is implementation-defined and the slot
+   could become an orphan.
+
 [InstallationService] is the gate that enforces the table — every
 mutation goes through it, and it consults the on-disk state before
 launching a job. Activities, broadcasts, and `am start --es autoStart`
@@ -124,7 +165,7 @@ The package is split into three layers:
 | `util/AppOwnership.kt`         | `chownAppDirNonRecursive` — resets a freshly-mkdir'd dir to app uid:gid so subsequent app-uid writes succeed. |
 | `InstallProgress.kt`           | Stage enum + progress event used by the service. The pkg-manager-bootstrap stages are `PKG_KEYRING` and `PKG_INSTALL` (distro-agnostic names). |
 | `InstallationService.kt`       | The state-machine gate. Foreground service that consults [InstallationStore], resolves the right [Distro] from [DistroRegistry], and exposes `progress` (StateFlow) + `log` (SharedFlow). |
-| `OperationLogPanel.kt`         | Reusable Android view (status line + progress bar + scrolling log) that binds to the service's `progress`/`log` flows. Used by both [InstallActivity] and [UninstallActivity] so the per-operation UI lives in one place. |
+| `OperationLogPanel.kt`         | Reusable Android view (accent-tinted status line + progress bar + scrolling log + outlined Cancel button) that binds to the service's `progress`/`log` flows. Cancel visibility tracks the current `InstallStage`; the click handler is supplied by the owning activity so install can wrap with a confirm dialog while uninstall doesn't. Used by both [InstallActivity] and [UninstallActivity] so the per-operation UI lives in one place. |
 | `AutoStart.kt`                 | Shared `EXTRA_AUTO_START` constant + `Intent?.requestsAutoStart()` extension. The single contract that lets [InstallActivity] / [UninstallActivity] tell "this launch is the user / CLI explicitly asking to fire the operation" from "this launch is just opening the page." |
 | `InstallActivity.kt`           | Install flow: read-only summary (Distro display name, Linux arch, install path) → Install button → swap to [OperationLogPanel] for live progress. Recognises `autoStart=true` to skip the form and start immediately. The button is disabled (with state-aware label) when the gate would refuse. |
 | `UninstallActivity.kt`         | Live uninstall progress page bound to [InstallationService]. Has no in-page button — confirmation lives on [DistroInfoActivity]. The uninstall fires only when the launching intent carries `autoStart=true` (same contract as [InstallActivity]); a bare launch / recents reopen just shows the bound service's last status. |
@@ -289,11 +330,18 @@ sweep fires once at process cold start.
    (Magisk's mount-master mode) so `umount` actually affects the
    global mount table; refuses with a non-zero exit if any mount
    remains under the rootfs.
-4. **`find -xdev -depth -delete`** — never `rm -rf`. Toybox `rm` has
-   no `--one-file-system`, and a single missed unmount could
+4. **`find -xdev -depth -delete` (rootfs subtree)** — pass 1 deletes
+   everything under `<installDir>/rootfs/`. Never `rm -rf`. Toybox
+   `rm` has no `--one-file-system`, and a single missed unmount could
    otherwise let `rm` walk through a live `/dev` bind and unlink host
    nodes (the historical bug that crashed zygote and pegged vold).
-   `-xdev` is the belt-and-braces against that.
+   `-xdev` is the belt-and-braces against that. This is the long
+   step (multi-GB tree); a cancel from the UI lands here.
+5. **`find -xdev -depth -delete` (metadata + container)** — pass 2
+   deletes `metadata.json`, `enter.sh`, and the empty `<installDir>/`
+   itself. Split out from pass 1 so a cancel mid-wipe leaves the
+   slot recognisable on the home screen for follow-up. See
+   *Cancellation* under *State machine* above.
 
 On success the directory (including `metadata.json`) is gone and the id
 is back to `(no dir)`. On any failure, the directory is left as-is and

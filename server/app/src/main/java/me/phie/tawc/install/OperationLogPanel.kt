@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.os.IBinder
 import android.text.method.ScrollingMovementMethod
@@ -15,21 +16,33 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import me.phie.tawc.R
+import me.phie.tawc.ui.accentOutlinedButton
 
 /**
- * Shared "operation in progress" UI. Builds a status line + progress
- * bar + scrolling log, manages a binding to [InstallationService] for
- * the lifetime of [activity], and updates the views off the service's
- * progress and log flows.
+ * Shared "operation in progress" UI. Builds a status line + accent-
+ * tinted progress bar + scrolling log + Cancel button, manages a
+ * binding to [InstallationService] for the lifetime of [activity], and
+ * updates the views off the service's progress and log flows.
  *
  * Owners attach [view] into their layout, call [bindToService] from
  * `onStart` and [unbind] from `onStop`. Local log lines (e.g. "[ui]
  * starting install") can be pushed in via [appendLog].
+ *
+ * The cancel button visibility tracks the current [InstallStage]: it's
+ * shown for any in-progress stage and hidden on `IDLE`/`DONE`/`FAILED`
+ * (no active job to cancel). Owners set [onCancelClicked] to a handler
+ * that decides whether to confirm and which service method to invoke
+ * (cancel-install-then-uninstall vs. cancel-uninstall-leaves-failed).
+ * The handler can read [boundService] to call directly into the
+ * service it's already wired to.
  */
 class OperationLogPanel(private val activity: Activity) {
 
@@ -38,20 +51,46 @@ class OperationLogPanel(private val activity: Activity) {
     private val progressBar: ProgressBar
     private val logText: TextView
     private val logScroll: ScrollView
+    private val cancelButton: MaterialButton
 
     private var service: InstallationService? = null
     private var collectScope: CoroutineScope? = null
 
+    /**
+     * Set by the owning activity to handle a Cancel tap. Install path
+     * confirms via dialog and then triggers the cancel-and-uninstall
+     * service call; the uninstall path calls cancel directly without
+     * a confirm step (user may be quickly aborting to avoid losing
+     * data — see notes/installation.md).
+     */
+    var onCancelClicked: (() -> Unit)? = null
+
+    /**
+     * The bound service, or `null` until the binder connects. Owners
+     * use this from [onCancelClicked] so the Cancel handler can call
+     * straight into the service that's driving this panel.
+     */
+    val boundService: InstallationService? get() = service
+
     init {
         val pad = (16 * activity.resources.displayMetrics.density).toInt()
+        val accent = activity.getColor(R.color.tawc_accent)
 
         view = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
 
-        statusText = TextView(activity).apply { text = "" }
+        statusText = TextView(activity).apply {
+            text = ""
+            // Default the status line to accent so the in-progress
+            // state is the visually present one. FAILED stage swaps
+            // it to the danger color in [startCollecting].
+            setTextColor(accent)
+        }
         view.addView(statusText, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
 
         progressBar = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(accent)
+            progressTintList = ColorStateList.valueOf(accent)
         }
         view.addView(progressBar, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
@@ -64,6 +103,23 @@ class OperationLogPanel(private val activity: Activity) {
         }
         logScroll.addView(logText)
         view.addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+
+        // Cancel sits below the log so it doesn't compete with the
+        // primary status row at the top, and so the user reads the
+        // operation's current state before reaching the abort. Hidden
+        // until a stage event tells us a job is actually running.
+        cancelButton = if (activity is AppCompatActivity) {
+            activity.accentOutlinedButton("Cancel") { onCancelClicked?.invoke() }
+        } else {
+            MaterialButton(activity).apply {
+                text = "Cancel"
+                setOnClickListener { onCancelClicked?.invoke() }
+            }
+        }
+        cancelButton.visibility = View.GONE
+        view.addView(cancelButton, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = 0).apply {
+            topMargin = pad / 2
+        })
     }
 
     private val connection = object : ServiceConnection {
@@ -113,9 +169,13 @@ class OperationLogPanel(private val activity: Activity) {
         val cs = CoroutineScope(Dispatchers.Main)
         collectScope = cs
 
+        val accent = activity.getColor(R.color.tawc_accent)
+        val danger = activity.getColor(R.color.tawc_danger)
+
         cs.launch {
             s.progress.collectLatest { p ->
                 statusText.text = p.message
+                statusText.setTextColor(if (p.stage == InstallStage.FAILED) danger else accent)
                 if (p.percent != null) {
                     progressBar.isIndeterminate = false
                     progressBar.progress = p.percent
@@ -123,6 +183,10 @@ class OperationLogPanel(private val activity: Activity) {
                     progressBar.isIndeterminate = true
                 }
                 progressBar.visibility = when (p.stage) {
+                    InstallStage.IDLE, InstallStage.DONE, InstallStage.FAILED -> View.GONE
+                    else -> View.VISIBLE
+                }
+                cancelButton.visibility = when (p.stage) {
                     InstallStage.IDLE, InstallStage.DONE, InstallStage.FAILED -> View.GONE
                     else -> View.VISIBLE
                 }
