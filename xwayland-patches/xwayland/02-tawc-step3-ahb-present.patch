@@ -1,0 +1,1474 @@
+diff --git a/Xext/meson.build b/Xext/meson.build
+index bb90e19..311485b 100644
+--- a/Xext/meson.build
++++ b/Xext/meson.build
+@@ -62,6 +62,11 @@ if build_xv
+     hdrs_xext += ['xvdix.h', 'xvmcext.h']
+ endif
+ 
++if build_tawc
++    srcs_xext += 'tawc-dri.c'
++    hdrs_xext += 'tawcdriproto.h'
++endif
++
+ libxserver_xext = static_library('libxserver_xext',
+     srcs_xext,
+     include_directories: inc,
+diff --git a/Xext/tawc-dri.c b/Xext/tawc-dri.c
+new file mode 100644
+index 0000000..2e364b9
+--- /dev/null
++++ b/Xext/tawc-dri.c
+@@ -0,0 +1,241 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * TAWC-DRI X11 extension: Phase 2 step 3.
++ *
++ * Server side of the AHB-shipping protocol. PresentBuffer carries an
++ * Android native_handle_t — numInts ints inline in the request body,
++ * numFds fds out-of-band via X11 FD passing (ReadFdFromClient, the
++ * same machinery DRI3's PixmapFromBuffer uses). The dispatch hands the
++ * pieces to xwl_tawc_present_native_handle, which rebuilds an
++ * AHardwareBuffer via AHardwareBuffer_createFromHandle, ships it
++ * through android_wlegl, and attaches the resulting wl_buffer to the
++ * target X11 window's wl_surface.
++ *
++ * See notes/xwayland.md.
++ */
++
++#ifdef HAVE_DIX_CONFIG_H
++#include <dix-config.h>
++#endif
++
++#include <stdlib.h>
++#include <stdint.h>
++#include <unistd.h>
++
++#include <X11/X.h>
++#include <X11/Xproto.h>
++
++#include "misc.h"
++#include "os.h"
++#include "dixstruct.h"
++#include "extnsionst.h"
++#include "extinit.h"
++#include "windowstr.h"
++#include "scrnintstr.h"
++
++#include "Xext/tawcdriproto.h"
++
++/* Forward decl — pulling in the Xwayland-private xwayland-tawc.h here
++ * would force an include path the rest of Xext/ doesn't have. The
++ * function is implemented in hw/xwayland/xwayland-tawc.c and resolved
++ * at link time via Xwayland's executable target. */
++extern int xwl_tawc_present_native_handle(WindowPtr window,
++                                          int *fds, int num_fds,
++                                          const int32_t *ints, int num_ints,
++                                          int width, int height, int stride,
++                                          int format, uint64_t usage);
++
++static int
++ProcTAWCDRIQueryVersion(ClientPtr client)
++{
++    REQUEST(xTAWCDRIQueryVersionReq);
++    xTAWCDRIQueryVersionReply rep;
++
++    REQUEST_SIZE_MATCH(xTAWCDRIQueryVersionReq);
++
++    rep = (xTAWCDRIQueryVersionReply) {
++        .type = X_Reply,
++        .sequenceNumber = client->sequence,
++        .length = 0,
++        .majorVersion = TAWCDRI_MAJOR,
++        .minorVersion = TAWCDRI_MINOR,
++    };
++    if (client->swapped) {
++        swaps(&rep.sequenceNumber);
++        swapl(&rep.length);
++        swapl(&rep.majorVersion);
++        swapl(&rep.minorVersion);
++    }
++    WriteToClient(client, sizeof(rep), &rep);
++    return Success;
++}
++
++static int
++ProcTAWCDRIPresentBuffer(ClientPtr client)
++{
++    REQUEST(xTAWCDRIPresentBufferReq);
++    WindowPtr window;
++    int *fds = NULL;
++    int32_t *ints_buf = NULL;
++    int rc;
++    uint64_t usage;
++    int num_fds, num_ints;
++
++    /* Wire layout: header + numInts u32s. length is in 4-byte words. */
++    REQUEST_AT_LEAST_SIZE(xTAWCDRIPresentBufferReq);
++    if ((size_t)stuff->length * 4 <
++            sizeof(xTAWCDRIPresentBufferReq) +
++            (size_t)stuff->numInts * sizeof(int32_t))
++        return BadLength;
++
++    num_fds  = stuff->numFds;
++    num_ints = stuff->numInts;
++
++    /* Reasonable caps so a malformed client can't OOM us. AOSP gralloc4
++     * private_handle_t maxes at numFds=2 (gralloc fd + sync fd) and
++     * numInts ~ 32 in practice; 16/256 is a generous upper bound. */
++    if (num_fds < 0 || num_fds > 16 || num_ints < 0 || num_ints > 256) {
++        client->errorValue = num_fds;
++        return BadValue;
++    }
++
++    /* DIX requires every dispatch that pulls fds to declare the count up
++     * front; otherwise libxtrans drops the SCM_RIGHTS-attached fds and
++     * ReadFdFromClient returns -1. Same shape as DRI3's
++     * proc_dri3_pixmap_from_buffers. */
++    SetReqFds(client, num_fds);
++
++    rc = dixLookupWindow(&window, stuff->window, client, DixWriteAccess);
++    if (rc != Success)
++        return rc;
++
++    /* Inline ints sit immediately after the request header. The X
++     * server's request buffer is byte-swapped on the wire-side if
++     * client->swapped, so for a swapped client we have to swap each
++     * int here. The values are opaque gralloc bookkeeping (BPP, layer
++     * count, vendor flags) — the client's libnativewindow generates
++     * them on the same architecture as the server in our setup, so
++     * cross-endian is paranoia rather than a real path. */
++    if (num_ints > 0) {
++        const int32_t *raw =
++            (const int32_t *)((const char *)stuff +
++                              sizeof(xTAWCDRIPresentBufferReq));
++        ints_buf = malloc(num_ints * sizeof(int32_t));
++        if (!ints_buf)
++            return BadAlloc;
++        for (int i = 0; i < num_ints; i++) {
++            int32_t v = raw[i];
++            if (client->swapped) {
++                CARD32 tmp = (CARD32)v;
++                swapl(&tmp);
++                v = (int32_t)tmp;
++            }
++            ints_buf[i] = v;
++        }
++    }
++
++    if (num_fds > 0) {
++        fds = malloc(num_fds * sizeof(int));
++        if (!fds) {
++            free(ints_buf);
++            return BadAlloc;
++        }
++        for (int i = 0; i < num_fds; i++) {
++            fds[i] = ReadFdFromClient(client);
++            if (fds[i] < 0) {
++                while (--i >= 0) close(fds[i]);
++                free(fds);
++                free(ints_buf);
++                return BadValue;
++            }
++        }
++    }
++
++    usage = ((uint64_t)stuff->usageHi << 32) | (uint64_t)stuff->usageLo;
++
++    rc = xwl_tawc_present_native_handle(window, fds, num_fds,
++                                        ints_buf, num_ints,
++                                        (int)stuff->width,
++                                        (int)stuff->height,
++                                        (int)stuff->stride,
++                                        (int)stuff->format,
++                                        usage);
++    /* xwl_tawc_present_native_handle owns + closes the fds on both
++     * success (handed to the AHB) and failure (closed during cleanup). */
++    free(fds);
++    free(ints_buf);
++    return rc;
++}
++
++static int
++ProcTAWCDRIDispatch(ClientPtr client)
++{
++    REQUEST(xReq);
++    switch (stuff->data) {
++    case X_TAWCDRIQueryVersion:
++        return ProcTAWCDRIQueryVersion(client);
++    case X_TAWCDRIPresentBuffer:
++        return ProcTAWCDRIPresentBuffer(client);
++    default:
++        return BadRequest;
++    }
++}
++
++static int _X_COLD
++SProcTAWCDRIQueryVersion(ClientPtr client)
++{
++    REQUEST(xTAWCDRIQueryVersionReq);
++    swaps(&stuff->length);
++    REQUEST_SIZE_MATCH(xTAWCDRIQueryVersionReq);
++    swapl(&stuff->majorVersion);
++    swapl(&stuff->minorVersion);
++    return ProcTAWCDRIQueryVersion(client);
++}
++
++static int _X_COLD
++SProcTAWCDRIPresentBuffer(ClientPtr client)
++{
++    REQUEST(xTAWCDRIPresentBufferReq);
++    swaps(&stuff->length);
++    REQUEST_AT_LEAST_SIZE(xTAWCDRIPresentBufferReq);
++    swapl(&stuff->window);
++    swaps(&stuff->numFds);
++    swaps(&stuff->numInts);
++    swapl(&stuff->width);
++    swapl(&stuff->height);
++    swapl(&stuff->stride);
++    swapl(&stuff->format);
++    swapl(&stuff->usageLo);
++    swapl(&stuff->usageHi);
++    /* The inline int payload is swapped lazily inside
++     * ProcTAWCDRIPresentBuffer so a non-swapped server doesn't pay
++     * for it. */
++    return ProcTAWCDRIPresentBuffer(client);
++}
++
++static int _X_COLD
++SProcTAWCDRIDispatch(ClientPtr client)
++{
++    REQUEST(xReq);
++    switch (stuff->data) {
++    case X_TAWCDRIQueryVersion:
++        return SProcTAWCDRIQueryVersion(client);
++    case X_TAWCDRIPresentBuffer:
++        return SProcTAWCDRIPresentBuffer(client);
++    default:
++        return BadRequest;
++    }
++}
++
++void
++tawc_dri_extension_init(void)
++{
++    AddExtension(TAWCDRI_NAME,
++                 TAWCDRINumberEvents,
++                 TAWCDRINumberErrors,
++                 ProcTAWCDRIDispatch,
++                 SProcTAWCDRIDispatch,
++                 NULL,
++                 StandardMinorOpcode);
++}
+diff --git a/Xext/tawcdriproto.h b/Xext/tawcdriproto.h
+new file mode 100644
+index 0000000..49bf6e8
+--- /dev/null
++++ b/Xext/tawcdriproto.h
+@@ -0,0 +1,84 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * TAWC-DRI: AHB-shipping X11 protocol extension. AHB equivalent of
++ * DRI3. The Phase 1 stub had a fabricated buffer-id; Phase 2 step 3
++ * carries a real Android native_handle_t over the wire — `numInts` ints
++ * inline in the request body and `numFds` fds out-of-band via X11's
++ * SCM_RIGHTS-style FD passing (the same mechanism DRI3's PixmapFromBuffer
++ * uses; ReadFdFromClient on the server side, xcb_send_request_with_fds
++ * on the client). The server then rebuilds an AHardwareBuffer via
++ * AHardwareBuffer_createFromHandle, exactly matching what
++ * compositor/native/wlegl_import.c does on the compositor side.
++ *
++ * See notes/xwayland.md.
++ */
++
++#ifndef _TAWCDRIPROTO_H_
++#define _TAWCDRIPROTO_H_
++
++#include <X11/X.h>
++#include <X11/Xmd.h>
++#include <X11/Xproto.h>
++
++#define TAWCDRI_NAME "TAWC-DRI"
++#define TAWCDRI_MAJOR 0
++#define TAWCDRI_MINOR 2
++
++#define X_TAWCDRIQueryVersion  0
++#define X_TAWCDRIPresentBuffer 1
++
++#define TAWCDRINumberErrors 0
++#define TAWCDRINumberEvents 0
++
++typedef struct {
++    CARD8  reqType;
++    CARD8  tawcReqType;
++    CARD16 length B16;
++    CARD32 majorVersion B32;
++    CARD32 minorVersion B32;
++} xTAWCDRIQueryVersionReq;
++#define sz_xTAWCDRIQueryVersionReq 12
++
++typedef struct {
++    BYTE   type;
++    BYTE   pad1;
++    CARD16 sequenceNumber B16;
++    CARD32 length B32;
++    CARD32 majorVersion B32;
++    CARD32 minorVersion B32;
++    CARD32 pad2;
++    CARD32 pad3;
++    CARD32 pad4;
++    CARD32 pad5;
++} xTAWCDRIQueryVersionReply;
++#define sz_xTAWCDRIQueryVersionReply 32
++
++/* PresentBuffer ships an entire AHB-backed pixmap: the native_handle
++ * payload (numFds + numInts and the inline ints) plus the AHB descriptor
++ * (width, height, stride, format, usage). FDs follow out-of-band via
++ * X11 FD passing; the server reads them with ReadFdFromClient(). The
++ * `numInts` inline u32s start immediately after this struct, padded
++ * up to 4-byte alignment by libxtrans. usage is split into lo/hi u32
++ * because Xproto wire types are 32-bit.
++ *
++ * The buffer is bound to `window`'s X11 toplevel and committed on its
++ * wl_surface; the request is void (no reply, errors arrive
++ * asynchronously). */
++typedef struct {
++    CARD8  reqType;
++    CARD8  tawcReqType;
++    CARD16 length B16;
++    CARD32 window B32;
++    CARD16 numFds B16;
++    CARD16 numInts B16;
++    CARD32 width B32;
++    CARD32 height B32;
++    CARD32 stride B32;
++    CARD32 format B32;
++    CARD32 usageLo B32;
++    CARD32 usageHi B32;
++} xTAWCDRIPresentBufferReq;
++#define sz_xTAWCDRIPresentBufferReq 36
++
++#endif /* _TAWCDRIPROTO_H_ */
+diff --git a/hw/xwayland/android_wlegl.xml b/hw/xwayland/android_wlegl.xml
+new file mode 100644
+index 0000000..24ef780
+--- /dev/null
++++ b/hw/xwayland/android_wlegl.xml
+@@ -0,0 +1,127 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="android">
++
++  <copyright>
++    Copyright © 2012 Collabora, Ltd.
++
++    Permission to use, copy, modify, distribute, and sell this
++    software and its documentation for any purpose is hereby granted
++    without fee, provided that the above copyright notice appear in
++    all copies and that both that copyright notice and this permission
++    notice appear in supporting documentation, and that the name of
++    the copyright holders not be used in advertising or publicity
++    pertaining to distribution of the software without specific,
++    written prior permission.  The copyright holders make no
++    representations about the suitability of this software for any
++    purpose.  It is provided "as is" without express or implied
++    warranty.
++
++    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
++    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
++    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
++    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
++    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
++    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
++    THIS SOFTWARE.
++  </copyright>
++
++  <interface name="android_wlegl" version="2">
++    <description summary="Android EGL graphics buffer support">
++      Interface used in the Android wrapper libEGL to share
++      graphics buffers between the server and the client.
++    </description>
++
++    <enum name="error">
++      <entry name="bad_handle" value="0" />
++      <entry name="bad_value" value="1" />
++    </enum>
++
++    <request name="create_handle">
++      <description summary="Create an Android native_handle_t object">
++        This creator method initialises the native_handle_t object
++        with everything except the file descriptors, which have to be
++        submitted separately.
++      </description>
++
++      <arg name="id" type="new_id" interface="android_wlegl_handle" />
++      <arg name="num_fds" type="int" />
++      <arg name="ints" type="array" summary="an array of int32_t" />
++    </request>
++
++    <request name="create_buffer">
++      <description summary="Create a wl_buffer from the native handle">
++        Pass the Android native_handle_t to the server and attach it
++        to the new wl_buffer object.
++
++        The android_wlegl_handle object must be destroyed immediately
++        after this request.
++      </description>
++
++      <arg name="id" type="new_id" interface="wl_buffer" />
++      <arg name="width" type="int" />
++      <arg name="height" type="int" />
++      <arg name="stride" type="int" />
++      <arg name="format" type="int" />
++      <arg name="usage" type="int" />
++      <arg name="native_handle" type="object" interface="android_wlegl_handle" />
++    </request>
++
++
++    <request name="get_server_buffer_handle" since="2">
++        <arg name="id" type="new_id" interface="android_wlegl_server_buffer_handle"/>
++        <arg name="width" type="int"/>
++        <arg name="height" type="int"/>
++        <arg name="format" type="int"/>
++        <arg name="usage" type="int"/>
++    </request>
++
++  </interface>
++
++  <interface name="android_wlegl_handle" version="1">
++    <description summary="An Android native_handle_t object">
++      The Android native_handle_t is a semi-opaque object, that
++      contains an EGL implementation specific number of int32
++      values and file descriptors.
++
++      We cannot send a variable size array of file descriptors
++      over the Wayland protocol, so we send them one by one.
++    </description>
++
++    <enum name="error">
++      <entry name="too_many_fds" value="0" />
++    </enum>
++
++    <request name="add_fd">
++      <arg name="fd" type="fd" />
++    </request>
++
++    <request name="destroy" type="destructor" />
++
++  </interface>
++
++
++  <interface name="android_wlegl_server_buffer_handle" version="1">
++      <description summary="a server allocated buffer">
++          On creation a server_side_buffer object will immediately send
++          the "buffer_fd" and "buffer_ints" events needed by the client to
++          reference the gralloc buffer, followed by the "buffer" event carrying
++          the wl_buffer object.
++      </description>
++      <event name="buffer_fd">
++          <arg name="fd" type="fd"/>
++      </event>
++      <event name="buffer_ints">
++          <arg name="ints" type="array"/>
++      </event>
++      <event name="buffer">
++          <description summary="the wl_buffer">
++              This event will be sent after the ints and all the fds have been sent
++          </description>
++          <arg name="buffer" type="new_id" interface="wl_buffer"/>
++          <arg name="format" type="int"/>
++          <arg name="stride" type="int"/>
++      </event>
++  </interface>
++
++</protocol>
+diff --git a/hw/xwayland/meson.build b/hw/xwayland/meson.build
+index 9fff644..950c9a5 100644
+--- a/hw/xwayland/meson.build
++++ b/hw/xwayland/meson.build
+@@ -127,6 +127,17 @@ if build_xwayland_glamor
+     xwayland_glamor += glamor
+ endif
+ 
++if build_tawc
++    srcs += [
++        'xwayland-tawc.c',
++        'xwayland-tawc.h',
++        'xwayland-tawc-libnativewindow.c',
++        'xwayland-tawc-libnativewindow.h',
++    ]
++    srcs += client_header.process('android_wlegl.xml')
++    srcs += code.process('android_wlegl.xml')
++endif
++
+ wayland_inc = [ inc, ]
+ if build_glx
+     wayland_inc += glx_inc
+diff --git a/hw/xwayland/xwayland-screen.c b/hw/xwayland/xwayland-screen.c
+index c83adda..4ebab27 100644
+--- a/hw/xwayland/xwayland-screen.c
++++ b/hw/xwayland/xwayland-screen.c
+@@ -71,6 +71,11 @@
+ #include "tearing-control-v1-client-protocol.h"
+ #include "fractional-scale-v1-client-protocol.h"
+ 
++#ifdef TAWC
++#include "android_wlegl-client-protocol.h"
++#include "xwayland-tawc.h"
++#endif
++
+ static DevPrivateKeyRec xwl_screen_private_key;
+ static DevPrivateKeyRec xwl_client_private_key;
+ 
+@@ -542,6 +547,16 @@ registry_global(void *data, struct wl_registry *registry, uint32_t id,
+         xwl_screen->fractional_scale_manager =
+             wl_registry_bind(registry, id, &wp_fractional_scale_manager_v1_interface, 1);
+     }
++#ifdef TAWC
++    else if (strcmp(interface, android_wlegl_interface.name) == 0) {
++        /* Bind v2: matches the compositor's advertised version. We only
++         * use v1 requests (create_handle / create_buffer); v2 adds
++         * get_server_buffer_handle, which the compositor rejects. */
++        uint32_t v = version < 2 ? version : 2;
++        xwl_screen->tawc_wlegl =
++            wl_registry_bind(registry, id, &android_wlegl_interface, v);
++    }
++#endif
+ #ifdef XWL_HAS_GLAMOR
+     else if (xwl_screen->glamor) {
+         xwl_glamor_init_wl_registry(xwl_screen, registry, id, interface,
+@@ -971,7 +986,19 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
+         else if (strcmp(argv[i], "-hidpi") == 0) {
+             xwl_screen->hidpi = 1;
+         }
++#ifdef TAWC
++        else if (strcmp(argv[i], "-tawc-test-pattern") == 0) {
++            xwl_screen->tawc_test_pattern = 1;
++        }
++#endif
+     }
++#ifdef TAWC
++    /* Smithay's XWayland::spawn doesn't take argv extras, but does
++     * forward env. Mirror the argv flag so the compositor can opt in
++     * by setting TAWC_XWL_TEST_PATTERN=1 via its envs vector. */
++    if (getenv("TAWC_XWL_TEST_PATTERN"))
++        xwl_screen->tawc_test_pattern = 1;
++#endif
+ 
+     if (!xwl_screen->rootless) {
+         use_fixed_size = 1;
+@@ -1030,6 +1057,13 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
+                              &registry_listener, xwl_screen);
+     xwl_screen_roundtrip(xwl_screen);
+ 
++#ifdef TAWC
++    /* The roundtrip above completes the registry; tawc_wlegl is bound
++     * (or absent) by the time we get here, so the test-pattern path
++     * can rely on its presence. Runs before fb/screen init so a
++     * compositor protocol error stops the boot deterministically. */
++    xwl_tawc_test_pattern_run(xwl_screen);
++#endif
+ 
+     if (xwl_screen->fullscreen && xwl_screen->rootless) {
+         ErrorF("error, cannot set fullscreen when running rootless\n");
+diff --git a/hw/xwayland/xwayland-screen.h b/hw/xwayland/xwayland-screen.h
+index 9751bd2..5b94380 100644
+--- a/hw/xwayland/xwayland-screen.h
++++ b/hw/xwayland/xwayland-screen.h
+@@ -44,6 +44,10 @@
+ #include <libdecor.h>
+ #endif
+ 
++#ifdef TAWC
++struct android_wlegl;
++#endif
++
+ struct xwl_screen {
+     double width;
+     double height;
+@@ -150,6 +154,18 @@ struct xwl_screen {
+     const char *output_name;
+ 
+     uint32_t present_capabilities;
++
++#ifdef TAWC
++    /* android_wlegl global, used to ship AHB-backed buffers from this
++     * X server to the compositor. See hw/xwayland/xwayland-tawc.c. */
++    struct android_wlegl *tawc_wlegl;
++
++    /* -tawc-test-pattern argv flag: at startup, allocate an AHB,
++     * CPU-fill it with a known gradient, and ship it via tawc_wlegl
++     * to a dedicated Wayland surface. Phase-2 step-2 verification
++     * harness (notes/xwayland.md). */
++    int tawc_test_pattern;
++#endif
+ };
+ 
+ /* Apps which use randr/vidmode to change the mode when going fullscreen,
+diff --git a/hw/xwayland/xwayland-tawc-libnativewindow.c b/hw/xwayland/xwayland-tawc-libnativewindow.c
+new file mode 100644
+index 0000000..7e31b87
+--- /dev/null
++++ b/hw/xwayland/xwayland-tawc-libnativewindow.c
+@@ -0,0 +1,181 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * libnativewindow.so dlopen wrapper. Bionic-only; we link against the
++ * NDK already, but going through dlopen keeps libnativewindow out of
++ * Xwayland's DT_NEEDED so a build that's never run on a real Android
++ * device (e.g. the unit-test harness) doesn't fail to load.
++ *
++ * AHardwareBuffer_getNativeHandle is "private" in NDK header parlance
++ * (declared in private/android/AHardwareBufferHelpers.h) but is in
++ * libnativewindow.so's exported map under LIBNATIVEWINDOW_PLATFORM —
++ * dlsym sees it. We need it because android_wlegl ships native_handle
++ * payload (numFds, numInts, fds, ints), not opaque AHB handles, so
++ * we have to crack the AHB to get the native_handle ABI back.
++ *
++ * See notes/xwayland.md.
++ */
++
++#ifdef HAVE_DIX_CONFIG_H
++#include <dix-config.h>
++#endif
++
++#include "xwayland-tawc-libnativewindow.h"
++
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "os.h"
++
++/* Function-pointer typedefs — match libnativewindow's NDK shape. */
++typedef int  (*pfn_alloc_t)(const struct tawc_ahb_desc *, struct AHardwareBuffer **);
++typedef void (*pfn_release_t)(struct AHardwareBuffer *);
++typedef void (*pfn_describe_t)(struct AHardwareBuffer *, struct tawc_ahb_desc *);
++typedef int  (*pfn_lock_t)(struct AHardwareBuffer *, uint64_t, int32_t,
++                           const void *, void **);
++typedef int  (*pfn_unlock_t)(struct AHardwareBuffer *, int32_t *);
++typedef const struct tawc_native_handle *
++             (*pfn_get_handle_t)(const struct AHardwareBuffer *);
++typedef int  (*pfn_from_handle_t)(const struct tawc_ahb_desc *,
++                                  const struct tawc_native_handle *,
++                                  int32_t method,
++                                  struct AHardwareBuffer **);
++
++/* From AOSP frameworks/native/libs/nativewindow/include/private/android/
++ * AHardwareBufferHelpers.h. METHOD_REGISTER means the AHB takes ownership
++ * of the handle's fds. */
++#define TAWC_AHB_METHOD_REGISTER 2
++
++static pfn_alloc_t       g_alloc;
++static pfn_release_t     g_release;
++static pfn_describe_t    g_describe;
++static pfn_lock_t        g_lock;
++static pfn_unlock_t      g_unlock;
++static pfn_get_handle_t  g_get_handle;
++static pfn_from_handle_t g_from_handle;
++static int               g_loaded;
++
++static pthread_once_t g_once = PTHREAD_ONCE_INIT;
++
++static void
++load_once(void)
++{
++    void *lib = dlopen("libnativewindow.so", RTLD_NOW | RTLD_GLOBAL);
++    if (!lib) {
++        ErrorF("xwl_tawc: dlopen(libnativewindow.so) failed: %s\n",
++               dlerror());
++        return;
++    }
++    g_alloc       = (pfn_alloc_t)      dlsym(lib, "AHardwareBuffer_allocate");
++    g_release     = (pfn_release_t)    dlsym(lib, "AHardwareBuffer_release");
++    g_describe    = (pfn_describe_t)   dlsym(lib, "AHardwareBuffer_describe");
++    g_lock        = (pfn_lock_t)       dlsym(lib, "AHardwareBuffer_lock");
++    g_unlock      = (pfn_unlock_t)     dlsym(lib, "AHardwareBuffer_unlock");
++    g_get_handle  = (pfn_get_handle_t) dlsym(lib, "AHardwareBuffer_getNativeHandle");
++    g_from_handle = (pfn_from_handle_t) dlsym(lib, "AHardwareBuffer_createFromHandle");
++
++    if (!g_alloc || !g_release || !g_describe || !g_lock || !g_unlock
++        || !g_get_handle || !g_from_handle) {
++        ErrorF("xwl_tawc: dlsym AHardwareBuffer_* failed "
++               "(alloc=%p release=%p describe=%p lock=%p unlock=%p "
++               "get_handle=%p from_handle=%p)\n",
++               (void *)g_alloc, (void *)g_release, (void *)g_describe,
++               (void *)g_lock, (void *)g_unlock, (void *)g_get_handle,
++               (void *)g_from_handle);
++        return;
++    }
++    g_loaded = 1;
++}
++
++int
++xwl_tawc_libnativewindow_load(void)
++{
++    pthread_once(&g_once, load_once);
++    return g_loaded;
++}
++
++int
++xwl_tawc_ahb_allocate(const struct tawc_ahb_desc *desc,
++                      struct AHardwareBuffer **out)
++{
++    if (!xwl_tawc_libnativewindow_load() || !desc || !out)
++        return -1;
++    *out = NULL;
++    int rc = g_alloc(desc, out);
++    if (rc != 0 || !*out) {
++        ErrorF("xwl_tawc: AHardwareBuffer_allocate failed rc=%d "
++               "(%ux%u fmt=%u usage=0x%llx)\n",
++               rc, desc->width, desc->height, desc->format,
++               (unsigned long long)desc->usage);
++        return rc != 0 ? rc : -1;
++    }
++    return 0;
++}
++
++void
++xwl_tawc_ahb_release(struct AHardwareBuffer *ahb)
++{
++    if (!ahb || !xwl_tawc_libnativewindow_load())
++        return;
++    g_release(ahb);
++}
++
++void
++xwl_tawc_ahb_describe(struct AHardwareBuffer *ahb,
++                      struct tawc_ahb_desc *out)
++{
++    if (!ahb || !out || !xwl_tawc_libnativewindow_load()) {
++        if (out) memset(out, 0, sizeof(*out));
++        return;
++    }
++    g_describe(ahb, out);
++}
++
++int
++xwl_tawc_ahb_lock(struct AHardwareBuffer *ahb, uint64_t usage, void **out)
++{
++    if (!ahb || !out || !xwl_tawc_libnativewindow_load())
++        return -1;
++    /* fence=-1 (no fence), rect=NULL (whole buffer). */
++    return g_lock(ahb, usage, -1, NULL, out);
++}
++
++int
++xwl_tawc_ahb_unlock(struct AHardwareBuffer *ahb)
++{
++    if (!ahb || !xwl_tawc_libnativewindow_load())
++        return -1;
++    /* fence_fd=NULL: synchronous unlock. */
++    return g_unlock(ahb, NULL);
++}
++
++const struct tawc_native_handle *
++xwl_tawc_ahb_get_native_handle(struct AHardwareBuffer *ahb)
++{
++    if (!ahb || !xwl_tawc_libnativewindow_load())
++        return NULL;
++    return g_get_handle(ahb);
++}
++
++int
++xwl_tawc_ahb_create_from_handle(const struct tawc_ahb_desc *desc,
++                                const struct tawc_native_handle *handle,
++                                struct AHardwareBuffer **out)
++{
++    if (!xwl_tawc_libnativewindow_load() || !desc || !handle || !out)
++        return -1;
++    *out = NULL;
++    int rc = g_from_handle(desc, handle, TAWC_AHB_METHOD_REGISTER, out);
++    if (rc != 0 || !*out) {
++        ErrorF("xwl_tawc: AHardwareBuffer_createFromHandle failed rc=%d "
++               "(%ux%u fmt=%u stride=%u usage=0x%llx numFds=%d numInts=%d)\n",
++               rc, desc->width, desc->height, desc->format, desc->stride,
++               (unsigned long long)desc->usage,
++               handle->numFds, handle->numInts);
++        return rc != 0 ? rc : -1;
++    }
++    return 0;
++}
+diff --git a/hw/xwayland/xwayland-tawc-libnativewindow.h b/hw/xwayland/xwayland-tawc-libnativewindow.h
+new file mode 100644
+index 0000000..8ef44a8
+--- /dev/null
++++ b/hw/xwayland/xwayland-tawc-libnativewindow.h
+@@ -0,0 +1,83 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Thin wrapper around libnativewindow.so — bionic NDK API for AHB
++ * allocation, plus the (exported-but-private) AHardwareBuffer_getNativeHandle
++ * symbol we need to ship a buffer over android_wlegl. See notes/xwayland.md.
++ */
++
++#ifndef XWAYLAND_TAWC_LIBNATIVEWINDOW_H
++#define XWAYLAND_TAWC_LIBNATIVEWINDOW_H
++
++#include <stdint.h>
++
++/* Opaque to callers; we don't pull in <android/hardware_buffer.h>
++ * because Xwayland's includes don't establish an Android NDK sysroot
++ * for every TU. Pointers only. */
++struct AHardwareBuffer;
++
++/* Mirror of cutils' native_handle_t. Stable ABI. */
++struct tawc_native_handle {
++    int version;   /* sizeof(native_handle_t) = 12 */
++    int numFds;
++    int numInts;
++    int data[];    /* numFds fds, then numInts ints */
++};
++
++/* AHardwareBuffer_Desc subset (matches the NDK layout). */
++struct tawc_ahb_desc {
++    uint32_t width;
++    uint32_t height;
++    uint32_t layers;
++    uint32_t format;
++    uint64_t usage;
++    uint32_t stride;
++    uint32_t rfu0;
++    uint64_t rfu1;
++};
++
++/* Format / usage constants we actually use, mirrored so callers
++ * don't need <android/hardware_buffer.h>. */
++#define TAWC_AHB_FORMAT_R8G8B8A8_UNORM      1
++#define TAWC_AHB_FORMAT_R8G8B8X8_UNORM      2
++#define TAWC_AHB_FORMAT_B8G8R8A8_UNORM      5
++
++#define TAWC_AHB_USAGE_CPU_READ_OFTEN       0x3ULL
++#define TAWC_AHB_USAGE_CPU_WRITE_OFTEN      0x30ULL
++#define TAWC_AHB_USAGE_GPU_SAMPLED_IMAGE    0x100ULL
++#define TAWC_AHB_USAGE_GPU_FRAMEBUFFER      0x200ULL
++#define TAWC_AHB_USAGE_COMPOSER_OVERLAY     0x800ULL
++
++/* Resolve symbols from libnativewindow.so. Returns 1 on success, 0 on
++ * failure. Idempotent; safe to call repeatedly. */
++int xwl_tawc_libnativewindow_load(void);
++
++/* AHardwareBuffer_allocate / _release / _describe. */
++int xwl_tawc_ahb_allocate(const struct tawc_ahb_desc *desc,
++                          struct AHardwareBuffer **out);
++void xwl_tawc_ahb_release(struct AHardwareBuffer *ahb);
++void xwl_tawc_ahb_describe(struct AHardwareBuffer *ahb,
++                           struct tawc_ahb_desc *out);
++
++/* AHardwareBuffer_createFromHandle: rebuild an AHB from a wire-format
++ * native_handle (numFds, numInts, fds, ints). Mirrors what
++ * compositor/native/wlegl_import.c does on the compositor side. The
++ * AHB takes ownership of the fds in `handle->data[0..numFds]` on
++ * success; on failure the caller still owns them. Returns 0 on success. */
++int xwl_tawc_ahb_create_from_handle(const struct tawc_ahb_desc *desc,
++                                    const struct tawc_native_handle *handle,
++                                    struct AHardwareBuffer **out);
++
++/* AHardwareBuffer_lock / _unlock — CPU access for filling test patterns
++ * and for tracker tooling. usage is TAWC_AHB_USAGE_CPU_*. Returns 0 on
++ * success. */
++int xwl_tawc_ahb_lock(struct AHardwareBuffer *ahb, uint64_t usage,
++                      void **out);
++int xwl_tawc_ahb_unlock(struct AHardwareBuffer *ahb);
++
++/* Borrow the AHB's underlying native_handle_t. Lifetime bound to the
++ * AHB; do not free. The pointer becomes invalid after _release(). */
++const struct tawc_native_handle *
++xwl_tawc_ahb_get_native_handle(struct AHardwareBuffer *ahb);
++
++#endif /* XWAYLAND_TAWC_LIBNATIVEWINDOW_H */
+diff --git a/hw/xwayland/xwayland-tawc.c b/hw/xwayland/xwayland-tawc.c
+new file mode 100644
+index 0000000..5c5bae0
+--- /dev/null
++++ b/hw/xwayland/xwayland-tawc.c
+@@ -0,0 +1,405 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * TAWC AHB buffer transport for Xwayland — Phase 2 step 2.
++ *
++ * The protocol shape we send is identical to libhybris's wayland
++ * platform plugin (libhybris/hybris/platforms/wayland/
++ * wayland_window_common.cpp:59), which is what tawc's compositor
++ * accepts from Wayland clients via android_wlegl in v1 mode:
++ *
++ *   1. android_wlegl.create_handle(num_fds, ints[]) -> handle
++ *   2. handle.add_fd(fd) repeated num_fds times
++ *   3. android_wlegl.create_buffer(width, height, stride, format,
++ *                                  usage, handle) -> wl_buffer
++ *   4. handle.destroy()
++ *
++ * The compositor's wlegl_import.c then rebuilds an AHardwareBuffer
++ * from the (fds, ints) pair via AHardwareBuffer_createFromHandle.
++ *
++ * See notes/xwayland.md.
++ */
++
++#ifdef HAVE_DIX_CONFIG_H
++#include <dix-config.h>
++#endif
++
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <wayland-client.h>
++
++#include <X11/X.h>
++#include "os.h"
++#include "windowstr.h"
++
++#include "xwayland-screen.h"
++#include "xwayland-window.h"
++#include "xwayland-tawc.h"
++#include "xwayland-tawc-libnativewindow.h"
++
++#include "android_wlegl-client-protocol.h"
++
++struct xwl_tawc_buffer *
++xwl_tawc_buffer_alloc(struct xwl_screen *xwl_screen,
++                      int width, int height,
++                      int format, uint64_t usage)
++{
++    (void) xwl_screen;
++    struct xwl_tawc_buffer *buf;
++    struct tawc_ahb_desc desc = {
++        .width  = (uint32_t)width,
++        .height = (uint32_t)height,
++        .layers = 1,
++        .format = (uint32_t)format,
++        .usage  = usage,
++    };
++    struct tawc_ahb_desc actual;
++
++    buf = calloc(1, sizeof(*buf));
++    if (!buf)
++        return NULL;
++
++    if (xwl_tawc_ahb_allocate(&desc, &buf->ahb) != 0 || !buf->ahb) {
++        free(buf);
++        return NULL;
++    }
++
++    xwl_tawc_ahb_describe(buf->ahb, &actual);
++    buf->width  = (int)actual.width;
++    buf->height = (int)actual.height;
++    buf->stride = (int)actual.stride;
++    buf->format = (int)actual.format;
++    buf->usage  = actual.usage;
++    return buf;
++}
++
++void
++xwl_tawc_buffer_destroy(struct xwl_tawc_buffer *buf)
++{
++    if (!buf)
++        return;
++    if (buf->buffer)
++        wl_buffer_destroy(buf->buffer);
++    if (buf->ahb)
++        xwl_tawc_ahb_release(buf->ahb);
++    free(buf);
++}
++
++/* Build a wl_buffer from a tawc_native_handle using the v1
++ * create_handle / add_fd / create_buffer sequence. The compositor
++ * speaks v2 of the protocol but rejects get_server_buffer_handle
++ * (server-side allocation), so client-side allocation via these v1
++ * requests is the only path. */
++static struct wl_buffer *
++ship_native_handle(struct android_wlegl *wlegl,
++                   const struct tawc_native_handle *handle,
++                   int width, int height, int stride,
++                   int format, uint64_t usage)
++{
++    struct android_wlegl_handle *wlegl_handle;
++    struct wl_array ints;
++    struct wl_buffer *buffer;
++    int *ints_data;
++
++    wl_array_init(&ints);
++    ints_data = wl_array_add(&ints, handle->numInts * sizeof(int));
++    if (!ints_data) {
++        wl_array_release(&ints);
++        return NULL;
++    }
++    memcpy(ints_data,
++           handle->data + handle->numFds,
++           handle->numInts * sizeof(int));
++
++    wlegl_handle = android_wlegl_create_handle(wlegl, handle->numFds, &ints);
++    wl_array_release(&ints);
++    if (!wlegl_handle)
++        return NULL;
++
++    for (int i = 0; i < handle->numFds; i++)
++        android_wlegl_handle_add_fd(wlegl_handle, handle->data[i]);
++
++    /* usage is uint32_t on the wire — the AHB usage high bits are
++     * gralloc4-internal and the compositor's wlegl_import.c masks
++     * to (uint32_t) anyway. */
++    buffer = android_wlegl_create_buffer(wlegl, width, height, stride,
++                                         format, (uint32_t)usage,
++                                         wlegl_handle);
++    android_wlegl_handle_destroy(wlegl_handle);
++    return buffer;
++}
++
++struct wl_buffer *
++xwl_tawc_buffer_get_wl_buffer(struct xwl_screen *xwl_screen,
++                              struct xwl_tawc_buffer *buf)
++{
++    const struct tawc_native_handle *handle;
++
++    if (!buf || !buf->ahb)
++        return NULL;
++    if (buf->buffer)
++        return buf->buffer;
++    if (!xwl_screen->tawc_wlegl) {
++        ErrorF("xwl_tawc: compositor does not advertise android_wlegl\n");
++        return NULL;
++    }
++
++    handle = xwl_tawc_ahb_get_native_handle(buf->ahb);
++    if (!handle) {
++        ErrorF("xwl_tawc: AHardwareBuffer_getNativeHandle failed\n");
++        return NULL;
++    }
++
++    buf->buffer = ship_native_handle(xwl_screen->tawc_wlegl, handle,
++                                     buf->width, buf->height, buf->stride,
++                                     buf->format, buf->usage);
++    if (!buf->buffer) {
++        ErrorF("xwl_tawc: android_wlegl create_buffer failed\n");
++        return NULL;
++    }
++    return buf->buffer;
++}
++
++/* Step-3 stub: a real impl will look up the xwl_tawc_buffer stashed on
++ * the PixmapPtr by the TAWC-DRI handler and route through the standalone
++ * shipping helpers. For now it returns NULL — TAWC-DRI bypasses the
++ * pixmap router and attaches its wl_buffer directly to the X11 window's
++ * wl_surface, since we don't need to compose AHB-backed pixmaps with the
++ * X server's normal drawing flow yet. */
++struct wl_buffer *
++xwl_tawc_pixmap_get_wl_buffer(PixmapPtr pixmap)
++{
++    (void) pixmap;
++    return NULL;
++}
++
++/* TAWC-DRI step 3: client-shipped native_handle → AHB → wl_buffer →
++ * direct attach + commit on the X11 window's wl_surface.
++ *
++ * This bypasses the X server's normal pixmap flow: rather than wrap the
++ * AHB as an X pixmap and let xwl_window_present_pixmap handle the
++ * compositor handoff, we attach to the wl_surface ourselves. That means:
++ *   - Server-side X11 drawing on the same window won't see this AHB
++ *     (no XGetImage, no XCopyArea integration). Pure GL clients don't
++ *     do those, which is the only Phase 2 use case. Mixed-rendering
++ *     would race the X server's normal SHM root pixmap attach over
++ *     this one.
++ *   - The AHB+wl_buffer is leaked across calls; subsequent Present
++ *     calls overwrite the wl_surface attach but the previous AHB
++ *     stays in the wl_compositor's release queue until the buffer-
++ *     release event fires. Step 4 (libhybris EGL plugin) and Wine-
++ *     style real workloads will need explicit release tracking; for
++ *     the step-3 verification client (one-shot present) this is fine.
++ */
++int
++xwl_tawc_present_native_handle(WindowPtr window,
++                               int *fds, int num_fds,
++                               const int32_t *ints, int num_ints,
++                               int width, int height, int stride,
++                               int format, uint64_t usage)
++{
++    struct xwl_screen *xwl_screen;
++    struct xwl_window *xwl_window;
++    struct tawc_native_handle *handle = NULL;
++    struct tawc_ahb_desc desc;
++    struct AHardwareBuffer *ahb = NULL;
++    struct xwl_tawc_buffer *buf = NULL;
++    struct wl_buffer *wlbuf;
++    size_t handle_sz;
++    int rc = BadAlloc;
++
++    if (!window || num_fds < 0 || num_ints < 0 || width <= 0 || height <= 0)
++        goto err_close_fds;
++
++    xwl_screen = xwl_screen_get(window->drawable.pScreen);
++    if (!xwl_screen->tawc_wlegl) {
++        ErrorF("xwl_tawc: TAWC-DRI Present without android_wlegl bound\n");
++        rc = BadMatch;
++        goto err_close_fds;
++    }
++
++    xwl_window = xwl_window_from_window(window);
++    if (!xwl_window || !xwl_window->surface) {
++        ErrorF("xwl_tawc: TAWC-DRI Present on unmapped/unsurfaced window 0x%lx\n",
++               (unsigned long)window->drawable.id);
++        rc = BadMatch;
++        goto err_close_fds;
++    }
++
++    /* Build a wire-format native_handle: header + numFds fds + numInts ints. */
++    handle_sz = sizeof(*handle) +
++                (size_t)(num_fds + num_ints) * sizeof(int);
++    handle = malloc(handle_sz);
++    if (!handle)
++        goto err_close_fds;
++    handle->version = (int)sizeof(*handle);
++    handle->numFds  = num_fds;
++    handle->numInts = num_ints;
++    for (int i = 0; i < num_fds;  i++) handle->data[i]           = fds[i];
++    for (int i = 0; i < num_ints; i++) handle->data[num_fds + i] = ints[i];
++
++    memset(&desc, 0, sizeof(desc));
++    desc.width  = (uint32_t)width;
++    desc.height = (uint32_t)height;
++    desc.layers = 1;
++    desc.format = (uint32_t)format;
++    desc.usage  = usage;
++    desc.stride = (uint32_t)stride;
++
++    /* AHB METHOD_REGISTER takes ownership of the entire handle struct
++     * AND its fds — same ABI as compositor/native/wlegl_import.c. Do
++     * NOT free(handle) on success: the underlying GraphicBuffer
++     * close+deletes the handle when the AHB is released, and a manual
++     * free trips Scudo's chunk-state check. */
++    if (xwl_tawc_ahb_create_from_handle(&desc, handle, &ahb) != 0) {
++        rc = BadValue;
++        goto err_free_handle;
++    }
++    handle = NULL;
++    /* Caller's fds are now owned by the AHB; don't close them. */
++    for (int i = 0; i < num_fds; i++) fds[i] = -1;
++
++    buf = calloc(1, sizeof(*buf));
++    if (!buf) {
++        xwl_tawc_ahb_release(ahb);
++        return BadAlloc;
++    }
++    buf->ahb    = ahb;
++    buf->width  = width;
++    buf->height = height;
++    buf->stride = stride;
++    buf->format = format;
++    buf->usage  = usage;
++
++    wlbuf = xwl_tawc_buffer_get_wl_buffer(xwl_screen, buf);
++    if (!wlbuf) {
++        xwl_tawc_buffer_destroy(buf);
++        return BadAlloc;
++    }
++
++    /* Direct wl_surface attach — bypasses the X-side pixmap flow. See
++     * the comment above this function. */
++    wl_surface_attach(xwl_window->surface, wlbuf, 0, 0);
++    wl_surface_damage(xwl_window->surface, 0, 0, width, height);
++    wl_surface_commit(xwl_window->surface);
++
++    /* The compositor side logs `wlegl: create_buffer ...` and
++     * `wlegl: imported ANativeWindowBuffer as texture ...` per AHB
++     * import; logging here would be redundant noise (a 60 fps client
++     * would fire it once per frame). Keep silent on the success path.
++     *
++     * xwl_tawc_buffer + AHB + wl_buffer leak deliberately for now —
++     * see the comment block above. */
++    return Success;
++
++ err_free_handle:
++    free(handle);
++ err_close_fds:
++    for (int i = 0; i < num_fds; i++)
++        if (fds[i] >= 0) close(fds[i]);
++    return rc;
++}
++
++/* ──────────────────────────────────────────────────────────────────
++ * -tawc-test-pattern: standalone harness for Phase 2 step 2.
++ *
++ * Allocates an AHB, fills it with a gradient via AHardwareBuffer_lock,
++ * and ships it through android_wlegl. Verifies the protocol round-trip
++ * against the compositor without any X clients existing.
++ *
++ * Visibility (attaching to a wl_surface so the gradient actually
++ * appears on screen) is deferred to step 3 — at that point TAWC-DRI
++ * wires the same shipping path to a real X11 toplevel.
++ *
++ * The gradient is deliberately distinct from the magenta tint the
++ * compositor applies to wl_shm buffers: an on-screen image that looks
++ * magenta means the SHM fallback fired and AHB import failed silently.
++ * ────────────────────────────────────────────────────────────────── */
++
++#define TEST_PATTERN_W 512
++#define TEST_PATTERN_H 512
++
++static void
++fill_gradient(uint32_t *pixels, int w, int h, int stride_pixels)
++{
++    /* AHB format R8G8B8A8_UNORM stores bytes in memory order R,G,B,A.
++     * On little-endian aarch64 that's an in-memory uint32_t of
++     * (A << 24) | (B << 16) | (G << 8) | R. Red across X, blue across Y. */
++    for (int y = 0; y < h; y++) {
++        for (int x = 0; x < w; x++) {
++            uint8_t r = (uint8_t)((x * 255) / (w - 1));
++            uint8_t g = 0x40;
++            uint8_t b = (uint8_t)((y * 255) / (h - 1));
++            uint8_t a = 0xff;
++            pixels[y * stride_pixels + x] =
++                (uint32_t)a << 24 |
++                (uint32_t)b << 16 |
++                (uint32_t)g << 8  |
++                (uint32_t)r;
++        }
++    }
++}
++
++void
++xwl_tawc_test_pattern_run(struct xwl_screen *xwl_screen)
++{
++    struct xwl_tawc_buffer *buf;
++    struct wl_buffer *wlbuf;
++    void *cpu;
++
++    if (!xwl_screen->tawc_test_pattern)
++        return;
++
++    if (!xwl_screen->tawc_wlegl) {
++        ErrorF("xwl_tawc test-pattern: android_wlegl not bound\n");
++        return;
++    }
++
++    /* CPU usage flags so AHardwareBuffer_lock returns a writable mapping;
++     * GPU_SAMPLED_IMAGE so the compositor can bind it as a texture. */
++    buf = xwl_tawc_buffer_alloc(xwl_screen,
++                                TEST_PATTERN_W, TEST_PATTERN_H,
++                                TAWC_AHB_FORMAT_R8G8B8A8_UNORM,
++                                TAWC_AHB_USAGE_CPU_WRITE_OFTEN |
++                                TAWC_AHB_USAGE_CPU_READ_OFTEN |
++                                TAWC_AHB_USAGE_GPU_SAMPLED_IMAGE);
++    if (!buf) {
++        ErrorF("xwl_tawc test-pattern: AHB allocation failed\n");
++        return;
++    }
++
++    if (xwl_tawc_ahb_lock(buf->ahb,
++                          TAWC_AHB_USAGE_CPU_WRITE_OFTEN, &cpu) != 0
++        || !cpu) {
++        ErrorF("xwl_tawc test-pattern: AHB lock failed\n");
++        xwl_tawc_buffer_destroy(buf);
++        return;
++    }
++
++    fill_gradient((uint32_t *)cpu,
++                  buf->width, buf->height, buf->stride);
++
++    if (xwl_tawc_ahb_unlock(buf->ahb) != 0)
++        ErrorF("xwl_tawc test-pattern: AHB unlock failed (continuing)\n");
++
++    wlbuf = xwl_tawc_buffer_get_wl_buffer(xwl_screen, buf);
++    if (!wlbuf) {
++        ErrorF("xwl_tawc test-pattern: failed to ship via android_wlegl\n");
++        xwl_tawc_buffer_destroy(buf);
++        return;
++    }
++
++    /* Round-trip so any compositor protocol error surfaces here, not
++     * later under the dispatch loop where it'd be harder to localize. */
++    wl_display_roundtrip(xwl_screen->display);
++
++    ErrorF("xwl_tawc test-pattern: %dx%d AHB shipped via android_wlegl "
++           "(stride=%d format=%d usage=0x%llx)\n",
++           buf->width, buf->height, buf->stride, buf->format,
++           (unsigned long long)buf->usage);
++
++    /* xwl_tawc_buffer + AHB + wl_buffer leak for the lifetime of the X
++     * server. Visibility is wired up in step 3 alongside the TAWC-DRI
++     * path. */
++}
+diff --git a/hw/xwayland/xwayland-tawc.h b/hw/xwayland/xwayland-tawc.h
+new file mode 100644
+index 0000000..4f3dd93
+--- /dev/null
++++ b/hw/xwayland/xwayland-tawc.h
+@@ -0,0 +1,91 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * TAWC AHB buffer transport for Xwayland — Phase 2 step 2.
++ *
++ * Wraps an AHardwareBuffer as a wl_buffer via the android_wlegl
++ * protocol so the compositor can import it through its existing
++ * gralloc1 path (compositor/native/wlegl_import.c). The protocol is
++ * the same one libhybris's wayland-platform plugin uses
++ * (libhybris/hybris/platforms/wayland/wayland_window_common.cpp:59),
++ * which is what the compositor already accepts from ordinary Wayland
++ * clients.
++ *
++ * See notes/xwayland.md.
++ */
++
++#ifndef XWAYLAND_TAWC_H
++#define XWAYLAND_TAWC_H
++
++#include "scrnintstr.h"
++#include "pixmap.h"
++
++struct AHardwareBuffer;
++struct wl_buffer;
++struct xwl_screen;
++
++/* Standalone AHB-backed buffer + lazily-created wl_buffer. Step 2's
++ * test pattern allocates one of these directly, without going through
++ * the X server's PixmapPtr machinery. Step 3 (TAWC-DRI) will allocate
++ * one of these per X11Pixmap and route via xwl_tawc_pixmap_get_wl_buffer
++ * below. */
++struct xwl_tawc_buffer {
++    struct AHardwareBuffer *ahb;   /* Owned. */
++    struct wl_buffer *buffer;      /* Lazy; created on first
++                                    * xwl_tawc_buffer_get_wl_buffer. */
++    int width;
++    int height;
++    int stride;     /* In pixels, as reported by AHardwareBuffer_describe. */
++    int format;     /* Android pixel format (AHARDWAREBUFFER_FORMAT_*). */
++    uint64_t usage; /* AHB usage flags. */
++};
++
++/* Allocate an AHB sized w*h with the given format and usage, and wrap
++ * it in a fresh xwl_tawc_buffer. Returns NULL on failure. The buffer
++ * has no wl_buffer yet — call xwl_tawc_buffer_get_wl_buffer once the
++ * AHB content is filled in. */
++struct xwl_tawc_buffer *
++xwl_tawc_buffer_alloc(struct xwl_screen *xwl_screen,
++                      int width, int height,
++                      int format, uint64_t usage);
++
++/* Tear down: destroys the wl_buffer (if any), releases the AHB, frees
++ * the xwl_tawc_buffer struct. */
++void xwl_tawc_buffer_destroy(struct xwl_tawc_buffer *buf);
++
++/* Lazily ship the AHB to the compositor via android_wlegl and return
++ * the resulting wl_buffer. Returns NULL if the compositor doesn't
++ * advertise android_wlegl, or buffer creation fails. */
++struct wl_buffer *
++xwl_tawc_buffer_get_wl_buffer(struct xwl_screen *xwl_screen,
++                              struct xwl_tawc_buffer *buf);
++
++/* Step-3 entry point: routes an AHB-backed PixmapPtr through the same
++ * shipping path. Step 2 leaves this as a stub returning NULL — until
++ * the TAWC-DRI extension stashes an xwl_tawc_buffer on PixmapPtrs,
++ * there are no AHB-backed pixmaps for it to find. */
++struct wl_buffer *xwl_tawc_pixmap_get_wl_buffer(PixmapPtr pixmap);
++
++/* If -tawc-test-pattern was passed (or TAWC_XWL_TEST_PATTERN env var
++ * is set), allocate a gradient AHB and ship it via android_wlegl. No
++ * surface attach yet — visibility lands in step 3 alongside TAWC-DRI.
++ * No-op if the flag wasn't set. */
++void xwl_tawc_test_pattern_run(struct xwl_screen *xwl_screen);
++
++/* TAWC-DRI step 3 entry point. Reconstructs an AHardwareBuffer from a
++ * client-shipped native_handle (numFds fds + numInts ints), wraps it
++ * as an xwl_tawc_buffer, attaches the resulting wl_buffer directly to
++ * the X11 window's wl_surface, and commits. Takes ownership of the
++ * fds in `fds[0..num_fds]` on success (closes them on failure too —
++ * AHardwareBuffer_createFromHandle's REGISTER mode owns them on success
++ * via the AHB; on failure we close ourselves).
++ *
++ * Returns 0 on success, X protocol error code (BadValue / BadMatch /
++ * BadAlloc) on failure. */
++int xwl_tawc_present_native_handle(WindowPtr window,
++                                   int *fds, int num_fds,
++                                   const int32_t *ints, int num_ints,
++                                   int width, int height, int stride,
++                                   int format, uint64_t usage);
++
++#endif /* XWAYLAND_TAWC_H */
+diff --git a/hw/xwayland/xwayland.c b/hw/xwayland/xwayland.c
+index 81b8a7e..5c5c75e 100644
+--- a/hw/xwayland/xwayland.c
++++ b/hw/xwayland/xwayland.c
+@@ -273,6 +273,11 @@ ddxProcessArgument(int argc, char *argv[], int i)
+     else if (strcmp(argv[i], "-hidpi") == 0) {
+         return 1;
+     }
++#ifdef TAWC
++    else if (strcmp(argv[i], "-tawc-test-pattern") == 0) {
++        return 1;
++    }
++#endif
+ 
+     return 0;
+ }
+diff --git a/include/extinit.h b/include/extinit.h
+index 59d1896..10863ee 100644
+--- a/include/extinit.h
++++ b/include/extinit.h
+@@ -158,6 +158,10 @@ extern void XvMCExtensionInit(void);
+ extern void dri3_extension_init(void);
+ #endif
+ 
++#ifdef TAWC
++extern void tawc_dri_extension_init(void);
++#endif
++
+ #if defined(PRESENT)
+ #include "presentext.h"
+ #endif
+diff --git a/include/meson.build b/include/meson.build
+index 72e1e5d..b4237fc 100644
+--- a/include/meson.build
++++ b/include/meson.build
+@@ -214,6 +214,7 @@ conf_data.set('RES', build_res ? '1' : false)
+ conf_data.set('RENDER', '1')
+ conf_data.set('SCREENSAVER', build_screensaver ? '1' : false)
+ conf_data.set('SHAPE', '1')
++conf_data.set('TAWC', build_tawc ? '1' : false)
+ conf_data.set('XACE', build_xace ? '1' : false)
+ conf_data.set('XCMISC', '1')
+ conf_data.set('XCSECURITY', build_xsecurity ? '1' : false)
+diff --git a/meson.build b/meson.build
+index 479b302..b6830f6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -360,6 +360,8 @@ endif
+ 
+ build_dpms = get_option('dpms')
+ 
++build_tawc = get_option('tawc')
++
+ build_xf86bigfont = get_option('xf86bigfont')
+ build_screensaver = get_option('screensaver')
+ build_res = get_option('xres')
+diff --git a/meson_options.txt b/meson_options.txt
+index 1acc65e..095a89c 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -86,3 +86,6 @@ option('devel-docs', type: 'combo', choices: ['true', 'false', 'auto'], value: '
+         description: 'Build development documentation')
+ option('docs-pdf', type: 'combo', choices: ['true', 'false', 'auto'], value: 'auto',
+         description: 'Whether to build PDF version of documentation. Setting is ignored if documentation is not built.')
++
++option('tawc', type: 'boolean', value: false,
++       description: 'Enable TAWC AHB-everywhere transport (TAWC-DRI extension + xwayland-tawc.c)')
+diff --git a/mi/miinitext.c b/mi/miinitext.c
+index 1ddcd7f..5471300 100644
+--- a/mi/miinitext.c
++++ b/mi/miinitext.c
+@@ -149,6 +149,9 @@ static const ExtensionModule staticExtensions[] = {
+ #ifdef DRI3
+     {dri3_extension_init, "DRI3", NULL},
+ #endif
++#ifdef TAWC
++    {tawc_dri_extension_init, "TAWC-DRI", NULL},
++#endif
+ #ifdef RES
+     {ResExtensionInit, "X-Resource", &noResExtension},
+ #endif

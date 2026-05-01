@@ -348,32 +348,269 @@ fn test_xwayland_xclock_renders_via_shm() {
     assert_compositor_clean();
 }
 
-/// TAWC-DRI Phase 1: a chroot-side xcb client opens :0, calls
-/// QueryExtension("TAWC-DRI"), then sends one TAWCDRIQueryVersion and
-/// one TAWCDRIPresentBuffer with a fabricated buffer-id. This proves
-/// the X server's extension wiring is in place and dispatch routes
-/// the requests — no real buffers, no GL. See notes/xwayland.md for
-/// the larger Phase 2 plan this gates.
+/// TAWC-DRI Phase 2 step 2: opt the compositor into Xwayland's
+/// `-tawc-test-pattern` path via `debug.tawc.xwl_test_pattern`,
+/// restart, and verify a server-allocated AHB ships through
+/// `android_wlegl` to the compositor. This proves the buffer-shipping
+/// plumbing (server-side libnativewindow allocate → AHB native_handle
+/// → android_wlegl create_buffer → compositor gralloc1 import) end-to-
+/// end without any X clients existing. Visibility (attaching the AHB
+/// to a wl_surface) is deferred to step 3 alongside TAWC-DRI buffer
+/// presentation. See notes/xwayland.md.
+///
+/// The test takes ownership of the compositor lifecycle (force-stop +
+/// start) twice: once to enable the test pattern, once to clean up.
+/// `assert_compositor_clean` at the end leaves the suite in the same
+/// shape every other test expects.
 #[test]
-fn test_tawc_dri_extension_round_trip() {
+fn test_xwayland_test_pattern_ahb_round_trip() {
     require_compositor();
 
+    // Enable opt-in flag.
+    adb::shell("setprop debug.tawc.xwl_test_pattern 1")
+        .expect("setprop debug.tawc.xwl_test_pattern");
+
+    // Defer-style cleanup that runs even if the test panics, so the
+    // prop doesn't leak into subsequent tests in the same suite run.
+    struct PropGuard;
+    impl Drop for PropGuard {
+        fn drop(&mut self) {
+            // `setprop` clears via empty quoted string.
+            let _ = adb::shell(r#"setprop debug.tawc.xwl_test_pattern """#);
+            let _ = adb::shell("am force-stop me.phie.tawc");
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = adb::shell("am start -n me.phie.tawc/.MainActivity");
+            // Wait for compositor to come back so the next test sees it ready.
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while std::time::Instant::now() < deadline {
+                if let Ok(true) = compositor::is_running() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+    let _guard = PropGuard;
+
+    // Fresh logcat so we can read the bring-up cleanly.
+    adb::logcat_clear().expect("logcat clear");
+
+    adb::shell("am force-stop me.phie.tawc").expect("force-stop");
+    std::thread::sleep(Duration::from_millis(400));
+    adb::shell("am start -n me.phie.tawc/.MainActivity").expect("am start");
+
+    // Wait for the compositor to come back AND for Xwayland to spawn,
+    // since the test-pattern path runs during Xwayland's screen init.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut compositor_up = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(true) = compositor::is_running() {
+            compositor_up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert!(
+        compositor_up,
+        "compositor did not come back up after restart; \
+         debug.tawc.xwl_test_pattern flow likely broken Xwayland startup"
+    );
+
+    // Compositor logs `wlegl: create_buffer ...` on a successful AHB
+    // import via android_wlegl. The test-pattern allocates one
+    // 512x512 R8G8B8A8 (format=1) AHB at startup; that should be the
+    // first such log line.
+    let log_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut saw_log = false;
+    let mut last_logs = String::new();
+    while std::time::Instant::now() < log_deadline {
+        let logs = adb::logcat_dump_tawc().expect("logcat dump");
+        if logs.contains("wlegl: create_buffer 512x512 stride=") {
+            saw_log = true;
+            last_logs = logs;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        saw_log,
+        "compositor never logged `wlegl: create_buffer 512x512` after \
+         enabling debug.tawc.xwl_test_pattern + restarting. Likely the \
+         android_wlegl bind is missing on Xwayland's side, or libnativewindow \
+         dlopen failed (check /data/data/me.phie.tawc/xtmp/xwayland.log).\n\
+         last logs:\n{}",
+         &last_logs[last_logs.len().saturating_sub(4096)..],
+    );
+
+    // Sanity-check: format=1 (R8G8B8A8_UNORM) and a non-magenta route.
+    // The compositor doesn't log "magenta" but the SHM-import path uses
+    // a different code path entirely, so a hit on `wlegl: create_buffer`
+    // implies the AHB path fired (not the SHM fallback).
+    assert!(
+        last_logs.contains("fmt=1 usage=0x"),
+        "wlegl: create_buffer matched but format/usage payload differs from \
+         what the test pattern allocates (R8G8B8A8 = fmt 1). Filling code \
+         in xwayland-tawc.c may have drifted.\nlogs:\n{}",
+         &last_logs[last_logs.len().saturating_sub(4096)..],
+    );
+}
+
+/// TAWC-DRI Phase 2 step 3: a chroot-side client allocates a real
+/// AHardwareBuffer via libhybris+libnativewindow, CPU-fills it with
+/// a green→yellow gradient, and sends it through TAWCDRIPresentBuffer
+/// (with FD passing). The X server rebuilds the AHB via
+/// AHardwareBuffer_createFromHandle, ships it through android_wlegl,
+/// and attaches the resulting wl_buffer to the X11 window's wl_surface.
+/// The compositor's wlegl import path then turns it into a GL texture.
+///
+/// End-to-end proof of the AHB-shipping pipe between an X11 client and
+/// the compositor: client AHB → TAWC-DRI → server AHB → android_wlegl
+/// → compositor → GL texture. No SHM fallback (which would tint the
+/// buffer magenta), no GLAMOR.
+///
+/// See notes/xwayland.md for the broader Phase 2 plan.
+#[test]
+fn test_tawc_dri_ahb_present_round_trip() {
+    require_compositor();
+    adb::logcat_clear().expect("logcat clear");
+
     let bin = chroot::ensure_tawc_dri_test().expect("build tawc-dri-test");
-    let cmd = format!("DISPLAY=:0 {}", bin);
+    // HOLD_SECS=1 is enough — the test client commits the AHB once, the
+    // X server attaches it to the wl_surface, and the compositor logs
+    // the wlegl create_buffer / texture import. We don't need to keep
+    // the window mapped for screencap inspection in an integration test
+    // that only verifies the compositor logs.
+    let cmd = format!("DISPLAY=:0 TAWC_DRI_HOLD_SECS=1 {}", bin);
     let output = adb::chroot_run(&cmd).expect("run tawc-dri-test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "tawc-dri-test exited non-zero ({:?}). \
-         The TAWC-DRI extension or its dispatch wiring is broken.\n\
+         AHB allocation, native_handle shipping, or X server dispatch is broken.\n\
          stdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
     assert!(
         stderr.contains("tawc-dri-test: OK"),
         "tawc-dri-test exited 0 but didn't reach the OK line — \
-         did the binary or DISPLAY change?\nstderr: {stderr}"
+         did the binary, DISPLAY, or hold loop change?\nstderr: {stderr}"
+    );
+    // Confirm the AHB pixel format and dimensions reached the
+    // compositor in AHB form (not the SHM fallback). Test client
+    // allocates 320x240 R8G8B8A8 (= AHB format 1).
+    let logs = adb::logcat_dump_tawc().expect("logcat dump");
+    assert!(
+        logs.contains("wlegl: create_buffer 320x240")
+            && logs.contains("fmt=1"),
+        "compositor never logged `wlegl: create_buffer 320x240 ... fmt=1`, \
+         meaning the TAWC-DRI AHB never reached the compositor's android_wlegl \
+         import path. The client may have fallen back to SHM (which would \
+         tint the buffer magenta), or the X server's TAWC-DRI dispatch may \
+         be silently dropping the request.\nlast 4k of compositor logs:\n{}",
+         &logs[logs.len().saturating_sub(4096)..],
+    );
+    // Also verify the AHB completed the trip into a GL texture on the
+    // compositor side — this is the line `import_shm_buffers`-style
+    // path won't produce. Catches a regression where the AHB import
+    // succeeds but the GL bind fails (e.g. format/usage mismatch).
+    assert!(
+        logs.contains("wlegl: imported ANativeWindowBuffer as texture 320x240"),
+        "compositor imported the AHB metadata but never bound it as a GL \
+         texture. The AHB→GL path (compositor/src/render.rs) likely got an \
+         EGL error.\nlogs:\n{}",
+         &logs[logs.len().saturating_sub(4096)..],
+    );
+    assert_compositor_clean();
+}
+
+/// TAWC-DRI Phase 2 step 3 stress: the same chroot-side client runs an
+/// animated double-buffered loop at 60 fps for 2 seconds (120 frames),
+/// alternating between two AHBs and repainting each frame. This catches
+/// regressions the one-shot test can't:
+///   - Per-frame allocation leaks in the X server's
+///     xwl_tawc_present_native_handle (each present creates a fresh AHB
+///     + wl_buffer; if those leak in a way that scales the X server
+///     stalls or hits gralloc OOM)
+///   - Rendering staleness: if the compositor caches the first frame's
+///     texture forever instead of re-importing, the on-screen image
+///     freezes — but with the loop, "frozen" still means animation
+///     sweep is missing, which is invisible from logs alone. We instead
+///     assert that >=120 wlegl: create_buffer lines appear (one per
+///     frame, no dropped imports) AND that the test client's reported
+///     fps stays at the configured 60fps target (so the X server isn't
+///     blocking it).
+#[test]
+fn test_tawc_dri_ahb_present_animated_loop() {
+    require_compositor();
+    adb::logcat_clear().expect("logcat clear");
+
+    let bin = chroot::ensure_tawc_dri_test().expect("build tawc-dri-test");
+    // 120 frames at 60fps = 2 seconds. Long enough to surface a leak
+    // (~120 per-frame AHB+wl_buffer pairs accumulated server-side)
+    // without bloating the test runtime.
+    const FRAMES: u32 = 120;
+    let cmd = format!(
+        "DISPLAY=:0 TAWC_DRI_LOOP_FRAMES={} {}",
+        FRAMES, bin
+    );
+    let output = adb::chroot_run(&cmd).expect("run tawc-dri-test loop");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "tawc-dri-test loop mode exited non-zero ({:?}). \
+         Likely a per-frame buffer-handling regression server-side.\n\
+         stderr: {stderr}\nstdout: {stdout}",
+        output.status.code()
+    );
+    // The client logs a summary line on success — parse the fps and
+    // assert it didn't fall noticeably below the 60fps target. Below
+    // 50fps would mean the X server (or compositor) is back-pressuring
+    // the client.
+    let fps_line = stderr
+        .lines()
+        .find(|l| l.contains("loop ran") && l.contains("fps"))
+        .unwrap_or_else(|| panic!("test client never reported its loop fps:\n{stderr}"));
+    let fps: f32 = fps_line
+        .split_whitespace()
+        .filter_map(|w| w.strip_suffix("fps").and_then(|n| n.parse::<f32>().ok())
+                          .or_else(|| {
+                              let tok = w.trim_end_matches(')');
+                              tok.parse::<f32>().ok().filter(|&v| v > 1.0 && v < 1000.0)
+                          }))
+        .next()
+        .unwrap_or_else(|| {
+            panic!("could not parse fps out of '{fps_line}'\nstderr:\n{stderr}")
+        });
+    assert!(
+        fps >= 50.0,
+        "TAWC-DRI loop client only sustained {fps:.1} fps (expected >=50 \
+         at the 60fps target). Server-side per-frame work is backpressuring \
+         the client — likely an O(N) leak or a slow path.\nstderr:\n{stderr}"
+    );
+
+    let logs = adb::logcat_dump_tawc().expect("logcat dump");
+    let create_count = logs.matches("wlegl: create_buffer 320x240").count();
+    // The compositor should import every frame's AHB. Allow a small
+    // slack for log-cat truncation / startup noise (we cleared logs
+    // before the run, but a few stray lines from prior messages may
+    // sneak in via the buffered Android log).
+    assert!(
+        create_count >= FRAMES as usize,
+        "compositor imported only {create_count} AHBs for {FRAMES} client \
+         frames. Some imports were dropped or never reached the compositor — \
+         most likely the X server is silently failing AHardwareBuffer_createFromHandle \
+         under sustained load. \nlast 4k of logs:\n{}",
+         &logs[logs.len().saturating_sub(4096)..],
+    );
+    // Compositor side mustn't have logged any tawc-error lines during
+    // the run — those signal AHB import failures or X11 dispatch errors
+    // that didn't kill the X server but did drop the buffer.
+    assert!(
+        !logs.contains("xwl_tawc:") || !logs.contains("failed"),
+        "compositor logged xwl_tawc errors during the loop:\n{}",
+         &logs[logs.len().saturating_sub(4096)..],
     );
     assert_compositor_clean();
 }

@@ -82,14 +82,45 @@ pub fn start_xwayland(
     std::env::set_var("PATH", &path_with_xwl);
 
     let dh = state.display_handle.clone();
-    let envs: Vec<(String, String)> = vec![(
+    // Xwayland is a pure bionic process. libhybris/lib is intentionally
+    // NOT on its LD_LIBRARY_PATH: libhybris ships glibc-built stub .sos
+    // (libui.so, libsync.so, libgralloc.so, libhardware.so) for
+    // chroot-side use, and putting them ahead of /system/lib64 makes the
+    // bionic linker pick them up when something pulls in libui — most
+    // notably `dlopen("libnativewindow.so")` from xwayland-tawc, since
+    // /system/lib64/libnativewindow.so DT_NEEDS libui.so. The libhybris
+    // stub then fails to resolve glibc's libc.so.6 and the dlopen
+    // collapses. Server-side AHB allocation needs only the bionic
+    // libnativewindow.so already resident in /system/lib64.
+    let mut envs: Vec<(String, String)> = vec![(
         "LD_LIBRARY_PATH".to_string(),
-        format!(
-            "{xwl}/lib:{lh}/lib",
-            xwl = XWL_INSTALL_DIR,
-            lh = LIBHYBRIS_INSTALL_DIR,
-        ),
+        format!("{xwl}/lib", xwl = XWL_INSTALL_DIR),
     )];
+
+    // Phase-2 step-2 verification harness: opt-in via the Android system
+    // property `debug.tawc.xwl_test_pattern` (or env var fallback for
+    // ad-hoc local use). When set, forward as `TAWC_XWL_TEST_PATTERN=1`
+    // to Xwayland, which reads it alongside the equivalent
+    // `-tawc-test-pattern` argv flag (smithay's spawn doesn't let us
+    // inject argv). On read, Xwayland allocates a known-pattern AHB and
+    // ships it through android_wlegl; the compositor's wlegl handler
+    // logs `wlegl: create_buffer ...` on import success. See
+    // notes/xwayland.md.
+    let test_pattern = std::env::var("TAWC_XWL_TEST_PATTERN")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .or_else(|| {
+            std::process::Command::new("getprop")
+                .arg("debug.tawc.xwl_test_pattern")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|v| !v.is_empty() && v != "0")
+        });
+    if let Some(v) = test_pattern {
+        info!("xwayland: TAWC_XWL_TEST_PATTERN={} (test pattern enabled)", v);
+        envs.push(("TAWC_XWL_TEST_PATTERN".to_string(), v));
+    }
 
     // Pipe Xwayland's stderr/stdout to a log file under our xtmp dir so
     // we can post-mortem startup failures (Stdio::null() drops them on

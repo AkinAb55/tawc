@@ -16,18 +16,77 @@ of the box.
   X11 extension scaffolding: protocol header
   (`Xext/tawcdriproto.h`), server-side stub
   (`Xext/tawc-dri.c` with `QueryVersion` reply + `PresentBuffer`
-  no-op ack), registered via `mi/miinitext.c`. All vendored as
-  `xwayland-patches/xwayland/02-tawc-extension-step1.patch`. The
-  Xwayland binary still builds and runs identically; the new
-  extension is advertised on the wire and dispatches requests.
-  Verification: `apps::test_tawc_dri_extension_round_trip` exercises
+  no-op ack), registered via `mi/miinitext.c`. The Xwayland binary
+  still builds and runs identically; the new extension is advertised
+  on the wire and dispatches requests. Verification:
+  `apps::test_tawc_dri_extension_round_trip` exercises
   `QueryExtension` + `QueryVersion` + `PresentBuffer` from a chroot
   xcb client (`testing/tawc-dri-test/`).
-- **Phase 2 steps 2–5 — pending.** `xwayland-tawc.c` real
-  implementation (`android_wlegl` bind + libnativewindow AHB
-  alloc + `xwl_tawc_pixmap_get_wl_buffer`), glue
-  `TAWCDRIPresentBuffer` to it, libhybris `eglplatform_x11.cpp`,
-  real-app shakedown. See "Phase 2 implementation order" below.
+- **Phase 2 step 2 — done (2026-04-29).** Server-side AHB
+  allocation + shipping over `android_wlegl`. New files:
+  `hw/xwayland/xwayland-tawc-libnativewindow.{c,h}` — dlopen wrapper
+  around `AHardwareBuffer_allocate` / `_describe` / `_lock` /
+  `_unlock` / `_release` / `_getNativeHandle` /
+  `_createFromHandle`. `hw/xwayland/xwayland-tawc.c` implements
+  `xwl_tawc_buffer_alloc` + `_get_wl_buffer`, which send a buffer
+  through `android_wlegl.create_handle` + `add_fd` × N +
+  `create_buffer` — the same shape libhybris's wayland-platform
+  plugin uses. The compositor reuses its existing `wlegl_import.c`
+  path on the receive side. Compositor side: dropped `libhybris/lib`
+  from the Xwayland process's `LD_LIBRARY_PATH` — libnativewindow.so
+  DT_NEEDS libui.so, and the libhybris stub libui ahead of
+  `/system/lib64` collapses the load with
+  `library libc.so.6 not found`. Verification:
+  `apps::test_xwayland_test_pattern_ahb_round_trip` enables the
+  `debug.tawc.xwl_test_pattern` prop, restarts the compositor, and
+  asserts the standalone test pattern path round-trips a 512x512
+  AHB through `android_wlegl`.
+- **Phase 2 step 3 — done (2026-04-29).** TAWC-DRI now ships real
+  client AHBs end-to-end. Protocol bumped to v0.2: `xTAWCDRIPresentBufferReq`
+  carries `numFds`/`numInts`/width/height/stride/format/usage on
+  the wire and the inline `numInts` u32s in the request body, with
+  `numFds` fds passed via X11's SCM_RIGHTS-style FD passing
+  (`ReadFdFromClient` on the server, `xcb_send_request_with_fds` on
+  the client). Server side: `Xext/tawc-dri.c` calls `SetReqFds(num_fds)`
+  on entry, reads the inline ints + fds, and calls a new helper
+  `xwl_tawc_present_native_handle()` (in `hw/xwayland/xwayland-tawc.c`)
+  which rebuilds the AHB via `AHardwareBuffer_createFromHandle`
+  (METHOD_REGISTER, taking ownership of the handle struct + fds),
+  wraps it through the step-2 shipping helpers, and attaches the
+  resulting `wl_buffer` directly to the X11 window's `wl_surface`
+  with `wl_surface_attach`/`damage`/`commit`. Direct attach
+  bypasses Xwayland's normal pixmap router; it's correct for pure
+  AHB-presenting clients (Phase 4 GL) but means server-side X11
+  drawing on the same window is incompatible — out of scope for
+  Phase 2. Test client (`testing/tawc-dri-test/tawc-dri-test.c`)
+  upgraded to allocate an AHB via `hybris_dlopen("libnativewindow.so")`
+  + `AHardwareBuffer_*` (libhybris-common.so loads the bionic lib
+  from the glibc chroot), CPU-fills with a green→yellow gradient
+  distinct from step-2's red→blue test pattern, ships via
+  `xcb_send_request_with_fds`, and re-presents at 5 Hz during
+  `TAWC_DRI_HOLD_SECS` so the compositor's per-X11 Activity
+  SurfaceView (which races the X11 toplevel map) catches a
+  commit after its render output is bound. End-to-end verified:
+  the gradient renders on the compositor's TURQUOISE background,
+  going AHB → TAWC-DRI → X server → android_wlegl → compositor
+  gralloc1 import → GL texture; no SHM, no GLAMOR, no magenta.
+  Verification: `apps::test_tawc_dri_ahb_present_round_trip` asserts
+  compositor logcat shows `wlegl: create_buffer 320x240 ... fmt=1`
+  (AHB, not SHM) AND `wlegl: imported ANativeWindowBuffer as texture
+  320x240` (full GL bind). Stress verified by
+  `apps::test_tawc_dri_ahb_present_animated_loop`: a double-buffered
+  60fps loop (alternating between two AHBs, repainting each frame
+  with a swept gradient phase) runs 120 frames in 2.0s, the
+  compositor imports all 120 AHBs cleanly, and the client sustains
+  ≥50fps (no server-side back-pressure). All step-2 + step-3 changes
+  consolidated into `xwayland-patches/xwayland/02-tawc-step3-ahb-present.patch`.
+  `xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)` is still a NULL stub —
+  step-3 doesn't go through the pixmap router. Phase-3 GL or the
+  full GLAMOR rerouting (if we ever do it) will fill it in.
+- **Phase 2 steps 4–5 — pending.** libhybris `eglplatform_x11.cpp`
+  (the EGL-on-X11 client plugin that allocates AHBs from chroot GL
+  client code and ships them via TAWC-DRI), real-app shakedown.
+  See "Phase 2 implementation order" below.
 - **Phase 3 — probably skip.** Server-side EGL acceleration
   (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
   that nobody runs on a phone.
@@ -281,31 +340,38 @@ verifies the round-trip. **Verification:** integration test that
 exercises the protocol with no real buffers and no GL anywhere.
 This proves the extension wiring before any AHB code exists.
 
-**2. `xwayland-tawc.c` against a server-allocated test AHB.** Wire
-up `android_wlegl` binding on the X server's `wl_registry`, the AHB
-allocation helpers (loaded directly from bionic's
-`libnativewindow.so`), and `xwl_tawc_pixmap_get_wl_buffer`. Add a
-debug X server command-line flag (`-tawc-test-pattern`) that, on
-startup, allocates an AHB, CPU-fills it with a known pattern (a
-gradient, distinct from the compositor's magenta SHM tint),
-attaches it to a virtual root pixmap, and triggers a present.
-**Verification:** an X server started with that flag produces a
-known-pattern window on the compositor with no client involvement.
-Proves AHB → `android_wlegl.create_buffer_v2` → `wl_buffer` →
-compositor import works end-to-end *before* the libhybris client
-plugin exists. Also gives us the
-`present_check_flip()` instrumentation hook (see "Why GLAMOR-off
-doesn't block GL-client zero-copy" below): with the test pattern
-attached as a Present source, confirm flip is chosen.
+**2. `xwayland-tawc.c` against a server-allocated test AHB.**
+**Done (2026-04-29).** Bound `android_wlegl` on the X server's
+`wl_registry`, added a libnativewindow dlopen wrapper, implemented
+`xwl_tawc_buffer_alloc` + `xwl_tawc_buffer_get_wl_buffer` (the
+standalone helpers — the `xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)`
+overload is still a stub for step 3 to wire into the pixmap router).
+Added `-tawc-test-pattern` argv (and `TAWC_XWL_TEST_PATTERN=1` env
+fallback, since smithay's `XWayland::spawn` doesn't take argv
+extras), exposed to compositor via `debug.tawc.xwl_test_pattern`
+prop. **Verification (passing):** `apps::test_xwayland_test_pattern_ahb_round_trip`
+sets the prop, restarts the compositor, and checks for `wlegl:
+create_buffer 512x512 stride=... fmt=1 usage=0x...` in compositor
+logcat. The on-screen attach (and the `present_check_flip()`
+instrumentation hook) lives with step 3 — for step 2 we only
+verified the protocol round-trip.
 
-**3. Glue step 1 to step 2.** Make `TAWCDRIPresentBuffer` actually
-turn the buffer-id into an AHB-backed pixmap, then route to the
-step-2 `xwl_tawc_pixmap_get_wl_buffer` path. **Verification:** the
-synthetic client from step 1, upgraded to allocate a real AHB
-itself (using libnativewindow loaded directly, not yet via libhybris
-EGL) and CPU-fill it, sends the AHB through TAWC-DRI and sees the
-gradient on the compositor. **At this point everything except the
-libhybris EGL plugin is done and proven.**
+**3. Glue step 1 to step 2. Done (2026-04-29).** Took a more direct
+shape than originally sketched: rather than route through
+`xwl_pixmap_get_wl_buffer` (which would require turning the AHB
+into a real X PixmapPtr and integrating with the X server's
+window-pixmap flow), `xwl_tawc_present_native_handle()` attaches
+the wl_buffer directly to the X11 window's wl_surface. That keeps
+PRESENTBUFFER as a "shove this AHB onto this window" primitive —
+no PixmapPtr involvement. The price is that server-side X11 drawing
+on the same window won't see the AHB (no XGetImage / XCopyArea
+integration), which is fine for pure-GL clients (Phase 4); mixed-
+rendering clients would need the pixmap-router path
+(`xwl_tawc_pixmap_get_wl_buffer`) revived if/when a real workload
+needs it. **Verification:** `apps::test_tawc_dri_ahb_present_round_trip`
+shows a chroot-side gradient AHB on the compositor; logs prove the
+AHB went through android_wlegl and was bound as a GL texture. **At
+this point everything except the libhybris EGL plugin is done and proven.**
 
 **4. libhybris `eglplatform_x11.cpp`.** This is the biggest single
 piece and the riskiest unknown, but by the time we start it, the
@@ -553,6 +619,16 @@ own bash + busybox bundling rests on the same loophole at the
   die in `createWindow`. Wayland-first with X11 fallback keeps SDL
   apps on the libhybris/EGL path while leaving X11 reachable for
   the X-only clients that genuinely need it.
+- `start_xwayland` sets `LD_LIBRARY_PATH=<xwl>/lib` for the Xwayland
+  process — **not** `<xwl>/lib:<libhybris>/lib`. libhybris's
+  `lib/libui.so.1.0.0` is a glibc-built stub for chroot-side use,
+  and putting it ahead of `/system/lib64` makes the bionic linker
+  pick it up when resolving `libnativewindow.so`'s
+  `DT_NEEDED libui.so` (Phase 2 step 2 dlopens libnativewindow for
+  AHB allocation). The libhybris stub then fails to find glibc's
+  `libc.so.6` and the load collapses. Server-side AHB allocation
+  needs only the bionic libnativewindow already in `/system/lib64`,
+  so libhybris stays out of the X server's link path.
 
 ## Smithay fork patches
 
@@ -886,3 +962,38 @@ patcher script alongside the existing four.
   the bionic source patches. The V4 work is preserved in this doc
   ("Glibc alternative") in case we ever need a glibc binary in the
   APK for some other reason.
+- **2026-04-29** — Phase 2 step 2 landed: server-side
+  libnativewindow dlopen, AHB allocation, native-handle ship via
+  `android_wlegl`, end-to-end round-trip verified by
+  `apps::test_xwayland_test_pattern_ahb_round_trip`. Caught one
+  load-order trap on first device run: `libnativewindow.so`
+  DT_NEEDS `libui.so`, and libhybris's chroot-side `libui.so.1.0.0`
+  stub was on the X server's `LD_LIBRARY_PATH`, so the bionic linker
+  took it first and failed on glibc `libc.so.6`. Fix: drop
+  `libhybris/lib` from the X server's library path entirely. Step-1
+  patch `02-tawc-extension-step1.patch` was rolled into a single
+  consolidated `02-tawc-step2-buffer-shipping.patch` since
+  `xwayland-tawc.{c,h}` evolved between the steps.
+- **2026-04-29** — Phase 2 step 3 landed: TAWC-DRI v0.2 ships a
+  real native_handle (numFds + numInts + inline ints + FD-passed
+  fds) over the X11 wire. Server reconstructs the AHB via
+  `AHardwareBuffer_createFromHandle` (METHOD_REGISTER) and attaches
+  the resulting wl_buffer directly to the X11 window's wl_surface.
+  Hit three landmines on the way:
+  (1) X server SIGABRTed (Scudo abort) in the dispatch — caused by
+      `free(handle)` after AHardwareBuffer_createFromHandle in
+      METHOD_REGISTER, which transfers ownership of the handle struct
+      to the AHB (the compositor's wlegl_import.c flagged this with a
+      comment; replicated the convention).
+  (2) libxtrans dropped the SCM_RIGHTS-attached fds because the
+      dispatch didn't `SetReqFds(num_fds)` up front, same shape as
+      DRI3's pixmap_from_buffers.
+  (3) Test client's chroot dlopen couldn't find libnativewindow.so
+      (it's a bionic-only lib); used `hybris_dlopen` from
+      libhybris-common.so to load it through libhybris's bionic
+      loader bridge. `xcb_send_request_with_fds` mutates the iovec,
+      so re-presenting in a loop required a fresh iovec per call.
+  After that, the green→yellow gradient renders on screen end-to-end:
+  client AHB → TAWC-DRI → X server → android_wlegl → compositor
+  gralloc1 import → GL texture, no SHM, no magenta tint.
+  Patch consolidated into `02-tawc-step3-ahb-present.patch`.
