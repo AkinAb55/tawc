@@ -51,6 +51,7 @@ data class Installation(
 
     companion object {
         const val DISTRO_ARCH = "arch"
+        const val DISTRO_MANJARO = "manjaro"
         // Kept as constants for the metadata schema; the runtime
         // mapping to InstallationMethod implementations lives in
         // [InstallationMethod.forKey] and the impl objects' KEY fields.

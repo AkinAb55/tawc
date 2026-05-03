@@ -56,7 +56,23 @@ object LibhybrisLinker {
             return false
         }
 
-        // Build a single shell script: mkdir + per-entry `ln -sfn`.
+        // Build a single shell script: mkdir + per-entry `ln -sfn` +
+        // GLVND/Vulkan vendor-loader registration.
+        //
+        // Why the vendor JSONs are mandatory on glvnd-using distros
+        // (Manjaro, modern Debian, …): with libglvnd installed, an
+        // app's `libEGL.so.1` is glvnd's dispatcher rather than a
+        // concrete EGL implementation. The dispatcher picks a vendor
+        // by reading `/usr/share/glvnd/egl_vendor.d/*.json` —
+        // whichever JSON sorts first wins. Mesa drops `50_mesa.json`,
+        // so without our `00_libhybris.json` an app calls into Mesa's
+        // libEGL even though `LD_LIBRARY_PATH=/usr/local/lib` would
+        // have resolved a direct `libEGL.so.1` lookup to ours.
+        //
+        // The Vulkan loader uses the same shape:
+        // `/usr/share/vulkan/icd.d/*.json` enumerates ICDs. We point
+        // both at libhybris's libraries inside `/usr/local/lib/`.
+        //
         // Using `ln -sfn` so re-runs replace existing symlinks
         // atomically and don't follow into a previously-symlinked dir
         // (the `-n` flag). `--` separates the absolute target from the
@@ -77,6 +93,31 @@ object LibhybrisLinker {
                 // /data/data path goes into the symlink, not /data/user/0.
                 appendLine("ln -sfn -- ${sq(src.canonicalPath)} \"\$DST\"/${sq(src.name)}")
             }
+            // GLVND EGL vendor JSON — sorts before mesa's `50_mesa.json`
+            // so glvnd's dispatcher loads libhybris first. The
+            // `library_path` is resolved by glvnd via the normal dlopen
+            // path, so absolute /usr/local/lib/libEGL.so.1 works
+            // regardless of the chroot's runtime ld.so.cache state.
+            //
+            // Vulkan is intentionally not registered the same way:
+            // libhybris ships its own `libvulkan.so.1` which is a
+            // *loader*, not an ICD, so pointing the system Vulkan
+            // loader at it via /usr/share/vulkan/icd.d would create a
+            // recursive loader-loads-loader chain. Vulkan apps under
+            // libhybris pick up the right loader through
+            // `LD_LIBRARY_PATH=/usr/local/lib` (set by profile.d).
+            // Tracked separately if Vulkan tests still fail post-EGL
+            // fix.
+            appendLine("EGL_DIR=${sq("$rootfsPath/usr/share/glvnd/egl_vendor.d")}")
+            appendLine("mkdir -p \"\$EGL_DIR\"")
+            appendLine("cat > \"\$EGL_DIR/00_libhybris.json\" <<'EGLJSON'")
+            appendLine("{")
+            appendLine("    \"file_format_version\" : \"1.0.0\",")
+            appendLine("    \"ICD\" : {")
+            appendLine("        \"library_path\" : \"/usr/local/lib/libEGL.so.1\"")
+            appendLine("    }")
+            appendLine("}")
+            appendLine("EGLJSON")
             appendLine("echo OK")
         }
         val r = method.runOutside(script) { log("libhybris-link: $it") }

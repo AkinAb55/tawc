@@ -17,6 +17,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import me.phie.tawc.R
+import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
@@ -42,9 +43,12 @@ class InstallActivity : AppCompatActivity() {
     private val store by lazy { InstallationStore(this) }
     private var targetId: String = Installation.DISTRO_ARCH
     private var selectedMethod: String? = null
+    private var selectedDistro: String? = null
 
     private lateinit var formSection: LinearLayout
     private lateinit var methodGroup: RadioGroup
+    private lateinit var distroGroup: RadioGroup
+    private lateinit var distroSummaryLabel: TextView
     private lateinit var installButton: MaterialButton
     private lateinit var panel: OperationLogPanel
 
@@ -69,6 +73,8 @@ class InstallActivity : AppCompatActivity() {
         // saved selection.
         selectedMethod = savedInstanceState?.getString(KEY_METHOD)
             ?: intent?.getStringExtra(EXTRA_METHOD)
+        selectedDistro = savedInstanceState?.getString(KEY_DISTRO)
+            ?: intent?.getStringExtra(EXTRA_DISTRO)
         // The form is only useful against an empty slot. If the slot is
         // already in any state (INSTALLING / READY / FAILED / …) the
         // form's Install button would just be the disabled "in progress"
@@ -133,6 +139,7 @@ class InstallActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_STARTED, started)
         selectedMethod?.let { outState.putString(KEY_METHOD, it) }
+        selectedDistro?.let { outState.putString(KEY_DISTRO, it) }
     }
 
     override fun onStart() {
@@ -148,17 +155,26 @@ class InstallActivity : AppCompatActivity() {
     private fun buildFormSection(pad: Int): LinearLayout {
         val s = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        // Resolve the host's default Distro so the form shows the
-        // exact thing that's about to be installed (display name +
-        // Linux arch label). If no Distro matches the host we still
-        // render the form — the install button click is the
-        // authoritative gate and will reject with a readable error.
-        val distro = DistroRegistry.defaultForHost()
-        val distroLabel = distro?.displayName ?: "(no supported distro for this device)"
-        val archLabel = distro?.linuxArch ?: "(unknown)"
+        // List the distros that match the host's primary ABI. Empty
+        // list means no Distro supports this device; render an
+        // explanatory line rather than a dead radio group, and let
+        // the service-level gate refuse the install if the user taps
+        // anyway. The `--es distro …` extra / saved state nudges the
+        // initial selection.
+        val available = DistroRegistry.availableForHost()
+        val initialDistro = (selectedDistro ?: available.firstOrNull()?.key)
+        selectedDistro = initialDistro
 
-        s.addView(formRow("Distro:", distroLabel), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
-        s.addView(formRow("Architecture:", archLabel), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+        s.addView(buildDistroPicker(available, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+
+        // Read-only summary that updates when the distro radio
+        // flips. Architecture comes from the picked Distro's
+        // linuxArch (not the raw host ABI) so e.g. ALARM shows
+        // "aarch64" and not "arm64-v8a".
+        distroSummaryLabel = TextView(this).apply { textSize = 14f }
+        refreshDistroSummary(available)
+        s.addView(formRow("Architecture:", distroSummaryLabel), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+
         s.addView(
             formRow("Install location:", store.installationDir(targetId).absolutePath),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
@@ -185,6 +201,61 @@ class InstallActivity : AppCompatActivity() {
         }
         s.addView(installButton, verticalLp(MATCH_PARENT, WRAP_CONTENT))
         return s
+    }
+
+    /**
+     * Build the distro picker. Lists every [Distro] whose Android ABI
+     * matches the host. Defaults to the first ABI-matching entry
+     * unless `--es distro …` / saved state nudges otherwise. Hidden
+     * when only one distro matches (the first-class case before
+     * Manjaro) so we don't render a single-choice radio group.
+     */
+    private fun buildDistroPicker(available: List<Distro>, pad: Int): LinearLayout {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val title = TextView(this).apply { text = "Distro:"; textSize = 14f }
+        container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+
+        if (available.isEmpty()) {
+            val msg = TextView(this).apply {
+                text = "(no supported distro for this device)"
+                textSize = 14f
+                typeface = Typeface.MONOSPACE
+            }
+            container.addView(msg, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            return container
+        }
+
+        distroGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val idsByKey = mutableMapOf<Int, String>()
+        for (d in available) {
+            val rid = View.generateViewId()
+            idsByKey[rid] = d.key
+            val rb = RadioButton(this).apply {
+                id = rid
+                text = d.displayName
+            }
+            distroGroup.addView(rb, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        }
+        container.addView(distroGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        val initialKey = selectedDistro?.takeIf { k -> available.any { it.key == k } }
+            ?: available.first().key
+        selectedDistro = initialKey
+        idsByKey.entries.firstOrNull { it.value == initialKey }?.let { distroGroup.check(it.key) }
+
+        distroGroup.setOnCheckedChangeListener { _, checkedId ->
+            idsByKey[checkedId]?.let {
+                selectedDistro = it
+                refreshDistroSummary(available)
+            }
+        }
+        return container
+    }
+
+    private fun refreshDistroSummary(available: List<Distro>) {
+        if (!::distroSummaryLabel.isInitialized) return
+        val d = available.firstOrNull { it.key == selectedDistro }
+        distroSummaryLabel.text = d?.linuxArch ?: "(unknown)"
     }
 
     /**
@@ -263,6 +334,21 @@ class InstallActivity : AppCompatActivity() {
         return row
     }
 
+    /**
+     * formRow variant that takes a pre-built TextView as the value
+     * cell so callers can keep a reference and update its text later
+     * (e.g. when the distro radio flips). Same layout as the string
+     * overload.
+     */
+    private fun formRow(label: String, value: TextView): LinearLayout {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val l = TextView(this).apply { text = label; textSize = 14f }
+        value.typeface = Typeface.MONOSPACE
+        row.addView(l, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 16 })
+        row.addView(value, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        return row
+    }
+
     private fun beginInstall() {
         // Only the chroot path needs `su`. Proot is rootless by
         // definition, so a missing-root device fails this check only
@@ -273,7 +359,14 @@ class InstallActivity : AppCompatActivity() {
         if (methodKey == ChrootMethod.KEY && !Su.rootAvailable()) {
             formSection.visibility = View.GONE
             panel.view.visibility = View.VISIBLE
-            panel.setStatus("ERROR: root (su) not available — pick proot, or grant Magisk root.")
+            // Also append to the log: bindToService() will overwrite
+            // the status text with the service's StateFlow ("Idle") as
+            // soon as onStart fires, so a status-only error vanishes
+            // and the user sees a misleading "Idle" with no
+            // explanation. The log line is sticky.
+            val msg = "ERROR: root (su) not available — pick proot, or grant Magisk root."
+            panel.setStatus(msg)
+            panel.appendLog(msg)
             return
         }
         formSection.visibility = View.GONE
@@ -282,10 +375,14 @@ class InstallActivity : AppCompatActivity() {
         // off and let it decide whether to run or reject. `started` only
         // tracks UI state (form vs panel) so a process-death recreate
         // restores the panel view.
-        panel.appendLog(if (started) "[ui] re-requesting install of '$targetId' via $methodKey"
-                        else "[ui] starting install of '$targetId' via $methodKey")
+        val distroKey = selectedDistro
+        panel.appendLog(
+            (if (started) "[ui] re-requesting install of '$targetId' via $methodKey"
+             else "[ui] starting install of '$targetId' via $methodKey")
+                + (distroKey?.let { " (distro=$it)" } ?: "")
+        )
         started = true
-        InstallationService.startInstall(this, targetId, methodKey)
+        InstallationService.startInstall(this, targetId, methodKey, distroKey)
     }
 
     private fun dispatchCancel() {
@@ -339,7 +436,9 @@ class InstallActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_ID = "id"
         const val EXTRA_METHOD = "method"
+        const val EXTRA_DISTRO = "distro"
         private const val KEY_STARTED = "tawc.install.started"
         private const val KEY_METHOD = "tawc.install.method"
+        private const val KEY_DISTRO = "tawc.install.distro"
     }
 }

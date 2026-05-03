@@ -21,10 +21,10 @@ Everything lives under the app's private data dir:
 
     /data/data/me.phie.tawc/
       cache/install/                 # owned by BootstrapCache (see below):
-      cache/install/bootstrap-<arch>.tar.zst    # canonical Arch x86_64 bootstrap (7-day TTL)
-      cache/install/bootstrap-<arch>.tar.gz     # canonical ALARM aarch64 bootstrap (7-day TTL)
-      cache/install/bootstrap-<arch>.tar.fifo                 # transient zstd→tar streaming pipe (Archive owns lifecycle; sweep evicts unconditionally)
-      cache/install/bootstrap-<arch>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
+      cache/install/bootstrap-<cacheKey>.tar.zst    # canonical Arch x86_64 bootstrap (7-day TTL); cacheKey="arch-x86_64"
+      cache/install/bootstrap-<cacheKey>.tar.gz     # canonical ALARM / Manjaro ARM bootstrap (7-day TTL); cacheKey="arch-aarch64" / "manjaro-aarch64"
+      cache/install/bootstrap-<cacheKey>.tar.fifo                 # transient zstd→tar streaming pipe (Archive owns lifecycle; sweep evicts unconditionally)
+      cache/install/bootstrap-<cacheKey>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
       distros/
         arch/
           metadata.json              # JSON: schemaVersion, id, distro, arch, method, installedAtMillis, installedAtAppVersionCode, sourceUrl, state, failure?
@@ -149,17 +149,19 @@ The package is split into three layers:
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
 | `SignatureVerifier.kt`         | Sealed `BootstrapVerification` (`None` / `Pgp` / `CrossMirrorMd5`) and `verify(...)`. Called from [Installer] between download and extract — see *Bootstrap integrity* below. Uses BouncyCastle (`bcpg-jdk18on` + `bcprov-jdk18on`) for the OpenPGP layer. Treat as load-bearing security code. |
-| `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempFifoFor(arch)` for [Archive]'s zstd→tar streaming FIFO so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<arch>.tar.{zst,gz}`; unconditional deletion of `*.fifo`, legacy `*.tmp`, and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
-| `Archive.kt`                   | Tar extraction. Plain `.tar` / `.tar.gz` get handed to `toybox tar` directly; `.tar.zst` is streamed in-process through a named pipe (`bootstrap-<arch>.tar.fifo`) so the ~700 MB plaintext never lands on disk. Never wipes — install only runs against an empty slot. |
+| `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempFifoFor(arch)` for [Archive]'s zstd→tar streaming FIFO so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<cacheKey>.tar.{zst,gz}`; unconditional deletion of `*.fifo`, legacy `*.tmp`, and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
+| `Archive.kt`                   | Tar extraction. Plain `.tar` / `.tar.gz` get handed to `toybox tar` directly; `.tar.zst` is streamed in-process through a named pipe (`bootstrap-<cacheKey>.tar.fifo`) so the ~700 MB plaintext never lands on disk. Never wipes — install only runs against an empty slot. |
 | `RootfsCleaner.kt`             | The one and only delete path: kill chroot processes → unmount strictly → `find -xdev -depth -delete`. Used by uninstall; never by install. |
 | `ChrootMounter.kt`             | Builds the bind-mount shell snippet, renders the canonical `enter.sh` (mount + chroot wrapper), and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
 | `ChrootRunner.kt`              | Concatenates `ChrootMounter.mountScript(rootfs)` with the chroot exec into one `su -c` shell so the mounts and the command share that shell's mount namespace. Base64-encodes the command into the wrapper script to dodge quoting hell. |
 | `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → writeEnterScript → distro.initPackageManager → distro.installBasePackages → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
-| `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix), `basePackages`, and the three policy hooks (`configure`, `initPackageManager`, `installBasePackages`). Also defines `DistroBootstrap`. |
-| `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro] and `Build.SUPPORTED_ABIS` → host-default [Distro]. `defaultForHost()` is consulted by the service before any disk state is written, so an unsupported ABI is a clean reject rather than a half-installed FAILED slot. |
-| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, profile.d/00-path.sh, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
+| `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix/verification), `cacheKey`, `basePackages`, the three policy hooks (`configure`, `initPackageManager`, `installBasePackages`), and `resolveBootstrap()` for distros with install-time URL/digest lookup (Manjaro). Also defines `DistroBootstrap`. |
+| `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro], `Build.SUPPORTED_ABIS` → installable [Distro] list, and the install activity's distro radio key → [Distro]. `availableForHost()` / `defaultForHost()` / `forKey()`. |
+| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch / Manjaro flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, profile.d/00-path.sh, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
 | `distro/arch/ArchLinuxX86_64.kt` | Arch Linux x86_64 (`pkgbuild.com` zstd bootstrap, `archlinux` keyring, geo-redirector mirrorlist). |
 | `distro/arch/ArchLinuxArm.kt`  | Arch Linux ARM aarch64 (`archlinuxarm.org` gzip bootstrap, `archlinuxarm` keyring, curated multi-mirror list — see *ALARM mirror failover* below). |
+| `distro/manjaro/GitHubReleaseResolver.kt` | Tiny `api.github.com /releases/latest` client. Returns `(browser_download_url, sha256)` for a named asset by reading the API response's `digest` field. |
+| `distro/manjaro/ManjaroArm.kt` | Manjaro ARM aarch64 (`manjaro-arm/rootfs` GitHub release gz; `archlinuxarm manjaro manjaro-arm` keyring set). `resolveBootstrap` does the GitHub-API lookup at install time so we always pull the latest weekly tag with a verifiable SHA-256. |
 | `util/HostArch.kt`             | `primaryAbi()` and `linuxArchFor(abi)` — the only place that knows the Android ABI ↔ Linux `uname -m` mapping. |
 | `util/HumanSize.kt`            | Byte-count → "1.2 MiB" formatter for download progress. |
 | `util/AppOwnership.kt`         | `chownAppDirNonRecursive` — resets a freshly-mkdir'd dir to app uid:gid so subsequent app-uid writes succeed. |
@@ -208,7 +210,7 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
    install lands in `FAILED` before any byte hits the rootfs. See
    *Bootstrap integrity* below for what each distro declares.
 4. **EXTRACTING** — root-owned via toybox tar. Zstd is streamed in-
-   process through a named pipe (`bootstrap-<arch>.tar.fifo` in the
+   process through a named pipe (`bootstrap-<cacheKey>.tar.fifo` in the
    cache dir): a writer thread feeds zstd-decompressed bytes into the
    FIFO while tar reads `tar -xf <fifo>` as a positional argument
    (not stdin — the shell pre-buffers past the script body and tar
@@ -279,16 +281,16 @@ on a phone with free space, competing with caches from apps the user
 actually opens. [TawcApplication.onCreate] runs `sweepStale()` on a
 background thread on every cold start. The sweep is a two-pass janitor:
 
-1. **TTL pass** — canonical `bootstrap-<arch>.tar.{zst,gz}` files are
+1. **TTL pass** — canonical `bootstrap-<cacheKey>.tar.{zst,gz}` files are
    evicted when their mtime is older than 7 days. Reuse refreshes the
    clock because `BootstrapCache.download` touches the mtime on every
    successful fetch (whether the bytes were freshly downloaded or served
    from a size-match cache hit inside [Downloader]). `setLastModifiedTime`
    is the NIO variant — `File.setLastModified` silently no-ops on some
    Android FS/SDK combos.
-2. **Unconditional pass** — `bootstrap-<arch>.tar.fifo` ([Archive]'s
+2. **Unconditional pass** — `bootstrap-<cacheKey>.tar.fifo` ([Archive]'s
    zstd→tar streaming FIFO; legacy `*.tmp` from older builds is also
-   matched for safety) and `bootstrap-<arch>.tar.{zst,gz}.part`
+   matched for safety) and `bootstrap-<cacheKey>.tar.{zst,gz}.part`
    ([Downloader]'s in-flight suffix) are deleted regardless of mtime,
    since neither is ever meaningful across processes — they only exist
    inside one `Archive.extractAsRoot` / `Downloader.download` call's
@@ -522,7 +524,38 @@ Hard rules:
 | --- | --- | --- |
 | Arch x86_64 (`geo.mirror.pkgbuild.com`, HTTPS) | PGP detached signature `<tarball>.sig`, against Pierre Schmitz's Arch developer key (`3E80 CA1A 8B89 F69C BA57 D98A 76A5 EF90 5444 9A5C`) shipped at `res/raw/arch_signing_key.asc` | `BootstrapVerification.Pgp` in `ArchLinuxX86_64.kt` |
 | ALARM aarch64 (`fl.us.mirror.archlinuxarm.org`, HTTPS) | Cross-mirror MD5 cross-check: `.md5` fetched over HTTPS from `fl.us.` and `ca.us.` (independently-operated mirrors with their own valid certs), digests must agree byte-for-byte, then the tarball's MD5 must match | `BootstrapVerification.CrossMirrorMd5` in `ArchLinuxArm.kt` |
-| In-chroot pacman packages | Default `SigLevel = Required DatabaseOptional`, against the keyring populated by `pacman-key --populate archlinux` / `archlinuxarm` | `ArchPacmanCommon.kt` (the `Never` line was removed, `--populate` is no longer `\|\| true`'d) |
+| Manjaro ARM aarch64 (`github.com/manjaro-arm/rootfs/releases`, HTTPS) | SHA-256 from the GitHub Releases REST API: `api.github.com/repos/manjaro-arm/rootfs/releases/latest` returns the asset's server-computed `digest: sha256:<hex>`. We fetch that JSON over HTTPS in `ManjaroArm.resolveBootstrap`, then verify the downloaded tarball's SHA-256 matches before extract | `BootstrapVerification.Sha256` (Manjaro path) in `ManjaroArm.kt` |
+| In-chroot pacman packages | Default `SigLevel = Required DatabaseOptional`, against the keyring populated by `pacman-key --populate archlinux` / `archlinuxarm` / `archlinuxarm manjaro manjaro-arm` | `ArchPacmanCommon.kt` (the `Never` line was removed, `--populate` is no longer `\|\| true`'d) |
+
+### Manjaro ARM bootstrap: trust profile
+
+Manjaro ARM is intermediate between the strong Arch x86_64 PGP path
+and the weaker ALARM cross-mirror MD5. Upstream doesn't sign with
+PGP either, but their tarball is hosted on GitHub Releases and the
+GitHub API exposes a server-side SHA-256 of every release artifact in
+the asset's `digest` field. We fetch that JSON over HTTPS to
+`api.github.com` and use the digest to verify the tarball before
+extract.
+
+What this catches:
+
+- Passive MITM (TLS handles this).
+- Mid-download corruption / bit-flips (SHA-256 mismatch on the
+  finished file).
+- A redirect to a different host serving a different tarball (the
+  digest-from-API and the actual-bytes don't match).
+
+What it does **not** catch:
+
+- A compromise of the manjaro-arm GitHub org pushing a malicious
+  artifact: the API would return that artifact's matching digest, so
+  our check would still pass. Same threat as any HTTPS-distributed
+  artifact without a separate offline-key signature chain.
+
+Stronger than `None`, weaker than `Pgp`, comparable in spirit to the
+ALARM cross-mirror MD5 (both rely on a single HTTPS endpoint's
+trust). When upstream Manjaro starts shipping a detached PGP
+signature we should switch over.
 
 ### Known weaker spot: ALARM bootstrap
 

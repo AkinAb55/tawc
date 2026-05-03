@@ -46,8 +46,37 @@ interface Distro {
      */
     val androidAbi: String
 
-    /** Bootstrap tarball metadata. */
+    /**
+     * Cache filename component for the bootstrap tarball. Two distros
+     * sharing one [linuxArch] (Arch Linux ARM and Manjaro ARM both at
+     * `aarch64`) can't share a cache slot — the [BootstrapCache]
+     * filename is `bootstrap-<cacheKey>.tar.<ext>`, so they need
+     * distinct keys. Default is `"$key-$linuxArch"` which is
+     * already-unique without per-distro overrides.
+     */
+    val cacheKey: String get() = "$key-$linuxArch"
+
+    /**
+     * Static bootstrap tarball metadata. For most distros this is the
+     * single source of truth — [resolveBootstrap] just returns it. For
+     * distros where the URL or expected digest is only known at install
+     * time (e.g. GitHub Releases "latest" with a server-side
+     * SHA-256 in the API response), this can be a placeholder and
+     * [resolveBootstrap] does the runtime lookup.
+     */
     val bootstrap: DistroBootstrap
+
+    /**
+     * Resolve the bootstrap descriptor at install time. Default impl
+     * returns the static [bootstrap] field. Override for distros whose
+     * URL or [BootstrapVerification] digest must be looked up live —
+     * e.g. ManjaroArm hits the GitHub Releases API for the latest
+     * tag's `Manjaro-ARM-aarch64-latest.tar.gz` asset and reads its
+     * server-computed SHA-256 from the `digest` field. Runs before
+     * download; failures throw so we never attempt a download whose
+     * verification can't be set up.
+     */
+    fun resolveBootstrap(log: (String) -> Unit): DistroBootstrap = bootstrap
 
     /** Base packages to `pacman -S --needed` (or equivalent) at install time. */
     val basePackages: List<String>

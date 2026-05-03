@@ -4,10 +4,31 @@ Survey of Linux distros for the in-app chroot, with tradeoffs.
 Companion to [distro-abstraction.md](distro-abstraction.md), which
 documents the code-level abstraction that lets us add new families.
 
-We currently ship **Arch Linux ARM** (aarch64) and **Arch Linux**
-(x86_64, for the emulator). This note exists because ALARM is
-under-maintained and somewhat bloated for our needs, and we keep
-getting asked "what about $distro?".
+We currently ship **Arch Linux ARM** (aarch64), **Arch Linux**
+(x86_64, for the emulator), and **Manjaro ARM** (aarch64). This note
+exists because ALARM is under-maintained and somewhat bloated for our
+needs, and we keep getting asked "what about $distro?".
+
+**Manjaro ARM** is the most recent addition — also pacman-based, so
+it reuses ~all of `ArchPacmanCommon` (mirrorlist + keyring set are
+the only real differences). Bootstrap is the official
+[manjaro-arm/rootfs](https://github.com/manjaro-arm/rootfs/releases)
+weekly auto-build (~210 MB, much smaller than ALARM); the GitHub
+Releases REST API exposes a server-computed SHA-256 in the asset's
+`digest` field, which we fetch over HTTPS and verify against — see
+[installation.md](installation.md) → *Bootstrap integrity*. The
+rootfs is unusually clean (~93 packages: no kernel, no firmware, no
+editors, no openssh) so the post-extract cruft purge has nothing to
+strip on this distro.
+
+A Manjaro **x86_64** equivalent is not currently shipped: Manjaro
+publishes no clean rootfs tarball for amd64 (only ISO images and
+Docker layers via `manjarolinux/base:latest` on Docker Hub). Adding
+it would mean a small Docker Registry HTTP API client in the
+installer (token + manifest list + content-addressed blob fetch) —
+left out for now since x86_64 is the emulator-only path and Arch
+Linux x86_64 already covers regression testing of the install
+abstraction.
 
 A specific reason ALARM should eventually be replaced: **its
 bootstrap tarball is unsigned upstream**, so we can only verify it
@@ -77,6 +98,7 @@ suitable for a chroot, fresh-enough packages for a desktop browser.
 - Active community focused on SBCs / PinePhone.
 - Best pick if "I like Arch but want better ARM maintenance" is the
   goal — minimal porting effort given our current code.
+- **Currently shipped** (see top of this note + `install/distro/manjaro/ManjaroArm.kt`).
 - Downside: still a smaller team than Debian/Fedora; quality is good
   but not enterprise-grade.
 

@@ -10,13 +10,15 @@
 # Prerequisites:
 #   - Android device or emulator connected via adb (set TAWC_TARGET= if
 #     multiple targets are connected)
-#   - In-app Arch chroot installed at
-#     /data/data/me.phie.tawc/distros/arch/ (install from the app's
-#     home screen, or `am start -n me.phie.tawc/.install.InstallActivity
-#     --es autoStart true --es id arch`)
+#   - In-app chroot installed at
+#     /data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/ (default
+#     `arch`; install from the app's home screen, or `am start -n
+#     me.phie.tawc/.install.InstallActivity --ez autoStart true --es id
+#     <id>`). Set TAWC_INSTALL_ID=<id> to target a different slot.
 #
 # Usage:
 #   bash testing/install-test-deps.sh
+#   TAWC_INSTALL_ID=manjaro bash testing/install-test-deps.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,6 +26,9 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=../client/select-device.sh
 source "$ROOT_DIR/client/select-device.sh"
+
+export TAWC_INSTALL_ID="${TAWC_INSTALL_ID:-arch}"
+TAWC_DISTROS_DIR="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID"
 
 # Keep grouped/commented so it's obvious what each package is for.
 PKGS=(
@@ -73,7 +78,7 @@ echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 # bwrap's argv, skips the sandbox flags, and execs the COMMAND
 # directly — fine on a private test rootfs, not safe in production.
 HOST_BWRAP="$ROOT_DIR/testing/fake-bwrap"
-GUEST_BWRAP="/data/data/me.phie.tawc/distros/arch/rootfs/usr/bin/bwrap"
+GUEST_BWRAP="$TAWC_DISTROS_DIR/rootfs/usr/bin/bwrap"
 echo "=== Installing fake bwrap (no CONFIG_USER_NS workaround) ==="
 adb push "$HOST_BWRAP" /data/local/tmp/fake-bwrap
 adb shell "su -c 'install -m 0755 /data/local/tmp/fake-bwrap $GUEST_BWRAP'"
@@ -98,7 +103,7 @@ adb shell "su -c 'install -m 0755 /data/local/tmp/fake-bwrap $GUEST_BWRAP'"
 # instead of `run-as`+ptrace) but flipping them there is harmless.
 HOST_FF_CFG="$ROOT_DIR/testing/firefox.cfg"
 HOST_FF_AUTOCFG="$ROOT_DIR/testing/firefox-autoconfig.js"
-GUEST_FF_PREFIX="/data/data/me.phie.tawc/distros/arch/rootfs/usr/lib/firefox"
+GUEST_FF_PREFIX="$TAWC_DISTROS_DIR/rootfs/usr/lib/firefox"
 echo "=== Installing Firefox prefs (autoconfig) ==="
 adb push "$HOST_FF_CFG" /data/local/tmp/firefox.cfg
 adb push "$HOST_FF_AUTOCFG" /data/local/tmp/firefox-autoconfig.js

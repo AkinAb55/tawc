@@ -33,13 +33,16 @@ on `(metadata.distro, metadata.arch)` and constructs the generic
 me.phie.tawc.install/
   Installation.kt                 # data model; fromJson tolerates missing distro/method
   InstallationStore.kt
-  InstallationService.kt          # gate; rejects on no-Distro-for-host before disk write
+  InstallationService.kt          # gate; rejects on no-Distro-for-host or
+                                  #   bad EXTRA_DISTRO before disk write
   InstallProgress.kt              # stages: ..., PKG_KEYRING, PKG_INSTALL, ...
-  InstallActivity.kt              # form rows from Distro.displayName / linuxArch
+  InstallActivity.kt              # form has distro radio when >1 distro matches host
   UninstallActivity.kt
   DistroInfoActivity.kt           # title + rows resolved via DistroRegistry
   OperationLogPanel.kt
-  Installer.kt                    # generic pipeline (replaces ArchInstaller)
+  Installer.kt                    # generic pipeline (replaces ArchInstaller);
+                                  #   calls Distro.resolveBootstrap() before download
+  SignatureVerifier.kt            # PGP / CrossMirrorMd5 / Sha256 (Manjaro)
   Su, Downloader, BootstrapCache, Archive, RootfsCleaner,
     ChrootMounter, ChrootRunner   # unchanged distro-agnostic primitives
   util/
@@ -47,8 +50,10 @@ me.phie.tawc.install/
     HumanSize.kt
     AppOwnership.kt               # chownAppDirNonRecursive
   distro/
-    Distro.kt                     # interface + DistroBootstrap data class
-    DistroRegistry.kt             # (distro, arch) -> Distro; defaultForHost()
+    Distro.kt                     # interface + DistroBootstrap data class +
+                                  #   cacheKey + resolveBootstrap() override hook
+    DistroRegistry.kt             # (distro, arch) -> Distro; availableForHost();
+                                  #   forKey() for InstallActivity radio resolution
     arch/
       ArchPacmanCommon.kt         # shared pacman.conf / mirrorlist write /
                                   #   profile.d / pacman-key / pacman -Syu /
@@ -56,6 +61,12 @@ me.phie.tawc.install/
       ArchLinuxX86_64.kt          # geo.mirror.pkgbuild.com zstd, archlinux keyring
       ArchLinuxArm.kt             # archlinuxarm.org gz, archlinuxarm keyring,
                                   #   curated multi-mirror failover list
+    manjaro/
+      GitHubReleaseResolver.kt    # api.github.com /releases/latest -> (url, sha256)
+      ManjaroArm.kt               # manjaro-arm/rootfs gz; resolveBootstrap() pulls
+                                  #   latest tag's URL+SHA256 via the GitHub API;
+                                  #   reuses ArchPacmanCommon for everything else
+                                  #   (3 keyrings: archlinuxarm, manjaro, manjaro-arm)
 ```
 
 `MainActivity` also gained a `DistroRegistry` import so the home-row
@@ -66,11 +77,18 @@ label uses the canonical display name + Linux arch ("Arch Linux ARM
 
 ```kotlin
 interface Distro {
-    val key: String                 // metadata.json value, e.g. "arch"
+    val key: String                 // metadata.json value, e.g. "arch", "manjaro"
     val displayName: String         // UI title, e.g. "Arch Linux ARM"
     val linuxArch: String           // uname -m: "x86_64" / "aarch64"
     val androidAbi: String          // Build.SUPPORTED_ABIS: "x86_64" / "arm64-v8a"
-    val bootstrap: DistroBootstrap  // URL, BootstrapFormat, optional stripPrefix
+    val cacheKey: String            // bootstrap cache filename component;
+                                    //   default "$key-$linuxArch" (disambiguates
+                                    //   arch-aarch64 vs manjaro-aarch64)
+    val bootstrap: DistroBootstrap  // URL, BootstrapFormat, stripPrefix, verification
+
+    /** Resolved at install time. Default: returns [bootstrap] verbatim. */
+    fun resolveBootstrap(log: (String) -> Unit): DistroBootstrap = bootstrap
+
     val basePackages: List<String>
 
     fun configure(rootfs: String, log: (String) -> Unit)
@@ -79,22 +97,39 @@ interface Distro {
 }
 ```
 
-Both x86 and ARM Arch variants share `ArchPacmanCommon` for
+Both Arch variants and Manjaro ARM share `ArchPacmanCommon` for
 pacman.conf munging, profile.d, the `pacman-key --init / --populate`
 and `pacman -Syu` command bodies. They differ in `bootstrap` (URL +
-format + stripPrefix), the keyring name, and the mirrorlist contents.
+format + stripPrefix), the keyring set (`archlinux` / `archlinuxarm` /
+`archlinuxarm manjaro manjaro-arm`), and the mirrorlist contents.
+
+`resolveBootstrap` is for distros whose URL or expected digest is
+only known at install time. `ManjaroArm` overrides it to fetch the
+latest [manjaro-arm/rootfs](https://github.com/manjaro-arm/rootfs/releases)
+release via the GitHub Releases REST API (`api.github.com/repos/.../releases/latest`)
+and read the asset's server-computed `digest` field — that hex digest
+becomes the `BootstrapVerification.Sha256` argument passed back into
+the installer. The Arch impls don't override; they keep their static
+PGP / cross-mirror-MD5 verification.
 
 ## `DistroRegistry`
 
 ```kotlin
 object DistroRegistry {
-    private val all: List<Distro> = listOf(ArchLinuxX86_64, ArchLinuxArm)
+    val all: List<Distro> = listOf(ArchLinuxX86_64, ArchLinuxArm, ManjaroArm)
 
     fun forInstallation(inst: Installation): Distro? =
         all.firstOrNull { it.key == inst.distro && it.androidAbi == inst.arch }
 
-    fun defaultForHost(): Distro? =
-        all.firstOrNull { it.androidAbi == HostArch.primaryAbi() }
+    /** Distros installable on this host (Android ABI match). */
+    fun availableForHost(): List<Distro> =
+        all.filter { it.androidAbi == HostArch.primaryAbi() }
+
+    fun defaultForHost(): Distro? = availableForHost().firstOrNull()
+
+    /** Resolve the Activity's distro radio pick. */
+    fun forKey(distroKey: String): Distro? =
+        availableForHost().firstOrNull { it.key == distroKey }
 }
 ```
 
@@ -167,6 +202,11 @@ returns null, before any disk state is written.
 - Adding Ubuntu. The abstraction supports it cleanly, but no actual
   Ubuntu Distro is added — the test was the existence of clean
   policy hooks, not a second family.
+- Manjaro x86_64. No clean upstream rootfs tarball exists; only
+  Docker Hub layers (`manjarolinux/base:latest`). Adding it would
+  mean a small Docker Registry HTTP API client. Out of scope until
+  someone actually needs it; the Manjaro ARM impl validated the
+  `resolveBootstrap` hook in the meantime.
 
 ## Verification (2026-04-27)
 

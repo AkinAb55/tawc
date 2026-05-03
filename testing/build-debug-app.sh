@@ -12,9 +12,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+export TAWC_INSTALL_ID="${TAWC_INSTALL_ID:-arch}"
+
 app_name="gtk4-debug-app"
 src_dir="$SCRIPT_DIR/$app_name"
-chroot_root="/data/data/me.phie.tawc/distros/arch/rootfs"
+chroot_root="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/rootfs"
 build_dir="$chroot_root/tmp/$app_name"
 
 echo "=== $app_name: pushing source ==="

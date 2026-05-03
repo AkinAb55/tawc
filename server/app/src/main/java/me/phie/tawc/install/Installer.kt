@@ -18,7 +18,8 @@ import java.io.IOException
  *                             exists on disk; any failure parks it in
  *                             FAILED for the user to uninstall + retry.
  *   2. DOWNLOADING          — [BootstrapCache.download] using
- *                             `distro.linuxArch` as the cache key.
+ *                             `distro.cacheKey` (e.g. `arch-aarch64`,
+ *                             `manjaro-aarch64`) as the cache key.
  *   3. VERIFYING            — [SignatureVerifier.verify] checks the
  *                             tarball against the distro's
  *                             [BootstrapVerification] policy (PGP
@@ -84,6 +85,13 @@ class Installer(
         val appVersionCode = try {
             context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
         } catch (_: android.content.pm.PackageManager.NameNotFoundException) { 0L }
+        // Resolve the bootstrap descriptor before writing metadata so
+        // the persisted `sourceUrl` reflects the actual URL the install
+        // ran against (matters for distros with dynamic resolution like
+        // ManjaroArm, where the latest GitHub release tag changes
+        // weekly). Failure here aborts before disk state is laid down.
+        val bootstrap = distro.resolveBootstrap(log)
+
         store.save(
             Installation(
                 id = id,
@@ -91,7 +99,7 @@ class Installer(
                 arch = distro.androidAbi,
                 method = method.key,
                 installedAtMillis = System.currentTimeMillis(),
-                sourceUrl = distro.bootstrap.url,
+                sourceUrl = bootstrap.url,
                 state = Installation.State.INSTALLING,
                 installedAtAppVersionCode = appVersionCode,
             )
@@ -99,16 +107,16 @@ class Installer(
 
         // Stage 1: download. BootstrapCache owns the cache dir
         // entirely — filename scheme, freshness mtime, TTL janitor —
-        // so the installer just hands it (linuxArch, url, format).
+        // so the installer just hands it (cacheKey, url, format).
         progress(InstallProgress(
             InstallStage.DOWNLOADING,
             "Downloading ${distro.linuxArch} bootstrap…",
         ))
-        log("download: ${distro.bootstrap.url}")
+        log("download: ${bootstrap.url}")
         val cacheFile = cache.download(
-            distro.linuxArch,
-            distro.bootstrap.url,
-            distro.bootstrap.format,
+            distro.cacheKey,
+            bootstrap.url,
+            bootstrap.format,
         ) { read, total ->
             val pct = total?.let { ((read * 100) / it).toInt().coerceIn(0, 100) }
             val totalLabel = total?.let { HumanSize.format(it) } ?: "?"
@@ -132,8 +140,8 @@ class Installer(
             InstallStage.VERIFYING,
             "Verifying bootstrap signature…",
         ))
-        log("verify: ${distro.bootstrap.verification::class.simpleName}")
-        SignatureVerifier.verify(context, cacheFile, distro.bootstrap.verification)
+        log("verify: ${bootstrap.verification::class.simpleName}")
+        SignatureVerifier.verify(context, cacheFile, bootstrap.verification)
 
         // Stage 3: extract. The rootfs dir does not exist yet — the
         // gate only invokes install on a `(no dir)` slot — so the
@@ -143,13 +151,13 @@ class Installer(
         // chroot path; proot ignores it and decompresses via
         // zstd-jni) so all `cache/install/` files have one owner.
         progress(InstallProgress(InstallStage.EXTRACTING, "Extracting rootfs…"))
-        log("extract: ${cacheFile.name} -> $rootfsPath (strip=${distro.bootstrap.stripPrefix}, method=${method.key})")
+        log("extract: ${cacheFile.name} -> $rootfsPath (strip=${bootstrap.stripPrefix}, method=${method.key})")
         method.extractBootstrap(
             tarball = cacheFile,
             rootfs = rootfsPath,
-            format = distro.bootstrap.format,
-            stripPrefix = distro.bootstrap.stripPrefix,
-            tempFifo = cache.tempFifoFor(distro.linuxArch),
+            format = bootstrap.format,
+            stripPrefix = bootstrap.stripPrefix,
+            tempFifo = cache.tempFifoFor(distro.cacheKey),
         ) { line ->
             log("tar: $line")
         }

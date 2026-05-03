@@ -144,6 +144,7 @@ class InstallationService : Service() {
             ACTION_INSTALL -> startInstall(
                 intent.getStringExtra(EXTRA_ID) ?: Installation.DISTRO_ARCH,
                 intent.getStringExtra(EXTRA_METHOD),
+                intent.getStringExtra(EXTRA_DISTRO),
             )
             ACTION_UNINSTALL -> startUninstall(intent.getStringExtra(EXTRA_ID) ?: Installation.DISTRO_ARCH)
             else -> Log.w(TAG, "InstallationService started without a known action")
@@ -161,9 +162,10 @@ class InstallationService : Service() {
 
     /**
      * Begin an install for [id] using [methodKey] (or auto-pick if
-     * null). Refuses if the gate forbids it.
+     * null) and [distroKey] (or the host default if null). Refuses if
+     * the gate forbids it.
      */
-    fun startInstall(id: String, methodKey: String? = null) {
+    fun startInstall(id: String, methodKey: String? = null, distroKey: String? = null) {
         if (!Installation.isValidId(id)) {
             reject("install '$id'", "invalid id (allowed: ^[a-z0-9][a-z0-9_-]{0,31}$)")
             return
@@ -183,10 +185,22 @@ class InstallationService : Service() {
                 return
             }
         }
-        // Resolve the host's default distro before any disk state is
-        // written so an unsupported ABI (e.g. 32-bit-only or armeabi)
-        // is a clean reject rather than a half-installed FAILED slot.
-        val distro = DistroRegistry.defaultForHost()
+        // Resolve the requested distro (or fall back to the host
+        // default) before any disk state is written so an unsupported
+        // ABI / unknown distro key is a clean reject rather than a
+        // half-installed FAILED slot.
+        val distro = if (distroKey != null) {
+            DistroRegistry.forKey(distroKey) ?: run {
+                reject(
+                    "install '$id'",
+                    "unknown or host-incompatible distro '$distroKey' " +
+                        "(available: ${DistroRegistry.availableForHost().joinToString { it.key }})",
+                )
+                return
+            }
+        } else {
+            DistroRegistry.defaultForHost()
+        }
         if (distro == null) {
             reject("install '$id'", "no Distro supports ABI ${android.os.Build.SUPPORTED_ABIS.joinToString(",")}")
             return
@@ -617,12 +631,19 @@ class InstallationService : Service() {
         const val ACTION_UNINSTALL = "me.phie.tawc.install.SERVICE_UNINSTALL"
         const val EXTRA_ID = "id"
         const val EXTRA_METHOD = "method"
+        const val EXTRA_DISTRO = "distro"
 
-        fun startInstall(context: Context, id: String, methodKey: String? = null) {
+        fun startInstall(
+            context: Context,
+            id: String,
+            methodKey: String? = null,
+            distroKey: String? = null,
+        ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
                 .putExtra(EXTRA_ID, id)
             if (methodKey != null) i.putExtra(EXTRA_METHOD, methodKey)
+            if (distroKey != null) i.putExtra(EXTRA_DISTRO, distroKey)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i)
             } else {

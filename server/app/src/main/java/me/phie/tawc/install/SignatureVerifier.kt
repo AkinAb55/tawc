@@ -66,7 +66,47 @@ object SignatureVerifier {
 
             is BootstrapVerification.Pgp -> verifyPgp(context, tarball, verification)
             is BootstrapVerification.CrossMirrorMd5 -> verifyCrossMirrorMd5(tarball, verification)
+            is BootstrapVerification.Sha256 -> verifySha256(tarball, verification)
         }
+    }
+
+    /**
+     * Verify [tarball] against a known-good SHA-256 hex digest. Used
+     * when the upstream bootstrap source hands us the digest out of
+     * band (e.g. GitHub Releases API `digest` field, OCI manifest
+     * digest) — no PGP signature, no checksum sidecar, but the digest
+     * is fetched from a single trusted HTTPS endpoint by the caller's
+     * `resolveBootstrap` and passed in here. The integrity story is
+     * "trust this single TLS endpoint"; weaker than PGP, comparable
+     * in spirit to [None] with a sanity check that catches mid-
+     * download corruption / redirect-to-different-host.
+     */
+    private fun verifySha256(
+        tarball: File,
+        v: BootstrapVerification.Sha256,
+    ) {
+        val expected = v.expectedHex.lowercase()
+        require(expected.length == 64 && expected.all { it.isDigit() || it in 'a'..'f' }) {
+            "Sha256 expected hex must be 64 lowercase hex chars, got '${v.expectedHex}'"
+        }
+        val md = MessageDigest.getInstance("SHA-256")
+        tarball.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        val actual = md.digest().joinToString("") { "%02x".format(it) }
+        if (actual != expected) {
+            throw IOException(
+                "Bootstrap SHA-256 mismatch for ${tarball.name}: " +
+                    "expected $expected, got $actual. " +
+                    "Tarball is corrupt or tampered with.",
+            )
+        }
+        Log.i(TAG, "Bootstrap SHA-256 verified: ${tarball.name} ($actual)")
     }
 
     private fun verifyPgp(
@@ -317,5 +357,19 @@ sealed class BootstrapVerification {
      */
     data class CrossMirrorMd5(
         val checksumUrls: List<String>,
+    ) : BootstrapVerification()
+
+    /**
+     * Compare a known-good SHA-256 hex digest (passed in by the
+     * Distro's `resolveBootstrap` after fetching it from a single
+     * trusted HTTPS endpoint, e.g. the GitHub Releases REST API
+     * `digest` field or an OCI manifest blob digest). Catches mid-
+     * download corruption and redirect-to-different-host as a sanity
+     * check; the security stance still rests on the TLS endpoint
+     * that produced the digest. Stronger than [None]; weaker than
+     * [Pgp] (no detached-key chain).
+     */
+    data class Sha256(
+        val expectedHex: String,
     ) : BootstrapVerification()
 }

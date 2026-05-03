@@ -12,10 +12,13 @@
 #   - tawc app installed (this script reinstalls it during build).
 #     libhybris ships inside the APK as an asset and is symlinked into
 #     each rootfs at install time — no on-device libhybris build step.
-#   - In-app Arch chroot installed at
-#     /data/data/me.phie.tawc/distros/arch/. Install via:
+#   - In-app chroot installed at
+#     /data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/ (default
+#     `arch`). Install via:
 #       adb shell am start -n me.phie.tawc/.install.InstallActivity \
-#           --es autoStart true --es id arch
+#           --ez autoStart true --es id <id> [--es distro <distro>]
+#     Set `TAWC_INSTALL_ID=<id>` (or pass via shell env) to test
+#     against a different slot — e.g. a Manjaro install at id=manjaro.
 #   - Test-suite chroot packages installed (run
 #     `bash testing/install-test-deps.sh` once per chroot install)
 #   - JAVA_HOME set or java-21-openjdk installed at default path
@@ -93,8 +96,8 @@ ERROR: in-app install not found at $INSTALL_DIR/.
 
 Install it from the host:
   adb shell am start -n me.phie.tawc/.install.InstallActivity \\
-      --es autoStart true --es id $INSTALL_ID \\
-      [--es method chroot|proot|tawcroot]
+      --ez autoStart true --es id $INSTALL_ID \\
+      [--es method chroot|proot|tawcroot] [--es distro <distro>]
 
 Then tail progress:
   adb logcat -s tawc-install

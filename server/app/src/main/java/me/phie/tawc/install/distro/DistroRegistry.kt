@@ -3,6 +3,7 @@ package me.phie.tawc.install.distro
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.distro.arch.ArchLinuxArm
 import me.phie.tawc.install.distro.arch.ArchLinuxX86_64
+import me.phie.tawc.install.distro.manjaro.ManjaroArm
 import me.phie.tawc.install.util.HostArch
 
 /**
@@ -16,6 +17,7 @@ object DistroRegistry {
     val all: List<Distro> = listOf(
         ArchLinuxX86_64,
         ArchLinuxArm,
+        ManjaroArm,
     )
 
     /**
@@ -28,12 +30,26 @@ object DistroRegistry {
         all.firstOrNull { it.key == inst.distro && it.androidAbi == inst.arch }
 
     /**
-     * Distro auto-selected for a fresh install on this host. Today
-     * this is a 1:1 ABI→Distro lookup; once we support multiple distro
-     * families (Ubuntu, Fedora, …) the install activity will grow a
-     * picker that filters [all] by ABI and the service will accept a
-     * `--es distro <key>` extra.
+     * Distros that can be installed on this host (matching the host's
+     * primary Android ABI). The install activity uses this for its
+     * distro radio; the service uses [forKey] to resolve the user's
+     * pick.
      */
-    fun defaultForHost(): Distro? =
-        all.firstOrNull { it.androidAbi == HostArch.primaryAbi() }
+    fun availableForHost(): List<Distro> =
+        all.filter { it.androidAbi == HostArch.primaryAbi() }
+
+    /**
+     * Distro auto-selected for a fresh install on this host when the
+     * caller doesn't specify one. First match wins — kept for the
+     * `am start` autoStart path that doesn't pass a distro extra.
+     */
+    fun defaultForHost(): Distro? = availableForHost().firstOrNull()
+
+    /**
+     * Resolve a `(key, host-abi)` pair to a Distro. Used by
+     * [me.phie.tawc.install.InstallationService] to validate the
+     * `--es distro` install extra against the device's actual ABI.
+     */
+    fun forKey(distroKey: String): Distro? =
+        availableForHost().firstOrNull { it.key == distroKey }
 }
