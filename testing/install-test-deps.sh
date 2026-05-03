@@ -8,8 +8,9 @@
 # installs in the middle of a test.
 #
 # Prerequisites:
-#   - Android device or emulator connected via adb (set TAWC_TARGET= if
-#     multiple targets are connected)
+#   - Android device or emulator connected via adb and selected via
+#     ./.tawctarget or TAWC_TARGET=device|emulator (see
+#     client/select-device.sh)
 #   - In-app chroot installed at
 #     /data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/ (default
 #     `arch`; install from the app's home screen, or `am start -n

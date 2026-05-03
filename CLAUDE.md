@@ -39,8 +39,10 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 ## Workflow
 - Debugging against both a real Android phone via adb or an emulator (x86_64 AVD with Magisk) are supported
 - libhybris/GPU drivers are not supported on thet emulator — see [emulator.md](notes/emulator.md)
-- A device can be selected with `TAWC_TARGET=device` or `TAWC_TARGET=emulator`, however generally default target should be automatically picked up (specified in `./.tawctarget`)
-- Use the default device unless explicitly requested/approved by the user.
+- The standing target is set in `./.tawctarget` (one word: `device`, `emulator`, or `none`). A missing file or `none` means **no device interaction is permitted** — every host script (`client/tawc-chroot-run`, `testing/run-integration-tests.sh`, `testing/install-test-deps.sh`, `tawcroot/test --device`, …) sources `client/select-device.sh` and will refuse to run. This is the default on a fresh checkout.
+- **Never edit `.tawctarget` yourself** — it represents the user's standing choice. To use a different target for one command, set `TAWC_TARGET=device` or `TAWC_TARGET=emulator` (or `ANDROID_SERIAL=<serial>`) on the command line. Don't rewrite the file.
+- Single-target auto-fallback is intentionally absent: with no opt-in, host scripts won't talk to whatever happens to be plugged in. A target mismatch (e.g. `.tawctarget=emulator` but the AVD isn't running) is also a hard error — bring the right target up, or override `TAWC_TARGET` for that command. Never silently substitute the other kind.
+- If the target is `none` and the user asks you to do something that needs a device, ask them which target to use rather than picking one yourself.
 - **Always start the emulator with `bash client/start-emulator`.** Never launch qemu / `emulator -avd ...` directly (one-shot or `nohup` invocations skip the post-boot setup the script performs — `setenforce 0`, `immersive_mode_confirmations`, Gboard disable, Magisk-su grant for `me.phie.tawc`, POST_NOTIFICATIONS, etc.). Without that setup the compositor doesn't render, the install service can't `su`, and tests silently misbehave. The script is idempotent: if the AVD is already running it just (re-)applies the post-boot setup, so when in doubt just run it.
 - Work autonomously when possible. If you need human help to set up your dev loop, ask
 - When analyzing screenshots, use a sub-agent so the image doesn't end up in main context
@@ -52,6 +54,9 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - Feel free to check out different commits/bisect/etc when needed, but always end up back where you started unless explicitly asked
 - Git push hangs on this system without user approval, only push if explicitly asked
 - Never `/schedule` anything, and never suggest using `/schedule` unprompted — only use the feature when the user explicitly asks for it
+
+## Less is more
+Don't be too long-winded in docs, comments, error messages, output to user and prose generally. Keep stuff compact and to-the-point, you're not being paid by the word. Only include extensive details where appropriate and actually useful.
 
 ## Background
 The compositor clears every frame to a flat color matching the rest of the app's UI (Material3 dark surface, ~`#141218`). The constant is `BACKGROUND_COLOR` in `render.rs`.

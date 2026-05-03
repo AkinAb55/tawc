@@ -8,7 +8,9 @@
 #
 # Prerequisites:
 #   - Android device or emulator connected via adb with root (su) access
-#     (multiple targets: set TAWC_TARGET=device|emulator first)
+#     and selected via ./.tawctarget or TAWC_TARGET=device|emulator
+#     (see client/select-device.sh -- no auto-fallback to a single
+#     connected target).
 #   - tawc app installed (this script reinstalls it during build).
 #     libhybris ships inside the APK as an asset and is symlinked into
 #     each rootfs at install time — no on-device libhybris build step.

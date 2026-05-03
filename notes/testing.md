@@ -74,8 +74,10 @@ runtime dependencies on the host.
 ### Running
 
 `testing/run-integration-tests.sh` is the recommended entry point. It
-picks the device via `client/select-device.sh` (`TAWC_TARGET=device|emulator`
-if both are connected), builds and deploys everything, then runs cargo.
+picks the device via `client/select-device.sh` (resolves
+`./.tawctarget` / `TAWC_TARGET`; no auto-fallback to a single
+connected target — see [emulator.md](emulator.md)), builds and
+deploys everything, then runs cargo.
 
 The script takes one optional positional arg — a libtest substring
 filter forwarded to `cargo test` — plus `--no-build` / `-n`.
@@ -89,8 +91,9 @@ bash testing/run-integration-tests.sh --no-build ...  # skip rebuild/redeploy
 
 Direct `cargo test` invocations work too — they just need
 `source client/select-device.sh` first so cargo inherits
-`ANDROID_SERIAL`. Without it the harness's `adb` calls fail silently
-when more than one target is connected.
+`ANDROID_SERIAL`. The source step also enforces the standing target,
+so a stale `cargo test` from a `.tawctarget=none` checkout fails fast
+instead of attaching to the wrong target.
 
 Prerequisites: a phone (or emulator) connected via adb, the tawc app
 installed, the in-app Arch chroot installed (via `am start … --es
