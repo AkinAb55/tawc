@@ -1,0 +1,212 @@
+/* PT_LOAD mapper. See include/loader_map.h.
+ *
+ * No syscalls live here — every kernel touch goes through the io
+ * vtable. That makes the mapper testable from cleat (under hosted
+ * glibc) by passing a libc-forwarding io impl, against the same
+ * binary the kernel itself would map on `execve`.
+ *
+ * Reference reading (no code copied):
+ *   musl ldso/dynlink.c::map_library — addr_min/max + BSS partial-page
+ *     dance.
+ *   Linux fs/binfmt_elf.c::elf_map / load_elf_binary — kernel side.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "loader_map.h"
+
+/* errno values matching Linux uapi. */
+#define TAWC_EINVAL    22
+#define TAWC_ENOENT    2
+#define TAWC_ERANGE    34
+
+/* tawc_strings.h not pulled in — we don't need any string ops here.
+ * memset for BSS partial-page is open-coded below. */
+static void zero_range(void *p, size_t n)
+{
+	uint8_t *b = (uint8_t *)p;
+	for (size_t i = 0; i < n; i++) b[i] = 0;
+}
+
+static int loader_prot_to_mmap(unsigned p)
+{
+	int r = 0;
+	if (p & TAWC_LOADER_PROT_R) r |= TAWC_MM_PROT_READ;
+	if (p & TAWC_LOADER_PROT_W) r |= TAWC_MM_PROT_WRITE;
+	if (p & TAWC_LOADER_PROT_X) r |= TAWC_MM_PROT_EXEC;
+	return r;
+}
+
+/* Compute AT_PHDR address for the synthesized auxv. The result is the
+ * runtime address (already biased by `base` for ET_DYN). Strategy:
+ *   - If PT_PHDR was present, use phdr_vaddr (image-relative) + base.
+ *   - Otherwise fall back to e_phoff under the first PT_LOAD: the
+ *     program headers live in the file at e_phoff, and if the first
+ *     PT_LOAD covers e_phoff (which it does in every real binary —
+ *     binutils always lays out the headers inside the first
+ *     readable load), the in-memory address is
+ *         loads[0].vaddr_lo + (e_phoff - loads[0].file_offset) + base
+ *
+ * Returns 0 if neither path can produce a sensible address (pathological
+ * binary), and the caller should refuse to load. */
+static uintptr_t compute_phdr_addr(const struct tawc_loader_image *img,
+                                   uintptr_t base)
+{
+	if (img->phdr_present)
+		return base + (uintptr_t)img->phdr_vaddr;
+
+	if (img->n_loads == 0) return 0;
+	const struct tawc_loader_seg *s = &img->loads[0];
+	uint64_t phoff = img->e_phoff;
+	if (phoff < s->file_offset) return 0;
+	uint64_t off_in_load = phoff - s->file_offset;
+	if (off_in_load >= s->file_size) return 0;
+	/* The phdr table itself must live entirely inside the mapped
+	 * file_size of the first load — otherwise AT_PHDR points at
+	 * mapped+unmapped boundary and ld.so SEGVs reading it. */
+	uint64_t phsize = (uint64_t)img->e_phnum * (uint64_t)img->e_phentsize;
+	if (phsize > s->file_size - off_in_load) return 0;
+	return base + s->vaddr_lo + (uintptr_t)off_in_load;
+}
+
+long tawc_loader_map(const struct tawc_loader_image *img,
+                     int fd, uintptr_t requested_base, size_t page_size,
+                     const struct tawc_loader_io *io,
+                     struct tawc_loader_placement *out)
+{
+	if (!img || !io || !out || !io->mmap || !io->mprotect || !io->munmap)
+		return -TAWC_EINVAL;
+	if (img->n_loads == 0)
+		return -TAWC_EINVAL;
+	if (page_size < 4096 || (page_size & (page_size - 1)))
+		return -TAWC_EINVAL;
+
+	const int is_dyn = (img->e_type == TAWC_ET_DYN);
+	uintptr_t base = 0;
+	uintptr_t span = (uintptr_t)img->addr_max;
+
+	/* Step 1: reservation (ET_DYN only). For ET_EXEC the per-segment
+	 * MAP_FIXED_NOREPLACE handles overlap detection. */
+	if (is_dyn) {
+		int flags = TAWC_MM_MAP_PRIVATE | TAWC_MM_MAP_ANON;
+		void *hint = (void *)0;
+		if (requested_base != 0) {
+			flags |= TAWC_MM_MAP_FIXED_NOREPLACE;
+			hint = (void *)requested_base;
+		}
+		uintptr_t rv = io->mmap(io->ctx, hint, span,
+		                        TAWC_MM_PROT_NONE, flags, -1, 0);
+		if (tawc_loader_mmap_is_err(rv))
+			return tawc_loader_mmap_errno(rv);
+		base = rv;
+	} else {
+		/* ET_EXEC: addresses are absolute; ignore requested_base. */
+		base = 0;
+	}
+
+	/* Step 2: per-segment mapping. */
+	for (unsigned i = 0; i < img->n_loads; i++) {
+		const struct tawc_loader_seg *s = &img->loads[i];
+
+		/* Need write while we memset the BSS partial-page slice. */
+		int has_partial = s->bss_partial_hi > s->bss_partial_lo;
+		int needs_temp_w = has_partial && !(s->prot & TAWC_LOADER_PROT_W);
+		int seg_prot = loader_prot_to_mmap(s->prot);
+		int load_prot = needs_temp_w ? (seg_prot | TAWC_MM_PROT_WRITE) : seg_prot;
+
+		uintptr_t seg_va = base + s->vaddr_lo;
+
+		/* (a) File-backed mapping. Skip if file_size == 0 (rare:
+		 * pure-BSS PT_LOAD). */
+		if (s->file_size > 0) {
+			int flags;
+			if (is_dyn) {
+				/* Replace part of the reservation. MAP_FIXED is
+				 * required because the kernel's MAP_FIXED_NOREPLACE
+				 * would refuse to overwrite our PROT_NONE
+				 * reservation. */
+				flags = TAWC_MM_MAP_PRIVATE | TAWC_MM_MAP_FIXED;
+			} else {
+				flags = TAWC_MM_MAP_PRIVATE |
+				        TAWC_MM_MAP_FIXED_NOREPLACE;
+			}
+			uintptr_t rv = io->mmap(io->ctx, (void *)seg_va,
+			                        s->file_size, load_prot, flags,
+			                        fd, s->file_offset);
+			if (tawc_loader_mmap_is_err(rv))
+				return tawc_loader_mmap_errno(rv);
+		}
+
+		/* (b) BSS partial-page zero-fill. Only if there's something
+		 * to clear AND the file mapping covered it. */
+		if (has_partial && s->file_size > 0) {
+			zero_range((void *)(base + s->bss_partial_lo),
+			           s->bss_partial_hi - s->bss_partial_lo);
+		}
+
+		/* (c) Drop the temporary write bit if we added one. */
+		if (needs_temp_w && s->file_size > 0) {
+			long rc = io->mprotect(io->ctx, (void *)seg_va,
+			                       s->file_size, seg_prot);
+			if (rc < 0) return rc;
+		}
+
+		/* (d) Anonymous BSS extension pages. */
+		if (s->bss_anon_hi > s->bss_anon_lo) {
+			int flags = TAWC_MM_MAP_PRIVATE | TAWC_MM_MAP_ANON |
+			            TAWC_MM_MAP_FIXED;
+			uintptr_t alen = s->bss_anon_hi - s->bss_anon_lo;
+			uintptr_t avirt = base + s->bss_anon_lo;
+			uintptr_t rv = io->mmap(io->ctx, (void *)avirt, alen,
+			                        seg_prot, flags, -1, 0);
+			if (tawc_loader_mmap_is_err(rv))
+				return tawc_loader_mmap_errno(rv);
+		}
+
+		/* For ET_EXEC: pure-BSS segments (file_size == 0). The
+		 * MAP_FIXED_NOREPLACE anonymous mmap above already placed
+		 * them. For ET_DYN: same — replace the reservation pages. */
+	}
+
+	out->base       = base;
+	out->span       = span;
+	out->entry      = base + (uintptr_t)img->e_entry;
+	out->phdr_addr  = compute_phdr_addr(img, base);
+	out->phnum      = img->e_phnum;
+	out->phentsize  = img->e_phentsize;
+	return 0;
+}
+
+long tawc_loader_unmap(const struct tawc_loader_placement *placement,
+                       const struct tawc_loader_io *io)
+{
+	if (!placement || !io || !io->munmap) return -TAWC_EINVAL;
+	if (placement->span == 0) return 0;
+	return io->munmap(io->ctx, (void *)placement->base, placement->span);
+}
+
+long tawc_loader_read_interp(int fd, const struct tawc_loader_image *img,
+                             char *out_path, size_t out_cap,
+                             const struct tawc_loader_io *io)
+{
+	if (!img || !out_path || !io || !io->pread) return -TAWC_EINVAL;
+	if (!img->interp_present) return -TAWC_ENOENT;
+	if (img->interp_size == 0) return -TAWC_EINVAL;
+	if (img->interp_size > out_cap) return -TAWC_ERANGE;
+
+	long n = io->pread(io->ctx, fd, out_path, img->interp_size,
+	                   img->interp_offset);
+	if (n < 0) return n;
+	if ((uint64_t)n != img->interp_size) return -TAWC_EINVAL;
+	/* PT_INTERP includes a trailing NUL; sanity-check that it does and
+	 * also defensively NUL-terminate at out_cap-1 in case the binary
+	 * lies. */
+	if (out_path[img->interp_size - 1] != '\0') {
+		if (img->interp_size < out_cap)
+			out_path[img->interp_size] = '\0';
+		else
+			out_path[out_cap - 1] = '\0';
+	}
+	return 0;
+}

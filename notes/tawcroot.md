@@ -28,27 +28,36 @@ uid/stat behavior, and Android-specific syscall fixups all happen
 in-process, in the same thread that issued the syscall. No tracer
 process, no `ptrace`, no per-syscall context switch.
 
-## Language: C + cleat
+## Language: C, with cleat for tests only
 
-Plain C (C11), compiled with NDK clang for arm64-v8a and x86_64.
-For containers, managed strings, and the test framework we use
+Plain C (C11), compiled with NDK clang for arm64-v8a and x86_64. The
+production tawcroot binary has **no third-party deps**. It links
+nothing but the kernel ABI: hand-rolled raw-syscall stubs, hand-rolled
+io helpers (`tawc_io_*`), no libc, no cleat, no STC.
+
 [cleat](https://codeberg.org/sphi/cleat) — Sophie's C library that
 bundles a unit-test framework and wraps [STC](https://github.com/stclib/STC)'s
-generic containers behind cleat's own generics API. cleat is the
-*only* third-party dep; we use cleat's vendored STC, not a separate
-STC checkout.
+generic containers — is used **only by the host-side test orchestrator**
+(`build/tawcroot-host/tests`). It is a hosted glibc binary that forks
+the tawcroot binaries as subprocesses; cleat / STC code never runs
+inside `libtawcroot.so` or `tawcroot-testhost`.
 
-cleat lives in `./cleat/`, cloned at a pinned tag and `.gitignore`d
+cleat lives in `./cleat/`, cloned at a pinned commit and `.gitignore`d
 (same pattern as `libhybris/`, `libxkbcommon/`, `proot/`). The
-build script clones it on first run; nothing to package separately.
+build script clones it on first run for `--abi=host`; nothing to
+package separately. Cross-builds (aarch64/x86_64) never reference
+cleat.
 
-**Use cleat's generics, not raw STC.** When we need a generic
-container (vec, map, set, smart pointer), instantiate it through
-cleat's wrapper macros, not STC's `#define i_type … #include "stc/vec.h"`
-forms directly. The wrappers give us a consistent surface (naming,
-iteration, ownership conventions) shared with the rest of Sophie's C
-code. Raw STC is fine to *read* through cleat's headers but we don't
-write call sites against it.
+**Containers in production code:** if/when production needs a
+container (bind table, BPF generator's program buffer, …), use
+hand-rolled fixed-size C arrays / open-coded structures. The
+constraints (`-static -nostdlib -no-pie -ffreestanding`, no malloc,
+no glibc) mean STC isn't reachable anyway. The bind table is built
+once at init from a flat C array; the handler walks the array
+directly. Anything that requires growing-on-demand allocation
+belongs out-of-handler and out-of-production: extract a pure
+function, test it under cleat, encode the result as a flat C array
+in the runtime.
 
 Why C, not C++ or Rust:
 - **Rust** is the worst fit for the hot path. The SIGSYS handler
@@ -63,27 +72,42 @@ Why C, not C++ or Rust:
   templates, `string_view`) but adds toolchain weight (libc++
   static-link, `-fno-exceptions -fno-rtti -fno-unwind-tables`,
   watching for hidden allocations / destructors crossing the
-  handler boundary) for benefits cleat/STC can largely replicate.
-- **C + cleat** is the simplest thing that works. C is the lingua
+  handler boundary) for not much in return. Production tawcroot
+  doesn't have a libc to begin with; the bits where C++ would help
+  (test scaffolding) live in the cleat-orchestrator process anyway.
+- **Plain C** is the simplest thing that works. C is the lingua
   franca of the bits we touch (signal handlers, asm stubs, kernel
-  ABI, ELF parsing, BPF). cleat (via STC) fills C's worst gaps —
-  managed strings, vecs/maps for the bind table and BPF generator,
-  smart-ish pointers for ownership — and gives us a test framework
-  in the same dep. We get C's predictability and footprint with a
-  meaningful chunk of C++'s ergonomics. The handler avoids cleat
-  entirely (no allocation, no hidden control flow); init/parsing/
-  tests use it freely.
+  ABI, ELF parsing, BPF), it links cleanly with `-nostdlib`, and
+  the things C is bad at (managed strings, regex, generic
+  containers) we don't actually need *inside production* — the
+  bind table is a flat array, paths are fixed-size buffers, the BPF
+  program is a static `struct sock_filter[]`. Where we *do* want
+  those niceties (test setup, path-translation unit tests once
+  extracted, BPF generator validation), they live in the cleat
+  test runner outside `libtawcroot.so`.
 
 Constraints baked into the design:
-- **In the SIGSYS handler:** no malloc, no cleat/STC, no stdio,
-  nothing that takes a lock, and no libc calls at all unless we have
+- **Production binary (`libtawcroot.so` / host `tawcroot`):** no
+  libc, no malloc, no cleat, no STC, no stdio, no third-party deps
+  at all. `-static -nostdlib -nostartfiles -no-pie -ffreestanding`.
+  All syscalls go through the raw stub in `arch/<arch>_stub.S`;
+  all formatted output goes through `tawc_io_*`. The seccomp filter
+  + handler structure relies on this — see §"Why non-PIE".
+- **In the SIGSYS handler specifically:** no allocation, no stdio,
+  nothing that takes a lock, no libc calls at all unless we have
   audited the generated code. Path buffers are fixed-size on the
-  handler's stack (`char buf[PATH_MAX]`). The bind table is built
-  once at init using cleat containers and converted to a flat C
-  array referenced by the handler — the handler walks the array,
-  not the cleat-wrapped vec.
-- **Outside the handler** (init, argv parsing, ELF reading,
-  tests): cleat freely, via its generics surface.
+  handler's stack (`char buf[PATH_MAX]`). The bind table is a flat
+  C array built at init.
+- **Testhost binary (`tawcroot-testhost`):** same constraints as
+  production — it's the same `_start`, same raw-syscall stub, same
+  filter, same handler. The only difference is `-DTAWCROOT_TESTHOST`
+  routes argv-dispatch in `main.c` to `tawcroot_testhost_main()`
+  (defined under `tawcroot/tests/testhost/src/`). cleat / STC are NOT linked
+  here either; the smoke driver uses the same `tawc_io_*` helpers.
+- **Cleat test runner (`tests`):** hosted glibc binary, fully
+  cleat-using. Forks the tawcroot binaries as subprocesses; never
+  shares an address space with them. This is the *only* place cleat
+  / STC code ever runs in this project.
 - Compile with `-O2 -fno-strict-aliasing -fvisibility=hidden
   -fno-stack-protector -static -no-pie`. Strip hard. No global
   constructors, sanitizers, profiling instrumentation, or implicit
@@ -198,8 +222,11 @@ those things later cheap, not just to ship MVP fast:
 - **The dispatch table is a fixed array indexed by syscall number**,
   with `NULL` for unhandled. Adding a syscall means filling a
   slot and adding it to the BPF allowlist — no ordering hazards.
-- **The BPF filter is generated from a syscall list** at build
-  time, single source of truth shared with the dispatch table.
+- **The BPF filter is generated from the dispatch table** at
+  runtime (in `prod_rootfs_init`, via
+  `tawcroot_dispatch_trap_list`). The dispatch table — populated by
+  per-subsystem `..._register()` calls — is the single source of
+  truth shared between handler routing and the BPF allowlist.
 - **Path translation, ELF parsing, bind-table lookup, and fake-root
   metadata decoration are separate from the handler dispatch**, so
   new policy (e.g. more complete xattr or device-node emulation)
@@ -366,8 +393,9 @@ rootfs fd out from under the next translated `openat`.
 
 **Re-exec state handoff.** The one exception to the `O_CLOEXEC`
 rule is a short-lived `exec_state_fd`, created by the `execve`
-handler immediately before re-execing tawcroot. It is passed as
-`--state-fd=<n>` in the child argv, intentionally *without*
+handler immediately before re-execing tawcroot. It is passed as the
+positional argv slot after `--exec-child` (i.e. `argv[2]`,
+formatted as a decimal integer), intentionally *without*
 `FD_CLOEXEC` for that one host exec. `--exec-child` reads it through
 `tawcroot_raw_syscall()`, reconstructs process state, then closes it
 before manually jumping to guest code. The fd is never visible to the
@@ -400,10 +428,11 @@ guest environment verbatim is part of the contract.
 
 **Environment rule.** `--exec-child` does not consult `environ` for
 tawcroot configuration. Internal state travels through the initial
-CLI or through `--state-fd=<n>` on re-exec. This makes "envp passes
-through verbatim" practical: the child may enumerate `environ` only
-to copy the guest environment onto the synthesized guest stack, not
-to interpret tawcroot settings.
+CLI or through the positional `<state-fd>` slot of `--exec-child`'s
+argv on re-exec. This makes "envp passes through verbatim"
+practical: the child may enumerate `environ` only to copy the guest
+environment onto the synthesized guest stack, not to interpret
+tawcroot settings.
 
 ## SIGSYS handler
 
@@ -528,23 +557,31 @@ tawcroot_raw_syscall_ret:
     ret
 ```
 
-There are two related addresses, and mixing them up breaks the
+There are three related addresses, and mixing them up breaks the
 whole design:
 
+- The label sitting **on** the SYSCALL/SVC instruction
+  (`tawcroot_raw_syscall_insn`) is the address of the trapping
+  instruction in the binary.
 - `seccomp_data.instruction_pointer` and `siginfo->si_call_addr`
-  identify the syscall instruction that triggered seccomp.
+  identify the **post-syscall PC** — the address of the instruction
+  immediately *after* the SYSCALL/SVC. Linux populates both fields
+  from `pt_regs->ip` / `pt_regs->pc`, which the syscall-entry asm
+  sets to the saved-return PC (the next instruction). Confirmed
+  empirically on x86_64 and aarch64 — see the smoke driver in
+  `tawcroot/src/main.c`. SYSCALL is 2 bytes on x86_64, SVC is 4
+  bytes on aarch64; the post-syscall PC is the *insn label + insn
+  size*, which is the same address as `tawcroot_raw_syscall_ret`.
 - The saved program counter in `ucontext_t` is the resume PC; for
-  `SECCOMP_RET_TRAP` it is already positioned as though the syscall
-  instruction completed, so resuming after the handler continues at
-  the instruction after `SYSCALL`/`SVC`.
+  `SECCOMP_RET_TRAP` it equals `instruction_pointer` (resuming after
+  the handler continues at the instruction after `SYSCALL`/`SVC`).
 
 The BPF filter therefore checks
-`instruction_pointer == &tawcroot_raw_syscall_insn` and `RET_ALLOW`s
-just that one instruction address. Anything else executing a
+`instruction_pointer == &tawcroot_raw_syscall_ret` (NOT `_insn`) and
+`RET_ALLOW`s just that one address. Anything else executing a
 SYSCALL/SVC is guest code and follows the normal trap table.
 
-(On aarch64 the equivalent uses `svc #0`; same label-on-the-insn
-pattern.)
+(On aarch64 the equivalent uses `svc #0`; same `_ret`-label pattern.)
 
 The stub symbols (`tawcroot_raw_syscall`,
 `tawcroot_raw_syscall_insn`, `tawcroot_raw_syscall_ret`) should be
@@ -555,12 +592,14 @@ the symbols can't be interposed by code the guest later mmaps (some
 debug/ptrace tooling does this).
 
 **Must-test before phase 1:** a tiny Android smoke binary installs a
-filter that allows exactly `&tawcroot_raw_syscall_insn`, traps a
+filter that allows exactly `&tawcroot_raw_syscall_ret`, traps a
 normal syscall from elsewhere, and records both `si_call_addr` and
 the saved resume PC from `ucontext_t` for x86_64 and aarch64. If
-the observed filter address is not the syscall-instruction label,
+the observed filter address is not the post-syscall PC label,
 stop and fix the stub/filter contract before implementing path
-translation. The same smoke must issue every raw syscall the handler
+translation. (Status: passing on x86_64 emulator — see
+`tawcroot/src/main.c::smoke_phase0` and the comment in `filter.c`
+where the `_ret`-vs-`_insn` discrepancy is documented.) The same smoke must issue every raw syscall the handler
 or `--exec-child` bootstrap plans to use (`openat`, `read`, `write`,
 `close`, `mmap`, `mprotect`, `munmap`, `getcwd`, `readlinkat`,
 `fstatat`/`statx`, `fcntl`, `execveat`, state-fd creation, etc.).
@@ -572,7 +611,7 @@ primitive before building on it.
 ### Why non-PIE
 
 The IP-based allowlisting in the BPF filter bakes
-`&tawcroot_raw_syscall_insn` as a fixed address literal into the
+`&tawcroot_raw_syscall_ret` as a fixed address literal into the
 filter program at install time. The filter is kernel state, inherited
 across `execve`, and **cannot be modified or removed** — only new
 filters can be stacked on top. Seccomp filter stacking uses a
@@ -607,10 +646,23 @@ Consequences:
   handler (reset by `execve`) and re-opens the rootfs fd / bind
   table.
 - Pick base addresses that avoid the guest's normal mapping
-  region. Use `-Wl,-Ttext-segment=<addr>`: **0x2000000000** for
-  aarch64, **0x600000000000** for x86_64 (same convention proot's
-  loader uses — high enough to avoid guest binary + ld.so + shared
-  libs, low enough to be in valid user address space).
+  region. Use `-Wl,--image-base=<addr>` (NDK lld does **not**
+  support `-Ttext-segment` — it errors out and explicitly
+  recommends `--image-base`). Bases:
+  **0x2000000000** for aarch64 (matches proot's `LOADER_ADDRESS`),
+  **0x40000000** for x86_64. The aarch64 number can be high
+  because `R_AARCH64_CALL26` and friends are PC-relative and the
+  binary is internally self-consistent. The x86_64 number is
+  forced down to ~1 GB by static-bionic's `libc.a`: it contains
+  `R_X86_64_PLT32` references to weak-undefined symbols (e.g.
+  `__loader_add_thread_local_dtor` from `__cxa_thread_atexit_impl.o`,
+  `__scudo_default_options` from scudo's `flags.o`) that the static
+  link resolves to address 0. The PLT32 displacement from our `.text`
+  to 0 must fit in a signed 32-bit immediate, so any base above ~2 GB
+  fails the link with "relocation R_X86_64_PLT32 out of range." 1 GB
+  comfortably clears the typical ET_EXEC default base (0x400000) and
+  sits far below where Linux/glibc ld.so loads (~0x7f00_0000_0000),
+  while leaving 1 GB of headroom under the 2 GB PLT32 ceiling.
 - No ASLR for tawcroot itself. Acceptable — tawcroot is not a
   security boundary (§"What it explicitly is not"), and the guest
   can read `/proc/self/maps` to find our address anyway.
@@ -672,10 +724,16 @@ hardening:
 - `rt_sigprocmask` / `sigprocmask`: prevent guest code from blocking
   real `SIGSYS`. Maintain a guest-visible shadow mask if needed, but
   clear `SIGSYS` before forwarding the real mask to the kernel.
-- `seccomp` and `prctl(PR_SET_SECCOMP, ...)`: reject with `-EPERM` or
-  `-ENOSYS` for MVP. Allowing the guest to stack filters means future
-  traps may arrive with different `RET_DATA` and different intended
-  semantics, and `KILL`/`ERRNO` actions could preempt translation.
+- `seccomp(SECCOMP_SET_MODE_*)` and `prctl(PR_SET_SECCOMP, ...)`:
+  pretend success — return `0` without installing the guest's filter.
+  We can't honestly install it (it'd stack on top of ours and could
+  `KILL_PROCESS` our own raw_syscall stub), and `-EPERM` was worse:
+  Mozilla's content sandbox treats `EPERM` as fatal and triggers a
+  teardown that aborts inside libhybris's bionic-Q linker on the
+  `unregister_tls_module` CHECK. Since the guest's filter is purely
+  defense-in-depth on top of tawcroot's translation enforcement,
+  faking success is sound. Read-only seccomp ops
+  (`SECCOMP_GET_ACTION_AVAIL` etc.) still pass through verbatim.
 - `prctl(PR_GET_SECCOMP)` may return the host truth (`2`) or a
   guest-compatible value if a workload needs it; do not lie in ways
   that encourage a program to install a filter we will reject.
@@ -686,9 +744,10 @@ compatible with the threading rules above; do not protect it with
 malloc-backed containers or libc locks from inside the handler.
 
 Tests must cover at least: guest `sigaction(SIGSYS, SIG_DFL)`, guest
-blocking `SIGSYS`, guest `prctl(PR_SET_SECCOMP)`, and a path syscall
-after each attempt. The expected result is that path translation still
-works.
+blocking `SIGSYS`, guest `prctl(PR_SET_SECCOMP)` / `seccomp(2)` (both
+must observe success on `SET_MODE_*` without actually installing the
+filter), and a path syscall after each attempt. The expected result
+is that path translation still works.
 
 ### Why the handler is async-signal-safe
 
@@ -847,6 +906,16 @@ Then apply these rules to the guest-absolute path `P`:
    the source string of `symlink(2)`, or converting `lstat` into
    `stat`.
 
+   **`AT_EMPTY_PATH` on plain `openat` is NOT a portable shortcut.**
+   It only landed in kernel 6.6 (`openat2` got it earlier, but plain
+   `openat(dirfd, "", AT_EMPTY_PATH, ...)` returns `-ENOENT` on
+   anything older). When the translated suffix is empty (guest asked
+   for "/"), pass `"."` instead — that resolves to the dir `dirfd`
+   refers to and works on every kernel we target. For `chdir`, just
+   `fchdir(base_fd)` directly when the suffix is empty. For
+   `*statat`/`readlinkat`/etc the flag is well-supported and fine.
+   (Confirmed empirically on Android 16 / kernel 6.6 emulator.)
+
    **Optional optimization for kernel ≥ 5.6:** for `openat`
    specifically, use `openat2` with `RESOLVE_IN_ROOT` to let the
    kernel do the clamping (kernel treats our rootfs fd as `/`,
@@ -957,9 +1026,12 @@ the dispatch table is generated from a syscall list at build time.
   rootfs prefix, prepend `/`, or look up a bind source and emit
   the bound destination).
 - `chroot` — guest-issued chroot is interesting. proot rejects it
-  or rebinds. We start with reject (`-EPERM`) and revisit if a
-  guest actually needs to chroot inside the chroot.
-- `pivot_root`, `mount`, `umount2` — return `-EPERM`. Same logic.
+  or rebinds. We reject (`-EPERM`, `fake_eperm` in
+  `syscalls_control.c`) and revisit if a guest actually needs to
+  chroot inside the chroot.
+- `pivot_root`, `mount`, `umount2`, `unshare`, `setns` — same
+  `fake_eperm` denial. Trapped so they can't desync our path
+  bookkeeping or tear down setup binds.
 - `execve`, `execveat` — the path arg needs translation, AND the
   loader/interpreter path inside the ELF (`PT_INTERP`,
   `/lib64/ld-linux-x86-64.so.2`) needs to resolve correctly. The
@@ -1096,8 +1168,7 @@ guest:        execve("/bin/bash", argv, envp)
    │
    ▼  SIGSYS, our handler
 handler:      execveat(our_binary_fd, "",
-                       ["tawcroot", "--exec-child",
-                        "--state-fd=NN"],
+                       ["tawcroot", "--exec-child", "<NN>"],
                        envp, AT_EMPTY_PATH)
    │
    ▼  kernel runs us; seccomp filter inherited, handler is gone
@@ -1206,21 +1277,23 @@ a small info leak.
 
 ## Seccomp filter
 
-Hand-written cBPF. The list of trapped syscalls is defined at build
-time (a single header shared with the dispatch table — one source of
-truth); `filter.c` emits the BPF program from that list at runtime
-and installs it. Program structure:
+Hand-written cBPF. The list of trapped syscalls is the runtime
+dispatch table — `prod_rootfs_init` walks it via
+`tawcroot_dispatch_trap_list` to collect every syscall number with a
+non-NULL slot, and `filter.c` emits the BPF program from that list
+and installs it. The dispatch table is the single source of truth
+shared between handler routing and the allowlist. Program structure:
 
 ```
-load syscall_nr from seccomp_data
-load arch from seccomp_data
+load arch from seccomp_data (offset 4)
 if arch != AUDIT_ARCH_<our-arch>: KILL_PROCESS  // can't happen, defense in depth
 // cBPF is 32-bit — compare instruction_pointer in two halves
-load instruction_pointer[31:0] from seccomp_data (offset 16)
-if lo32 != lo32(&tawcroot_raw_syscall_insn): goto not_stub
-load instruction_pointer[63:32] from seccomp_data (offset 20)
-if hi32 == hi32(&tawcroot_raw_syscall_insn): ALLOW  // our stub
+load instruction_pointer[31:0] from seccomp_data (offset 8)
+if lo32 != lo32(&tawcroot_raw_syscall_ret): goto not_stub
+load instruction_pointer[63:32] from seccomp_data (offset 12)
+if hi32 == hi32(&tawcroot_raw_syscall_ret): ALLOW  // our stub
 not_stub:
+load syscall_nr from seccomp_data (offset 0)
 switch (syscall_nr):
   case openat: TRAP
   case stat: TRAP
@@ -1229,9 +1302,9 @@ switch (syscall_nr):
 ```
 
 **Implementation note:** seccomp cBPF operates on 32-bit words.
-`seccomp_data.instruction_pointer` is a `__u64` at offset 16;
-you must `BPF_LD_ABS_W` both halves (offsets 16 and 20) and
-compare each. On aarch64 with base 0x2000000000 the high 32 bits
+`seccomp_data.instruction_pointer` is a `__u64` at offset 8 (after
+`int nr` at 0 and `__u32 arch` at 4); you must `BPF_LD_ABS_W` both
+halves (offsets 8 and 12) and compare each. On aarch64 with base 0x2000000000 the high 32 bits
 are non-zero — a filter that only checks the low half would
 mis-ALLOW guest code at a coincidentally matching low address.
 
@@ -1462,102 +1535,179 @@ Android version (`/system_ext`, `/linkerconfig`, sometimes
 `/dev/binderfs`) are filtered out when rendering the wrapper rather
 than making tawcroot reject the whole argv.
 
-**`/dev/shm` is never disk-backed under tawcroot.** The proot
-method's app-writable `/dev/shm` directory bind exists because
-proot can't intercept `memfd_create`/`shm_open` shape mismatches
-cleanly; tawcroot must not inherit that workaround. Instead,
-`/dev/shm` is handled in-handler: `shm_open` and any path-bearing
-syscall under `/dev/shm/<name>` is emulated via `memfd_create` (or
-an equivalent anon-fd primitive) and a small in-process name table,
-so guest code sees POSIX shm semantics without any host directory
-backing it. See the memfd-extension issue in `issues/` for the
-shape; tawcroot is the place that fix lands. No `tawcroot-dev-shm`
-directory, no `-b …:/dev/shm` entry, and the installer's
-`TawcrootMethod` must not create or reference such a path.
+**`/dev/shm` is bind-mounted to an app-writable cache dir, same as
+proot.** The earlier plan was for tawcroot to emulate POSIX shm
+in-handler via `memfd_create` (no host backing dir). That never
+landed. Without backing, Mozilla's parent-process `shm_open(3)` in
+`SharedMemory::Allocate` hard-asserts on ENOENT
+(`MOZ_RELEASE_ASSERT(mHandle.IsValid() && mMapping.IsValid())`)
+and Firefox segfaults at libxul.so before reaching even XPCOM
+init. `TawcrootMethod` therefore mkdirs `<filesDir>/tawcroot-dev-
+shm` and binds it at `/dev/shm`, mirroring `ProotMethod.devShmDir`.
+If the in-handler emulation ever does land, the bind can come back
+out — until then this is the simpler, working solution.
 
 `-w` sets initial CWD (translated). We also export a small set of
 env vars (`HOME`, `USER`, `TMPDIR`, `PATH`) before exec.
 
 ## Module layout
 
+Actual layout (flat — the `syscalls/` subdir was planned but the file
+count never justified it; kept as one `syscalls_fs.c` until execve
+adds an `exec.c`).
+
 ```
-tawcroot/
-├── BUILD               # one-line note: built by client/build-tawcroot
+tawcroot/                            # everything tawcroot-specific lives here
 ├── README.md           # short: "see notes/tawcroot.md"
-├── include/
-│   ├── tawcroot.h      # public types: bind_entry, syscall_args, etc.
-│   ├── arch.h          # selects arch/<arch>.h based on __aarch64__/__x86_64__
-│   └── log.h           # tiny logger (write to stderr, gated by argv/state flag)
-├── src/
-│   ├── main.c          # argv parse, init, exec
-│   ├── child.c         # --exec-child re-entry
-│   ├── filter.c        # build + install seccomp filter
+├── build               # cross-ABI NDK build (also stages into APK jniLibs)
+├── build-fixtures      # NDK build for guest fixtures (loader smoke)
+├── test                # runs the cleat orchestrator (host) or pushes
+│                       #   testhost via adb (device)
+├── Makefile            # incremental host build (production + testhost + cleat tests)
+├── include/                            # production headers — no test scaffolding
+│   ├── tawcroot.h      # exec-state struct, magic constant
+│   ├── arch.h          # syscall_args struct, includes arch/<arch>.h
+│   ├── arch/{aarch64,x86_64}.h  # arch_read_args / arch_write_return
+│   ├── dispatch.h      # syscall→handler table API
+│   ├── exec_handler.h  # execve handler entry (memfd build + execveat)
+│   ├── exec_state.h    # serialized re-exec state struct + (de)serialize
+│   ├── fdtab.h         # reserved-fd allocator + memo cache
+│   ├── filter.h        # seccomp filter install API
+│   ├── handler.h       # SIGSYS handler install + observation
+│   ├── io.h            # libc-free print helpers
+│   ├── loader_elf.h    # phdr parsing, image bounds, interp pointer
+│   ├── loader_exec.h   # --exec-child entry + shebang resolution
+│   ├── loader_jump.h   # asm-only stack-pivot + final jump to ld.so/_start
+│   ├── loader_map.h    # mmap/mprotect of PT_LOADs, AT_PHDR computation
+│   ├── loader_stack.h  # synthesize argv/envp/auxv on a fresh stack
+│   ├── path.h          # translator, modes, bind table, openat2 probe
+│   ├── path_oracle.h   # readlink/openat oracle interface used by resolver
+│   ├── path_resolve.h  # symlink walker — operates against an oracle
+│   ├── raw_sys.h       # tawc_<syscall> wrappers + open_how struct
+│   ├── sysnr.h         # per-arch syscall numbers
+│   └── usercopy.h      # process_vm_readv-based guarded copy
+├── src/                                # production sources — no test scaffolding
+│   ├── main.c          # production entry: --exec-child / prod-rootfs init
+│   ├── dispatch.c      # syscall→handler table storage
+│   ├── filter.c        # build + install BPF program
 │   ├── handler.c       # sigsys_handler dispatch, ucontext glue
-│   ├── path.c          # translate(), reverse_translate(), bind table
-│   ├── elf.c           # read PT_INTERP, execve handling
-│   ├── identity.c      # fake-root uid/gid/stat/chown decoration
-│   ├── usercopy.c      # guarded guest memory copy helpers
-│   ├── syscalls/
-│   │   ├── fs.c        # openat, stat family, mkdir, unlink, …
-│   │   ├── exec.c      # execve, execveat
-│   │   ├── proc.c      # /proc/self/exe synthesis, getcwd reverse
-│   │   └── deny.c      # mount, chroot, pivot_root → -EPERM
-│   └── arch/
-│       ├── x86_64.h    # arch_read_args, arch_write_return
-│       ├── x86_64_stub.S
-│       ├── aarch64.h
-│       └── aarch64_stub.S
-├── tests/
-│   ├── unit/           # cleat-driven tests for path.c, filter.c, elf.c, …
-│   └── integration/    # one binary per scenario, run under tawcroot
-└── Makefile            # plain make, no autoconf nonsense
+│   ├── identity.c      # fake-root uid/gid handlers
+│   ├── io.c            # io.h impl (libc-free print helpers via tawc_write)
+│   ├── strings.c       # pure libc-free str/mem helpers — also linked into the
+│   │                   #   cleat test runner under hosted glibc for unit tests
+│   │                   #   (tawcroot/tests/unit/test_strings.c)
+│   ├── path.c          # translate(), reverse-translate, bind table, memo, openat2 probe
+│   ├── path_fold.c     # absolute-path folder (`.`/`..`/empty/`//`) — pure
+│   ├── path_resolve.c  # symlink walker — pure, oracle-driven
+│   ├── exec_handler.c  # execve guest-side entry (build memfd state + execveat)
+│   ├── exec_state.c    # exec-state (de)serialization
+│   ├── loader_elf.c    # ELF phdr parsing
+│   ├── loader_map.c    # PT_LOAD mmap/mprotect, AT_PHDR computation
+│   ├── loader_stack.c  # synthesize argv/envp/auxv on a fresh stack
+│   ├── loader_exec.c   # --exec-child main: load guest + jump
+│   ├── loader_io_prod.c # production-side oracle (raw syscalls)
+│   ├── syscalls_{fs,fd,control,exec,socket}.c # per-syscall handlers
+│   ├── usercopy.c      # process_vm_readv probe + tawc_copy_string_from_guest
+│   └── arch/{aarch64,x86_64}_{stub,loader_jump}.S  # _start, raw syscall stub,
+│                                                   # sigreturn trampoline, loader jump
+└── tests/                              # everything that isn't shipped in production
+    ├── testhost/
+    │   ├── include/
+    │   │   ├── child.h     # --exec-child entry
+    │   │   ├── phase1.h    # phase-1 smoke entry
+    │   │   └── smoke.h     # phase-0 smoke harness
+    │   └── src/
+    │       ├── testhost_main.c  # argv dispatch (--exec-child / -r ROOTFS / phase-0)
+    │       ├── child.c          # --exec-child re-entry
+    │       ├── phase1.c         # phase-1 smoke driver (inline-asm syscall probes)
+    │       └── smoke.c          # phase-0 smoke (trap-contract, raw-syscall exercise)
+    ├── unit/                # cleat-direct pure-function tests (no fork)
+    │   └── test_strings.c   # tawc_strlen/streq/starts_with/parse_long/int_to_str
+    ├── handler/             # cleat tests that fork tawcroot-testhost
+    │   ├── steps.{c,h}      # parse [ok ]/[FAIL] lines from testhost stdout and
+    │   │                    #   register one cleat test per check (dynamic)
+    │   ├── test_phase0.c    # one register_dynamic_tests call -> phase-0 smokes
+    │   └── test_phase1.c    # builds fake rootfs, then phase-1 smokes
+    └── integration/         # cleat tests that fork production tawcroot
+        └── programs/        # tiny C guests built by the runner and exec'd under tawcroot
 ```
 
-Build artifacts: one static binary per ABI (`libtawcroot.so` —
-ET_EXEC despite the `.so` name; shipped as a jniLib like
-`libproot-loader.so` for the same APK-execve reason), no separate
-loader binary.
+The directory is laid out so it could be lifted into its own repo (no
+external paths inside `tawcroot/`). The one tawc-app coupling is in
+`tawcroot/build`, which stages the production binary into
+`server/app/src/main/jniLibs/<abi>/libtawcroot.so` for APK packaging,
+and in `tawcroot/test --device` which sources `client/select-device.sh`
+to pick the adb target — strip those if splitting.
+
+Build artifacts (per `tawcroot/build`):
+- **Production tawcroot** — one static non-PIE ET_EXEC per ABI:
+  `libtawcroot.so` for arm64-v8a / x86_64, `tawcroot` for host.
+  Shipped as a jniLib like `libproot-loader.so` for the same
+  APK-execve reason. No test scaffolding, no `--run-test`, no
+  smoke driver, no third-party deps.
+- **`tawcroot-testhost`** — same source set + `tawcroot/tests/testhost/src/`,
+  compiled with `-DTAWCROOT_TESTHOST`. Built by default for
+  `--abi=host`; built for cross-ABIs only with `--testhost`. Not
+  packaged into the APK.
+- **`tests`** — host-only cleat orchestrator. Built by default for
+  `--abi=host`. Hosted glibc binary; never cross-compiled.
 
 ## Build integration
 
-A `client/build-tawcroot` script alongside `client/build-proot`:
+A `tawcroot/build` script alongside `client/build-proot`:
 
-- Clones cleat into `./cleat/` at a pinned tag/commit (gitignored,
-  same pattern as `libhybris/`, `libxkbcommon/`, `proot/`) on
-  first run. Pin lives in the build script; bumping it is a
-  deliberate change. cleat brings its own vendored STC — we do
-  *not* clone STC separately, and we use cleat's generics
-  wrappers, not raw STC's.
 - Cross-compile with the NDK's clang for `arm64-v8a` and `x86_64`.
-- Pure C11 + `-Icleat/include` (which transitively exposes the
-  bundled STC) + a couple of `.S` files. No talloc, no autoconf,
-  no config.h.
-- **Statically linked, non-PIE** against bionic's `libc.a`
-  (`-static -no-pie`). Required by both the re-exec architecture
-  (no bionic linker before our `_start`) and the seccomp filter's
-  IP-based stub allowlisting (stable address across re-execs —
-  see §"Why non-PIE"). Handler/runtime objects also use
-  `-fno-stack-protector` and no sanitizer/profiling instrumentation
-  so guest glibc and tawcroot's static bionic runtime cannot collide
-  through compiler-inserted helper paths. No `dlopen`, no Android
-  property/IPC features (we don't use these). Expect ~1–2 MB binary.
-- **Fixed base addresses** per arch via `-Wl,-Ttext-segment=`:
-  0x2000000000 (aarch64), 0x600000000000 (x86_64). These mirror
-  proot's `LOADER_ADDRESS` convention — high enough to avoid guest
-  binary + ld.so + shared lib mappings, within the valid user
-  address space.
-- Output `build/tawcroot-<abi>/libtawcroot.so` + strip.
-- Gradle `packTawcroot` task copies into
-  `server/app/src/main/jniLibs/<abi>/libtawcroot.so`.
-- Builds the host-side test binary (`build/tawcroot-host/tests`)
-  natively **with the host toolchain** (not NDK — static bionic
-  binaries don't run on desktop Linux). Runs it as part of the
-  script's default target — see §"Testing strategy". Never
-  cross-compiled; tests don't ship on-device.
+- Pure C11 + a couple of `.S` files for production sources. No
+  talloc, no autoconf, no config.h.
+- **Statically linked, non-PIE, freestanding**
+  (`-static -nostdlib -nostartfiles -no-pie -ffreestanding`).
+  Required by both the re-exec architecture (no bionic linker
+  before our `_start`) and the seccomp filter's IP-based stub
+  allowlisting (stable address across re-execs — see §"Why non-PIE").
+  Handler/runtime objects also use `-fno-stack-protector` and no
+  sanitizer/profiling instrumentation so guest glibc and
+  tawcroot's runtime cannot collide through compiler-inserted
+  helper paths. No `dlopen`, no Android property/IPC features
+  (we don't use these). Expect ~30 KB binary today; ~1–2 MB once
+  the manual ELF loader and full handler land.
+- **Fixed base addresses** per arch via `-Wl,--image-base=`:
+  0x2000000000 (aarch64), 0x40000000 (x86_64). NDK lld rejects
+  `-Ttext-segment` outright; use `--image-base`. The x86_64 base
+  is constrained by static-bionic PLT32 weak-undef relocations —
+  see §"Why non-PIE" for the full story. The aarch64 base mirrors
+  proot's `LOADER_ADDRESS` convention.
+- Output `build/tawcroot-<abi>/libtawcroot.so` + strip; testhost
+  variant at `build/tawcroot-<abi>/libtawcroot-testhost.so` or
+  `build/tawcroot-host/tawcroot-testhost`.
+- Gradle `packTawcroot` task copies the production binary into
+  `server/app/src/main/jniLibs/<abi>/libtawcroot.so`. Testhost is
+  never copied — it's only used by the cleat orchestrator on host
+  and by `tawcroot/test --device` via adb push.
+- Clones cleat into `./cleat/` at a pinned commit (gitignored,
+  same pattern as `libhybris/`, `libxkbcommon/`, `proot/`) on
+  first `--abi=host` run. Pin lives in the build script; bumping
+  it is a deliberate change. cleat brings its own vendored STC —
+  we do *not* clone STC separately. **cleat is built into the
+  test orchestrator only**, not into either tawcroot binary.
+- Builds the cleat orchestrator (`build/tawcroot-host/tests`)
+  natively with the host toolchain (not NDK — hosted glibc
+  binary). Runs it as part of `--abi=host` by default — see
+  §"Testing strategy". Never cross-compiled.
+- **Host build is incremental** via `tawcroot/Makefile`:
+  `gcc -MMD -MP` for header dep tracking, `-j$(nproc)` for
+  parallel compile. Warm rebuilds (no source changes) take ~30 ms;
+  touching one production source rebuilds + relinks both tawcroot
+  binaries in ~300 ms; touching a cleat header rebuilds just the
+  test files that include it. For tight inner loops you can call
+  `make -C tawcroot` directly — `tawcroot/build --abi=host`
+  adds the cleat-clone step on top. Cross-ABI NDK builds stay in
+  the bash flow (NDK setup is bash-shaped, and they're not in
+  the inner loop).
 
 This keeps it consistent with the existing proot build (proot
-ships as `libproot.so` + `libproot-loader.so`; tawcroot is a single
-`.so`).
+ships as `libproot.so` + `libproot-loader.so`; tawcroot ships as
+`libtawcroot.so` for production, with `tawcroot-testhost` and
+`tests` as host-only test artifacts).
 
 ## Installer integration
 
@@ -1566,12 +1716,11 @@ A new `TawcrootMethod.kt` next to `ProotMethod.kt`. Same shape:
 - Generate the wrapper script (`enter.sh` equivalent).
 - Apply the same bootstrap-cache + tar-extract pipeline as
   `ProotMethod`.
-- **Do not** create a disk-backed `/dev/shm` directory or bind one
-  in. tawcroot emulates `/dev/shm` in-handler via `memfd_create`
-  (see §"Bootstrap & entry"). Skipping the directory is part of the
-  contract — if Firefox or anything else trips on `/dev/shm` under
-  tawcroot, fix it in the handler, not by reintroducing a host
-  directory.
+- Create a disk-backed `/dev/shm` dir and bind it (same as proot's
+  `prootDevShmDir`). The plan to emulate `/dev/shm` in-handler via
+  `memfd_create` never landed and Firefox's parent-process
+  `shm_open(3)` hard-asserts on ENOENT without the bind. See
+  §"Bootstrap & entry" for the lifecycle.
 - Apply the libhybris symlinks (`LibhybrisLinker.link` works
   unchanged — the rootfs layout is the same).
 
@@ -1587,66 +1736,162 @@ case in the `case method` switch.
 ## Testing strategy
 
 **Tests run on the host. Every feature is tested as it is
-implemented.** A change without its tests is not a change. The
-test framework is cleat's, the same dep that gives us containers
-— one less thing to bring in.
+implemented.** A change without its tests is not a change.
 
-The test binary is built natively for the dev box (x86_64 Linux),
-not cross-compiled. It does not ship on-device. `client/build-tawcroot`
-runs it as part of its default target; CI runs it on every push.
-Failing tests fail the build.
+### The two-binary split
 
-What "tested as implemented" means in practice — *every* PR-equivalent
-unit of work touches at least:
+Production tawcroot must not contain test scaffolding — no
+argv-reachable test branches, no smoke driver, no `--run-test`
+hook. The test layer lives in two places:
 
-1. A unit test for the new pure-function logic (path translation
-   case, BPF generator entry, ELF helper, bind-table lookup, …).
-2. A handler-level integration test that runs `tawcroot -r
-   /tmp/fake-rootfs -- /some/test-program`, where `test-program`
-   is a small built-by-the-test-suite C binary that exercises the
-   syscall(s) via direct `syscall(2)` calls (so we don't depend
-   on libc's choice of which `*at` form to use), checks the
-   results, and exits 0/non-0.
-3. For trapped syscalls: a coverage assertion that the syscall
-   appears in both the BPF allowlist *and* the dispatch table
-   (the "without all four it's not done" rule from §"Maintenance
-   contract").
+1. **`tawcroot-testhost`** — a *second* binary built from the
+   same production sources plus `tawcroot/tests/testhost/src/{testhost_main,
+   smoke,child,phase1}.c`, compiled with `-DTAWCROOT_TESTHOST`. Same
+   `_start`, same raw-syscall stub, same filter, same handler — the
+   only difference is `main.c` routes argv-dispatch into
+   `tawcroot_testhost_main()` (which lives outside `tawcroot/src/`).
+   The smoke driver issues inline-asm syscalls *from inside the
+   testhost* so each one's IP is outside the stub allowlist and the
+   filter TRAPs into the real handler. Handler-level tests cannot
+   live anywhere else: the IP allowlist couples them to the binary
+   under test. Testhost is **never** packaged into the APK; it
+   exists only so the cleat orchestrator can fork it.
 
-### Layers, in order of how often they run
+2. **`tests` (cleat orchestrator)** — a host-only glibc binary at
+   `build/tawcroot-host/tests`, built from `tawcroot/tests/{unit,handler,
+   integration}/*.c` linked against cleat + STC. This is the *only*
+   place cleat / STC code ever runs in the project. It owns:
+   - filter syntax (full-match regexes against `module`, `name`,
+     or `module::name`; multiple args OR'd; see cleat
+     docs/test_framework.md),
+   - exit code (0 = pass, 1 = fail),
+   - the unified report.
 
-- **Pure unit tests** (cleat-driven, in `tests/unit/`): path
-  parsing/translation/reverse-translation, bind-table longest-prefix
-  match, ELF `PT_INTERP` extraction, BPF program generation
-  (cross-checked against libseccomp's `seccomp_export_pfc` for
-  human-readable diff). Pure C functions, no syscalls, no fork.
-  Sub-second. Runs on every save in a `make watch` loop.
-- **Filter unit tests** (`tests/unit/filter_*`): build the BPF
-  program in-process, install it via `seccomp(SECCOMP_SET_MODE_FILTER, …)`
-  in a child, fire each interesting syscall, observe the action
-  via `SIGSYS` siginfo. Validates per-syscall decisions for real,
-  not just statically.
-- **Integration tests** (`tests/integration/`): full `tawcroot
-  -r /tmp/fake-rootfs -- <child>` runs against a host-built fake
-  rootfs (a tmpdir tree with well-known files and a static
-  `dash`/`busybox` for the `execve` paths). `<child>` programs
-  are tiny C binaries built by the test suite that exercise
-  specific behaviors: "cat /etc/foo returns rootfs content",
-  "openat with absolute path translates", "relative openat with
-  `..` is clamped at the rootfs root", "bad path pointers return
-  `EFAULT` rather than crashing", "getuid/stat/chown preserve the
-  fake-root illusion", "guest `close_range` cannot kill tawcroot's
-  internal fds", "guest `sigaction(SIGSYS)` / `sigprocmask` cannot
-  disable translation", "guest seccomp installation is denied",
-  "linkat falls back to symlink on Android-style `EPERM`", "execve
-  of a dynamically linked binary reaches the loader through PT_INTERP",
-  etc.
+   The orchestrator does not share an address space with tawcroot.
+   For handler-layer cases it `fork`+`exec`s `tawcroot-testhost`
+   with the appropriate argv (e.g. `-r <rootfs>`), captures
+   stdout/stderr/exit, and asserts on the result. For
+   integration cases it forks the real production `tawcroot` (once
+   that binary grows enough of the manual ELF loader to jump to a
+   guest). cleat's `test_capture { ... }` is also available for
+   self-forking tests when handy.
+
+`tawcroot/test` is a thin wrapper around the cleat
+orchestrator; `bash tawcroot/test` runs everything,
+positional args become cleat filters. `--device` mode keeps the
+old adb-driven phase-0/phase-1 testhost flow alive for
+Android-shape coverage (untrusted_app filter validation, etc.) —
+that path doesn't run the cleat binary because cleat is host-only,
+but the handler tests it exercises are the same ones the cleat
+orchestrator runs against the host testhost.
+
+### Cleat / STC are never linked into production
+
+This is a hard rule:
+
+- `tawcroot/src/` (production) — no cleat, no STC, no glibc, no
+  libc at all. Production stays `-static -nostdlib -nostartfiles
+  -ffreestanding -no-pie`.
+- `tawcroot/tests/testhost/src/` (testhost-only) — same constraints. The
+  smoke driver uses the same `tawc_io_*` raw-syscall helpers as
+  production. cleat / STC are not reachable here either; this
+  binary is freestanding.
+- `tawcroot/tests/{unit,handler,integration}/` (cleat orchestrator) —
+  cleat / STC freely. Hosted glibc binary; doesn't share an
+  address space with the binaries it tests.
+
+If extracting a pure helper from `tawcroot/src/` for unit testing
+needs cleat-style ergonomics, link the helper into the cleat
+orchestrator with a hosted compile (`-fhosted`), not the other way
+around. Production source files compile under both regimes — they
+use only standard C and our own minimal helpers, so a hosted build
+of e.g. `path.c` is fine *if and only if* it doesn't drag in the
+freestanding-only globals (the dispatch table, the raw-syscall
+stub). The first such extraction (likely `path_translate`) is the
+moment to formalize this.
+
+### The four test layers
+
+Every PR-equivalent unit of work should land tests in at least one
+of these four layers, and ideally a layer-1 unit test plus a layer-2
+or layer-3 functional test.
+
+1. **Unit (`tawcroot/tests/unit/`)** — pure-function tests, cleat-direct.
+   The Makefile compiles flagged-pure tawcroot sources twice (once
+   freestanding for the production / testhost binaries, once with
+   hosted glibc for the cleat orchestrator), so the cleat tests can
+   call into the production code directly. The set of "pure-enough
+   to dual-compile" sources lives in `PROD_C_FOR_TESTS` in
+   `tawcroot/Makefile` — currently just `strings.c`; future
+   candidates include path-translation helpers and BPF program
+   generation once they're extracted out of `path.c` / `filter.c`
+   into pure functions. Tests today: `unit/test_strings.c`
+   (`tawc_strlen` / `tawc_streq` / `tawc_starts_with` /
+   `tawc_parse_long` / `tawc_int_to_str`, plus a round-trip
+   property between the last two). Future per the design: path
+   parsing/translation/reverse-translation, bind-table longest-
+   prefix match, ELF `PT_INTERP` extraction, BPF program generation
+   (cross-checked against libseccomp's `seccomp_export_pfc` for a
+   human-readable diff). Pure C, no syscalls, no fork. Sub-second.
+   Runs on every save.
+2. **Handler (`tawcroot/tests/handler/`)** — fork `tawcroot-testhost` with
+   chosen argv, capture stdout, parse every `[ok ]` / `[FAIL]` line
+   that `tawc_io_step` emits, register one cleat test per check.
+   The testhost itself has the inline-asm probes that drive the
+   SIGSYS handler; the cleat case sets up fixtures (e.g. fake
+   rootfs), execs, and surfaces individual checks via cleat's
+   `register_dynamic_tests`. Each parsed pass becomes a no-op cleat
+   test; each fail becomes a `register_test_problem` whose message
+   contains the step line plus its trailing kv-context. The shared
+   helper is `tawcroot/tests/handler/steps.{c,h}`.
+
+   Today's modules: `handler/test_phase0` (phase-0 foundation
+   smoke -> trap-contract + raw-syscall sweep + state-fd handoff +
+   `--exec-child` re-exec), `handler/test_phase1` (phase-1 path
+   translation + phase-0.5 runtime invariants). Together they
+   produce 100+ individually-named cleat tests; one testhost exec
+   per file. Adding a new check is a one-line `tawc_io_step()` call
+   in the testhost — the cleat side picks it up automatically next
+   run.
+
+   Test names are derived from the `tawc_io_step` label. Keep
+   labels stable (no embedded runtime values, no unicode arrows /
+   dashes); see `tawcroot/tests/testhost/src/smoke.c::exercise_one` for the
+   convention (rv goes on a separate kv-line so the label stays
+   stable).
+3. **Integration (`tawcroot/tests/integration/`)** — full `tawcroot
+   -r /tmp/fake-rootfs -- <child>` runs against a host-built fake
+   rootfs (a tmpdir tree with well-known files and a static
+   `dash`/`busybox` for the `execve` paths). `<child>` programs
+   are tiny C binaries built by the test suite from
+   `tawcroot/tests/integration/programs/` that exercise specific behaviors:
+   "cat /etc/foo returns rootfs content", "openat with absolute
+   path translates", "relative openat with `..` is clamped at the
+   rootfs root", "bad path pointers return `EFAULT` rather than
+   crashing", "getuid/stat/chown preserve the fake-root illusion",
+   "guest `close_range` cannot kill tawcroot's internal fds",
+   "guest `sigaction(SIGSYS)` / `sigprocmask` cannot disable
+   translation", "guest seccomp installation is denied", "linkat
+   falls back to symlink on Android-style `EPERM`", "execve of a
+   dynamically linked binary reaches the loader through PT_INTERP",
+   etc. Lives behind production tawcroot getting a working
+   ELF-load + jump-to-guest path; a `tawcroot/tests/integration/
+   test_placeholder.c` keeps the layout honest in the meantime by
+   asserting production tawcroot exits 2 with the
+   "not yet implemented" message.
+4. **Differential (`tawcroot/tests/diff/`, future)** — same `<child>`
+   programs as layer 3, run under both proot and tawcroot, diff
+   stdout/exit. Cheap once layer 3 exists; high signal because
+   proot's behavior is the spec for everything except the
+   handful of places we deliberately diverge (fast path,
+   `/dev/shm` via memfd, etc.). Not built yet.
 - **Synthesized Android-filter tests**: a pre-filter wrapper that
   installs an Android-`untrusted_app`-shaped seccomp filter
   (RET_ERRNO on a few syscalls per arch) before exec'ing
   tawcroot. Validates the lp64 `access`-on-x86_64 quirk and the
   TRAP-vs-ERRNO precedence rule on plain Linux, no emulator
   required.
-- **Real-workload smoke** (`tests/integration/workload/`): drive
+- **Real-workload smoke** (`tawcroot/tests/integration/workload/`): drive
   a `pacstrap`'d Arch chroot through tawcroot on the dev box,
   including a `pacman -Syu`. This is where we measure the perf
   win as a regression test, not just a bench number.
@@ -1679,40 +1924,658 @@ coverage.
 
 ## Phasing
 
-- **Phase 0 — Foundation smoke**: static non-PIE binary, raw syscall stub,
-   BPF IP allowlist against `tawcroot_raw_syscall_insn`, inherited
-   seccomp across self-exec, non-`CLOEXEC` `exec_state_fd` handoff,
-   SIGSYS handler reinstall, and Android-filter compatibility for
-   every raw syscall used by the handler/bootstrap. This must pass
-   on Android x86_64 and aarch64 before path translation work starts.
-- **Phase 0.5 — Runtime invariant protection**: reserve and protect internal
-   fds, trap `close*`/`dup*`/`fcntl`, virtualize guest `SIGSYS`
-   disposition/mask, deny guest seccomp installation, and prove a path
-   syscall still works after guest attempts to close all fds, reset
-   `SIGSYS`, block `SIGSYS`, and install its own seccomp filter.
-- **Phase 1 — MVP path translation (host-side)**: argv parse, rootfs fd,
-   filter for openat/stat/access/getuid/chown/linkat, SIGSYS
-   handler, guarded guest-copy helpers, `arch_*` helpers for x86_64,
-   absolute + relative path translation with `..`/symlink clamping,
-   fake-root uid/stat/chown behavior, hardlink-as-symlink fallback,
-   and handler-level tests that issue direct syscalls from a static
-   test binary already running under the filter. No dynamic guest
-   shell yet; phase 2 is what makes normal `execve` work.
-- **Phase 2 — execve handling**: ELF/PT_INTERP, re-exec dance, in-process
-   manual loader (PT_LOAD mmap + auxv synth + entry jump — see
-   "Known gaps" #2), multi-process correctness, `/proc/self/exe`,
-   `getcwd` reverse. Exit criteria: dynamically linked `/bin/true`
-   and `/bin/sh -c "ls /"` run from inside a fake rootfs. The manual
-   loader is the long pole.
+- **Phase 0 — Foundation smoke**: ✓ DONE on x86_64 emulator (kernel
+   6.6, Android 16). Static non-PIE binary, raw syscall stub, BPF IP
+   allowlist against `tawcroot_raw_syscall_ret` (NOT `_insn` — the
+   kernel reports post-syscall PC; see §"Issuing host syscalls from
+   the handler"), inherited seccomp across self-exec, non-`CLOEXEC`
+   `exec_state_fd` handoff via memfd, SIGSYS handler reinstall, and
+   raw-syscall set exercised through the stub under our smoke filter.
+   aarch64 cross-build clean. Outstanding: real Android `untrusted_app`
+   zygote-filter validation (requires APK-level deployment — `run-as`
+   doesn't inherit zygote filter; folded into Phase 4).
+- **Phase 0.5 — Runtime invariant protection**: ✓ DONE on x86_64
+   emulator (Android 16, kernel 6.6); aarch64 cross-build clean.
+     • Internal fds (`rootfs_fd`, bind src_fds) reserved into a
+       high-numbered range (`TAWCROOT_RESERVED_FD_BASE = 1000`) at
+       init via `fcntl(F_DUPFD_CLOEXEC, base)`. From the guest's
+       perspective every fd ≥ 1000 returns -EBADF.
+     • Trapped + handled: `close`, `close_range` (clamps at the
+       reserved boundary so `close_range(0, ~0u)` only closes
+       guest-visible fds), `dup`, `dup2` (x86_64 only; aarch64 has
+       only dup3), `dup3`, `fcntl` (with F_DUPFD/F_DUPFD_CLOEXEC
+       capping the requested minimum at base-1).
+     • SIGSYS shadow: `rt_sigaction(SIGSYS, ...)` round-trips a
+       guest-side `struct kernel_sigaction` shadow — the kernel
+       disposition stays our handler. `rt_sigaction` for any other
+       signal passes through verbatim.
+     • Signal-mask shadow: `rt_sigprocmask` strips the SIGSYS bit
+       from any new mask before forwarding to the kernel and
+       OR-injects it into oldset based on a shadow `g_guest_sigsys_blocked`
+       flag. Guest reads back what it wrote; kernel never blocks SIGSYS.
+     • Seccomp denial: `seccomp(2)` and `prctl(PR_SET_SECCOMP)`
+       return -EPERM; `prctl(PR_GET_SECCOMP)` and other prctl ops
+       pass through.
+     • Acid tests: after guest does `close_range(3, ~0u)` AND
+       `rt_sigaction(SIGSYS, SIG_DFL)` AND `rt_sigprocmask(SIG_BLOCK,
+       {SIGSYS})` AND `seccomp(SET_MODE_FILTER, ...)`, openat
+       through our handler still resolves inside the rootfs.
+     Lives in `src/syscalls_fd.c` + `src/syscalls_control.c`;
+     reservation entry point is `tawcroot_fd_reserve` in
+     `include/fdtab.h`. Guest-multi-thread mask state (per-thread
+     shadow) is a phase-2 follow-up — phase-1 smoke is single-threaded.
+- **Phase 1 — MVP path translation (host-side)**: ✓ DONE on x86_64
+   emulator (Android 16, kernel 6.6) **and validated on aarch64
+   device** (OnePlus 9, Android 14, kernel 5.4.284) under the real
+   `untrusted_app` zygote filter via `tawcroot/test --device`.
+   Path translation, fd reservation, SIGSYS/sigprocmask shadow,
+   seccomp/prctl denial, well-known-symlink memo, fake-root identity,
+   `renameat2`, `truncate`, and the mode-aware lstat-vs-stat memo all
+   pass on the device. With this run, Phase-0's outstanding
+   "real-`untrusted_app`-zygote-filter validation" item is also closed.
+   The `faccessat2` (kernel ≥5.8) and `close_range` (kernel ≥5.9)
+   handler-suite cases skip on 5.4 — testhost detects -ENOSYS from the
+   raw syscall and emits `[skip]` (parsed by `tawcroot/tests/handler/steps.c`,
+   registered as passing); polyfilling new syscalls with older ones is
+   intentionally out of scope for tawcroot, real workloads on 5.4 see
+   the same -ENOSYS without us in the path.
+   Comprehensive handler set:
+     • argv parse (`-r <rootfs>`, `-b src:dst` repeatable)
+     • dispatch table; BPF trap set generated from the same handler list
+     • per-arch ucontext glue (read args, write return)
+     • absolute path translation with `..` clamp; escape attempts
+       (`/../../host-secret`) provably clamp at rootfs root
+     • relative path reverse-translation via raw `getcwd` + rootfs
+       host-prefix strip
+     • bind-mount table with longest-prefix match
+     • well-known-symlink memoization (`/lib`, `/lib64`, `/bin`,
+       `/sbin`, `/usr/sbin`, `/usr/lib64`, `/var/run` — the typical
+       glibc-rootfs symlink hit set) — required for ld.so library
+       opens at any program startup
+     • fake-root identity (`getuid`/`geteuid`/`getgid`/`getegid` → 0)
+     • metadata decoration: `fstatat` and `statx` with `st_uid`/
+       `st_gid`/`stx_uid`/`stx_gid` rewritten to 0
+     • path-bearing handlers: `openat`, `readlinkat`, `faccessat2`,
+       `chdir`, `getcwd` (reverse-translates), `mkdirat`, `unlinkat`,
+       `symlinkat`, `linkat` (with EACCES/EPERM → symlink fallback
+       per proot's `--link2symlink`), `fchmodat`, `fchownat`
+       (fake-root no-op success — host uid can't chown rootfs files
+       and the on-disk owner stays app-uid)
+     • legacy x86_64 wrappers (`stat`/`lstat`/`access`/`readlink`/
+       `chmod`/`chown`/`lchown`/`mkdir`/`rmdir`/`unlink`) routed
+       through *at variants — the kludge that closes Android's
+       lp64-`access`-on-x86_64 gap as a side-effect of path
+       translation
+     • EFAULT-safe guest-pointer copies via `process_vm_readv`
+       (probed at init with `tawc_usercopy_init`); `openat(NULL)`
+       and `openat(<unmapped>)` cleanly return -EFAULT, no handler
+       crashes
+     • Four-mode resolution API (FOLLOW / NOFOLLOW / PARENT_CREATE /
+       PARENT_REMOVE) plumbed through every path-bearing handler.
+       The well-known-symlink memoizer is mode-aware: a sole-component
+       match is rewritten only under FOLLOW, so `lstat("/lib")`
+       returns the symlink's `S_IFLNK` while `stat("/lib")` returns
+       the target dir's `S_IFDIR`. Verified on x86_64 emulator.
+     • `rename` / `renameat` / `renameat2` (two-path translation
+       w/ PARENT_REMOVE + PARENT_CREATE), `truncate` (translate path
+       then `openat` + `ftruncate` + `close`). Legacy x86_64
+       `link`/`symlink`/`rename` route through their `*at` cousins.
+     • Generic non-final-component symlink resolution via
+       `openat2(2)` with `RESOLVE_IN_ROOT` on kernel ≥5.6. The
+       openat handler probes at init (`tawcroot_path_probe_openat2`)
+       and routes through openat2 when available, letting the
+       kernel handle arbitrary in-rootfs symlinks (including
+       absolute targets that would otherwise escape) by re-rooting
+       resolution at our rootfs fd. Verified: a fake rootfs with
+       `/etc/host-secret → /etc/passwd` (absolute) opens to ENOENT
+       (clamped) instead of leaking the host's `/etc/passwd`.
+     • Manual symlink-aware canonicalization (`src/path_resolve.c`
+       + `src/path_fold.c`, oracle interface in `include/path_oracle.h`).
+       Walks each component, calls a filesystem oracle's `readlink`,
+       splices the target back into the suffix, re-folds, and bounds
+       the walk at `SYMLOOP_MAX = 40`. Mode-aware: NOFOLLOW /
+       PARENT_CREATE / PARENT_REMOVE leave the leaf untouched. This
+       runs unconditionally inside `tawcroot_path_translate` after
+       fold + memo and before bind routing, so every path-bearing
+       handler (not just `openat`) gets the same clamping discipline
+       on every kernel. Marked `LEGACY-5.4` in `path.c`: the resolver
+       exists because kernel <5.6 has no `openat2(RESOLVE_IN_ROOT)`,
+       and is well-contained for future deletion (banner comment in
+       `include/path_resolve.h` documents the drop procedure).
+       Tested two ways: cleat unit tests against a mock oracle
+       (`tawcroot/tests/unit/test_path_resolve.c`: chain, self-loop, depth
+       bomb, NOFOLLOW leaf, absolute-target clamp, `..`-target clamp)
+       and end-to-end against a real fake rootfs on host + device
+       (`tawcroot/tests/handler/test_phase1.c` rootfs adds `/altpath`,
+       `/chain1..3`, `/loop`).
+   Phase-1 outstanding: the openat2 fast path in `handle_openat`
+   stays for the tiny perf win on 5.6+, but is now redundant — the
+   resolver has already canonicalized the path. Cheap to drop later.
+- **Phase 2 — execve handling**: split into sub-stages because the
+   work landed incrementally and the doc was lying about what's done.
+   The original "manual loader is the long pole" framing is obsolete:
+   the loader works end-to-end on host for both static and dynamic
+   guests with full argv/envp/auxv (`tawcroot/tests/unit/test_loader_smoke*`,
+   `tawcroot/tests/integration/test_prod_exec`, `tawcroot/tests/integration/test_exec_child`,
+   `tawcroot/tests/integration/test_exec_via_handler`).
+
+   **All sub-stages 2a-2g pass on host x86_64. Cross-builds (aarch64,
+   x86_64) clean. Real-Android validation pending phase 4 (APK
+   plumbing).**
+
+   Sub-stages:
+   - **2a — In-process loader (`--exec`)**: ✓ DONE on host x86_64.
+     `tawcroot_loader_exec` parses ELF, maps PT_LOADs (with BSS
+     partial-page zero + anonymous extension), reads PT_INTERP and
+     maps ld.so for dynamic guests, allocates a fresh stack, builds
+     argc/argv/envp + full auxv (incl. `AT_RANDOM` from `getrandom`),
+     and jumps. `/bin/true`, `/bin/ls /dev/null`, dynamic exit-42 all
+     pass.
+   - **2b — `--exec-child` memfd handoff**: ✓ DONE on host. Handler
+     writes versioned exec_state into a non-CLOEXEC memfd; `--exec-child`
+     mmaps it, parses path/argv/envp, hands off to the loader.
+     Round-trips static + dynamic guests; bad-fd / corrupt-magic /
+     short-buffer cases all return cleanly.
+   - **2c — SIGSYS-handler-side `execve` interception**: ✓ DONE.
+     `tawcroot_exec_handler_perform` builds the memfd, opens
+     `/proc/self/exe`, and `execveat`s into `--exec-child`. In
+     rootfs mode it now translates the guest path through
+     `tawcroot_path_translate` for the existence probe, and
+     captures rootfs+binds+guest_exe into the exec_state's optional
+     extras (v2 format) so `--exec-child` can re-establish state.
+     Validated by the `prod_rootfs_guest_does_execve` integration
+     test.
+   - **2d — Production CLI `-r/-b/--` + path translation in the
+     loader**: ✓ DONE. `tawcroot -r ROOTFS [-b SRC:DST]... -- CMD
+     [ARGS...]` parses argv in `main.c`, opens the rootfs O_PATH
+     fd, reserves it into the high range, builds the bind table,
+     installs handler+filter, and calls `tawcroot_loader_exec`.
+     The loader detects `tawcroot_rootfs_fd >= 0` and routes the
+     guest binary's path AND PT_INTERP through
+     `tawcroot_path_translate`. Validated by 8 cases in
+     `tawcroot/tests/integration/test_prod_rootfs.c` (static binary inside
+     rootfs, bind dst routing, `..`-clamping, missing/bad arg
+     shapes, unreachable guest).
+   - **2e — `/proc/self/exe` synthesis**: ✓ DONE.
+     `tawcroot_set_guest_exe_path` (in `path.c`) stashes the
+     guest's requested exec path; `handle_readlinkat` matches
+     `/proc/self/exe` and `/proc/<our-pid>/exe` and returns the
+     stash. Production `main.c` sets it from `argv[cmd_start]`
+     after `prod_rootfs_init`; `tawcroot_loader_exec_child`
+     re-sets it from the carried `exec_state.guest_exe` (or the
+     new exec path if absent). Validated in `phase1.c`.
+   - **2f — Handler reinstall in `--exec-child`**: ✓ DONE.
+     `tawcroot_loader_exec_child` re-runs the production init
+     sequence when `exec_state.rootfs_host` is present: open
+     rootfs, reserve, set host path, usercopy probe, add binds,
+     memoize symlinks, probe `openat2`, dispatch_init, install
+     SIGSYS handler. The seccomp filter is NOT re-installed (it's
+     inherited as kernel state — see "Why non-PIE"). Without this
+     the post-exec guest's first path-bearing syscall would either
+     route to host paths (no rootfs view) or kill the process (no
+     handler).
+   - **2g — Multi-process correctness**: ✓ DONE for static execve.
+     `prod_rootfs_guest_does_execve` validates the full chain:
+     filter trap → handler dispatch → memfd write with extras →
+     execveat self → `--exec-child` re-init → manual-load target
+     inside rootfs → exit 42. fork+exec for dynamic guests, and
+     `bash -c 'ls'` style flows, are follow-ups (need either a
+     glibc-on-rootfs test fixture or a dynamic guest that calls
+     fork+execve from libc).
+
+   Exit gate (was "dynamically linked `/bin/true` and
+   `/bin/sh -c "ls /"` run from inside a fake rootfs"): partially
+   met. Static binaries inside the rootfs run end-to-end including
+   guest-issued execve. Dynamic binaries inside a fake rootfs need
+   a fixture rootfs that contains the dynamic linker — that's an
+   integration-test scaffolding task, tracked alongside the dynamic
+   fork+exec follow-up.
 - **Phase 3 — Full trapped syscall surface**: every syscall in "Which
    syscalls need trapping" above.
-- **Phase 4 — Emulator integration**: `client/build-tawcroot`, jniLib
-   packaging, `TawcrootMethod.kt`, dispatch in `tawc-chroot-run`,
-   wrapper script. Run `pacman -Syu` to completion.
-- **Phase 5 — aarch64 port**: arch/aarch64 files, run on device, libhybris
-   smoke test.
-- **Phase 6 — Hardening + perf**: stacked-filter weird cases, Firefox-
-   specific stuff, measure and tune.
+- **Fast iteration loop (debugging tawcroot on a real Android target).**
+   The full install pipeline (download + extract + pacman -Syu) takes
+   ~7 minutes; restarting it every code change is too slow. The
+   working iteration loop:
+
+   1. One-time setup: install the APK once with `--es method tawcroot`,
+      let it run far enough that the bootstrap is extracted (PKG_KEYRING
+      stage). Even if the install errors out at pacman-key, the rootfs
+      under `/data/data/me.phie.tawc/distros/arch/rootfs/` is intact.
+   2. Per-iteration: `bash tawcroot/build --abi=<abi>`
+      then `adb push server/app/src/main/jniLibs/<abi>/libtawcroot.so
+      /data/local/tmp/libtawcroot.so` then `adb shell 'su -c "cp
+      /data/local/tmp/libtawcroot.so <apk-lib-path>/libtawcroot.so"'`.
+      Total ~3 seconds.
+   3. Test: `adb shell 'run-as me.phie.tawc sh -c "cd <rootfs> && \
+      <libtawcroot> -r <rootfs> <binds> -- <cmd>"'`.
+
+   This bypasses the APK install AND the Arch install. Only Kotlin
+   changes (TawcrootMethod, etc.) require a full APK rebuild +
+   `adb install -r`.
+
+- **PHASE 5 COMPLETE on x86_64 emulator.** A full `tawcroot`-method
+   Arch install via the in-app `InstallActivity` reaches `state: READY`,
+   and `bash client/tawc-chroot-run "uname -a; id; pacman --version"`
+   produces clean Arch output (`Linux localhost ...`, `uid=0(root)`,
+   `Pacman v7.1.0`) on the host shell. End-to-end app launch through
+   the APK + run-as + tawcroot chain works.
+
+- **Additional bugs found and fixed during install pipeline validation:**
+   - **`openat2` and `faccessat2` killed handler-host processes via
+     Android's stacked seccomp filter.** Android 16's `untrusted_app`
+     domain RET_TRAPs both syscalls (NR 437 and 439). Two flavours of
+     fix:
+     1. `tawcroot_path_probe_openat2()` was running BEFORE
+        `install_handler` in `prod_rootfs_init`. Without the handler,
+        Android's TRAP went to default disposition and killed the
+        process. Reordered: install_handler first, then probe (the
+        handler now catches the trap and routes to "no slot →
+        -ENOSYS", which the probe interprets as "openat2 unavailable,
+        fall back to manual canonicalization").
+     2. `handle_access` and `handle_faccessat` issued `faccessat2`
+        from inside our SIGSYS handler. Android's filter then trapped
+        again, causing recursive SIGSYS that the kernel routes
+        past-mask via force_sig and kills with default action. Fix:
+        use `faccessat` (NR 269) — older but unrestricted by Android's
+        filter — and drop the flags (our common callers don't pass
+        AT_-style flags through access).
+     The `bash -c "exec uname"` test that worked earlier didn't hit
+     this because uname doesn't call access; pacman-key does as part
+     of its very first command, which is why it surfaced only during
+     real install validation.
+   - **Inherited signal mask in the JVM-spawned shell chain:** the
+     `prod_rootfs_init` path (running from `/system/bin/sh` via
+     ProcessBuilder) didn't unblock SIGSYS, mirroring the unblock
+     `--exec-child` already does. Mask was actually 0x80000000 (bit 31
+     = signal 32, NOT SIGSYS) so this turned out not to be the
+     actual blocker — but the unblock is now defensive at every
+     entry point regardless.
+
+- **Bugs found and fixed during emulator validation:**
+   - `#!` shebang scripts: the manual loader didn't handle them at all
+     (treated `#!/usr/bin/bash` files as ELF, failed with -EINVAL).
+     Added `resolve_shebangs` in `loader_exec.c` that mirrors Linux
+     `binfmt_script.c`: reads up to 4 levels of shebang indirection,
+     rewrites argv to `[interp, [shebang_arg,] script_path,
+     orig_argv[1..]]`, opens the interpreter as the actual ELF to load.
+     Subtle gotcha: don't share storage between `path_buf` and
+     `argv_out[0]` — overwriting one silently rewrites the other and
+     bash sees `argv[1] == /usr/bin/bash` instead of the intended
+     script path. Without this, every shell-script entry-point in Arch
+     (pacman-key, gpg, etc.) failed with the loader's exit 61.
+   - `getresuid` / `getresgid` not in the fake-root trap set: bash
+     reads its `$UID` / `$EUID` via `getresuid(2)`, not `getuid(2)`.
+     Without the trap the kernel returns the real app uid (10222) and
+     scripts like pacman-key that gate on `[[ $EUID -eq 0 ]]` reject
+     the call. Added handlers in `identity.c` that copy zero into all
+     three out-pointers via `tawc_copy_to_guest`.
+   - `AT_EMPTY_PATH` with a NON-NULL empty string: glibc's `fstat()`
+     calls `fstatat(fd, "", &st, AT_EMPTY_PATH)` with a real but-empty
+     pointer. The handler only short-circuited `gpath == 0` (NULL) and
+     fell through to translate `""` against the kernel cwd, routing
+     `fstat` to the wrong inode. wc, gpg-agent, etc. would then read
+     stale stat data and segfault. Added a one-byte peek via the
+     EFAULT-safe usercopy helper in both `handle_newfstatat` and
+     `handle_statx`. Test in `phase1.c::fstatat(fd, "", AT_EMPTY_PATH)`.
+
+   These fixes are why static binaries worked early in phase 5 but
+   anything script-based (pacman-key) and anything that did `bash $UID`
+   stayed broken until they landed.
+
+- **Bugs found and fixed during phase-5b (aarch64 OnePlus 9, Android
+  14, kernel 5.4.284):**
+   - **`execve` (NR 221) was missing from the aarch64 dispatch.** The
+     prior comment in `syscalls_exec.c` claimed "aarch64 has no
+     execve(2); glibc routes everything through execveat(2) there" —
+     this was wrong. aarch64 has both NR 221 (execve) and NR 281
+     (execveat). Glibc's `execve()` wrapper goes through NR 221, only
+     `fexecve()` and `execveat()` use NR 281. Without an NR 221
+     handler, `bash -c '/bin/true'` (and any other plain
+     fork+execve) issued NR 221 untrapped: our filter said ALLOW,
+     Android's stacked filter killed the process with SIGSYS, and the
+     guest died with "Bad system call" the moment it tried to exec a
+     child. Fix: register `handle_execve` for `TAWC_SYS_execve = 221`
+     on aarch64 too (wrappers `do_exec` work identically on both
+     arches). Symptom on x86_64 emulator: nothing — Android's filter
+     either allows execve there or doesn't apply the same restriction,
+     so the bug was silent until the first real-device run.
+   - **`clone3` (NR 435) untrapped on aarch64.** Glibc 2.34+ tries
+     clone3 first and falls back to clone(NR 220) on -ENOSYS. Without
+     a handler, our filter ALLOWed clone3 and Android's filter
+     intercepted — depending on policy version this was either a
+     silent ENOSYS (good — fallback fires) or a kill. Adding
+     `handle_clone3` returning -ENOSYS keeps the fallback path
+     deterministic and removes one unknown-behavior surface. The
+     comment in `syscalls_control.c::handle_clone3` documents the
+     filter-precedence reasoning: this fix only works if Android
+     RET_TRAPs (or RET_ERRNOs) clone3, not RET_KILLs it. Empirically
+     bash-fork on Android 14 worked once clone3 was -ENOSYS'd from
+     our handler.
+   - **`loader_exec_child` ordered `probe_openat2` before
+     `install_handler`** on the post-execveat re-entry path, in
+     mirror of the Phase 4 emulator bug that was already fixed in
+     `prod_rootfs_init` (main.c). On Android 14 this turned out not
+     to be the live blocker (Android 14's filter doesn't TRAP
+     openat2 — same as x86_64 emulator never tripped this in
+     practice), but the ordering inversion is still a bug:
+     `prod_rootfs_init` → install_handler before probe; the re-init
+     in `loader_exec_child` should match. Fix is one line; reordered
+     to install_handler then probe_openat2.
+
+   These fixes converted "every bash-fork dies after 6 sigactions"
+   into clean execution of `uname -a`, `id`, `pacman --version`,
+   shell pipelines (`ls /etc | head`), all through the bash → fork
+   → execve → handler → exec_handler_perform → execveat self →
+   --exec-child → loader chain on the OnePlus 9.
+
+- **More phase-5b bugs found while debugging pacman-key/gpg-agent on
+  aarch64 device:**
+   - **AF_UNIX bind/connect didn't translate `sun_path`.** The path
+     in `bind(fd, &sockaddr_un, len)` lives inside the userspace
+     struct, not as a separate syscall argument the kernel resolves
+     through *at-style APIs. Without translation, gpg-agent's
+     `bind(/root/.gnupg/S.gpg-agent)` looked for `/root/` on the host
+     filesystem and got -ENOENT, exiting status 2 and breaking every
+     pacman-key flow. Fix: trap `bind` (NR 200 aarch64 / 49 x86_64)
+     and `connect` (NR 203 / 42), copy the sockaddr_un from guest,
+     translate sun_path through `tawcroot_path_translate`, and
+     forward with a rewritten `/proc/self/fd/<base_fd>/<suffix>` form
+     on the handler stack. Lives in `src/syscalls_socket.c`.
+     Confirmed: `gpg-agent --daemon` now exits 0 with the keyring
+     sockets created at the right host-filesystem location.
+   - **Fd-relative path resolution in *at handlers.** Every *at
+     handler (openat, fstatat, statx, readlinkat, faccessat, mkdirat,
+     unlinkat, fchmodat, symlinkat, linkat, renameat, renameat2)
+     was passing the guest's `dirfd` to `fetch_and_translate`, which
+     ignored it and resolved relative paths against the kernel CWD
+     instead. gpg opens its homedir then issues
+     `openat(homedir_fd, "pubring.gpg", ...)` — translating
+     "pubring.gpg" via cwd produced ENOENT even though `ls` and
+     `stat` of the file work. Same shape breaks `find -delete`
+     mid-walk and any tool that uses `*fd_dir(); openat(fd, …)`
+     patterns (which is most modern fs traversal). Fix: new
+     `fetch_and_translate_at(dirfd, …)` variant — when dirfd ≠
+     AT_FDCWD and path is relative, pass through to the kernel's
+     fd-relative resolution. The dirfd is itself one we previously
+     handed back from a translated openat, so the inode is already
+     inside the rootfs view. Caveat: a `..` chain from the dirfd
+     can still escape (kernel walks `..` past the dirfd freely);
+     proot has the same gap on kernels without RESOLVE_BENEATH.
+   - **Per-string env buffer was too small.** `do_exec` collected
+     argv/envp into static buffers with `MAX_STR = 4096` per string.
+     Bash's `LS_COLORS`, exported function bodies, and a few
+     /etc/profile.d additions easily blow past 4 KB; a single
+     overflowing env entry made `tawc_copy_string_from_guest` return
+     -ENAMETOOLONG, which `do_exec` propagated as the execve(2)
+     return — bash printed "File name too long" for every external
+     command. Bumped MAX_STR to 16 KB and the envp_strings buffer to
+     256 KB.
+
+   With the bind/dirfd/env-buffer trio in place, the original
+   pacman-key/gpg-agent reproducer (`gpg --quick-gen-key` against a
+   fresh homedir) now passes end-to-end on aarch64 device and
+   x86_64 emulator: pubring.kbx is created, the master key is
+   generated, the self-signature is written, and pacman-key --init
+   runs to completion. The earlier diagnosis ("gpg never tries
+   `O_CREAT` on pubring.kbx") was wrong — the apparent missing-
+   `O_CREAT` was a downstream symptom of an earlier-failing
+   socket/dirfd path that we'd already untangled by the time the
+   reproducer was retested. Issue closed.
+
+   pacman-key --populate previously failed because of an unrelated
+   `wc` segfault (its `secret_keys_available` helper pipes gpg's
+   --with-colons output through `wc -l`). Root cause: the loader
+   in `loader_exec.c` allocated a 256 KiB anonymous stack for the
+   guest. wc 9.11's `wc_lines`/`wc_bytes` are compiled with
+   `-fstack-clash-protection` and pre-allocate a 256 KiB I/O
+   buffer in the stack frame, then page-probe (`orq $0,(%rsp)`)
+   on the way down — which walked one page off the bottom of our
+   region and SIGSEGV'd with SEGV_MAPERR at exactly `rsp`. Fixed
+   by bumping the loader's stack to 8 MiB to match Linux's
+   default RLIMIT_STACK; anonymous pages stay demand-zeroed so
+   the cost is reservation, not RSS.
+
+   x86_64 had also drifted out of buildable shape while aarch64
+   work landed: `handle_rename_legacy` was passing path pointers
+   where `do_renameat` expected dirfd ints (left over from before
+   the renameat refactor that added explicit dirfds), and
+   `TAWC_SYS_execve` (NR 59) was missing from the x86_64 sysnr
+   block. Without those fixes the x86_64 cross build never
+   produced a binary with the bind/connect translator in it, so
+   the emulator was running a stale .so where bind() bypassed
+   tawcroot entirely and gpg-agent crashed on the host-side path.
+   Both fixes are tiny and obvious in hindsight; they're called
+   out so a future bisect doesn't get confused.
+
+   Also fixed a latent stdout-vs-stderr bug while debugging:
+   `tawc_io_str` was writing trace and error output to fd 1
+   (stdout), but tawcroot is supposed to leave stdout untouched
+   for the guest. Output going to stdout gets captured by shell
+   `$(...)` command substitution and turns into argv for downstream
+   commands; reproduces hilariously in pacman-key, where any future
+   trace would silently corrupt arg parsing. Now writes to fd 2
+   (stderr), matching the `tawcroot: …` error-message convention
+   used at init sites in main.c.
+
+- **Bugs found while bringing up the gtk4 input integration tests on
+  the OnePlus 9 (Android 14, kernel 5.4):**
+   - **`apply_memo` shift-loop aliasing bug for shrinking targets.**
+     The well-known-symlink memoizer's in-place shift wrote the trailing
+     remainder right-to-left for both growing and shrinking rewrites.
+     For a shrink (`m->target_len < m->src_len`), the very-last shift
+     iteration read from a position the very-first iteration had
+     already overwritten — truncating the path at `target_len`. The
+     production-relevant case is `usr/sbin -> bin` (relative) on Arch:
+     translating `/usr/sbin/bash` produced `bin` instead of `bin/bash`,
+     which the second memo pass then expanded back to `/usr/bin` (a
+     directory), so `lstat /usr/sbin/bash` returned the symlink at
+     `/bin` and `bash` builtin PATH lookup failed for any binary that
+     glibc resolved through /usr/sbin. Fix: copy left-to-right when
+     shrinking, right-to-left when growing. `tawcroot/src/path.c`.
+   - **`faccessat` (NR 269 aarch64 / 48 x86_64) was untrapped.** Only
+     `faccessat2` (NR 439) and legacy x86_64 `access` (NR 21) had
+     dispatch entries. Glibc's `access(2)` wrapper issues NR 269 on
+     all kernels and only probes NR 439 opportunistically (5.8+ via
+     dlopen-style fallback), so on the OnePlus 9 (5.4) every libc
+     access check on a guest path went straight to the kernel, which
+     resolved against the host filesystem and returned -ENOENT.
+     Symptom: fontconfig couldn't find `/etc/fonts/fonts.conf`
+     (`Cannot load default config file: No such file: (null)`),
+     gcc's `find_a_file` couldn't find `cc1` and fell back to bare
+     `posix_spawnp("cc1")` which then failed with
+     `posix_spawnp: No such file or directory`. Fix: register
+     `handle_faccessat` for `TAWC_SYS_faccessat` alongside
+     `TAWC_SYS_faccessat2`. The handler already drops flags for the
+     inner `TAWC_RAW(faccessat, ...)` call (we issue NR 269 internally
+     to avoid Android's RET_TRAP on faccessat2), so the same
+     implementation serves both numbers.
+
+   With those two fixes, `bash testing/run-integration-tests.sh
+   --no-build test_input_dispatch` against `--es method tawcroot`
+   passes all 13 input-dispatch scenarios on the OnePlus 9 in ~22 s.
+   This is the first integration-test suite running entirely under
+   tawcroot on the device — gtk4-debug-app builds in the chroot
+   install (gcc-on-tawcroot is fine post-faccessat fix; the harness
+   supports `TAWC_BUILD_INSTALL_ID` to build in a sibling install if
+   desired) and runs from the tawcroot rootfs against the in-app
+   compositor over the shared `/data/data/me.phie.tawc/wayland-0`
+   socket.
+
+- **Fixed: GNU `wc` 9.11 segfault.** A core dump (with `ulimit -c
+  unlimited` under root) showed `si_code=SEGV_MAPERR`, fault address
+  ≡ rsp, and rip inside a `orq $0,(%rsp); cmp %r11,%rsp; jne loop`
+  page-probing loop — GCC's `-fstack-clash-protection` instrumentation.
+  `wc_lines`/`wc_bytes` reserve a 256 KiB I/O buffer in the stack
+  frame (offset `-0x4008c(%rbp)`) and walk it down one page at a
+  time. The loader's stack mmap was exactly 256 KiB, so the probe
+  loop fell off the bottom and SIGSEGV'd. wc was unique among
+  coreutils because no other tool happened to allocate a frame ≥
+  the loader-stack size. Fix: bump `STACK_SZ` in `loader_exec.c` to
+  8 MiB (matches Linux's default RLIMIT_STACK).
+
+- **Phase 4 — Emulator integration**: ✓ APK plumbing landed; ✓
+   x86_64 emulator end-to-end validation done. Real Arch glibc binaries
+   (uname, id, pacman --version, bash with pipes) run through the full
+   tawcroot stack from app context (run-as, real `untrusted_app` zygote
+   filter active) on the Android 16 / kernel 6.6 emulator. Including
+   the SIGSYS-handler-driven re-exec dance: `bash -c "exec uname"` and
+   `bash -c "ls /etc | head"` both run end-to-end, traversing fork →
+   trapped execve → handler → exec_handler_perform → execveat into self
+   → `--exec-child` re-init → manual-load → ld.so → glibc init → guest
+   main → exit.
+
+   One on-device fix needed beyond the host validation: the inherited
+   signal mask from the bash child has SIGSYS blocked (bit 30, plus
+   bit 31 — bash's normal pre-exec signal-discipline setup), and the
+   mask persists across `execveat`. Linux's seccomp `force_sig_seccomp`
+   does NOT bypass the thread mask on this kernel, so SIGSYS stays
+   pending and the kernel kills with default action when our newly-
+   installed handler should have fired. Fix: `tawcroot_loader_exec_child`
+   force-unblocks SIGSYS via `rt_sigprocmask(SIG_UNBLOCK, {SIGSYS})`
+   immediately after install_handler, before the manual-load jump
+   (`tawcroot/src/loader_exec.c`). The runtime sigprocmask shadow in
+   `syscalls_control.c` already strips SIGSYS from any guest-issued
+   mask change, so this only matters for the inherited initial mask
+   in the post-re-exec process.
+   `tawcroot/build` cross-builds for aarch64 + x86_64 and stages
+   `libtawcroot.so` into `server/app/src/main/jniLibs/<abi>/`; the APK
+   ships it like `libproot.so`. `TawcrootMethod.kt` mirrors
+   `ProotMethod.kt` (rootless, app-uid-owned rootfs, same bind set, same
+   pure-Kotlin tar extractor) but drops the proot-only workarounds:
+   no separate loader stub, no `/dev/shm` host bind (memfd-emulated
+   in-handler), no `--link2symlink` (built into the linkat handler), no
+   `MOZ_DISABLE_*_SANDBOX` envs (no ptrace tracer for Firefox's
+   sandbox to fight). The install activity has a third radio button;
+   `client/tawc-chroot-run` dispatches `tawcroot` alongside chroot/proot.
+   Outstanding: real-device run (phase 5), `pacman -Syu` to completion
+   (phase 6).
+- **Phase 5 — emulator end-to-end**: ✓ DONE on x86_64. Install via APK
+   succeeds (`state: READY`, `method: tawcroot`). `tawc-chroot-run`
+   from the host shell runs `uname -a`, `id`, `pacman --version`,
+   bash pipelines (`ls /etc | head`), bash fork+exec, manual-load of
+   real Arch glibc binaries — all working.
+
+- **Phase 5b — aarch64 port**: ✓ DONE on OnePlus 9 (Android 14, kernel
+   5.4.284) for the smoke-command criterion. Install via APK reaches
+   `state: READY` (`--es method tawcroot --es id arch-tawcroot`),
+   and `tawc-chroot-run "uname -a; id; pacman --version | head -1;
+   ls /etc | head"` produces clean Arch glibc output through the bash
+   → fork → execve → handler → exec_handler_perform → execveat self
+   → --exec-child → loader chain. `pacman-key --init` and
+   `gpg --quick-gen-key` both run cleanly on the aarch64 device and
+   x86_64 emulator after the bind/connect/dirfd/env-buffer fixes.
+   `pacman-key --populate` was previously blocked on a `wc` segfault
+   (loader stack too small for wc's stack-clash-probed 256 KiB
+   frame); fixed by bumping the loader stack to 8 MiB. Full
+   `pacman -Syu` to completion is Phase 6 perf work.
+
+   Three aarch64-only bugs found and fixed during this run; see
+   "Bugs found and fixed during phase-5b" above for details. Most
+   important: registering `handle_execve` for NR 221 — aarch64 has
+   both `execve` (221) and `execveat` (281) and the prior code only
+   trapped 281, so any plain `execve()` (which is what bash's `exec`
+   builtin and most fork+exec paths use) sailed past our filter and
+   got SIGSYS-killed by Android's stacked filter.
+
+   Subsequent gtk4 integration-test bringup surfaced two more
+   aarch64-relevant bugs (apply_memo shift aliasing and untrapped
+   `faccessat` NR 269); see "Bugs found while bringing up the gtk4
+   input integration tests" above. With those fixed, the
+   `test_input_dispatch` integration suite (13 input-dispatch
+   scenarios driving gtk4 through the compositor over Wayland) runs
+   entirely under tawcroot on the OnePlus 9.
+
+- **Phase 5c — full integration suite, OnePlus 9** (2026-05-02):
+   pacman package install and the wider chroot-test surface come
+   online. **12 of 12 integration tests pass** through tawcroot
+   on the OnePlus 9 with no `MOZ_DISABLE_*_SANDBOX` workaround env
+   vars. Firefox-side fixes landed: app-writable `/dev/shm` bind
+   so Mozilla's `shm_open(3)` doesn't hard-assert (was tracked
+   in `issues/tawcroot-firefox-segfault.md`); `seccomp(2)` /
+   `prctl(PR_SET_SECCOMP)` lie about successful filter install
+   so Mozilla's content-sandbox teardown path doesn't trip the
+   bionic-Q linker's `unregister_tls_module` CHECK in libhybris;
+   legacy x86_64 `readlink(2)` /proc/self/exe synthesis (the
+   `readlinkat` handler had it but NR 89 didn't); host-auxv
+   passthrough so the synthesized guest stack carries HWCAP /
+   HWCAP2 / SYSINFO_EHDR / CLKTCK / FLAGS; the test_firefox
+   steady-state AHB assertion rewritten from a fragile
+   `wlegl: imported` log-grep (only true while the WebRender
+   buffer ring is still growing) to a compositor-state check
+   (`surfaces_wlegl >= 1 && surfaces_shm == 0 && frames > before`)
+   which catches the same regressions without false-failing on
+   settled rings. Three aarch64-relevant
+   bugs found and fixed:
+     1. **close-loop death-spiral via gpgme.** glibc's
+        `closefrom()` (called by gpgme between `fork()` and
+        `execve()` for fd hygiene) enumerates `/proc/self/fd` via
+        `getdents64` in a loop, closing each fd until the list
+        is empty. Earlier rev returned `-EBADF` from the close
+        handler for any fd ≥ `TAWCROOT_RESERVED_FD_BASE`, but the
+        kernel-side fd was never actually closed — `/proc/self/fd`
+        kept showing 1000-1009 forever, glibc's loop never
+        terminated, pacman/gpg-agent hung at 100% CPU for tens of
+        minutes per scriptlet. Two-part fix:
+          a. **BPF close fast-path.** The seccomp filter now
+             special-cases `close(fd)`: only `RET_TRAP`s when `fd`
+             matches an actual reserved slot baked into the
+             filter at install time (rootfs_fd + each bind src_fd),
+             and `RET_ALLOW`s otherwise. Removes
+             ~1M unnecessary SIGSYS round-trips per gpgme child.
+             The reserved-fd list is a new
+             `tawcroot_reserved_fds[]` (in `fdtab.h` /
+             `syscalls_fd.c`) populated by `tawcroot_fd_reserve()`.
+          b. **Handler actually closes.** `handle_close` for a
+             reserved fd now calls real `close()` (no more lying
+             with `-EBADF`). Lets glibc's closefrom loop terminate.
+             A guest fork-child losing its reserved fds is fine
+             because the child is about to `execve`, and our
+             exec_handler re-establishes them in `--exec-child`.
+        Plus a third piece in `path.c`:
+          c. **Lazy re-open of reserved fds.** `path_translate`
+             validates `tawcroot_rootfs_fd` and each
+             `tawcroot_binds[i].src_fd` via a one-syscall
+             `fcntl(F_GETFD)` probe at the top of every translation,
+             and re-opens from the stashed host path
+             (`tawcroot_rootfs_host_path`, new
+             `tawcroot_binds[i].src[256]` field) on `-EBADF`.
+             Costs one extra syscall per translation; required so
+             post-closefrom path syscalls in the parent process
+             don't break.
+     2. **AT_EXECFN sticks to original argv across guest exec.**
+        `tawcroot_exec_handler_perform` was forwarding the parent
+        process's stashed `tawcroot_guest_exe_path` through the
+        re-exec memfd into the child's `loader_exec_child`, which
+        meant `/proc/self/exe` resolved to the *first*-ever guest
+        binary (typically `/bin/bash`) for every fork-and-exec'd
+        descendant. Firefox's stub binary (which uses
+        `/proc/self/exe` to find its installation directory and
+        then `dlopen`s `libxul.so` relative to it) saw `/bin/bash`,
+        couldn't find libxul, printed
+        "Couldn't load XPCOM." and exited. Fix: pass
+        `extras.guest_exe = NULL` from the exec handler so
+        `--exec-child` falls back to `st.path` (the actual exec
+        target). `readlink /proc/self/exe` now correctly returns
+        the binary the guest just exec'd.
+     3. **Bind src host paths weren't tracked.** The bind table
+        previously stored only `src_fd`, recovering the host path
+        via `readlinkat /proc/self/fd/<src_fd>` at exec-handler
+        time. Once gpgme's closefrom started actually closing those
+        fds (per fix #1), the readlink failed, so `--exec-child`
+        couldn't re-establish the bind table. Added a `src[256]`
+        field to `struct tawcroot_bind` populated at
+        `tawcroot_path_add_bind` time; exec_handler now copies
+        directly from there.
+
+   With those fixes pacman installs packages cleanly (`pacman -S`
+   completed pkgconf in 1.5s, the full test-deps set in ~5 minutes),
+   gtk3/gtk4 demos, weston, Vulkan clients, supertuxkart, and the
+   full `test_input_dispatch` flow all pass on the OnePlus 9.
+   Keyring init (`pacman-key --init && --populate archlinux`) also
+   completes end-to-end after the wc-segfault loader-stack fix.
+
+- **Phase 6 — Hardening + perf**: stacked-filter weird cases,
+   measure and tune.
 
 ## Known gaps to address before MVP
 
@@ -1751,23 +2614,29 @@ here so we don't ship MVP and discover them at runtime.
    - Binary size: ~450 KB stripped for trivial program; full
      tawcroot likely 1–2 MB.
 
-2. **In-process program loader for `--exec-child`** (the *guest*
-   loader, distinct from gap #1's static-link decision for
-   tawcroot itself). §"execve handling in detail" explains
-   *why* we can't `execve` into ld.so (signal handlers reset,
-   our SIGSYS handler dies, ld.so's first path-bearing syscall
-   kills the process). The fix is to manually load the binary
-   + ld.so via `mmap` and jump to ld.so's entry,
-   proot-loader-style. Concretely we need:
+2. **~~In-process program loader for `--exec-child`~~ — RESOLVED on
+   host.** The manual loader (parser, PT_LOAD mapper with BSS partial-
+   page zero and anonymous extension, stack synth with full auxv +
+   `AT_RANDOM`, per-arch trampoline) is implemented and runs static
+   and dynamic guests through to exit. `tawcroot/tests/integration/test_prod_exec`
+   exercises `/bin/true`, `tawcroot/tests/unit/test_loader_smoke_dynamic`
+   exercises `/bin/ls`, `tawcroot/tests/integration/test_exec_child` and
+   `test_exec_via_handler` round-trip the full memfd handoff. argv,
+   envp, and auxv all survive intact (verified in
+   `dynamic_argv_check.c`).
 
-   This is the highest-risk part of tawcroot. The rest of the design
-   is ordinary syscall rewriting; this part has to reproduce enough of
-   kernel `execve`'s ELF setup that glibc's dynamic linker believes it
-   started normally. Treat it as a separate milestone with its own
-   smoke binary before broadening the syscall surface. If we cannot
-   make a dynamically linked `/bin/true` and `/bin/sh -c true` run
-   under this loader on both host Linux and Android, tawcroot is not a
-   viable proot replacement in this form.
+   Outstanding pieces (to validate on Android + under translation):
+   - Run the same loader against a fake rootfs (depends on phase 2d).
+   - Run on the aarch64 device under the real `untrusted_app` zygote
+     filter (depends on phase 4 APK plumbing).
+   - Verify `MAP_FIXED_NOREPLACE` placement against tawcroot's high
+     non-PIE base (`0x2000000000` aarch64 / `0x40000000` x86_64) on a
+     real device — host glibc tests don't stress the address-space
+     discipline the same way.
+
+   Reference material below stays valid for any future maintenance
+   (BSS rules, AT_RANDOM, kernel auxv ordering); the "highest-risk
+   part of tawcroot" framing is retired.
 
    - **ELF header reader** (~50 lines): read `Elf64_Ehdr`,
      validate magic, extract `e_type`/`e_entry`/`e_phoff`/
@@ -1863,15 +2732,61 @@ here so we don't ship MVP and discover them at runtime.
      `MAP_FIXED_NOREPLACE` is available on all relevant Android
      kernels (introduced in 4.17; Android 11+ minimum is 5.4).
 
-   Reference: `proot/src/loader/loader.c` (~150 lines of logic)
-   does the mmap+auxv-patch+jump dance; the ELF parsing and
-   load-script generation lives in `proot/src/execve/enter.c`
-   + `exit.c` (~1400 lines). Our version is simpler because
-   we do everything in-process (no ptrace, no cross-process
-   memory writes, no load-script serialization). Plan for
-   ~500–800 lines in a dedicated `src/loader.c`. This is phase
-   2 work — nothing in the rest of the design works without it
-   for dynamically linked guests.
+   **Implementation policy: write it ourselves with references.**
+   We do not vendor proot's loader (GPLv2 — would license-encumber
+   tawcroot) and we do not lift musl wholesale (its loader is half
+   the problem; see below). Instead we write a fresh `src/loader_*.c`
+   set under tawcroot's own license, using these as oracles to
+   diff our behaviour against:
+
+   - **musl `ldso/dynlink.c::map_library`** (MIT) — canonical
+     reference for PT_LOAD mapping math: addr_min/addr_max walk,
+     ET_DYN reservation+`MAP_FIXED` dance, BSS partial-page
+     zero-fill, anonymous extension for `p_memsz > p_filesz`.
+     Re-read this file when our PT_LOAD mapper disagrees with
+     reality, but rewrite it against our fdtab/`tawc_raw_*` API
+     rather than copy it verbatim. Musl does **not** synthesize
+     a stack — it patches the kernel-built one — so the auxv
+     and stack-layout pieces have no musl analogue.
+   - **proot `src/loader/loader.c`** (GPLv2, reference only) —
+     proof-of-existence for the in-process map+jump pattern on
+     Android. Useful as a runtime oracle (run a binary under
+     proot, dump its initial stack, diff against ours) but no
+     code is copied.
+   - **Linux kernel `fs/binfmt_elf.c::create_elf_tables`** — the
+     authoritative spec for what userspace sees on the initial
+     stack. The auxv list, ordering, and `AT_RANDOM`/`AT_PLATFORM`
+     string-copy semantics come from here. Kernel headers and
+     the ABI itself aren't copyrightable interfaces; behaviour
+     is.
+   - **glibc `csu/libc-start.c`** + glibc's
+     `elf/dl-sysdep.c::_dl_sysdep_start` — what the guest
+     program *expects* to find. Useful when debugging "binary
+     starts then immediately aborts/segfaults" — usually a
+     missing or wrong auxv entry.
+
+   Plan for ~500–800 lines in `src/loader_elf.c` (parser + phdr
+   geometry, ~200 lines), `src/loader_map.c` (PT_LOAD mapper +
+   address-space discipline, ~250 lines), `src/loader_stack.c`
+   (initial-stack synth + auxv, ~250 lines), and
+   `src/arch/<arch>_loader_jump.S` (~15 lines/arch).
+
+   **Test-first staging.** Each piece ships with cleat tests
+   before the next builds on it:
+   1. parser/geometry: synthetic ELF buffers + real `/bin/true`
+      headers, asserted byte-for-byte
+   2. mapper: map a real ELF on host, walk `/proc/self/maps`,
+      assert prot bits + BSS bytes-zero
+   3. stack: build a stack, walk it as if we were the kernel,
+      compare against `getauxval` output for every entry
+   4. trampoline + static-binary smoke: load and run a freshly
+      built `static-hello`, assert exit code + captured stdout
+   5. dynamic smoke: dynamically linked `/bin/true`, then
+      `/bin/sh -c "ls /"` inside a fake rootfs (the phase-2
+      exit gate)
+
+   Until step 4 passes nothing else in phase 2 starts; until
+   step 5 passes phase 3 doesn't start.
 
 3. **Path canonicalization is the primary mechanism, not a
    fallback.** `openat2(RESOLVE_IN_ROOT)` requires kernel 5.6;
@@ -2057,23 +2972,32 @@ Android 14, API 34, kernel 5.4.284):
 
 ## Maintenance contract
 
-- The C is ours. Keep it small, idiomatic. The only third-party
-  dep is cleat (vendored at a pinned tag), which transitively
-  brings STC. No autoconf, no plugin systems, no second
-  container library.
-- For generic containers, use cleat's generics surface, not raw
-  STC `i_type`/`#include` forms. We want a consistent style with
-  the rest of Sophie's C.
+- The C is ours. Keep it small, idiomatic. **Production has no
+  third-party deps** — no libc, no cleat, no STC, nothing. cleat
+  (and its vendored STC) lives in the host-side test orchestrator
+  only; bumping the cleat pin in `tawcroot/build` is a
+  deliberate change that affects tests and tests only.
+- Don't add a libc, runtime, or container library to production.
+  If something needs containers, build the structure at init from
+  a flat C array, or extract a pure helper and test it under
+  cleat. The bind table is the canonical example.
 - Match the project's existing conventions: scripts in `client/`,
   installer code in `me.phie.tawc.install`, notes here.
 - When adding a new trapped syscall, add it to (1) the BPF filter
-  generator, (2) the dispatch table, (3) a cleat unit test in
-  `tests/unit/`, (4) an integration test in `tests/integration/`.
-  Without all four it's not done. The host-side `client/build-tawcroot`
-  default target runs the suite; CI runs it on every push.
-- The SIGSYS handler stays cleat-free, STC-free, and malloc-free.
-  If a feature needs containers in the handler, the design is
-  wrong — restructure so the container is built at init and the
-  handler reads a flat immutable view.
+  generator, (2) the dispatch table, (3) a `tawcroot/tests/unit/` test
+  for any new pure helper, (4) a `tawcroot/tests/handler/` test that
+  drives the syscall through `tawcroot-testhost` against a
+  fake rootfs, and (5) a `tawcroot/tests/integration/` test once
+  production gains a working ELF-load + jump path.
+  `tawcroot/test` runs all of them; CI runs it on every push.
+- Do NOT add `--run-test`, smoke-driver, or other test argv
+  branches to `tawcroot/src/main.c`. Test-only entry code lives
+  under `tawcroot/tests/testhost/src/` and is gated behind
+  `-DTAWCROOT_TESTHOST`. Production must be reachable via real
+  CLI only.
+- The SIGSYS handler stays freestanding, allocation-free, and
+  libc-free. If a feature needs containers in the handler, the
+  design is wrong — restructure so the container is built at
+  init and the handler reads a flat immutable view.
 - Update this note when the design shifts. Future-Sophie will
   thank you.

@@ -1,0 +1,93 @@
+#!/bin/bash
+# Build the loader test fixtures (tawcroot/tests/integration/programs/) for an
+# Android ABI via NDK. Used by `tawcroot/test --device` to push
+# guest binaries to the device and exercise `tawcroot --exec` against
+# them.
+#
+# Outputs land in `build/tawcroot-<abi>/programs/`. Same naming as the
+# host build's fixtures (`build/tawcroot-host/programs/`).
+#
+# Usage:
+#   bash tawcroot/build-fixtures <x86_64|aarch64>
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+    echo "usage: $0 <x86_64|aarch64>" >&2
+    exit 2
+fi
+ABI="$1"
+
+TAWCROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$TAWCROOT_DIR/.." && pwd)"
+PROG_DIR="$TAWCROOT_DIR/tests/integration/programs"
+OUT_DIR="$REPO_DIR/build/tawcroot-$ABI/programs"
+mkdir -p "$OUT_DIR"
+
+# NDK lookup mirrors client/build-proot (we share the same NDK install).
+if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
+    if [ -d "$DEFAULT_SDK/ndk" ]; then
+        ANDROID_NDK_HOME="$DEFAULT_SDK/ndk/$(ls -1 "$DEFAULT_SDK/ndk" | sort -V | tail -1)"
+    fi
+fi
+if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
+    echo "ERROR: ANDROID_NDK_HOME not set and no NDK found under \$ANDROID_HOME/ndk." >&2
+    exit 1
+fi
+NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+case "$ABI" in
+    x86_64)
+        STATIC_ASM_SUFFIX="x86_64"
+        CC="$NDK_BIN/x86_64-linux-android29-clang"
+        ;;
+    aarch64)
+        STATIC_ASM_SUFFIX="aarch64"
+        CC="$NDK_BIN/aarch64-linux-android29-clang"
+        ;;
+    *)
+        echo "ERROR: unsupported abi: $ABI" >&2
+        exit 1
+        ;;
+esac
+[ -x "$CC" ] || { echo "ERROR: missing $CC" >&2; exit 1; }
+
+# --- static fixtures (raw syscalls, freestanding) ---
+#
+# Source files are arch-specific .S because the syscall numbers and
+# instruction set differ. Aarch64 versions are added alongside the
+# original x86_64 ones; if a fixture lacks an aarch64 .S we skip it
+# (the test runner reports skipped).
+build_static() {
+    local name="$1"
+    local src="$PROG_DIR/${name}_${STATIC_ASM_SUFFIX}.S"
+    if [ ! -f "$src" ]; then
+        echo "  skip $name ($STATIC_ASM_SUFFIX source missing)"
+        return
+    fi
+    local out="$OUT_DIR/$name"
+    "$CC" -static -nostdlib -no-pie -O2 -Wl,--build-id=none "$src" -o "$out"
+    echo "  built $name"
+}
+
+# --- dynamic fixtures (link bionic via NDK) ---
+build_dynamic() {
+    local name="$1"
+    local src="$PROG_DIR/${name}.c"
+    if [ ! -f "$src" ]; then
+        echo "  skip $name (no source)"
+        return
+    fi
+    local out="$OUT_DIR/$name"
+    "$CC" -O2 -Wl,--build-id=none "$src" -o "$out"
+    echo "  built $name (dynamic, bionic)"
+}
+
+echo "==> building android-$ABI fixtures into $OUT_DIR"
+build_static  static_exit42
+build_static  static_argc_random
+build_dynamic dynamic_exit42
+build_dynamic dynamic_argv_check
+
+echo "==> done"

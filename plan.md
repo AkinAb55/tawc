@@ -196,13 +196,66 @@ for the full design.
   correctness, `/proc/self/exe` synthesis, `getcwd` reverse-translate.
 - Phase 3 — full path-syscall surface: every entry in `notes/tawcroot.md`
   §"Which syscalls need translation" wired through the dispatch table.
-- Phase 4 — emulator integration (x86_64 AVD): `client/build-tawcroot`,
+- Phase 4 — emulator integration (x86_64 AVD): `tawcroot/build`,
   jniLib packaging as `libtawcroot.so`, `TawcrootMethod.kt` next to
   `ProotMethod.kt`, dispatch in `client/tawc-chroot-run`, wrapper
   script. Run `pacman -Syu` to completion; verify the lp64-`access`-on-
   x86_64 stacked-filter case (only fires on x86_64).
 - Phase 5 — aarch64 port (real device): `arch/aarch64.h` + stub asm,
   libhybris/Firefox smoke tests, measure `pacman -Syu` wall-time vs
-  proot.
-- Phase 6 — hardening + perf: stacked-filter edge cases, Firefox
-  sandbox specifics, tune the trapped-syscall set.
+  proot. **Phase 5b smoke green on OnePlus 9 (2026-05-01)** — see
+  notes/tawcroot.md. **Phase 5c integration suite green
+  (2026-05-02): 12/12 tests pass on the OnePlus 9 with no
+  `MOZ_DISABLE_*_SANDBOX` workaround env vars.** Firefox-side
+  fixes that landed in this round: `/dev/shm` bind in
+  `TawcrootMethod` so Mozilla's `shm_open(3)` succeeds (was
+  hard-asserting in `SharedMemory::Allocate`); seccomp/
+  `prctl(PR_SET_SECCOMP)` lying about successful filter install
+  so Mozilla's content-sandbox setup doesn't trip a teardown that
+  aborts inside libhybris's bionic-Q linker on the
+  `unregister_tls_module` CHECK; legacy x86_64 `readlink(2)`
+  /proc/self/exe synthesis (the `readlinkat` handler had it but
+  NR 89 didn't); host-auxv passthrough (HWCAP/HWCAP2/SYSINFO_EHDR/
+  CLKTCK/FLAGS) in the synthesized guest stack; and the
+  test_firefox steady-state assertion rewritten from a fragile
+  `wlegl: imported` log-line grep to a compositor-state check
+  that catches the same regressions without false-failing on
+  settled buffer rings. Three aarch64 bugs from earlier in phase
+  5b also still apply: gpgme/closefrom death spiral (BPF close
+  fast-path + lazy reserved-fd re-open), `/proc/self/exe`
+  AT_EXECFN sticking across guest exec, and bind src host-path
+  tracking. See notes/tawcroot.md "Phase 5c — full integration
+  suite, OnePlus 9". **Phase 5d in-app install green (2026-05-02):
+  18/18 integration tests pass after installing through the
+  in-app installer (`InstallActivity --es method tawcroot`)
+  rather than the adb-shell `client/tawc-chroot-run` path used
+  by 5c. Three more tawcroot bugs surfaced and got fixed:
+  (1) `prod_rootfs_init` / `loader_exec_child` had `probe_openat2`
+  running with SIGSYS still blocked from the inherited initial
+  mask; Android's `untrusted_app` filter then RET_TRAPs openat2
+  and the kernel kills the process before the unblock at the
+  end of the bootstrap fires. Moved the unblock above the probe.
+  (2) `tawcroot_rootfs_host_path` was stored verbatim from `-r`,
+  but on Android the app's `/data/data/<pkg>` is a bind-mount
+  alias for `/data/user/0/<pkg>` and the kernel's `getcwd`
+  walks dentries via the mount-side path. Result: the prefix
+  match in `handle_getcwd` failed for every chroot-internal
+  cwd lookup once the install service spawned us via
+  `/data/user/0/...`. Now canonicalize via
+  `readlinkat(/proc/self/fd/<rootfs_fd>)` at startup. (3) The
+  in-app `TawcrootMethod.runInside` skipped writing
+  `/etc/profile.d/01-tawc.sh` and never linked
+  `/tmp/.X11-unix → /data/data/me.phie.tawc/xtmp/.X11-unix`,
+  so X clients in the chroot couldn't reach Xwayland. Switched
+  to invoking the per-install `enter.sh` (same shape as
+  `client/tawc-chroot-run`) and added `DISPLAY=:0` +
+  `SDL_VIDEODRIVER=wayland,x11` + the X-socket symlink to its
+  profile.d body. One workaround still active and tracked
+  separately: `pacman-key --init`'s `gpg-agent` spins at 100%
+  CPU when started from the in-app installer process (works
+  fine via `client/tawc-chroot-run` from adb shell), so
+  `ArchPacmanCommon` pins `SigLevel = Never` and skips
+  `pacman-key` for tawcroot installs — see
+  `issues/tawcroot-gpg-agent-hangs-from-app-context.md`.**
+- Phase 6 — hardening + perf: stacked-filter edge cases, tune
+  the trapped-syscall set.

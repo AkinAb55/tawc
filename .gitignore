@@ -30,6 +30,7 @@ libxkbcommon/
 android-headers/
 proot/
 proot-deps/
+cleat/
 
 # OS
 .DS_Store
