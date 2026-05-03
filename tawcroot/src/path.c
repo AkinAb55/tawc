@@ -115,9 +115,10 @@ static void memo_one(const char *prefix)
 
 	char buf[256];
 	long n = TAWC_RAW(TAWC_SYS_readlinkat, tawcroot_rootfs_fd,
-			  (long)prefix, (long)buf, (long)sizeof buf - 1,
+			  (long)prefix, (long)buf, (long)sizeof buf,
 			  0, 0);
 	if (n <= 0) return;
+	if ((size_t)n == sizeof buf) return;  /* truncated — skip memo */
 	buf[n] = 0;
 
 	struct symlink_memo *m = &g_memo[g_n_memo++];

@@ -149,8 +149,13 @@ long tawcroot_path_resolve_symlinks(char *suf, size_t cap,
 			suf[comp_end] = 0;
 
 			char target[TAWC_PATH_MAX];
+			/* Pass full buffer (not cap-1) so we can detect
+			 * truncation: when readlink returns the full cap,
+			 * the kernel had more bytes to write but ran out
+			 * of room. cap-1 form silently mistakes a truncated
+			 * target for an exact-fit one. */
 			long n = oracle->readlink(oracle->ctx, suf,
-						  target, sizeof target - 1);
+						  target, sizeof target);
 
 			suf[comp_end] = saved;
 
@@ -158,10 +163,28 @@ long tawcroot_path_resolve_symlinks(char *suf, size_t cap,
 				/* Not a symlink. Walk into next component. */
 				continue;
 			}
-			if (n < 0) {
-				/* ENOENT or other: stop. The downstream syscall
-				 * will produce the right kernel error. */
+			if (n == -TAWC_ENOENT) {
+				/* Component missing: stop with the resolved
+				 * prefix; the downstream syscall produces the
+				 * kernel-native error. */
 				return 0;
+			}
+			if (n < 0) {
+				/* Any other errno (-EACCES, -EIO, ...) is fatal:
+				 * propagate so the caller's syscall returns it
+				 * to the guest verbatim. Folding these into
+				 * "not a symlink, continue" leaks a partially-
+				 * translated path the kernel might serve under
+				 * different rules than readlinkat used. */
+				return n;
+			}
+			if ((size_t)n == sizeof target) {
+				/* Saturation: target is at least sizeof(target)
+				 * bytes, so we can neither NUL-terminate it nor
+				 * be sure the bytes we have are the whole target.
+				 * Refuse rather than silently use a truncated
+				 * target the kernel won't agree with. */
+				return -TAWC_ENAMETOOLONG;
 			}
 			if (n == 0) {
 				/* Zero-length symlink target. Linux refuses to

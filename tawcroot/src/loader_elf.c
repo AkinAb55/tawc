@@ -97,12 +97,10 @@ long tawc_loader_parse_ehdr(const void *buf, size_t buf_len,
 
 void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
                             uint64_t p_memsz, uint64_t p_offset,
-                            uint64_t p_align, uint32_t p_flags,
+                            uint32_t p_flags,
                             size_t page_size,
                             struct tawc_loader_seg *seg)
 {
-	(void)p_align; /* recorded only; alignment math uses page_size */
-
 	uint64_t end_file = p_vaddr + p_filesz;
 	uint64_t end_mem  = p_vaddr + p_memsz;
 
@@ -148,7 +146,6 @@ void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
 	seg->p_filesz  = p_filesz;
 	seg->p_memsz   = p_memsz;
 	seg->p_offset  = p_offset;
-	seg->p_align   = p_align;
 	seg->p_flags   = p_flags;
 }
 
@@ -188,7 +185,7 @@ long tawc_loader_parse_phdrs(const void *phdr_buf, size_t phdr_buf_len,
 
 			tawc_loader_seg_layout(ph->p_vaddr, ph->p_filesz,
 			                       ph->p_memsz, ph->p_offset,
-			                       ph->p_align, ph->p_flags,
+			                       ph->p_flags,
 			                       page_size,
 			                       &img->loads[n_loads]);
 			n_loads++;

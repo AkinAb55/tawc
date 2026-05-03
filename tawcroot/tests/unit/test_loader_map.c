@@ -118,6 +118,79 @@ static int maps_check_range(uintptr_t addr, uintptr_t end, int want_r,
 
 /* ------------- tests ------------- */
 
+/* Recording I/O vtable: doesn't actually map, just acknowledges every
+ * mmap by returning the requested address (or a fake non-zero base for
+ * the ET_DYN reservation when hint=NULL). Used to drive the mapper
+ * against a synthetic image without polluting the test process's address
+ * space — we only care about the placement struct it produces.
+ *
+ * The fake-base value is chosen so addresses don't collide with any
+ * real mapping a sanitizer might want to inspect; nothing dereferences
+ * the returned pointers. */
+#define MOCK_DYN_BASE ((uintptr_t)0x70000000UL)
+
+static uintptr_t mock_mmap_record(void *ctx, void *addr, size_t len,
+                                  int prot, int flags, int fd,
+                                  uint64_t offset)
+{
+	(void)ctx; (void)len; (void)prot; (void)flags;
+	(void)fd; (void)offset;
+	if (addr) return (uintptr_t)addr;
+	return MOCK_DYN_BASE;
+}
+static long mock_mprotect_ok(void *ctx, void *addr, size_t len, int prot)
+{ (void)ctx; (void)addr; (void)len; (void)prot; return 0; }
+static long mock_munmap_ok(void *ctx, void *addr, size_t len)
+{ (void)ctx; (void)addr; (void)len; return 0; }
+static long mock_pread_ok(void *ctx, int fd, void *buf, size_t n, uint64_t off)
+{ (void)ctx; (void)fd; (void)buf; (void)off; return (long)n; }
+
+static struct tawc_loader_io mock_io = {
+	.ctx = nullptr,
+	.mmap = mock_mmap_record,
+	.mprotect = mock_mprotect_ok,
+	.munmap = mock_munmap_ok,
+	.pread = mock_pread_ok,
+};
+
+/* Regression: tawc_loader_unmap on an ET_EXEC placement used to do
+ * `munmap(0, addr_max)` because we recorded base=0/span=addr_max — that
+ * would unmap libtawcroot itself. The fix: record the actual loaded
+ * range, [addr_min, addr_max). This test exercises the bookkeeping
+ * with a recording mock io so we don't need a real ET_EXEC fixture. */
+test(placement_et_exec_covers_only_loaded_range)
+{
+	/* Two PT_LOADs with filesz/memsz aligned to page size — no BSS,
+	 * so the mapper never calls zero_range on the (un-backed) addresses
+	 * the recording mock io hands out. */
+	tawc_elf64_phdr ph[2];
+	memset(ph, 0, sizeof ph);
+	ph[0].p_type = TAWC_PT_LOAD; ph[0].p_flags = 0x4 | 0x1;
+	ph[0].p_offset = 0x1000; ph[0].p_vaddr = 0x401000; ph[0].p_paddr = 0x401000;
+	ph[0].p_filesz = 0x1000; ph[0].p_memsz = 0x1000; ph[0].p_align = 0x1000;
+	ph[1].p_type = TAWC_PT_LOAD; ph[1].p_flags = 0x4 | 0x2;
+	ph[1].p_offset = 0x2000; ph[1].p_vaddr = 0x402000; ph[1].p_paddr = 0x402000;
+	ph[1].p_filesz = 0x1000; ph[1].p_memsz = 0x1000; ph[1].p_align = 0x1000;
+
+	struct tawc_loader_image img;
+	memset(&img, 0, sizeof img);
+	img.e_type      = TAWC_ET_EXEC;
+	img.e_machine   = TAWC_EM_X86_64;
+	img.e_phentsize = sizeof(tawc_elf64_phdr);
+	img.e_phnum     = 2;
+	img.e_entry     = 0x401234;
+	test_int_eq(tawc_loader_parse_phdrs(ph, sizeof ph, 4096, &img), 0);
+	test_int_eq((int)img.addr_min, 0x401000);
+	test_int_eq((int)img.addr_max, 0x403000);
+
+	struct tawc_loader_placement pl;
+	test_int_eq(tawc_loader_map(&img, /*fd*/-1, 0, 4096, &mock_io, &pl), 0);
+	test_int_eq((int)pl.base, 0x401000);
+	test_int_eq((int)pl.span, 0x2000);   /* addr_max - addr_min */
+	/* entry uses the local base (0 for ET_EXEC) — absolute. */
+	test_int_eq((int)pl.entry, 0x401234);
+}
+
 test(map_real_self_exe_dyn)
 {
 	struct tawc_loader_image img;

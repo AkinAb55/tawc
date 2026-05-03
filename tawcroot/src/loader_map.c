@@ -169,8 +169,28 @@ long tawc_loader_map(const struct tawc_loader_image *img,
 		 * them. For ET_DYN: same — replace the reservation pages. */
 	}
 
-	out->base       = base;
-	out->span       = span;
+	/* placement.base/span describe the in-memory range of the loaded
+	 * image so `tawc_loader_unmap(placement, ...)` can free exactly
+	 * what we mapped — nothing more, nothing less.
+	 *
+	 *   ET_DYN: addr_min is 0 (image-relative), so the loaded range is
+	 *           [chosen_base, chosen_base + addr_max). Record that.
+	 *   ET_EXEC: vaddrs are absolute. Loaded range is
+	 *           [addr_min, addr_max). Record that. The previous form
+	 *           recorded base=0/span=addr_max, which would unmap the
+	 *           whole low half of the address space (including
+	 *           libtawcroot itself) on cleanup.
+	 *
+	 * `out->entry` and `compute_phdr_addr` still use the local `base`
+	 * (which is 0 for ET_EXEC) so absolute vaddrs go through unchanged. */
+	if (is_dyn) {
+		out->base = base;
+		out->span = (uintptr_t)img->addr_max;
+	} else {
+		out->base = (uintptr_t)img->addr_min;
+		out->span = (uintptr_t)(img->addr_max - img->addr_min);
+	}
+	(void)span;
 	out->entry      = base + (uintptr_t)img->e_entry;
 	out->phdr_addr  = compute_phdr_addr(img, base);
 	out->phnum      = img->e_phnum;

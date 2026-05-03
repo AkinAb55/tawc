@@ -179,7 +179,6 @@ test(seg_layout_no_bss_single_page)
 	                       /*filesz*/  0x500,
 	                       /*memsz*/   0x500,
 	                       /*offset*/  0x1000,
-	                       /*align*/   0x1000,
 	                       /*flags*/   0x4 /* PF_R */,
 	                       /*page*/    4096,
 	                       &s);
@@ -205,7 +204,7 @@ test(seg_layout_filesz_on_page_boundary_with_anon_bss)
 	struct tawc_loader_seg s;
 	/* filesz lands exactly at 0x2000; partial slice is empty;
 	 * memsz extends one more page → one anon page. */
-	tawc_loader_seg_layout(0x1000, 0x1000, 0x2000, 0x1000, 0x1000,
+	tawc_loader_seg_layout(0x1000, 0x1000, 0x2000, 0x1000,
 	                       0x4 | 0x2 /* PF_R | PF_W */, 4096, &s);
 	test_int_eq((int)s.vaddr_filehi, 0x2000);
 	test_int_eq((int)s.vaddr_memhi,  0x3000);
@@ -220,7 +219,7 @@ test(seg_layout_partial_and_anon_bss)
 {
 	struct tawc_loader_seg s;
 	/* filesz mid-page, memsz spans into a new page. */
-	tawc_loader_seg_layout(0x1000, 0x800, 0x3500, 0x1000, 0x1000,
+	tawc_loader_seg_layout(0x1000, 0x800, 0x3500, 0x1000,
 	                       0x4 | 0x2, 4096, &s);
 	test_int_eq((int)s.vaddr_filehi,  0x2000);
 	test_int_eq((int)s.vaddr_memhi,   0x5000);  /* 0x1000+0x3500=0x4500 → up to 0x5000 */
@@ -233,7 +232,7 @@ test(seg_layout_partial_and_anon_bss)
 test(seg_layout_executable_prot)
 {
 	struct tawc_loader_seg s;
-	tawc_loader_seg_layout(0x400000, 0x1234, 0x1234, 0, 0x1000,
+	tawc_loader_seg_layout(0x400000, 0x1234, 0x1234, 0,
 	                       0x4 | 0x1 /* PF_R | PF_X */, 4096, &s);
 	test_int_eq(s.prot, (TAWC_LOADER_PROT_R | TAWC_LOADER_PROT_X));
 }
@@ -243,7 +242,7 @@ test(seg_layout_p_offset_aligned_down)
 	struct tawc_loader_seg s;
 	/* p_vaddr/p_offset both have in-page offset 0x100. file_offset
 	 * must round down to the nearest page; file_size accounts for it. */
-	tawc_loader_seg_layout(0x1100, 0x800, 0x800, 0x3100, 0x1000,
+	tawc_loader_seg_layout(0x1100, 0x800, 0x800, 0x3100,
 	                       0x4, 4096, &s);
 	test_int_eq((int)s.vaddr_lo,    0x1000);
 	test_int_eq((int)s.file_offset, 0x3000);
@@ -255,7 +254,7 @@ test(seg_layout_16k_page)
 	/* aarch64 binaries built with --max-page-size=0x4000 — same math
 	 * just bigger pages. */
 	struct tawc_loader_seg s;
-	tawc_loader_seg_layout(0x4000, 0x3000, 0x5000, 0x4000, 0x4000,
+	tawc_loader_seg_layout(0x4000, 0x3000, 0x5000, 0x4000,
 	                       0x4 | 0x2, 0x4000, &s);
 	test_int_eq((int)s.vaddr_lo,     0x4000);
 	test_int_eq((int)s.vaddr_filehi, 0x8000);

@@ -528,6 +528,43 @@ DECLARE_AT_PASS(mkdirat,    TAWC_SYS_mkdirat,    3, TAWCROOT_PATH_PARENT_CREATE)
 DECLARE_AT_PASS(unlinkat,   TAWC_SYS_unlinkat,   3, TAWCROOT_PATH_PARENT_REMOVE)
 DECLARE_AT_PASS(fchmodat,   TAWC_SYS_fchmodat,   3, TAWCROOT_PATH_FOLLOW)
 
+/* utimensat: translate path and pass through. Special-case the
+ * Linux extension `pathname == NULL` (operate on dirfd directly) by
+ * forwarding without translation; the AT_PASS macro can't express
+ * that since it rejects null paths up front.
+ *
+ * Without this trapping, libarchive (used by pacman) hits the kernel
+ * with a guest-visible path that fails to resolve — the package
+ * extraction completes but every file gets the current mtime instead
+ * of the archive's recorded one, drowning install logs in
+ * "Can't restore time" warnings. */
+static long handle_utimensat(const tawcroot_syscall_args *args,
+			     ucontext_t *uc)
+{
+	(void)uc;
+	int dirfd = (int)args->a;
+	const char *gpath = (const char *)(uintptr_t)args->b;
+	if (!gpath) {
+		/* Linux-extension: NULL pathname → operate on dirfd. The
+		 * dirfd is one of ours (translated openat handed it back);
+		 * forward unchanged. */
+		return TAWC_RAW(TAWC_SYS_utimensat, dirfd, 0,
+				args->c, args->d, 0, 0);
+	}
+	char path_buf[TAWC_PATH_MAX];
+	char suffix[TAWC_PATH_MAX];
+	int  base_fd, use_empty;
+	long e = fetch_and_translate_at(dirfd, gpath,
+					path_buf, sizeof path_buf,
+					suffix, sizeof suffix,
+					&base_fd, &use_empty,
+					TAWCROOT_PATH_FOLLOW);
+	if (e) return e;
+	const char *p = use_empty ? "." : suffix;
+	return TAWC_RAW(TAWC_SYS_utimensat, base_fd, (long)p,
+			args->c, args->d, 0, 0);
+}
+
 /* fchownat: translate path, but DON'T issue the host syscall (Android
  * untrusted_app uid can't chown anyway). proot `-0` semantics: report
  * success and lie. The on-disk file remains app-owned; guest sees what
@@ -958,8 +995,15 @@ static long handle_rmdir(const tawcroot_syscall_args *args, ucontext_t *uc)
 static long handle_chown_legacy(const tawcroot_syscall_args *args,
 				ucontext_t *uc)
 {
-	(void)args;
 	(void)uc;
+	/* Validate the path pointer even though we ignore the value, so
+	 * a guest with a wild pointer sees -EFAULT instead of fake
+	 * success — matches the contract every other path-bearing
+	 * handler exposes. */
+	const char *path = (const char *)(uintptr_t)args->a;
+	char path_buf[TAWC_PATH_MAX];
+	long n = tawc_copy_string_from_guest(path_buf, sizeof path_buf, path);
+	if (n < 0) return n;
 	return 0;  /* fake-root no-op, like fchownat */
 }
 
@@ -1045,6 +1089,7 @@ void tawcroot_fs_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_symlinkat,   handle_symlinkat);
 	tawcroot_dispatch_install(TAWC_SYS_fchmodat,    handle_fchmodat);
 	tawcroot_dispatch_install(TAWC_SYS_fchownat,    handle_fchownat);
+	tawcroot_dispatch_install(TAWC_SYS_utimensat,   handle_utimensat);
 	tawcroot_dispatch_install(TAWC_SYS_statx,       handle_statx);
 	tawcroot_dispatch_install(TAWC_SYS_linkat,      handle_linkat);
 	tawcroot_dispatch_install(TAWC_SYS_renameat,    handle_renameat);

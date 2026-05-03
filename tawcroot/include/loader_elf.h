@@ -167,7 +167,6 @@ struct tawc_loader_seg {
 	uint64_t  p_filesz;
 	uint64_t  p_memsz;
 	uint64_t  p_offset;
-	uint64_t  p_align;
 	uint32_t  p_flags;
 };
 
@@ -265,14 +264,16 @@ long tawc_loader_parse_phdrs(const void *phdr_buf, size_t phdr_buf_len,
  *
  * Caller has already validated:
  *   - p_filesz <= p_memsz
- *   - p_align is a power of two
+ *   - p_align is a power of two and >= page_size (parser-side; the
+ *     layout math itself uses page_size, so p_align is not consulted
+ *     here)
  *   - (p_offset & (page_size-1)) == (p_vaddr & (page_size-1))
  *
  * `seg->prot` is computed from `p_flags` (PF_R/W/X bits 0/1/2).
  */
 void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
                             uint64_t p_memsz, uint64_t p_offset,
-                            uint64_t p_align, uint32_t p_flags,
+                            uint32_t p_flags,
                             size_t page_size,
                             struct tawc_loader_seg *seg);
 

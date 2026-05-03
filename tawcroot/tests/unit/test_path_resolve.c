@@ -277,6 +277,93 @@ test(resolver_zero_length_target_treated_as_enoent)
 	test_str_eq(suf, "etc/empty");
 }
 
+/* ---- non-ENOENT/EINVAL errno bubbles up ----
+ *
+ * The oracle's contract: -EINVAL means "not a symlink, keep walking",
+ * -ENOENT means "component missing, stop with what we resolved", any
+ * other -errno is fatal — must propagate so the guest's syscall sees
+ * it. Earlier the resolver folded all non-EINVAL errors into "stop
+ * with the prefix as-is", which silently swallowed -EACCES from a
+ * restricted parent dir. */
+
+static long mock_readlink_eacces(void *ctx, const char *suffix,
+				 char *out, size_t out_cap)
+{
+	(void)ctx; (void)out; (void)out_cap; (void)suffix;
+	return -13;  /* -EACCES */
+}
+
+test(resolver_propagates_eacces)
+{
+	struct tawcroot_path_oracle ora = {
+		.ctx = NULL, .readlink = mock_readlink_eacces,
+	};
+
+	char suf[256];
+	strcpy(suf, "restricted/file");
+	long rv = tawcroot_path_resolve_symlinks(suf, sizeof suf,
+						 TAWCROOT_PATH_FOLLOW, &ora);
+	test_int_eq(rv, -13);  /* -EACCES propagated */
+}
+
+static long mock_readlink_enoent(void *ctx, const char *suffix,
+				 char *out, size_t out_cap)
+{
+	(void)ctx; (void)out; (void)out_cap; (void)suffix;
+	return -2;  /* -ENOENT */
+}
+
+test(resolver_stops_on_enoent_with_prefix)
+{
+	/* -ENOENT mid-walk: stop with whatever we've resolved so far,
+	 * leave suf untouched, return 0 — the downstream syscall will
+	 * produce the kernel-native ENOENT. */
+	struct tawcroot_path_oracle ora = {
+		.ctx = NULL, .readlink = mock_readlink_enoent,
+	};
+
+	char suf[256];
+	strcpy(suf, "missing/file");
+	long rv = tawcroot_path_resolve_symlinks(suf, sizeof suf,
+						 TAWCROOT_PATH_FOLLOW, &ora);
+	test_int_eq(rv, 0);
+	test_str_eq(suf, "missing/file");
+}
+
+/* ---- saturated readlink (target == out_cap) is treated as truncation ----
+ *
+ * Linux readlinkat doesn't tell the caller whether the target was
+ * exactly out_cap bytes or got truncated to out_cap. The resolver
+ * passes the full buffer and treats `n == out_cap` as truncation, so
+ * we fail loud (ENAMETOOLONG) rather than silently using a possibly-
+ * truncated target the kernel won't agree with. */
+
+static long mock_readlink_saturate(void *ctx, const char *suffix,
+				   char *out, size_t out_cap)
+{
+	(void)ctx;
+	if (suffix[0] == 0) return -22;
+	if (strcmp(suffix, "huge") != 0) return -22;
+	/* Fill the entire buffer with non-NUL bytes, claim out_cap bytes
+	 * of target — the saturation case the kernel exposes when the
+	 * actual target is at least `out_cap` bytes long. */
+	memset(out, 'x', out_cap);
+	return (long)out_cap;
+}
+
+test(resolver_saturated_readlink_is_ENAMETOOLONG)
+{
+	struct tawcroot_path_oracle ora = {
+		.ctx = NULL, .readlink = mock_readlink_saturate,
+	};
+
+	char suf[256];
+	strcpy(suf, "huge");
+	long rv = tawcroot_path_resolve_symlinks(suf, sizeof suf,
+						 TAWCROOT_PATH_FOLLOW, &ora);
+	test_int_eq(rv, -36);  /* -ENAMETOOLONG */
+}
+
 /* ---- mid-path symlink with relative `..` target ---- */
 
 test(resolver_relative_dotdot_target)

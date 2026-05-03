@@ -84,17 +84,28 @@ static long open_in_view(const char *guest_path, char *suffix_buf,
 	                   O_RDONLY | O_CLOEXEC, 0);
 }
 
+/* Stage tag for parse_image so callers can distinguish ehdr vs phdr
+ * failure and exit with the correct documented loader code (61 vs 62).
+ * Set on failure only; ignored on success. */
+enum parse_image_stage {
+	PARSE_IMAGE_EHDR = 0,
+	PARSE_IMAGE_PHDR = 1,
+};
+
 static long parse_image(int fd, struct tawc_loader_image *img,
                         uint8_t *ebuf, size_t ebuf_cap,
                         uint8_t *pbuf, size_t pbuf_cap,
-                        size_t page_size)
+                        size_t page_size,
+                        enum parse_image_stage *stage_out)
 {
+	*stage_out = PARSE_IMAGE_EHDR;
 	if (ebuf_cap < sizeof(tawc_elf64_ehdr)) return -22;
 	long n = tawc_pread64(fd, ebuf, sizeof(tawc_elf64_ehdr), 0);
 	if (n != (long)sizeof(tawc_elf64_ehdr)) return -22;
 	long rc = tawc_loader_parse_ehdr(ebuf, sizeof(tawc_elf64_ehdr), img);
 	if (rc) return rc;
 
+	*stage_out = PARSE_IMAGE_PHDR;
 	size_t pbytes = (size_t)img->e_phnum * img->e_phentsize;
 	if (pbytes > pbuf_cap) return -22;
 	n = tawc_pread64(fd, pbuf, pbytes, (long)img->e_phoff);
@@ -291,9 +302,10 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	struct tawc_loader_image bin_img;
 	uint8_t ebuf[sizeof(tawc_elf64_ehdr)];
 	uint8_t pbuf[64 * 64];
+	enum parse_image_stage stage;
 	long rc = parse_image((int)bin_fd, &bin_img, ebuf, sizeof ebuf,
-	                      pbuf, sizeof pbuf, PAGE);
-	if (rc) LOADER_FAIL(61 + (rc == -22 ? 0 : 1));
+	                      pbuf, sizeof pbuf, PAGE, &stage);
+	if (rc) LOADER_FAIL(stage == PARSE_IMAGE_EHDR ? 61 : 62);
 	if (bin_img.e_type != TAWC_ET_EXEC && bin_img.e_type != TAWC_ET_DYN)
 		LOADER_FAIL(63);
 
@@ -323,8 +335,10 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 		if (ld_fd < 0) LOADER_FAIL(65);
 
 		struct tawc_loader_image ld_img;
+		enum parse_image_stage ld_stage;
+		(void)ld_stage;
 		if (parse_image((int)ld_fd, &ld_img, ebuf, sizeof ebuf,
-		                pbuf, sizeof pbuf, PAGE) != 0)
+		                pbuf, sizeof pbuf, PAGE, &ld_stage) != 0)
 			LOADER_FAIL(66);
 		if (ld_img.e_type != TAWC_ET_DYN || ld_img.interp_present)
 			LOADER_FAIL(67);
@@ -353,7 +367,7 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * page tables — no real RSS until the guest touches them. */
 	const size_t STACK_SZ = 8 * 1024 * 1024;
 	long stack_rv = tawc_mmap((void *)0, STACK_SZ, PROT_RW, MAP_PA, -1, 0);
-	if (stack_rv < 0 && stack_rv >= -4095) LOADER_FAIL(70);
+	if (tawc_loader_mmap_is_err((uintptr_t)stack_rv)) LOADER_FAIL(70);
 	void *stack = (void *)stack_rv;
 
 	uint8_t random16[16];
@@ -424,7 +438,7 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 	const int FLAGS  = TAWC_MM_MAP_PRIVATE;
 	long mrv = tawc_mmap((void *)0, (size_t)size, PROT_R, FLAGS,
 	                     state_fd, 0);
-	if (mrv < 0 && mrv >= -4095) LOADER_FAIL(81);
+	if (tawc_loader_mmap_is_err((uintptr_t)mrv)) LOADER_FAIL(81);
 	const void *buf = (const void *)mrv;
 
 	static const char *argv_buf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];

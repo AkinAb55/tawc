@@ -64,11 +64,20 @@ static inline long tawc_loader_mmap_errno(uintptr_t v)
 
 /* Output of tawc_loader_map: where the image landed and the
  * derived addresses callers (the stack synth and the trampoline)
- * actually need. */
+ * actually need.
+ *
+ * `base` and `span` describe the in-memory range of the loaded image
+ * — `tawc_loader_unmap` does `munmap(base, span)` to free exactly
+ * what we mapped. For ET_DYN that's [chosen_base, chosen_base+addr_max);
+ * for ET_EXEC that's [addr_min, addr_max), since vaddrs are absolute.
+ *
+ * `entry` and `phdr_addr` are absolute virtual addresses for the guest
+ * to jump to / for ld.so to read. For ET_DYN they're biased by the
+ * chosen base; for ET_EXEC the bias is 0 (image vaddrs already absolute). */
 struct tawc_loader_placement {
-	uintptr_t base;        /* For ET_DYN: chosen base. For ET_EXEC: 0. */
-	uintptr_t span;        /* memhi of the last segment (relative to base). */
-	uintptr_t entry;       /* base + e_entry */
+	uintptr_t base;        /* low address of the loaded image */
+	uintptr_t span;        /* size in bytes (so [base, base+span) is the load range) */
+	uintptr_t entry;       /* absolute jump target */
 	uintptr_t phdr_addr;   /* in-memory address of the program-header table */
 	uint16_t  phnum;       /* echo of img->e_phnum (for AT_PHNUM) */
 	uint16_t  phentsize;   /* echo of img->e_phentsize (for AT_PHENT) */
