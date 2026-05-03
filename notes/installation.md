@@ -615,14 +615,22 @@ dead weight on Android's NAND. The slimming logic lives in
 `distro/arch/ArchPacmanCommon.kt` (so both Arch flavours pay the same
 cost) and runs in three pieces:
 
-1. **Post-extract `rm -rf`** during `CONFIGURING` (`POST_EXTRACT_PURGE_PATHS`).
-   These are big standalone trees that pacman itself wouldn't otherwise
-   reclaim: `/boot`, `/usr/lib/firmware`, `/usr/lib/modules`,
-   `/var/cache/pacman/pkg`, plus the `man`/`info`/`doc`/`gtk-doc`/`help`/`locale`/`i18n`
-   trees under `/usr/share`. The exact reclaim size lives next to the
-   constant in code (`POST_EXTRACT_PURGE_PATHS`) — the per-tree numbers
-   in that doc-comment are the source of truth, this note intentionally
-   doesn't repeat them so the two can't drift.
+1. **Post-extract `rm -rf`** during `CONFIGURING` (`POST_EXTRACT_PURGE_PATHS`
+   for whole directories, `POST_EXTRACT_PURGE_GLOBS` for shell-glob
+   file patterns). Whole-tree reclaims: `/boot`, `/usr/lib/firmware`,
+   `/usr/lib/modules`, `/var/cache/pacman/pkg`, the
+   `man`/`info`/`doc`/`gtk-doc`/`help`/`locale`/`i18n` trees under
+   `/usr/share`, and `/usr/share/gir-1.0` (GIR XML sources — runtime
+   GI consumers read `.typelib` from `/usr/lib/girepository-1.0/`).
+   File-glob reclaims: the multi-language gcc runtime libraries
+   (`libgo`, `libgphobos`, `libgfortran`, `libgdruntime`, `libobjc`,
+   `libgnat-*`, `libgnarl-*`) and the sanitizer runtimes
+   (`libasan`/`libtsan`/`libubsan`/`liblsan`/`libhwasan`) — both `.so`
+   and `.a` — plus a handful of large unused static archives
+   (`libstdc++.a`, `libsupc++.a`, `libisl.a`, `libgio-2.0.a`,
+   `libgprofng.a`, `libc.a`). The exact reclaim sizes live next to the
+   constants in code; this note intentionally doesn't repeat them so
+   the two can't drift.
 
 2. **`NoExtract` patterns** appended to `/etc/pacman.conf` during
    `CONFIGURING` (`NO_EXTRACT_PATTERNS`). These keep future `pacman -S`
@@ -632,6 +640,12 @@ cost) and runs in three pieces:
    touches and the rootfs would slowly grow back to its bootstrap size.
    Patterns match file paths inside the package tarball (no leading
    slash); multiple `NoExtract = ` lines accumulate.
+
+   Pacman's NoExtract uses fnmatch(3) without `FNM_PATHNAME`, so `*`
+   matches `/`. A blanket `usr/lib/*.a` would therefore *also* block
+   `usr/lib/gcc/<triple>/<ver>/libgcc.a` and break every `gcc` invocation
+   with `cannot find -lgcc`. The static-archive entries are listed by
+   exact filename for that reason.
 
 3. **`pacman -Rdd --noconfirm --noscriptlet`** during `PKG_KEYRING`
    (`SHARED_CRUFT_PACKAGES` plus the per-arch kernel package). The

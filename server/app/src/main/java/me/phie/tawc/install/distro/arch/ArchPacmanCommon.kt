@@ -59,6 +59,81 @@ internal object ArchPacmanCommon {
         // fall back to English source strings.
         "/usr/share/locale",
         "/usr/share/i18n",
+        // GObject introspection XML sources. Only `g-ir-compiler` and
+        // doc generators (`g-ir-doc-tool`) read these. Runtime GI
+        // consumers (vala, pygobject, gjs) read the compiled
+        // `.typelib` files in `/usr/lib/girepository-1.0/` instead. We
+        // never recompile typelibs in the chroot, so the XML is
+        // ~56 MB of pure dead weight.
+        "/usr/share/gir-1.0",
+    )
+
+    /**
+     * File-glob paths to delete after extract. Kept separate from
+     * [POST_EXTRACT_PURGE_PATHS] because the shell expansion has to
+     * happen *outside* the `"$ROOTFS$path"` quoting that the
+     * directory list relies on.
+     *
+     * Targets large per-file artefacts that aren't worth removing the
+     * containing dir for. Paired with matching entries in
+     * [NO_EXTRACT_PATTERNS] so future `pacman -S` doesn't put them
+     * back. Sizes from a fresh manjaro-arm bootstrap + base packages
+     * (2026-05):
+     *   /usr/lib/lib(go|gphobos|...).so  ~120 MB (multi-language gcc runtimes)
+     *   /usr/lib/lib(go|gphobos|stdc++|c|isl|...).a  ~50 MB (static archives;
+     *     keeps libgcc*.a / libssp*.a — gcc's default link spec
+     *     references them)
+     */
+    private val POST_EXTRACT_PURGE_GLOBS: List<String> = listOf(
+        // gcc-libs ships runtime .so files for every language frontend
+        // gcc supports — Go, D, Fortran, Objective-C, Ada — plus the
+        // sanitizer runtimes (asan/tsan/ubsan/lsan/hwasan). We only
+        // ever build C in the chroot, none of our binaries link any
+        // sanitizer, and nothing else in the rootfs imports these.
+        // Keep libgcc_s, libstdc++, libatomic, libgomp, libssp — those
+        // are pulled in dynamically by ordinary C/C++ binaries.
+        "/usr/lib/libgo.so*",
+        "/usr/lib/libgphobos.so*",
+        "/usr/lib/libgdruntime.so*",
+        "/usr/lib/libgfortran.so*",
+        "/usr/lib/libobjc.so*",
+        "/usr/lib/libgnat-*.so*",
+        "/usr/lib/libgnarl-*.so*",
+        "/usr/lib/libasan.so*",
+        "/usr/lib/libtsan.so*",
+        "/usr/lib/libubsan.so*",
+        "/usr/lib/liblsan.so*",
+        "/usr/lib/libhwasan.so*",
+        // Static archives for the same multi-language runtimes and
+        // sanitizers, plus a few large standalone static libs we never
+        // statically link against. We build gtk4-debug-app dynamically
+        // (see `testing/gtk4-debug-app/build.sh`), so the ld(1) `-l`
+        // search of these is dead weight on disk.
+        //
+        // Listed by exact path on purpose. A blanket `usr/lib/*.a`
+        // glob would *also* match `usr/lib/gcc/<triple>/<ver>/libgcc.a`
+        // because pacman's NoExtract uses fnmatch(3) without
+        // FNM_PATHNAME, so `*` matches `/`. Once libgcc.a is missing,
+        // every gcc invocation aborts with `cannot find -lgcc` from
+        // the default link spec. Stick to specific filenames.
+        "/usr/lib/libgo.a",
+        "/usr/lib/libgphobos.a",
+        "/usr/lib/libgdruntime.a",
+        "/usr/lib/libgfortran.a",
+        "/usr/lib/libobjc.a",
+        "/usr/lib/libgnat-*.a",
+        "/usr/lib/libgnarl-*.a",
+        "/usr/lib/libasan.a",
+        "/usr/lib/libtsan.a",
+        "/usr/lib/libubsan.a",
+        "/usr/lib/liblsan.a",
+        "/usr/lib/libhwasan.a",
+        "/usr/lib/libstdc++.a",
+        "/usr/lib/libsupc++.a",
+        "/usr/lib/libisl.a",
+        "/usr/lib/libgio-2.0.a",
+        "/usr/lib/libgprofng.a",
+        "/usr/lib/libc.a",
     )
 
     /**
@@ -90,6 +165,46 @@ internal object ArchPacmanCommon {
         "usr/share/locale/*",
         "usr/share/i18n/locales/*",
         "usr/share/i18n/charmaps/*",
+        // GIR XML sources — runtime GI consumers read .typelib in
+        // /usr/lib/girepository-1.0/ instead.
+        "usr/share/gir-1.0/*",
+        // multi-language gcc runtimes (Go/D/Fortran/Ada/ObjC) and
+        // sanitizers (asan/tsan/ubsan/lsan/hwasan). We only ever
+        // compile C in the chroot. See POST_EXTRACT_PURGE_GLOBS for
+        // the matching post-extract delete.
+        "usr/lib/libgo.so*",
+        "usr/lib/libgphobos.so*",
+        "usr/lib/libgdruntime.so*",
+        "usr/lib/libgfortran.so*",
+        "usr/lib/libobjc.so*",
+        "usr/lib/libgnat-*.so*",
+        "usr/lib/libgnarl-*.so*",
+        "usr/lib/libasan.so*",
+        "usr/lib/libtsan.so*",
+        "usr/lib/libubsan.so*",
+        "usr/lib/liblsan.so*",
+        "usr/lib/libhwasan.so*",
+        // static archives for the multi-language runtimes and
+        // sanitizers, plus the large unused standalones. **Not**
+        // libgcc*.a / libssp*.a — gcc's default link spec needs them.
+        "usr/lib/libgo.a",
+        "usr/lib/libgphobos.a",
+        "usr/lib/libgdruntime.a",
+        "usr/lib/libgfortran.a",
+        "usr/lib/libobjc.a",
+        "usr/lib/libgnat-*.a",
+        "usr/lib/libgnarl-*.a",
+        "usr/lib/libasan.a",
+        "usr/lib/libtsan.a",
+        "usr/lib/libubsan.a",
+        "usr/lib/liblsan.a",
+        "usr/lib/libhwasan.a",
+        "usr/lib/libstdc++.a",
+        "usr/lib/libsupc++.a",
+        "usr/lib/libisl.a",
+        "usr/lib/libgio-2.0.a",
+        "usr/lib/libgprofng.a",
+        "usr/lib/libc.a",
     )
 
     /**
@@ -180,6 +295,11 @@ internal object ArchPacmanCommon {
         val ignoreLine = "IgnorePkg = " + ignoredPackages.joinToString(" ")
         val noExtractLines = NO_EXTRACT_PATTERNS.joinToString("\n") { "NoExtract = $it" }
         val purgeList = POST_EXTRACT_PURGE_PATHS.joinToString(" ") { "\"\$ROOTFS$it\"" }
+        // Globs are intentionally NOT quoted — the shell expands the
+        // wildcards at rm time. The "$ROOTFS" prefix stays quoted so
+        // the rootfs path itself is safe; the suffix is a fixed
+        // literal followed by `*`, so the glob expansion is bounded.
+        val purgeGlobs = POST_EXTRACT_PURGE_GLOBS.joinToString(" ") { "\"\$ROOTFS\"$it" }
 
         val script = buildString {
             appendLine("set -eu")
@@ -277,6 +397,10 @@ PACMAN_EOF
                 # `find -delete` (toybox) doesn't take patterns, so we
                 # just rm -rf the lot — these are dirs we never want.
                 rm -rf $purgeList
+                # Glob-deletes (multi-language gcc runtimes, static
+                # archives). Globs are unquoted on purpose so the shell
+                # expands them; missing matches don't fail the build.
+                rm -f $purgeGlobs 2>/dev/null || true
 
                 echo OK
                 """.trimIndent()
