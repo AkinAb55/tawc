@@ -94,11 +94,36 @@ val rustTripleFor = mapOf(
     "x86_64" to "x86_64-linux-android",
 )
 
+// Map an Android ABI to the (script flag, builddir name) pair
+// `client/build-libxkbcommon` uses. The compositor's build.rs reads
+// `libxkbcommon/<builddir>/libxkbcommon.a` for the matching arch.
+val xkbForAbi = mapOf(
+    "arm64-v8a" to ("aarch64" to "builddir"),
+    "x86_64" to ("x86_64" to "builddir-x86_64"),
+)
+
 tawcAbis.forEach { abi ->
     val triple = rustTripleFor[abi] ?: error("Unsupported ABI: $abi")
     val capAbi = abi.replaceFirstChar { it.uppercase() }
 
+    // Cross-build the static libxkbcommon the Rust compositor links
+    // against. Same shape as buildLibhybris: invokes the host script,
+    // skipped when the output artefact already exists.
+    val tawcRoot = rootProject.projectDir.parentFile
+    val (xkbAbiFlag, xkbBuilddir) = xkbForAbi[abi]
+        ?: error("Unsupported ABI for libxkbcommon: $abi")
+    val xkbStaticLib = "$tawcRoot/libxkbcommon/$xkbBuilddir/libxkbcommon.a"
+    val buildLibxkbcommonTask = tasks.register<Exec>("buildLibxkbcommon$capAbi") {
+        workingDir = tawcRoot
+        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+        commandLine("bash", "client/build-libxkbcommon", "--abi=$xkbAbiFlag")
+        inputs.file("$tawcRoot/client/build-libxkbcommon")
+        outputs.file(xkbStaticLib)
+        outputs.upToDateWhen { File(xkbStaticLib).exists() }
+    }
+
     val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
+        dependsOn(buildLibxkbcommonTask)
         workingDir = file("${rootProject.projectDir}/compositor")
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine(

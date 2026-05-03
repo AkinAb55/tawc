@@ -19,15 +19,15 @@
 #   - host (default) — runs the cleat binary directly on the dev box.
 #   - device         — cross-builds the cleat orchestrator + tawcroot +
 #                tawcroot-testhost + fixtures via the NDK, pushes the lot
-#                to /data/local/claude-debug/, and runs the orchestrator
-#                via `su -c`. Same four cleat layers as host mode (unit /
-#                handler / integration), same filter syntax, same exit
-#                code semantics — `--device` just changes where the
-#                orchestrator runs. Selection within device mode follows
-#                the rest of the tawc tree: `.tawctarget` /
-#                `TAWC_TARGET=device|emulator` (sourced from
-#                `client/select-device.sh` — the only tawc-app coupling
-#                in this script).
+#                to $TAWC_SCRATCH (see client/tawc-scratch.sh), and runs
+#                the orchestrator via `su -c`. Same four cleat layers as
+#                host mode (unit / handler / integration), same filter
+#                syntax, same exit code semantics — `--device` just
+#                changes where the orchestrator runs. Selection within
+#                device mode follows the rest of the tawc tree:
+#                `.tawctarget` / `TAWC_TARGET=device|emulator` (sourced
+#                from `client/select-device.sh` — the only tawc-app
+#                coupling in this script).
 #
 # Usage:
 #   bash tawcroot/test                # everything, host
@@ -81,6 +81,8 @@ fi
 # detection is the orchestrator's exit code, not adb-grep heuristics.
 # shellcheck disable=SC1091
 source "$REPO_DIR/client/select-device.sh"   # sets ANDROID_SERIAL (tawc-app glue)
+# shellcheck disable=SC1091
+source "$REPO_DIR/client/tawc-scratch.sh"    # sets TAWC_SCRATCH, ensures it
 
 DEVICE_ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r\n')
 case "$DEVICE_ABI" in
@@ -105,27 +107,25 @@ LOCAL_FIXTURES_DIR="$REPO_DIR/build/tawcroot-$BUILD_ABI/programs"
 # On-device layout — must match the -D paths baked into LOCAL_TESTS by
 # build_tests in tawcroot/build (TAWCROOT_TESTHOST_BIN, TAWCROOT_PROD_BIN,
 # TAWCROOT_*_BIN, TAWCROOT_ANDROID_FILTER_WRAP, TAWCROOT_TEST_TMPDIR).
-SCRATCH=/data/local/claude-debug
-TESTS=$SCRATCH/tests
-TR=$SCRATCH/tawcroot-testhost
-PROD=$SCRATCH/tawcroot
-FIXTURES=$SCRATCH/programs
-TMPDIR_ON_DEVICE=$SCRATCH/tt
+TESTS=$TAWC_SCRATCH/tests
+TR=$TAWC_SCRATCH/tawcroot-testhost
+PROD=$TAWC_SCRATCH/tawcroot
+FIXTURES=$TAWC_SCRATCH/programs
+TMPDIR_ON_DEVICE=$TAWC_SCRATCH/tt
 
-# Two-step push (adb push lands in /data/local/tmp; su cp installs into
-# /data/local/claude-debug with execute bits) — same pattern as before.
+# $TAWC_SCRATCH is shell-uid-writable (it's under /data/local/tmp), so a
+# single rootless `adb push` lands the binary at its final path with
+# execute bits preserved from the host — no `su cp` second hop needed.
+adb shell "mkdir -p $FIXTURES $TMPDIR_ON_DEVICE" >/dev/null
 push_one() {
     local local_path="$1" device_path="$2"
-    local name; name=$(basename "$device_path")
-    adb push "$local_path" "/data/local/tmp/$name" > /dev/null
-    adb shell "su -c 'mkdir -p $(dirname "$device_path") && cp /data/local/tmp/$name $device_path && chmod +x $device_path'"
+    adb push "$local_path" "$device_path" > /dev/null
 }
 
 push_one "$LOCAL_BIN"   "$TR"
 push_one "$LOCAL_PROD"  "$PROD"
 push_one "$LOCAL_TESTS" "$TESTS"
 
-adb shell "su -c 'mkdir -p $FIXTURES $TMPDIR_ON_DEVICE'"
 for f in "$LOCAL_FIXTURES_DIR"/*; do
     [ -f "$f" ] || continue
     push_one "$f" "$FIXTURES/$(basename "$f")"
@@ -133,7 +133,8 @@ done
 
 # Cleat tests create rootfs trees under TAWCROOT_TEST_TMPDIR with paths
 # like "$TMPDIR/tawcroot-test-rootfs-phase1"; clearing keeps reruns
-# deterministic when a previous run died mid-test.
+# deterministic when a previous run died mid-test. Done via su because
+# the previous run's tree is owned by root.
 adb shell "su -c 'rm -rf $TMPDIR_ON_DEVICE/tawcroot-test-rootfs-* && mkdir -p $TMPDIR_ON_DEVICE'"
 
 # Forward PASSTHROUGH filters verbatim — the cross-compiled cleat
@@ -152,7 +153,7 @@ echo "=== running cleat tests on $ANDROID_SERIAL ($BUILD_ABI) ==="
 # coloured pass/fail stays visible.
 TMPLOG=$(mktemp)
 trap 'rm -f "$TMPLOG"' EXIT
-adb shell "su -c 'cd $SCRATCH && $TESTS$PT_QUOTED; echo __exit=\$?'" \
+adb shell "su -c 'cd $TAWC_SCRATCH && $TESTS$PT_QUOTED; echo __exit=\$?'" \
     | tee "$TMPLOG"
 got=$(grep -oE '__exit=[0-9]+' "$TMPLOG" | tail -1 | cut -d= -f2)
 if [ "${got:-}" != "0" ]; then

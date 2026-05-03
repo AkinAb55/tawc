@@ -15,6 +15,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=../client/select-device.sh
 source "$ROOT_DIR/client/select-device.sh"
+# shellcheck source=../client/tawc-scratch.sh
+source "$ROOT_DIR/client/tawc-scratch.sh"
 
 INSTALL_ID="${TAWC_INSTALL_ID:-arch}"
 export TAWC_INSTALL_ID="$INSTALL_ID"
@@ -25,11 +27,11 @@ chroot_root="/data/data/me.phie.tawc/distros/$INSTALL_ID/rootfs"
 build_dir="$chroot_root/tmp/$app_name"
 
 echo "=== $app_name: pushing source ==="
-adb push "$src_dir/$app_name.c" "/data/local/tmp/$app_name.c" >/dev/null
-adb push "$src_dir/build.sh" "/data/local/tmp/$app_name-build.sh" >/dev/null
+adb push "$src_dir/$app_name.c" "$TAWC_SCRATCH/$app_name.c" >/dev/null
+adb push "$src_dir/build.sh" "$TAWC_SCRATCH/$app_name-build.sh" >/dev/null
 adb shell "su -c 'mkdir -p $build_dir && \
-                  cp /data/local/tmp/$app_name.c $build_dir/$app_name.c && \
-                  cp /data/local/tmp/$app_name-build.sh $build_dir/build.sh'"
+                  cp $TAWC_SCRATCH/$app_name.c $build_dir/$app_name.c && \
+                  cp $TAWC_SCRATCH/$app_name-build.sh $build_dir/build.sh'"
 
 echo "=== $app_name: building ==="
 "$ROOT_DIR/client/tawc-chroot-run" "/bin/bash /tmp/$app_name/build.sh"

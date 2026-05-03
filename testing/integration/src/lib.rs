@@ -5,6 +5,11 @@ pub mod compositor;
 pub mod debug_app;
 pub mod helpers;
 
+/// On-device scratch dir for everything that doesn't live in the app's
+/// private data dir. Test/debug only — production never touches this.
+/// See `client/tawc-scratch.sh` for the rationale.
+pub const TAWC_SCRATCH: &str = "/data/local/tmp/tawc-dev";
+
 /// Install id for the in-app distro this test run targets. Reads
 /// `TAWC_INSTALL_ID` (matches `client/tawc-chroot-run`) and defaults to
 /// `arch` for backwards compatibility with the chroot/proot suite.

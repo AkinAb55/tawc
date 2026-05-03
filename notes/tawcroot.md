@@ -1790,10 +1790,11 @@ hook. The test layer lives in two places:
 orchestrator; `bash tawcroot/test` runs everything,
 positional args become cleat filters. `--device` mode pushes the
 NDK-cross-built orchestrator (plus tawcroot, tawcroot-testhost,
-fixtures, and the androidfilter wrap) to
-`/data/local/claude-debug/`, then exec's it under `su -c`. Same
-binary shape as host mode — just a different ABI and a chrooted
-`TAWCROOT_TEST_TMPDIR` (`/data/local/claude-debug/tt` vs `/tmp`).
+fixtures, and the androidfilter wrap) to the canonical on-device
+scratch dir `$TAWC_SCRATCH` (`/data/local/tmp/tawc-dev/`, see
+`client/tawc-scratch.sh`), then exec's it under `su -c`. Same
+binary shape as host mode — just a different ABI and a different
+`TAWCROOT_TEST_TMPDIR` (`$TAWC_SCRATCH/tt` vs `/tmp`).
 PASSTHROUGH filters propagate through `su -c` verbatim, exit code
 is the orchestrator's own (captured via an `__exit=$?` sentinel
 because adb shell isn't always a clean exit-code passthrough).
@@ -2171,8 +2172,8 @@ coverage.
       under `/data/data/me.phie.tawc/distros/arch/rootfs/` is intact.
    2. Per-iteration: `bash tawcroot/build --abi=<abi>`
       then `adb push server/app/src/main/jniLibs/<abi>/libtawcroot.so
-      /data/local/tmp/libtawcroot.so` then `adb shell 'su -c "cp
-      /data/local/tmp/libtawcroot.so <apk-lib-path>/libtawcroot.so"'`.
+      /data/local/tmp/tawc-dev/libtawcroot.so` then `adb shell 'su -c "cp
+      /data/local/tmp/tawc-dev/libtawcroot.so <apk-lib-path>/libtawcroot.so"'`.
       Total ~3 seconds.
    3. Test: `adb shell 'run-as me.phie.tawc sh -c "cd <rootfs> && \
       <libtawcroot> -r <rootfs> <binds> -- <cmd>"'`.

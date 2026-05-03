@@ -358,8 +358,9 @@ build_binary() {
 # ABI. Mirrors tawcroot/Makefile's `tests` target but uses the NDK clang
 # against bionic instead of host gcc. Output lands at
 # `$BUILD_ROOT/tawcroot-<abi>/tests`. Fixture / testhost / prod paths are
-# baked in via -D as on-device absolute paths under
-# `/data/local/claude-debug/` — tawcroot/test --device pushes them there.
+# baked in via -D as on-device absolute paths under the canonical scratch
+# dir (`/data/local/tmp/tawc-dev/`, also defined in `client/tawc-scratch.sh`)
+# — tawcroot/test --device pushes them there.
 #
 # Cleat is hosted (it uses fork/exec/stdio); links bionic dynamically.
 # tawcroot's PROD_C_FOR_TESTS sources are recompiled here as well so the
@@ -381,8 +382,9 @@ build_tests() {
     mkdir -p "$obj_dir"
 
     # On-device paths the orchestrator will exec at runtime. Must match
-    # what tawcroot/test --device pushes.
-    local on_device="/data/local/claude-debug"
+    # what tawcroot/test --device pushes (and the TAWC_SCRATCH constant
+    # in client/tawc-scratch.sh).
+    local on_device="/data/local/tmp/tawc-dev"
 
     # NDK clang doesn't recognize -fno-tree-loop-distribute-patterns (gcc-only);
     # the rest of the warning set mirrors tawcroot/Makefile's TESTS_CFLAGS.

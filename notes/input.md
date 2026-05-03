@@ -38,11 +38,11 @@ fullscreen, so screen coordinates map 1:1 to SurfaceView coordinates. The compos
 divides by the scale factor (2) to get Wayland logical coordinates.
 
 **Debug loop:**
-1. Screenshot: `adb shell "su -c 'screencap -p /sdcard/screenshot.png'" && adb pull /sdcard/screenshot.png /tmp/screenshot.png`
+1. Screenshot: `adb shell screencap -p /data/local/tmp/tawc-dev/screenshot.png && adb pull /data/local/tmp/tawc-dev/screenshot.png /tmp/screenshot.png`
 2. Identify target element's pixel coordinates in the 1080x2400 image
 3. Tap: `adb shell input tap X Y`
 4. Screenshot again to see result
-5. Clean up: `adb shell rm /sdcard/screenshot.png && rm /tmp/screenshot.png`
+5. Clean up: `adb shell rm /data/local/tmp/tawc-dev/screenshot.png && rm /tmp/screenshot.png`
 
 Be precise -- at 2x scale, UI elements are small in physical pixels. The Firefox tab
 close "X" and toolbar hamburger are only ~50-60px apart.

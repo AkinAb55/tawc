@@ -26,7 +26,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIBHYBRIS_DIR="$REPO_DIR/libhybris"
+LIBHYBRIS_REPO="https://github.com/wmww/libhybris.git"
 ANDROID_HEADERS_DIR="$REPO_DIR/android-headers"
+ANDROID_HEADERS_REPO="https://github.com/Halium/android-headers.git"
+ANDROID_HEADERS_BRANCH="halium-11.0"
 
 CLEAN=0
 for arg in "$@"; do
@@ -63,17 +66,24 @@ for tool in autoreconf libtool wayland-scanner pkg-config make patchelf; do
     }
 done
 
-# Vendored headers.
-[ -d "$LIBHYBRIS_DIR/.git" ] || {
-    echo "ERROR: $LIBHYBRIS_DIR is missing. Clone our fork:" >&2
-    echo "       git clone https://github.com/wmww/libhybris.git ./libhybris" >&2
-    exit 1
-}
-[ -f "$ANDROID_HEADERS_DIR/android-version.h" ] || {
-    echo "ERROR: $ANDROID_HEADERS_DIR is missing." >&2
-    echo "       git clone --branch halium-11.0 https://github.com/Halium/android-headers.git ./android-headers" >&2
-    exit 1
-}
+# Vendored sources. libhybris is our fork (`wmww/libhybris`), our changes
+# stack as clean commits on top of upstream — see CLAUDE.md "Libhybris
+# fork" and `libhybris/TAWC_FORK.md`. android-headers is upstream Halium,
+# pinned to the `halium-11.0` branch. Both checkouts are gitignored.
+# A pre-existing non-git $LIBHYBRIS_DIR / $ANDROID_HEADERS_DIR (e.g. left
+# behind by Gradle's outputs.dir declaration when this script is invoked
+# from the build) is wiped first — git clone refuses a non-empty target.
+if [ ! -d "$LIBHYBRIS_DIR/.git" ]; then
+    [ -e "$LIBHYBRIS_DIR" ] && rm -rf "$LIBHYBRIS_DIR"
+    echo "==> cloning $LIBHYBRIS_REPO -> $LIBHYBRIS_DIR"
+    git clone "$LIBHYBRIS_REPO" "$LIBHYBRIS_DIR"
+fi
+if [ ! -f "$ANDROID_HEADERS_DIR/android-version.h" ]; then
+    [ -e "$ANDROID_HEADERS_DIR" ] && rm -rf "$ANDROID_HEADERS_DIR"
+    echo "==> cloning $ANDROID_HEADERS_REPO @ $ANDROID_HEADERS_BRANCH -> $ANDROID_HEADERS_DIR"
+    git clone --depth 1 --branch "$ANDROID_HEADERS_BRANCH" \
+        "$ANDROID_HEADERS_REPO" "$ANDROID_HEADERS_DIR"
+fi
 
 # ── Build tree ──
 # We build in-tree (BUILD_DIR == LIBHYBRIS_DIR/hybris) because some

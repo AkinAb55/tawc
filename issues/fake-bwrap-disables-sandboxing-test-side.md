@@ -6,7 +6,7 @@ installs a wrapper script over `/usr/bin/bwrap` in the chroot rootfs:
 ```
 HOST_BWRAP="$ROOT_DIR/testing/fake-bwrap"
 GUEST_BWRAP="/data/data/me.phie.tawc/distros/arch/rootfs/usr/bin/bwrap"
-adb shell "su -c 'install -m 0755 /data/local/tmp/fake-bwrap $GUEST_BWRAP'"
+adb shell "su -c 'install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP'"
 ```
 
 `testing/fake-bwrap` walks bubblewrap's known argv, throws away the

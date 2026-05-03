@@ -207,13 +207,15 @@ fn ensure_pidfile_helper() -> io::Result<()> {
         .parent()
         .unwrap()
         .join("tawc-pidfile-exec");
+    let staging = format!("{}/tawc-pidfile-exec", crate::TAWC_SCRATCH);
+    adb::shell(&format!("mkdir -p {}", crate::TAWC_SCRATCH))?;
     std::process::Command::new("adb")
-        .args(["push", &helper_src.to_string_lossy(), "/data/local/tmp/tawc-pidfile-exec"])
+        .args(["push", &helper_src.to_string_lossy(), &staging])
         .output()?;
     let helper_dev = pidfile_helper_device();
     adb::shell(&format!(
-        "su -c 'cp /data/local/tmp/tawc-pidfile-exec {} && chmod +x {}'",
-        helper_dev, helper_dev
+        "su -c 'cp {} {} && chmod +x {}'",
+        staging, helper_dev, helper_dev
     ))?;
     *pushed = true;
     Ok(())

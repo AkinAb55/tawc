@@ -15,16 +15,16 @@ untested.
 ```bash
 # One-time: install host deps (see "Host packages" below)
 
-# One-time per fresh clone:
-git clone https://github.com/wmww/libhybris.git           ./libhybris
-git clone --branch halium-11.0 --depth 1 \
-    https://github.com/Halium/android-headers.git         ./android-headers
-bash client/build-libxkbcommon       # clones libxkbcommon, cross-builds .a
-bash client/build-libhybris-aarch64  # cross-builds libhybris for aarch64 glibc
-
 # Each iteration:
 cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
 ```
+
+Vendored repos (`./libxkbcommon/`, `./libhybris/`, `./android-headers/`)
+are auto-cloned by their respective build scripts on first invocation —
+no manual clone step is needed. Gradle drives those scripts ahead of the
+Rust compositor build, so a fresh clone goes straight to `assembleDebug`.
+To force a rebuild by hand, run `bash client/build-libxkbcommon` or
+`bash client/build-libhybris-aarch64`.
 
 The result is `server/app/build/outputs/apk/debug/app-debug.apk`. Install
 and launch as documented in CLAUDE.md's Quick Reference.
@@ -260,13 +260,14 @@ The data came from the chroot's `/usr/share/xkeyboard-config-2/`
 (Arch Linux ARM `xkeyboard-config` package). To update:
 
 ```bash
-adb shell "su -c 'cd /data/data/me.phie.tawc/distros/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/xkb-data.tar .'"
-adb pull /data/local/tmp/xkb-data.tar /tmp/xkb-data.tar
+adb shell mkdir -p /data/local/tmp/tawc-dev
+adb shell "su -c 'cd /data/data/me.phie.tawc/distros/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/tawc-dev/xkb-data.tar .'"
+adb pull /data/local/tmp/tawc-dev/xkb-data.tar /tmp/xkb-data.tar
 rm -rf server/app/src/main/assets/xkb
 mkdir -p server/app/src/main/assets/xkb
 tar xf /tmp/xkb-data.tar -C server/app/src/main/assets/xkb/
 rm /tmp/xkb-data.tar
-adb shell "rm /data/local/tmp/xkb-data.tar"
+adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 ```
 
 ## Chroot package gotchas

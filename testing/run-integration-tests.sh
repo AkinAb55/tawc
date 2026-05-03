@@ -61,6 +61,8 @@ done
 
 # shellcheck source=../client/select-device.sh
 source "$ROOT_DIR/client/select-device.sh"
+# shellcheck source=../client/tawc-scratch.sh
+source "$ROOT_DIR/client/tawc-scratch.sh"
 
 # Install id under /data/data/me.phie.tawc/distros/<id>/. Defaults to
 # `arch` (the chroot/proot suite); set TAWC_INSTALL_ID=arch-tawcroot to
@@ -108,8 +110,20 @@ EOF
     fi
 
     echo "=== Pushing pidfile helper ==="
-    adb push testing/tawc-pidfile-exec /data/local/tmp/
-    adb shell "su -c 'cp /data/local/tmp/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec'"
+    adb push testing/tawc-pidfile-exec "$TAWC_SCRATCH/tawc-pidfile-exec"
+    adb shell "su -c 'cp $TAWC_SCRATCH/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec'"
+
+    # Pre-build the tawcroot device test bundle so the
+    # `tawcroot::test_tawcroot_device_suite` integration case can run
+    # `tawcroot/test --device --no-build` and skip a redundant
+    # cross-compile.
+    case "$ANDROID_SERIAL" in
+        emulator-*) TAWCROOT_ABI=x86_64 ;;
+        *)          TAWCROOT_ABI=aarch64 ;;
+    esac
+    echo "=== Building tawcroot device tests ($TAWCROOT_ABI) ==="
+    bash tawcroot/build "--abi=$TAWCROOT_ABI" --testhost --tests
+    bash tawcroot/build-fixtures "$TAWCROOT_ABI"
 fi
 
 # Launch the compositor once for the whole suite. Tests assert it is

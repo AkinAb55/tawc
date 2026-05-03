@@ -53,7 +53,7 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
     let test_fs_build_dir = format!("{}{}", rootfs_for(&test_install), chroot_build);
     let build_fs_build_dir = format!("{}{}", rootfs_for(&build_install), chroot_build);
     let binary_chroot = format!("{}/{}", chroot_build, name);
-    let staging = format!("/data/local/tmp/{}-src", name);
+    let staging = format!("{}/{}-src", crate::TAWC_SCRATCH, name);
     let source_dir: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -66,13 +66,13 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
         return Ok(binary_chroot);
     }
 
-    adb::shell(&format!("rm -rf {}", staging))?;
+    adb::shell(&format!("mkdir -p {} && rm -rf {}", crate::TAWC_SCRATCH, staging))?;
     Command::new("adb")
         .args(["push", &source_dir.to_string_lossy(), &staging])
         .output()?;
 
     // Copy into the build install's rootfs. su lets us reach the
-    // staging dir (shell-uid-owned in /data/local/tmp) and the rootfs
+    // staging dir (shell-uid-owned, under TAWC_SCRATCH) and the rootfs
     // path regardless of install method, but the resulting files land
     // owned by uid 0. For proot/tawcroot installs the in-chroot build
     // runs as the app uid (see [adb::chroot_run] dispatch), so chmod

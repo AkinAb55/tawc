@@ -55,7 +55,12 @@ done
 
 # Clone the pinned tag if missing. We don't track upstream master — if you
 # need to bump, change LIBXKB_TAG above and rerun with --clean.
+# An existing non-git $LIBXKB_DIR (e.g. left behind by an aborted prior
+# run, or pre-created by Gradle's outputs.file declaration when this
+# script is invoked from the build) is wiped first — git clone refuses
+# to populate a non-empty directory.
 if [ ! -d "$LIBXKB_DIR/.git" ]; then
+    [ -e "$LIBXKB_DIR" ] && rm -rf "$LIBXKB_DIR"
     echo "==> cloning $LIBXKB_GIT @ $LIBXKB_TAG -> $LIBXKB_DIR"
     git clone --depth 1 --branch "$LIBXKB_TAG" "$LIBXKB_GIT" "$LIBXKB_DIR"
 else
