@@ -80,6 +80,7 @@ TESTS_CFLAGS := \
     -DTAWCROOT_DYNAMIC_ARGV_CHECK_BIN=\"$(OUT)/programs/dynamic_argv_check\" \
     -DTAWCROOT_STATIC_EXECVE_EXIT42_BIN=\"$(OUT)/programs/static_execve_exit42\" \
     -DTAWCROOT_DYNAMIC_BIG_STACK_BIN=\"$(OUT)/programs/dynamic_big_stack\" \
+    -DTAWCROOT_ANDROID_FILTER_WRAP=\"$(OUT)/androidfilter/wrap\" \
     -MMD -MP
 
 TESTS_LDFLAGS := -lm
@@ -223,7 +224,8 @@ fixtures:           $(OUT)/programs/static_exit42 \
                     $(OUT)/programs/dynamic_exit42 \
                     $(OUT)/programs/dynamic_argv_check \
                     $(OUT)/programs/static_execve_exit42 \
-                    $(OUT)/programs/dynamic_big_stack
+                    $(OUT)/programs/dynamic_big_stack \
+                    $(OUT)/androidfilter/wrap
 
 clean:
 	rm -rf $(OUT)
@@ -271,6 +273,17 @@ $(OUT)/programs/dynamic_argv_check: $(SRC_TS)/integration/programs/dynamic_argv_
 $(OUT)/programs/static_execve_exit42: $(SRC_TS)/integration/programs/static_execve_exit42_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+
+# androidfilter/wrap: host glibc binary that installs a synthesized
+# Android-`untrusted_app`-shape seccomp BPF filter and execs its argv
+# tail. Exists so test_androidfilter.c can run the existing handler
+# suite under the same filter shape we'd see on a real device under
+# run-as. Hosted glibc — not part of either tawcroot binary, only
+# launched by the test orchestrator. See the file's header comment for
+# the trapped-NR set and the deliberate-not-trapped exclusions.
+$(OUT)/androidfilter/wrap: $(SRC_TS)/handler/androidfilter/wrap.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wall -Wextra -Werror -Wl,--build-id=none $< -o $@
 
 # dynamic_big_stack: ET_DYN with a function that allocates a 380 KiB
 # buffer in its stack frame and walks every page. Compiled with

@@ -34,3 +34,13 @@
  * Call from `register_dynamic_tests`.
  */
 void steps_register_from_testhost(csview module, const char *const *extra_args);
+
+/* Same as steps_register_from_testhost, but the launched argv is
+ * prefixed with `prefix_argv` (NULL-terminated). The first element
+ * becomes argv[0] (i.e. the actual executable forked); the testhost
+ * binary path follows. Used by the synthesized-Android-filter suite to
+ * route the testhost through a seccomp prefilter wrapper.
+ */
+void steps_register_from_testhost_prefixed(csview module,
+                                           const char *const *prefix_argv,
+                                           const char *const *extra_args);

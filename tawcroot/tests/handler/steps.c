@@ -80,11 +80,24 @@ static char *append_str(char *out, csview extra)
 
 void steps_register_from_testhost(csview module, const char *const *extra_args)
 {
+	steps_register_from_testhost_prefixed(module, NULL, extra_args);
+}
+
+void steps_register_from_testhost_prefixed(csview module,
+                                           const char *const *prefix_argv,
+                                           const char *const *extra_args)
+{
 	/* `VecStr` stores `const char*` (cstr_raw). Pushed C strings must
 	 * outlive `run_subproc`, which they do: TAWCROOT_TESTHOST_BIN is a
-	 * `-D` literal, and `extra_args` come from the caller's static / stack
-	 * lifetime. No allocations needed. */
-	VecStr cmd = c_init(vec_str, {TAWCROOT_TESTHOST_BIN});
+	 * `-D` literal, prefix_argv / extra_args come from the caller's
+	 * static / stack lifetime. No allocations needed. */
+	VecStr cmd = c_init(vec_str, {});
+	if (prefix_argv) {
+		for (const char *const *a = prefix_argv; *a; a++) {
+			vec_str_push(&cmd, *a);
+		}
+	}
+	vec_str_push(&cmd, TAWCROOT_TESTHOST_BIN);
 	if (extra_args) {
 		for (const char *const *a = extra_args; *a; a++) {
 			vec_str_push(&cmd, *a);

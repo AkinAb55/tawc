@@ -1885,12 +1885,27 @@ or layer-3 functional test.
    proot's behavior is the spec for everything except the
    handful of places we deliberately diverge (fast path,
    `/dev/shm` via memfd, etc.). Not built yet.
-- **Synthesized Android-filter tests**: a pre-filter wrapper that
-  installs an Android-`untrusted_app`-shaped seccomp filter
-  (RET_ERRNO on a few syscalls per arch) before exec'ing
-  tawcroot. Validates the lp64 `access`-on-x86_64 quirk and the
-  TRAP-vs-ERRNO precedence rule on plain Linux, no emulator
-  required.
+- **Synthesized Android-filter tests** (`tawcroot/tests/handler/
+  androidfilter/wrap.c` + `tawcroot/tests/handler/test_androidfilter.c`):
+  a pre-filter wrapper that installs an Android-`untrusted_app`-shaped
+  seccomp filter (RET_TRAP on `openat2`/`faccessat2`/`clone3`, plus
+  the lp64 legacy set on x86_64) before exec'ing the testhost. Reuses
+  the entire phase-1 step list via the `--include-legacy-x86_64` /
+  default split — produces the `androidfilter` and (on x86_64)
+  `androidfilter_legacy` modules, ~104 cleat tests on x86_64. Catches
+  the probe-ordering / handler-recursion / dispatch-coverage bugs
+  documented in "Bugs found and fixed during install pipeline
+  validation" without needing a device. The wrapper does NOT install a
+  SIGSYS handler — default disposition for any trapped syscall before
+  tawcroot's handler is up is process termination, mirroring the
+  device behavior. See the wrapper's header comment for the
+  deliberate-not-trapped exclusions (`execve`/`execveat` so the
+  wrapper can launch the child; `close_range` because tawcroot's
+  handler re-emits NR 436 internally and Android's filter doesn't
+  appear to trap it). Found one bug: the testhost's `prod_rootfs_init`
+  ordered `probe_openat2` before `install_handler`, mirroring the same
+  bug fixed in production main.c months ago. See
+  `tawcroot/tests/testhost/src/phase1.c`.
 - **Real-workload smoke** (`tawcroot/tests/integration/workload/`): drive
   a `pacstrap`'d Arch chroot through tawcroot on the dev box,
   including a `pacman -Syu`. This is where we measure the perf

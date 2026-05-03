@@ -237,14 +237,6 @@ int tawcroot_phase1_main(const char *rootfs)
 	 * mostly a perf concern -- keep it simple by doing it pre-filter. */
 	tawcroot_path_memoize_well_known();
 
-	/* Probe openat2 (kernel ≥ 5.6). Sets `tawcroot_openat2_works` so
-	 * the openat handler can route through openat2 with RESOLVE_IN_ROOT
-	 * for generic non-final-component symlink resolution. Must run
-	 * pre-filter -- we don't trap openat2 and the handler would 0-ENOSYS
-	 * a TRAP'd one if the inherited filter delivered it. */
-	tawcroot_path_probe_openat2();
-	tawc_io_kv_dec("    openat2_works", (long)tawcroot_openat2_works);
-
 	/* Print bind table for diagnostic visibility. */
 	tawc_io_kv_dec("    n_binds", (long)tawcroot_n_binds);
 	for (size_t i = 0; i < tawcroot_n_binds; i++) {
@@ -262,6 +254,33 @@ int tawcroot_phase1_main(const char *rootfs)
 
 	long inst = tawcroot_install_handler();
 	fails += tawc_io_step("install SIGSYS handler", inst == 0);
+
+	/* The signal mask we inherit may have SIGSYS blocked (mirroring
+	 * the production fix in main.c — JVM-spawned shell chain blocks
+	 * various signals). Unblock SIGSYS up front, BEFORE probe_openat2,
+	 * since that trips Android's stacked filter (synthesized in our
+	 * test wrapper) and needs the handler actually invocable. */
+	{
+		uint64_t bit_sigsys = 1ULL << (31 - 1);
+		(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 1 /*SIG_UNBLOCK*/,
+		               (long)&bit_sigsys, 0, 8, 0, 0);
+	}
+
+	/* Probe openat2 (kernel ≥ 5.6). Sets `tawcroot_openat2_works` so
+	 * the openat handler can route through openat2 with RESOLVE_IN_ROOT
+	 * for generic non-final-component symlink resolution.
+	 *
+	 * Must run AFTER install_handler — Android's untrusted_app filter
+	 * RET_TRAPs openat2 (NR 437); the synthesized-Android-filter test
+	 * wrapper does the same. With the handler installed, the trap
+	 * dispatches to "no slot → -ENOSYS" (since openat2 isn't in our
+	 * dispatch table) and the probe interprets that as "openat2
+	 * unavailable, fall back to manual canonicalization". Without the
+	 * handler, default SIGSYS disposition kills the process. Mirrors
+	 * the production fix in main.c (see notes/tawcroot.md "Bugs found
+	 * and fixed during install pipeline validation"). */
+	tawcroot_path_probe_openat2();
+	tawc_io_kv_dec("    openat2_works", (long)tawcroot_openat2_works);
 
 	int trap_nrs[64];
 	size_t n_traps = tawcroot_dispatch_trap_list(trap_nrs,
