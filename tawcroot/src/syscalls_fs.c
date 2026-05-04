@@ -262,7 +262,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 		if (empty) {
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
 					   (long)&local, flags, 0, 0);
-			if (rv == 0) decorate_stat(&local);
+			if (rv != 0) return rv;
+			decorate_stat(&local);
 			long ce = tawc_copy_to_guest(out, &local, sizeof local);
 			if (ce < 0) return ce;
 			return rv;
@@ -308,7 +309,8 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, base_fd, (long)resolved,
 			   (long)&local, rv_flags, 0, 0);
-	if (rv == 0) decorate_stat(&local);
+	if (rv != 0) return rv;
+	decorate_stat(&local);
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	if (ce < 0) return ce;
 	return rv;
@@ -1027,11 +1029,10 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (empty) {
 			long rv = TAWC_RAW(TAWC_SYS_statx, dirfd, (long)"", flags,
 					   mask, (long)&local, 0);
-			if (rv == 0) {
-				local.stx_uid = 0;
-				local.stx_gid = 0;
-				local.stx_mask |= STATX_UID | STATX_GID;
-			}
+			if (rv != 0) return rv;
+			local.stx_uid = 0;
+			local.stx_gid = 0;
+			local.stx_mask |= STATX_UID | STATX_GID;
 			long ce = tawc_copy_to_guest(out, &local, sizeof local);
 			if (ce < 0) return ce;
 			return rv;
@@ -1076,10 +1077,9 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 
 	long rv = TAWC_RAW(TAWC_SYS_statx, base_fd, (long)resolved,
 			   rv_flags, mask, (long)&local, 0);
-	if (rv == 0) {
-		local.stx_uid = 0;
-		local.stx_gid = 0;
-	}
+	if (rv != 0) return rv;
+	local.stx_uid = 0;
+	local.stx_gid = 0;
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	if (ce < 0) return ce;
 	return rv;
@@ -1280,7 +1280,8 @@ static long stat_via_at(const char *path, struct stat *out, int flags)
 
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, base_fd, (long)p,
 			   (long)&local, f, 0, 0);
-	if (rv == 0) decorate_stat(&local);
+	if (rv != 0) return rv;
+	decorate_stat(&local);
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	if (ce < 0) return ce;
 	return rv;
