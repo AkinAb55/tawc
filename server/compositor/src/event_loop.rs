@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,11 +55,15 @@ pub struct LoopData {
 }
 
 /// Set up and run the calloop event loop. Returns when `running` becomes false.
+///
+/// `socket_path` is bound and inserted as a calloop source as the last
+/// step before entering the dispatch loop — see the comment at the
+/// caller in `lib.rs::run_compositor` for why we don't bind earlier.
 pub fn run(
     display: Display<TawcState>,
     state: TawcState,
     render: RenderState,
-    listener: ListeningSocket,
+    socket_path: &str,
     output: smithay::output::Output,
     scale: i32,
     touch_channel: Channel<TouchEvent>,
@@ -88,23 +93,12 @@ pub fn run(
         Ok(PostAction::Continue)
     })?;
 
-    // --- Source 2: Listener socket ---
-    // Accept new client connections as they arrive.
-    let listener_source = Generic::new(listener, Interest::READ, Mode::Level);
-    loop_handle.insert_source(listener_source, |_, source, data: &mut LoopData| {
-        while let Some(stream) = source.accept().map_err(|e| std::io::Error::other(e))? {
-            info!("New Wayland client connected");
-            let client_state = ClientState::new(data.state.client_count.clone());
-            if let Err(e) = data
-                .display
-                .handle()
-                .insert_client(stream, Arc::new(client_state))
-            {
-                error!("Failed to insert client: {}", e);
-            }
-        }
-        Ok(PostAction::Continue)
-    })?;
+    // --- Source 2: deferred ---
+    // The listening socket is bound and inserted just before
+    // `event_loop.dispatch` starts (see end of this function). Binding
+    // earlier would let clients `connect()` while we're still wiring up
+    // sources, leaving their initial roundtrip stuck in the listen
+    // backlog and exceeding GTK4's connect timeout on slow hosts.
 
     // --- Source 3: Touch input channel ---
     // Receives touch events from the Android UI thread via JNI, tagged
@@ -488,6 +482,34 @@ pub fn run(
     // Spawn Xwayland (best-effort: failure logs and continues — the
     // Wayland-only subset of the compositor still works without it).
     crate::xwayland::start_xwayland(&loop_handle, &loop_data.state);
+
+    // Bind the Wayland socket as the last setup step. From here on, any
+    // new connection lands in a backlog the dispatch loop drains within
+    // a single iteration. Setting the mode 0o777 lets clients running as
+    // any uid (in-chroot bionic-libc with its own concept of "us") open
+    // the socket.
+    let listener = ListeningSocket::bind_absolute(socket_path.into())
+        .map_err(Box::<dyn std::error::Error>::from)?;
+    let _ = std::fs::set_permissions(
+        socket_path,
+        std::fs::Permissions::from_mode(0o777),
+    );
+    let listener_source = Generic::new(listener, Interest::READ, Mode::Level);
+    loop_handle.insert_source(listener_source, |_, source, data: &mut LoopData| {
+        while let Some(stream) = source.accept().map_err(std::io::Error::other)? {
+            info!("New Wayland client connected");
+            let client_state = ClientState::new(data.state.client_count.clone());
+            if let Err(e) = data
+                .display
+                .handle()
+                .insert_client(stream, Arc::new(client_state))
+            {
+                error!("Failed to insert client: {}", e);
+            }
+        }
+        Ok(PostAction::Continue)
+    })?;
+    info!("Wayland socket: {}", socket_path);
 
     info!("Entering calloop event loop");
 

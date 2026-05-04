@@ -135,15 +135,20 @@ adb shell "am force-stop me.phie.tawc"
 sleep 0.3
 adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
 
-# Wait until the tawc process is alive AND the chroot-visible Wayland
-# socket exists. Both matter: `am force-stop` leaves the unix-domain
-# socket file behind on disk even though no process is listening, so
-# the file alone would falsely indicate readiness.
+# Wait until the tawc process is alive, the wayland socket exists, AND
+# the calloop event loop is dispatching. The compositor binds the
+# socket as its last setup step (see compositor/src/event_loop.rs::run)
+# so a fresh "Entering calloop event loop" log line confirms both — but
+# `am force-stop` leaves the previous run's socket file behind, so the
+# stat alone would falsely match a stale socket while the new
+# compositor is still in early init. The logcat probe disambiguates.
+adb logcat -c >/dev/null 2>&1 || true
 COMPOSITOR_READY=0
 for _ in $(seq 1 150); do
     if adb shell "pidof me.phie.tawc >/dev/null && \
                   su -c 'test -e $INSTALL_DIR/rootfs/tmp/wayland-0' && \
-                  echo ready" 2>/dev/null | grep -q ready; then
+                  echo ready" 2>/dev/null | grep -q ready &&
+       adb logcat -d -s tawc-native 2>/dev/null | grep -q "Entering calloop event loop"; then
         COMPOSITOR_READY=1
         break
     fi

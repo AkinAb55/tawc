@@ -1,46 +1,32 @@
-# `input::test_input_dispatch` is flaky on the emulator (~20% pass rate)
+# `input::test_input_dispatch` is flaky on the emulator
 
 After `ac87c0b` consolidated the input scenarios into a single chained
 `#[test]` that drives one debug-app instance through 13 scenes, the
 suite passes consistently on the OnePlus 9 device and intermittently on
-the x86_64 emulator (5-run sample: 1 PASS, 4 FAIL).
+the x86_64 emulator. As of 2026-05-04 the residual flake rate is ~20%
+(4/5 typical), down from the original ~80% after fixing two distinct
+races below.
 
-The flake survives a `am force-stop me.phie.tawc` + sleep before each
-run, so it isn't compositor warm-up. It is also independent of the
-install method (reproduced on a proot install on emulator; the original
-chroot install would hit the same compositor-side text-input pipeline).
+## Symptoms (residual)
 
-## Symptoms
+`scene_full_compose_loop_with_click_in_middle`:
 
-Failure modes seen across the 5-run sample:
+```
+'hello world': "Timeout waiting for text 'hello world' (last: Some(\"hello worlworld\"))"
+```
 
-1. `scene_full_compose_loop_with_click_in_middle` (most common) —
-   ```
-   'hello world': "Timeout waiting for text 'hello world' (last: Some(\"hello worlworld\"))"
-   ```
-   The 5x `setComposingText("w" → "wo" → "wor" → "worl" → "world")`
-   loop ends with `"worl" + "world"` in the buffer instead of just
-   `"world"`. Looks like the `"worl"` preedit got committed (rather
-   than replaced) before `"world"` arrived.
+The 5x `setComposingText("w" → "wo" → "wor" → "worl" → "world")` loop
+ends with `"worl" + "world"` (or worse — `"hello wwoworworlworld"` has
+been observed) instead of just `"world"`. Every intermediate preedit
+gets COMMITTED to the text buffer instead of replacing the previous
+preedit.
 
-2. `scene_basic_input_and_delete` (less common) —
-   ```
-   text 'hello world': "Timeout waiting for text 'hello world' (last: None)"
-   ```
-   The very first `adb::input_text("hello world")` doesn't reach the
-   debug app within the 5s `TIMEOUT`.
-
-3. `scene_click_during_preedit_commits_pending_text` —
-   ```
-   pending preedit 'hello' was dropped on cursor move; got "world"
-   ```
-   Tap during active preedit doesn't commit the preedit before the
-   touch reaches the client.
-
-All three failures are consistent with a race between rapid-fire
-`am broadcast` invocations and the compositor's text-input-v3 state
-machine. On the slower emulator the broadcasts queue / overlap
-differently; on the device they don't.
+The committed-preedit pattern only manifests in `scene_full` and only
+when run after the 9 preceding scenes (a fresh `gtk4-debug-app` driven
+through just the same broadcast sequence does the right thing
+end-to-end — see Diagnostic notes below). Something about the IM
+context or compositor `text_input_state` accumulates across scenes and
+biases the next preedit replacement into a commit.
 
 ## Repro
 
@@ -51,30 +37,72 @@ TAWC_TARGET=emulator bash testing/run-integration-tests.sh --no-build "input::"
 Each `scene_full_compose_loop_with_click_in_middle` failure pinpoints
 `tests/input.rs:459` — `app.wait_for_text("hello world", TIMEOUT)`.
 
-## Hypotheses
+## What's been fixed (2026-05-04)
 
-- `am broadcast` from rust-test-side `Command::new("adb").args(...)` is
-  effectively async on the receiving side: the receiver may not have
-  finished processing broadcast N before broadcast N+1 arrives.
-  Compositor's text-input-v3 hops between threads (broadcast receiver
-  on main thread → calloop → wayland send) and a faster-than-state
-  arrival can squash an in-flight preedit replacement.
-- `reset_buffer` between scenes only zeroes the visible buffer; the
-  compositor's `current_preedit` / `composingRegionIsPreedit` mirror
-  state can carry over and bias the next scene's first interaction.
-- Emulator is single-CPU under load (gradle + cargo + emulator + adb
-  on the same box), so timing margins shrink.
+1. **Compositor-not-ready race** (compositor + test runner). Two
+   coupled bugs surfaced as `chroot_process.rs: Failed to read PID/PGID`
+   or `helpers.rs: Debug app exited while waiting for 'READY'`:
+   - The compositor was binding the Wayland socket in `lib.rs` *before*
+     entering `event_loop::run`, then doing ~80ms of GLES init,
+     source registration and Xwayland spawn before reaching the
+     dispatch loop. During that window a connecting GTK4 client could
+     land in the listen backlog without `accept()` ever running.
+     Fixed by deferring bind to inside `event_loop::run` as the last
+     step before `event_loop.dispatch` (compositor/src/event_loop.rs).
+   - `am force-stop me.phie.tawc` leaves the previous run's
+     `wayland-0` socket file on disk, so the test runner's
+     `test -e wayland-0` poll matched a stale path while the new
+     compositor was still in early init (which made the GTK4 client
+     connect against a dead inode and exit immediately). Fixed by
+     additionally grepping logcat for the `tawc-native: Entering
+     calloop event loop` line before declaring the compositor ready.
+
+2. **Inter-broadcast wait was zero**. Adding `app.wait_for_preedit(p)`
+   between each `adb::input_set_composing(p)` (already done in
+   `scene_compose_lifecycle`, missing in `scene_full`) closes some of
+   the rapid-fire window. It does NOT fix the residual flake — even
+   with a confirmed PREEDIT round-trip + 150ms sleep between
+   iterations, the same "every preedit gets committed" pattern still
+   shows up ~30% of runs. Reverted because it doesn't help and
+   introduces noise.
+
+## Hypotheses (untested)
+
+- The compositor's `current_preedit` mirror gets out of sync with what
+  the client thinks the preedit is across many enable/disable cycles.
+  `reset_buffer` clears it via `finishComposingText` →
+  `delete_surrounding_text(1000, 1000)`, but the GTK4 IM context
+  state on the client side might also need a reset.
+- A stray focus leave/enter cycle (which calls
+  `handle_android_event(FinishComposingText)`) could be firing during
+  the rapid-fire compose loop. Would explain the per-preedit commit
+  pattern: each preedit_string event triggers an internal commit. No
+  evidence yet.
+- GTK4 specifically might commit a preedit on receiving a new
+  preedit_string with `cursor_begin == cursor_end == len` if it
+  interprets it as a "preedit + cursor at end" with replacement
+  semantics that depend on prior surrounding-text state.
+
+## Diagnostic notes
+
+- A standalone manual run that bypasses the test harness and just
+  fires the same 5x `am broadcast SET_COMPOSING_TEXT` sequence + a
+  `FINISH_COMPOSING_TEXT` against a fresh `gtk4-debug-app` produces
+  exactly the right output: `PREEDIT:h ... PREEDIT:hello, TEXT_CHANGED:hello, PREEDIT (cleared)`.
+  The flake only appears under the 13-scene cumulative test sequence.
+- Failure pattern is "every preedit committed" not "some preedits
+  committed" — points at a state machine that's been wedged into the
+  wrong mode rather than a transient timing race.
 
 ## Possible directions
 
-- Add a small inter-broadcast settle delay inside the `for prefix in [...]`
-  loops (cheap; would mask the race for tests but not fix the
-  underlying compositor bug).
-- Make `reset_buffer` emit an explicit compositor state-clear and
-  wait for the round-trip before returning.
-- Split the chained scenario back into per-scene tests; consolidation
-  was for GTK startup cost — splitting only the IC-side scenes would
-  isolate the race without re-introducing 14× cold starts.
-- Investigate whether the compositor's `commit_string` / preedit
-  replacement is actually atomic against rapid `set_preedit_string`
-  arrivals.
+- Fully tear down the GTK4 client between scene groups (lose the
+  amortisation but break the cross-scene state carry).
+- Insert an explicit text-input enable/disable cycle into
+  `reset_buffer` so the compositor's per-instance state and the
+  client's IM context both fully reset between scenes.
+- Capture `WAYLAND_DEBUG=server` output across a failing run to
+  confirm whether the compositor is sending `commit_string` events
+  for preedits (state-machine bug on our side) or just
+  `preedit_string` events the client misinterprets (client / GTK4
+  bug we'd have to work around).

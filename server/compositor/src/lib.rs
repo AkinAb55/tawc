@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -13,7 +12,7 @@ use log::info;
 use smithay::backend::egl::EGLContext;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::Transform;
-use wayland_server::{Display, ListeningSocket};
+use wayland_server::Display;
 
 mod egl_android;
 mod gl_import;
@@ -606,18 +605,20 @@ fn run_compositor(
     // GlobalId is not RAII — the global lives as long as the Display.
     let _output_global = output.create_global::<TawcState>(&state.display_handle);
 
-    // --- Listening socket ---
+    // --- Run ---
+    // Note: the listening socket is bound inside `event_loop::run` as the
+    // last step before entering the dispatch loop. Binding here would
+    // create a window where clients can `connect()` and write requests
+    // (the kernel queues them on the listening socket) but the
+    // compositor isn't yet running `accept()` — on a slow emulator the
+    // ~80ms of GLES/source setup between bind and dispatch is enough to
+    // make a freshly-spawned GTK4 client time out its initial roundtrip.
     let _ = std::fs::remove_file(WAYLAND_SOCKET_PATH);
     if let Some(parent) = std::path::Path::new(WAYLAND_SOCKET_PATH).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let listener = ListeningSocket::bind_absolute(WAYLAND_SOCKET_PATH.into())?;
-    let _ = std::fs::set_permissions(WAYLAND_SOCKET_PATH, std::fs::Permissions::from_mode(0o777));
-    info!("Wayland socket: {}", WAYLAND_SOCKET_PATH);
-
-    // --- Run ---
     event_loop::run(
-        wl_display, state, render_state, listener, output, scale,
+        wl_display, state, render_state, WAYLAND_SOCKET_PATH, output, scale,
         touch_channel, text_input_channel, state_query_channel, surface_event_channel,
         &RUNNING,
     )
