@@ -1,54 +1,84 @@
-# tawcroot: guest signal-state shadows are not thread-safe
+# tawcroot: residual TID-reuse race on guest "SIGSYS blocked" shadow
 
-`syscalls_control.c` keeps two pieces of guest-visible signal state
-as plain process-global variables:
+The thread-safety fixes have landed; this issue is reduced to a small
+residual race inherent to the per-thread state model.
 
-- `g_guest_sigsys_blocked` — shadow of whether the guest blocked
-  SIGSYS via `rt_sigprocmask`.
-- `g_guest_sigsys_action` — the guest's installed `sigaction` for
-  SIGSYS.
+## What was fixed
 
-Each kernel thread has its own real `sigprocmask`. When the guest
-is multi-threaded, the shadows are wrong by construction:
+`syscalls_control.c` previously kept two pieces of guest-visible
+signal state as plain process-globals — a torn-write hazard the
+moment a multi-threaded guest touched signal state. Both have moved
+into `signal_shadow.c`:
 
-- Two threads concurrently calling `rt_sigprocmask({SIGSYS})` race
-  on the shared `int`. One write wins; readbacks return a value
-  that doesn't match what either thread asked for.
-- The plain-`int` writes are torn-load-safe on x86_64/aarch64, but
-  the design doc commits to a stricter standard ("Threading and
-  vfork invariants" prescribes lock-free snapshot tables).
-- The handler reads/writes the action pointer from the SIGSYS path
-  while the `rt_sigprocmask` handler may write it from another
-  thread — no atomic, no fence.
+- `g_guest_sigsys_blocked` → per-thread shadow in a TID-keyed
+  open-address table (256 slots, linear probe). Slot updates use
+  `__atomic_compare_exchange` to claim and `__atomic_store/load` for
+  the bit. Per-thread isolation is enforced by lookup; concurrent
+  setters on the same tid serialize via the bit's atomic store;
+  concurrent setters on different tids that hash to the same slot
+  resolve via the CAS-claim spin.
 
-`syscalls_control.c:56-58` notes "Single thread of control for now
-(phase-1 smoke is single-threaded; multi-thread + per-thread mask
-is a phase-2 follow-up)." That captures the intent but understates
-the risk for guest workloads that legitimately use threads
-(Firefox, Wayland clients, glib worker pools).
+- `g_guest_sigsys_action` → process-wide seqlock. Even seq = stable,
+  odd = writer in progress. Writers `CAS(seq, even→even+1)` to claim,
+  publish bytes, then store `seq+=1`. Readers retry on inconsistent
+  reads. Multi-writer-safe via the CAS-claim spin.
 
-## Fix sketch
+Helpers are pure (no syscalls), async-signal-safe (only
+`__atomic_*` builtins + plain byte copy), and exercised under
+hosted glibc by `tests/unit/test_signal_shadow.c` — single-thread
+basics plus a 16-thread blocked-isolation stress and a
+4×4-writer/reader seqlock stress (50K iterations each).
 
-- Per-thread `__thread` storage for the sigprocmask shadow (or a
-  seqlock around an array indexed by tid).
-- Atomic copy of the sigaction struct via `__atomic_load_n` /
-  `__atomic_store_n` on a pointer to an immutable record,
-  mirroring the "snapshot pointer published with release
-  semantics" pattern in the design doc.
+## Residual race: TID reuse
+
+If thread A blocks SIGSYS (slot for tid=A_tid set to blocked=1), A
+exits without unblocking, and the kernel later reuses A's tid for
+thread B, B will read the stale 1 until it issues an
+`rt_sigprocmask` with `SIG_SETMASK` (always rewrites the bit) or
+`SIG_BLOCK`/`SIG_UNBLOCK` with SIGSYS in the set (only those touch
+the bit — blocking an unrelated signal leaves the SIGSYS shadow
+untouched). POSIX-wise B should inherit its creator's mask, not
+A's stale state.
+
+We have no way to tell "first appearance of a tid" from "tid
+reuse" without one of:
+
+- A clone hook to clear the new tid's slot when a thread is
+  created. We don't trap clone(2) in handler dispatch (only
+  clone3, which we currently fake-ENOSYS); even if we did, the
+  parent-side trap doesn't have the child tid yet.
+- A `tgkill(0, tid, 0)` probe on every read to detect a dead-tid
+  slot. Async-signal-safe, but a syscall per probe per
+  rt_sigprocmask is too expensive.
+- An exit-side hook clearing the dying thread's slot. Would need
+  the seccomp filter to RET_TRAP `exit`/`exit_group`, which we
+  currently allow. Cost: one extra trap per thread teardown,
+  probably acceptable but adds dispatch surface.
+
+In practice:
+- Realistic guests set-then-read; the bug only fires when a thread
+  reads its mask without first writing it.
+- The kernel doesn't reuse tids while any thread holds them;
+  pid_max is typically ≥32K on Android.
+- Behavior under the race: B reads back a wrong "old" mask once;
+  no crash, no data corruption.
+
+The current "documented residual" stance reflects a cost-vs-impact
+trade — none of the mitigations are free, and none of the
+realistic guest workloads we ship to (pacman, glibc init, Firefox
+content procs) hit the read-without-write pattern that exposes the
+bug.
 
 ## Test gap
 
-There is no multi-thread regression test for these globals (or for
-any handler global, e.g. `g_obs`). The existing handler tests are
-all single-threaded. Suggested test (post-loader): run a
-multi-threaded guest making concurrent path-bearing syscalls and
-check that translation still succeeds. It won't deterministically
-catch the race but will catch gross corruption.
+Multi-thread end-to-end coverage of the rt_sigprocmask/rt_sigaction
+handlers (running through the actual SIGSYS handler in a guest) is
+still TODO — the existing testhost smoke is single-threaded. The
+unit tests cover the lock-free primitives directly.
 
-## Severity / priority
+## Severity
 
-Correctness, not feature gap. First thing to break the moment we
-run a multi-threaded guest that touches signal state. Higher
-priority than the deferred fd-provenance work because that's a
-performance/observability gap; this is a real bug under any
-real-world Wayland app.
+Low. Reduced from "first thing to break under any multi-threaded
+guest" to "edge case observable only on tid reuse after blocked-thread
+exit". Keep the issue open as a marker until either the residual race
+is fixed or the multi-thread phase-1 testhost lands.

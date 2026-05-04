@@ -27,6 +27,7 @@
 
 #include "dispatch.h"
 #include "raw_sys.h"
+#include "signal_shadow.h"
 #include "sysnr.h"
 #include "usercopy.h"
 
@@ -53,32 +54,21 @@
 # define SIG_SETMASK 2
 #endif
 
-/* Shadow state for the guest's SIGSYS view. Single thread of control
- * for now (phase-1 smoke is single-threaded; multi-thread + per-thread
- * mask is a phase-2 follow-up).
- *
- * Size matches the kernel's `struct sigaction` for sigsetsize=8 on each
- * arch (review finding B2). Earlier revs oversized to 64 bytes "to fit
- * either arch", which over-read 32 bytes past the guest's actual struct
- * via tawc_copy_from_guest and over-wrote 32 bytes past oldact via
- * tawc_copy_to_guest. Both directions could EFAULT or trash adjacent
- * guest memory.
- *
+/* Shadow state for the guest's SIGSYS view lives in signal_shadow.c.
+ * Two pieces, scoped differently:
+ *   - The sigaction is process-global (POSIX dispositions are
+ *     process-wide), protected by a seqlock against concurrent
+ *     sigaction(SIGSYS) calls from multiple threads.
+ *   - The "blocked" bit is per-thread (POSIX masks are per-thread),
+ *     stored in a TID-keyed open-address table — the kernel mask in
+ *     uc->uc_sigmask is per-thread for free, but we strip SIGSYS from
+ *     it to keep traps coming, so the shadow has to live separately.
+ * Sizing of the action buffer (TAWC_KERN_SIGACTION_SIZE) is exposed
+ * via signal_shadow.h:
  *   x86_64: handler ptr (8) + flags (8) + sa_restorer (8) + mask (8) = 32
  *   aarch64: handler ptr (8) + flags (8) + mask (8)              = 24
- *
- * Round-trip exactly that many bytes through the shadow. */
-#if defined(__x86_64__)
-# define TAWC_KERN_SIGACTION_SIZE 32
-#elif defined(__aarch64__)
-# define TAWC_KERN_SIGACTION_SIZE 24
-#else
-# error "unsupported arch"
-#endif
-
-static unsigned char g_guest_sigsys_action[TAWC_KERN_SIGACTION_SIZE];
-static int           g_guest_sigsys_action_set = 0;
-static int           g_guest_sigsys_blocked    = 0;
+ * (Earlier revs oversized to 64; over-read past the guest struct in
+ * both directions, review finding B2.) */
 
 /* Lie about successful filter install. Returning -EPERM here works in
  * principle but breaks Firefox: Mozilla's content sandbox calls
@@ -206,7 +196,7 @@ static long handle_rt_sigaction(const tawcroot_syscall_args *args,
 	/* Read the guest's new action into a stack-local buffer FIRST so
 	 * we know whether the call would have succeeded before exposing
 	 * stale shadow contents to a faulting oldact write. */
-	unsigned char incoming[sizeof g_guest_sigsys_action];
+	unsigned char incoming[TAWC_KERN_SIGACTION_SIZE];
 	int have_incoming = 0;
 	if (act) {
 		long e = tawc_copy_from_guest(incoming, sizeof incoming, act);
@@ -215,19 +205,14 @@ static long handle_rt_sigaction(const tawcroot_syscall_args *args,
 	}
 
 	if (oldact) {
-		static const unsigned char zero[sizeof g_guest_sigsys_action];
-		const unsigned char *src = g_guest_sigsys_action_set
-			? g_guest_sigsys_action : zero;
-		long e = tawc_copy_to_guest(oldact, src,
-					    sizeof g_guest_sigsys_action);
+		unsigned char snap[TAWC_KERN_SIGACTION_SIZE];
+		tawc_sigshadow_action_get(snap);
+		long e = tawc_copy_to_guest(oldact, snap, sizeof snap);
 		if (e < 0) return EFAULT_NEG;
 	}
 
-	if (have_incoming) {
-		for (size_t i = 0; i < sizeof g_guest_sigsys_action; i++)
-			g_guest_sigsys_action[i] = incoming[i];
-		g_guest_sigsys_action_set = 1;
-	}
+	if (have_incoming)
+		tawc_sigshadow_action_set(incoming);
 	return 0;
 }
 
@@ -242,6 +227,16 @@ static uint64_t *uc_sigmask_word(ucontext_t *uc)
 	return (uint64_t *)&uc->uc_sigmask;
 }
 
+/* State-mutation order:
+ *  1. read guest_set into a local
+ *  2. compute new kmask + new_blocked locally
+ *  3. mutate uc->uc_sigmask in place
+ *  4. copy_to_guest old mask; on EFAULT, roll back uc->uc_sigmask
+ *  5. publish blocked shadow via tawc_sigshadow_blocked_set if and
+ *     only if step 4 succeeded AND new_blocked changed
+ *
+ * Step 5 is conditional and unconditionally last, so there's no
+ * shadow-rollback path. */
 static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 				  ucontext_t *uc)
 {
@@ -251,6 +246,9 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 	size_t sigsetsize  = (size_t)args->d;
 
 	if (sigsetsize != 8) return EINVAL_NEG;
+	/* No-op call (the kernel returns 0 immediately for this shape).
+	 * Short-circuit before issuing gettid + a shadow table probe. */
+	if (!guest_set && !guest_oldset) return 0;
 
 	uint64_t set_val = 0;
 	int have_set = 0;
@@ -262,7 +260,14 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 
 	uint64_t *kmask = uc_sigmask_word(uc);
 	uint64_t  cur_kmask = *kmask;
-	int prev_blocked = g_guest_sigsys_blocked;
+	/* The shadow lives in a TID-keyed table — uc->uc_sigmask is
+	 * already per-thread (the kernel populated it for the trapping
+	 * thread), but we deliberately strip SIGSYS from it, so the
+	 * "guest blocked SIGSYS" bit needs its own per-thread store. */
+	long tid_l = TAWC_RAW(TAWC_SYS_gettid, 0, 0, 0, 0, 0, 0);
+	int  tid   = (int)tid_l;
+	int  prev_blocked = tawc_sigshadow_blocked_get(tid);
+	int  new_blocked  = prev_blocked;
 
 	if (have_set) {
 		int sigsys_in_set = (set_val & SIGSYS_BIT) != 0;
@@ -271,15 +276,15 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 		switch (how) {
 		case SIG_BLOCK:
 			*kmask = cur_kmask | kernel_set;
-			if (sigsys_in_set) g_guest_sigsys_blocked = 1;
+			if (sigsys_in_set) new_blocked = 1;
 			break;
 		case SIG_UNBLOCK:
 			*kmask = cur_kmask & ~kernel_set;
-			if (sigsys_in_set) g_guest_sigsys_blocked = 0;
+			if (sigsys_in_set) new_blocked = 0;
 			break;
 		case SIG_SETMASK:
 			*kmask = kernel_set;
-			g_guest_sigsys_blocked = sigsys_in_set;
+			new_blocked = sigsys_in_set;
 			break;
 		default:
 			return EINVAL_NEG;
@@ -291,14 +296,15 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 		if (prev_blocked) old |= SIGSYS_BIT;
 		long e = tawc_copy_to_guest(guest_oldset, &old, 8);
 		if (e < 0) {
-			/* Roll back the mask if we'd already updated it. */
-			if (have_set) {
-				*kmask = cur_kmask;
-				g_guest_sigsys_blocked = prev_blocked;
-			}
+			/* Roll back the kernel mask if we'd updated it.
+			 * Shadow doesn't need rollback — we haven't
+			 * published `new_blocked` yet. */
+			if (have_set) *kmask = cur_kmask;
 			return EFAULT_NEG;
 		}
 	}
+	if (have_set && new_blocked != prev_blocked)
+		tawc_sigshadow_blocked_set(tid, new_blocked);
 	return 0;
 }
 

@@ -84,7 +84,7 @@ TESTS_CFLAGS := \
     -DTAWCROOT_TEST_TMPDIR=\"/tmp\" \
     -MMD -MP
 
-TESTS_LDFLAGS := -lm
+TESTS_LDFLAGS := -lm -pthread
 
 # --- source lists ---
 
@@ -102,6 +102,7 @@ PROD_C := \
     $(SRC_T)/src/syscalls_fs.c \
     $(SRC_T)/src/syscalls_fd.c \
     $(SRC_T)/src/syscalls_control.c \
+    $(SRC_T)/src/signal_shadow.c \
     $(SRC_T)/src/syscalls_socket.c \
     $(SRC_T)/src/usercopy.c \
     $(SRC_T)/src/loader_elf.c \
@@ -125,7 +126,8 @@ PROD_C_FOR_TESTS := \
     $(SRC_T)/src/loader_elf.c \
     $(SRC_T)/src/loader_map.c \
     $(SRC_T)/src/loader_stack.c \
-    $(SRC_T)/src/exec_state.c
+    $(SRC_T)/src/exec_state.c \
+    $(SRC_T)/src/signal_shadow.c
 
 TESTHOST_EXTRA_C := \
     $(SRC_TH)/src/testhost_main.c \
