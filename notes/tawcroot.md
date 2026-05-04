@@ -3018,6 +3018,38 @@ here so we don't ship MVP and discover them at runtime.
    variants, or ship non-PIE and accept that dispatch is just a
    perf win without the ASLR benefit).
 
+## Possible perf improvements
+
+Items that are pure throughput wins — no correctness impact, no
+workload we ship today is blocked. Listed here so we don't forget
+about them when a profile or a new target makes one relevant.
+
+1. **fd-provenance table.** Today path-relative ops (`fchdir(fd)`,
+   `openat(fd, "...", ...)`) resolve `fd` via `/proc/self/fd/<n>`
+   at handler time — one extra syscall round-trip per call.
+   Correct, but unnecessary. A process-wide `fd → provenance`
+   table (rootfs-relative path / bind id / host path) updated on
+   the fd-producing syscalls (`open`, `openat`, `dup`, `dup2`,
+   `dup3`, `fcntl(F_DUPFD{,_CLOEXEC})`, exec) and consulted on
+   path-relative ops would shortcut it. Same lock-free
+   snapshot-on-update discipline as the bind table for
+   vfork/multithread safety; cross-process inheritance rides on
+   the exec_state re-exec dance that already ferries the fd map.
+   Becomes relevant for workloads with many path-relative ops
+   (some build systems, certain language runtimes) or when we add
+   per-thread state for the SIGSYS path. Also unblocks the
+   fd-relative `/proc/self/{exe,maps}` synthesis gap noted in
+   "Open questions" #3.
+
+2. **io_uring SQE rewriter.** `io_uring_setup` currently returns
+   `-ENOSYS` (deny-and-fall-back); the full SQE-rewriting design
+   in "Open questions" #1 is the perf upgrade. Guests that probe
+   for io_uring (bash, pacman, Firefox, libhybris) fall back
+   cleanly to syscall-based I/O. Becomes worth the ~500-1000
+   lines when a target actually wants io_uring throughput —
+   `fio`-style benchmarks, modern databases inside the chroot,
+   newer container runtimes.
+
 ## Confirmed environment
 
 Empirically verified on the primary test device (OnePlus 9,
