@@ -105,17 +105,10 @@ struct tawcroot_bind {
 	int    src_fd;               /* O_PATH | O_DIRECTORY of the host src */
 	size_t dst_len;              /* length of `dst`, excluding NUL        */
 	char   dst[256];             /* rootfs-relative dst (NO leading '/'). */
-	char   src[256];             /* host src path, for lazy re-open after
-	                              * a guest fork+closefrom killed src_fd. */
+	char   src[256];             /* host src path, ferried through to
+	                              * --exec-child so the new tawcroot
+	                              * incarnation can re-open it.            */
 };
-
-/* Re-open a reserved fd (rootfs or bind src) from its stored host path
- * if a guest fork-child's closefrom() closed it. No-op if `*fd_p` still
- * resolves; otherwise opens `host_path` with O_PATH | O_DIRECTORY |
- * O_CLOEXEC, F_DUPFD_CLOEXECs into the reserved range, and updates
- * `*fd_p`. Returns the (possibly new) fd on success, -errno on failure.
- * Async-signal-safe — only raw syscalls. */
-long tawcroot_reopen_reserved_fd(int *fd_p, const char *host_path);
 
 extern struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];
 extern size_t               tawcroot_n_binds;

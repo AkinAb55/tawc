@@ -1,9 +1,8 @@
 /* Path-translation orchestration — fold → bind → memo → resolver → bind.
  *
- * `tawcroot_path_translate` (path.c) is the production wrapper. It owns
- * fd lifecycle (rootfs/bind reopen after closefrom), reads the
- * process-global rootfs/bind/memo tables, and wires up a raw_sys-backed
- * cwd source and readlink oracle. It then calls into
+ * `tawcroot_path_translate` (path.c) is the production wrapper. It
+ * reads the process-global rootfs/bind/memo tables and wires up a
+ * raw_sys-backed cwd source and readlink oracle. It then calls into
  * `tawcroot_path_translate_with_ctx` here, which is pure with respect
  * to the OS — every external dependency is in the context struct, so
  * the orchestration itself compiles into both the freestanding

@@ -91,11 +91,10 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 	int   sc_arch     = info->si_arch;
 	(void)sc_syscall;
 
-	/* Update the snapshot. Plain stores are fine: only one handler can
-	 * write at a time on a single CPU (kernel masks SIGSYS for the
-	 * duration of this handler — we deliberately leave SA_NODEFER off,
-	 * see notes). The volatile qualifier prevents the compiler from
-	 * caching reads in the test driver. */
+	/* Update the snapshot. Plain stores; see the single-threaded-only
+	 * caveat above — under a multi-threaded testhost driver these
+	 * fields would race across CPUs. The volatile qualifier prevents
+	 * the compiler from caching reads in the test driver. */
 	g_obs.last_nr         = args.nr;
 	g_obs.last_arg0       = args.a;
 	g_obs.last_call_addr  = (uintptr_t)sc_addr;

@@ -62,9 +62,6 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * host-fs path, opened directly. */
 	if (tawcroot_rootfs_fd >= 0) {
 		char suffix[4096];
-		/* tawcroot_path_translate lazy-reopens rootfs_fd / bind src_fds
-		 * if a guest closefrom() killed them — see path.c. Saves us
-		 * from doing it explicitly here. */
 		tawcroot_path_result r = tawcroot_path_translate(
 		    path, suffix, sizeof suffix, TAWCROOT_PATH_FOLLOW);
 		if (r.err) return r.err;
@@ -114,11 +111,12 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		if (nb > TAWCROOT_EXEC_STATE_MAX_BINDS)
 			nb = TAWCROOT_EXEC_STATE_MAX_BINDS;
 		extras.n_binds = nb;
-		/* Source host paths come straight off the bind table (added
-		 * for closefrom-survive lazy re-open). Earlier revisions
-		 * recovered them via readlinkat /proc/self/fd/<src_fd> — that
-		 * failed once gpgme's fork-child closefrom() killed src_fd
-		 * before the execve handler ran. */
+		/* Source host paths come straight off the bind table.
+		 * Earlier revisions recovered them via readlinkat
+		 * /proc/self/fd/<src_fd>, which broke once gpgme's fork-child
+		 * closefrom() raced against the recovery readlink — keeping
+		 * the strings around makes the dependency on a live src_fd
+		 * disappear. */
 		for (uint32_t i = 0; i < nb; i++) {
 			bind_src_arr[i] = tawcroot_binds[i].src;
 			bind_dst_arr[i] = tawcroot_binds[i].dst;

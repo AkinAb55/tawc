@@ -53,16 +53,16 @@ long tawcroot_fd_reserve(int fd)
 static long handle_close(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	int fd = (int)args->a;
-	/* Reserved fds: actually close (let the kernel do it) and return
-	 * success. See filter.c for the closefrom-loop rationale. The BPF
-	 * already filters out non-reserved close calls, so by the time we
-	 * land here the fd is one of ours — typically inherited into a
-	 * fork-child that's about to closefrom-then-exec, in which case the
-	 * exec_handler's --exec-child path re-establishes the fds. The
-	 * parent's reserved fds are unaffected because fork copies the fd
-	 * table. */
-	return TAWC_RAW(TAWC_SYS_close, fd, 0, 0, 0, 0, 0);
+	(void)args;
+	/* Reserved fds: lie. The BPF filter only routes close() here when
+	 * the argument matches one of our reserved slots, so by definition
+	 * we never want the kernel to actually close it — the guest sees
+	 * success, our handler keeps the fd alive for downstream path
+	 * translation. This makes our reserved fds un-killable from the
+	 * guest (close_range, dup2/3, fcntl F_DUPFD all already reject or
+	 * trim around the reserved range), which means handler-side state
+	 * for path translation can stay immutable post-init. */
+	return 0;
 }
 
 static long handle_close_range(const tawcroot_syscall_args *args,

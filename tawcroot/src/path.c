@@ -171,8 +171,8 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
 	for (size_t i = 0; i < n; i++) b->dst[i] = d[i];
 	b->dst[n] = 0;
 
-	/* Stash the host src path for lazy re-open if a guest fork-child's
-	 * closefrom() closes our src_fd before reaching exec. */
+	/* Stash the host src path so exec_handler can ferry it through to
+	 * --exec-child for the new tawcroot incarnation to re-open. */
 	{
 		size_t k = 0;
 		while (src_host[k] && k + 1 < sizeof b->src) {
@@ -183,45 +183,6 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
 	}
 	tawcroot_n_binds++;
 	return 0;
-}
-
-/* Lazy re-open of a reserved fd after a guest closefrom() killed it.
- * fcntl(F_GETFD) returns the FD_CLOEXEC flag (≥ 0) on a live fd and
- * -EBADF on a dead one — cheaper than a full statfs probe. On dead-fd,
- * open the stashed host path and reserve again (F_DUPFD_CLOEXEC into
- * the reserved range). Used from `*at`-issuing handlers and from
- * exec_handler. Pure-async-signal-safe — raw syscalls only.
- *
- * The new fd may land at a different reserved slot than the original
- * (the kernel's lowest-free search picks whatever is free at or above
- * the base), so we update *fd_p in place. The BPF close-trap predicate
- * still treats the original baked-in slot as reserved, so a guest
- * closing the new fd value would not be intercepted — but that's
- * benign: the next operation lazy-reopens again. */
-long tawcroot_reopen_reserved_fd(int *fd_p, const char *host_path)
-{
-	if (!fd_p || !host_path || !host_path[0]) return -22; /* EINVAL */
-	int fd = *fd_p;
-	if (fd >= 0) {
-		/* F_GETFD = 1. Returns the FD_CLOEXEC bit (0/1) or -EBADF.   */
-		long r = TAWC_RAW(TAWC_SYS_fcntl, fd, 1 /*F_GETFD*/, 0, 0, 0, 0);
-		if (r >= 0) return fd;
-	}
-	long nfd = tawc_openat(-100 /*AT_FDCWD*/, host_path,
-	                       0x200000 | 0x10000 | 0x80000, 0);
-	if (nfd < 0) return nfd;
-	/* F_DUPFD_CLOEXEC into the reserved range; close the kernel-allocated
-	 * low fd. Bypass tawcroot_fd_reserve() because the BPF reserved-fd
-	 * array is install-time-baked and lives untouched by re-opens; the
-	 * new slot may not be in it, but that just means future close() on
-	 * the new fd won't trap (the kernel handles it; we lazy-reopen
-	 * again on the next translation). */
-	long resv = tawc_fcntl((int)nfd, 1030 /*F_DUPFD_CLOEXEC*/,
-	                       (long)TAWCROOT_RESERVED_FD_BASE);
-	tawc_close((int)nfd);
-	if (resv < 0) return resv;
-	*fd_p = (int)resv;
-	return resv;
 }
 
 /* `tawcroot_path_fold_absolute` is implemented in `path_fold.c` (pure,
@@ -319,19 +280,9 @@ tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 		return r;
 	}
 
-	/* Lazy re-open of reserved fds. A guest fork-child running glibc's
-	 * `closefrom()` (gpgme/curl/python pre-exec hygiene) can wipe our
-	 * rootfs fd and bind src fds before the execve handler kicks in.
-	 * Validate-then-reopen here so any syscall handler downstream has
-	 * the right fd. Cheap when the fd is alive (one F_GETFD). */
-	long rr = tawcroot_reopen_reserved_fd(&tawcroot_rootfs_fd,
-	                                      tawcroot_rootfs_host_path);
-	if (rr < 0) { r.err = (int)rr; return r; }
-	for (size_t i = 0; i < tawcroot_n_binds; i++) {
-		long br = tawcroot_reopen_reserved_fd(&tawcroot_binds[i].src_fd,
-		                                      tawcroot_binds[i].src);
-		if (br < 0) { r.err = (int)br; return r; }
-	}
+	/* No lazy-reopen needed: handle_close fake-succeeds for reserved
+	 * fds, so the guest cannot kill rootfs_fd or bind src_fds. The
+	 * globals read below are immutable post-init. */
 
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd   = tawcroot_rootfs_fd,
