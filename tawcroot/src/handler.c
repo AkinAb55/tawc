@@ -54,7 +54,18 @@ extern void tawcroot_sigreturn_trampoline(void);
  * "no mutable handler state without snapshot rules" principle from
  * notes/tawcroot.md "Threading and `vfork` invariants". Gate it behind
  * TAWCROOT_TESTHOST so production stays clean; testhost binaries keep
- * the slot for the smoke driver. */
+ * the slot for the smoke driver.
+ *
+ * Single-threaded-only: writes to g_obs are *not* race-free under a
+ * multi-threaded guest. Two threads trapping concurrently will
+ * interleave the field stores below, and tawcroot_handler_observe
+ * may snapshot a half-updated record. This is acceptable because the
+ * existing testhost smoke (smoke.c, child.c, phase1.c) is
+ * single-threaded by construction. The day someone writes a
+ * multi-threaded handler test, this slot needs the same seqlock
+ * treatment as the SIGSYS-shadow state in signal_shadow.c — until
+ * then the simpler plain-store form keeps the test driver code
+ * ergonomic. */
 #ifdef TAWCROOT_TESTHOST
 static volatile tawcroot_handler_obs g_obs;
 #endif
