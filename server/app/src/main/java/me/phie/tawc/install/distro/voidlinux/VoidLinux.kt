@@ -49,7 +49,7 @@ internal sealed class VoidLinux(
     final override val basePackages: List<String> = VoidCommon.DEFAULT_BASE_PACKAGES
 
     final override fun configure(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
-        VoidCommon.configure(method, rootfs, log)
+        VoidCommon.configure(method, rootfs, linuxArch, log)
 
     final override fun initPackageManager(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
         VoidCommon.initPackageManager(method, rootfs, log)

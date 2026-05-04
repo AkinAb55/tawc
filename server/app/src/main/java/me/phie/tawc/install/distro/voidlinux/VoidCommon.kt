@@ -119,10 +119,20 @@ internal object VoidCommon {
         "linux-firmware",
     )
 
-    // Runtime package mirror (xbps repos). The bootstrap-tarball mirror
-    // lives at `live/current/` (see VoidSha256Resolver) — the trees are
-    // separate on Void's CDN.
-    private const val DEFAULT_MIRROR = "https://repo-default.voidlinux.org/current"
+    // Runtime package mirror (xbps repos). We use the Fastly CDN-backed
+    // mirror so users get a near-edge connection automatically; the
+    // alternative `repo-default.voidlinux.org` is a fixed CNAME chain
+    // to a single Helsinki box (no geo-routing despite the name) and
+    // gives ~163 KB/s outside Europe vs ~3 MB/s on Fastly. The bootstrap
+    // tarball mirror lives separately at `live/current/` (see
+    // VoidSha256Resolver). The aarch64 binpkg tree is namespaced under
+    // `current/aarch64/`; x86_64 sits at `current/` directly.
+    private const val MIRROR_BASE = "https://repo-fastly.voidlinux.org/current"
+
+    private fun mirrorFor(linuxArch: String): String = when (linuxArch) {
+        "x86_64" -> MIRROR_BASE
+        else -> "$MIRROR_BASE/$linuxArch"
+    }
 
     /**
      * Configure the freshly-extracted rootfs:
@@ -137,8 +147,10 @@ internal object VoidCommon {
     fun configure(
         method: InstallationMethod,
         rootfs: String,
+        linuxArch: String,
         log: (String) -> Unit,
     ) {
+        val mirror = mirrorFor(linuxArch)
         // Heredoc terminators MUST be at column 0 (per shell `<<EOF`
         // semantics); we build the script line-by-line rather than
         // using `"""...""".trimIndent()`, because the interpolated
@@ -159,7 +171,7 @@ internal object VoidCommon {
             appendLine("chmod 644 \"\$ROOTFS/etc/profile.d/00-path.sh\"")
 
             appendLine("cat > \"\$ROOTFS/etc/xbps.d/00-repository-main.conf\" <<'REPO_EOF'")
-            appendLine("repository=$DEFAULT_MIRROR")
+            appendLine("repository=$mirror")
             appendLine("REPO_EOF")
 
             appendLine("cat > \"\$ROOTFS/etc/xbps.d/00-noextract.conf\" <<'NOEX_EOF'")
