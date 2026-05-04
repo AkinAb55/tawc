@@ -49,6 +49,9 @@
 #ifndef O_CLOEXEC
 # define O_CLOEXEC 0x80000
 #endif
+#ifndef O_RDWR
+# define O_RDWR 2
+#endif
 
 /* ----- inline-asm syscall probes (issued from within phase1.c so the
  * IP is outside the stub allowlist and the filter TRAPs into our
@@ -119,6 +122,20 @@ static long inline_fstatat(int dirfd, const char *path,
 {
 	long rv;
 	INLINE_SYS6(TAWC_SYS_fstatat, dirfd, path, out, flags, 0, 0, rv);
+	return rv;
+}
+
+static long inline_unlinkat(int dirfd, const char *path, int flag)
+{
+	long rv;
+	INLINE_SYS6(TAWC_SYS_unlinkat, dirfd, path, flag, 0, 0, 0, rv);
+	return rv;
+}
+
+static long inline_faccessat(int dirfd, const char *path, int mode, int flag)
+{
+	long rv;
+	INLINE_SYS6(TAWC_SYS_faccessat, dirfd, path, mode, flag, 0, 0, rv);
 	return rv;
 }
 
@@ -1684,6 +1701,102 @@ int tawcroot_phase1_main(const char *rootfs)
 					       0, 0, 0, 0);
 			}
 			tawc_close((int)probe_fd);
+		}
+	}
+
+	/* /dev/shm in-handler emulation: create + reuse + unlink + stat. */
+	{
+		long fd1 = inline_openat(AT_FDCWD, "/dev/shm/tawcroot-smoke",
+					 O_RDWR | 0x40 /*O_CREAT*/,
+					 0600);
+		fails += tawc_io_step(
+			"openat(/dev/shm/...,O_CREAT) -> memfd-backed fd",
+			fd1 >= 0);
+		tawc_io_kv_dec("    rv", fd1);
+
+		if (fd1 >= 0) {
+			/* ftruncate isn't trapped: the kernel does it
+			 * directly on the dup. Proves the fd refers to a
+			 * real, resizable memfd. */
+			long tr;
+			INLINE_SYS6(TAWC_SYS_ftruncate, fd1, 4096, 0, 0, 0, 0, tr);
+			fails += tawc_io_step(
+				"ftruncate on shm fd -> 0", tr == 0);
+
+			/* O_EXCL on existing name -> -EEXIST. */
+			long fd_excl = inline_openat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke",
+				O_RDWR | 0x40 /*O_CREAT*/ | 0x80 /*O_EXCL*/,
+				0600);
+			fails += tawc_io_step(
+				"openat(...,O_CREAT|O_EXCL) on existing -> -EEXIST",
+				fd_excl == -17);
+
+			/* Reopen without O_CREAT -> existing entry. */
+			long fd2 = inline_openat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke",
+				O_RDWR, 0);
+			fails += tawc_io_step(
+				"reopen existing /dev/shm name -> fd",
+				fd2 >= 0);
+
+			/* stat /dev/shm/<name> -> regular file, root-owned. */
+			struct stat st;
+			long sr = inline_fstatat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke", &st, 0);
+			fails += tawc_io_step(
+				"fstatat /dev/shm/<name> -> 0", sr == 0);
+			fails += tawc_io_step(
+				"shm stat: uid=0", st.st_uid == 0);
+
+			/* stat /dev/shm dir -> directory. */
+			long sd = inline_fstatat(AT_FDCWD, "/dev/shm",
+						 &st, 0);
+			fails += tawc_io_step(
+				"fstatat /dev/shm -> 0 (synth dir)", sd == 0);
+			fails += tawc_io_step(
+				"shm dir stat: is dir",
+				(st.st_mode & 0170000) == 0040000);
+
+			/* faccessat on the name and dir -> 0. */
+			long ad = inline_faccessat(
+				AT_FDCWD, "/dev/shm", 0, 0);
+			fails += tawc_io_step(
+				"faccessat /dev/shm -> 0", ad == 0);
+			long an = inline_faccessat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke", 0, 0);
+			fails += tawc_io_step(
+				"faccessat /dev/shm/<name> -> 0", an == 0);
+
+			/* Drop the name. */
+			long ur = inline_unlinkat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke", 0);
+			fails += tawc_io_step(
+				"unlinkat /dev/shm/<name> -> 0", ur == 0);
+
+			/* Now re-stat -> -ENOENT. */
+			long sr2 = inline_fstatat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke",
+				&st, 0);
+			fails += tawc_io_step(
+				"post-unlink stat -> -ENOENT", sr2 == -2);
+
+			/* unlink-of-missing -> -ENOENT. */
+			long ur2 = inline_unlinkat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke", 0);
+			fails += tawc_io_step(
+				"unlink missing -> -ENOENT", ur2 == -2);
+
+			/* Open w/o O_CREAT after unlink -> -ENOENT. */
+			long fd3 = inline_openat(
+				AT_FDCWD, "/dev/shm/tawcroot-smoke",
+				O_RDWR, 0);
+			fails += tawc_io_step(
+				"open after unlink (no O_CREAT) -> -ENOENT",
+				fd3 == -2);
+
+			if (fd2 >= 0) tawc_close((int)fd2);
+			tawc_close((int)fd1);
 		}
 	}
 

@@ -23,12 +23,13 @@ import java.io.IOException
  *
  *   - No separate loader stub. `libtawcroot.so` is statically linked
  *     and contains both the runtime + the ELF loader.
- *   - Same `/dev/shm` bind to an app-writable cache dir as proot. The
- *     earlier "tawcroot emulates POSIX shm via memfd_create" plan
- *     never landed; absent the bind, Firefox's parent process uses
- *     POSIX `shm_open(3)` against `/dev/shm/...`, gets ENOENT, and
- *     `MOZ_RELEASE_ASSERT(mHandle.IsValid() && mMapping.IsValid())`
- *     hard-crashes early in startup.
+ *   - Real in-memory `/dev/shm`: `shm_open(3)` calls under `/dev/shm/`
+ *     are intercepted by the SIGSYS handler and routed to a
+ *     `memfd_create`-backed name table (`tawcroot/src/shm.c`). No host
+ *     directory is bound; the segments live in the kernel and dissolve
+ *     when the last fd closes, so there's no flash-write cost or
+ *     storage-growth concern. (Mozilla's parent → content IPC uses
+ *     SCM_RIGHTS to pass the fd; no cross-process open-by-name needed.)
  *   - No `--link2symlink` flag. Hardlink-EACCES → symlink fallback is
  *     built into the linkat handler (`syscalls_fs.c::link_with_symlink_fallback`).
  *   - No `MOZ_DISABLE_*_SANDBOX` env vars. Firefox's sandbox setup
@@ -41,15 +42,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
     /** Absolute path to the tawcroot binary on disk. */
     val tawcrootBin: String =
         File(context.applicationInfo.nativeLibraryDir, "libtawcroot.so").absolutePath
-
-    /**
-     * Host-side directory bound at `/dev/shm` inside the rootfs. Same
-     * rationale as [ProotMethod.devShmDir]: Android's /dev has no
-     * /dev/shm and Firefox's parent uses POSIX `shm_open(3)`, hard-
-     * crashing on ENOENT. `filesDir` (not `cacheDir`) so Android won't
-     * purge it under storage pressure mid-session.
-     */
-    private val devShmDir: String = File(context.filesDir, "tawcroot-dev-shm").absolutePath
 
     override val key: String = KEY
     override val displayName: String = "tawcroot (systrap, rootless)"
@@ -109,9 +101,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         for (dir in LIBHYBRIS_BIND_DIRS) {
             File(rootfs, dir.removePrefix("/")).mkdirs()
         }
-        // Backing dir for the /dev/shm bind. Must exist before
-        // tawcroot_path_add_bind opens it.
-        File(devShmDir).mkdirs()
 
         val cmdB64 = android.util.Base64.encodeToString(
             command.toByteArray(Charsets.UTF_8),
@@ -214,16 +203,13 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * invocation) and [renderEnterScript] (shell-script form) — adding
      * a bind here updates both call sites at once.
      *
-     * Order: /dev → /proc → /sys → /dev/shm → libhybris dirs → TAWC_DATA.
-     * `/dev/shm` must come AFTER `/dev` so tawcroot's path translator
-     * picks the more-specific bind first (same semantics as proot's
-     * later-binds-win rule for overlapping paths). See [devShmDir]
-     * for why the /dev/shm bind exists at all. */
+     * Order: /dev → /proc → /sys → libhybris dirs → TAWC_DATA.
+     * No `/dev/shm` bind: tawcroot's SIGSYS handler emulates POSIX
+     * shm in-process via memfd_create (`tawcroot/src/shm.c`). */
     private fun bindSpecs(): List<Pair<String, String>> = buildList {
         add("/dev" to "/dev")
         add("/proc" to "/proc")
         add("/sys" to "/sys")
-        add(devShmDir to "/dev/shm")
         for (dir in LIBHYBRIS_BIND_DIRS) add(dir to dir)
         add(TAWC_DATA to TAWC_DATA)
     }
@@ -258,15 +244,12 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         appendLine("TAWCROOT=${shellQuote(tawcrootBin)}")
         appendLine("ROOTFS=${shellQuote(rootfs)}")
         appendLine("TAWC_DATA=${shellQuote(TAWC_DATA)}")
-        appendLine("DEV_SHM_DIR=${shellQuote(devShmDir)}")
         // Bind targets must exist on disk inside the rootfs view since
         // some downstream code stat()'s them. Match ProotMethod.
         appendLine("mkdir -p \"\$ROOTFS\$TAWC_DATA\"")
         for (dir in LIBHYBRIS_BIND_DIRS) {
             appendLine("mkdir -p \"\$ROOTFS$dir\"")
         }
-        // Host-side backing dir for the /dev/shm bind.
-        appendLine("mkdir -p \"\$DEV_SHM_DIR\"")
         // Refresh /etc/profile.d/01-tawc.sh. Note: tawcroot does NOT
         // need the MOZ_DISABLE_*_SANDBOX env vars proot does — the
         // ptrace-tracer-vs-Firefox-sandbox conflict doesn't exist

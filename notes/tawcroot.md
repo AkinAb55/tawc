@@ -1547,17 +1547,37 @@ Android version (`/system_ext`, `/linkerconfig`, sometimes
 `/dev/binderfs`) are filtered out when rendering the wrapper rather
 than making tawcroot reject the whole argv.
 
-**`/dev/shm` is bind-mounted to an app-writable cache dir, same as
-proot.** The earlier plan was for tawcroot to emulate POSIX shm
-in-handler via `memfd_create` (no host backing dir). That never
-landed. Without backing, Mozilla's parent-process `shm_open(3)` in
-`SharedMemory::Allocate` hard-asserts on ENOENT
-(`MOZ_RELEASE_ASSERT(mHandle.IsValid() && mMapping.IsValid())`)
-and Firefox segfaults at libxul.so before reaching even XPCOM
-init. `TawcrootMethod` therefore mkdirs `<filesDir>/tawcroot-dev-
-shm` and binds it at `/dev/shm`, mirroring `ProotMethod.devShmDir`.
-If the in-handler emulation ever does land, the bind can come back
-out — until then this is the simpler, working solution.
+**`/dev/shm` is emulated in-handler via `memfd_create`** — no host
+directory bound, no flash-write cost. Path-bearing syscalls under
+`/dev/shm/<name>` are intercepted by the SIGSYS handler and routed
+to a small (name → memfd) table in `src/shm.c`:
+
+- `openat(O_CREAT)` creates a `memfd_create(name, MFD_ALLOW_SEALING)`,
+  stores an internal **non-CLOEXEC** dup at the high reserved-fd
+  range, and hands a fresh dup to the guest. `O_EXCL` and `O_TRUNC`
+  honored.
+- `openat` on an existing name returns a fresh dup of the cached fd.
+- `unlinkat` drops the name; the segment lives on as long as any
+  fd is open (POSIX shm semantics, kernel refcount).
+- `fstatat`/`statx`/`faccessat` synthesize sensible answers for both
+  `/dev/shm` (synthetic dir) and `/dev/shm/<name>` (regular file
+  with `fstat`-derived size, owner uid 0).
+
+Cross-process visibility for fork+execve patterns (Mozilla parent →
+content IPC) is preserved via two mechanisms:
+
+1. The internal memfds are non-CLOEXEC, so they survive the
+   handler-driven `execveat` re-exec verbatim — same fd numbers,
+   same kernel objects.
+2. `exec_state` ferries the (name, fd_int) pairs through the memfd
+   handed across re-exec; `--exec-child`'s loader calls
+   `tawcroot_shm_register` to rebuild the (name → fd) map without
+   re-creating any kernel-side memfd.
+
+Mozilla's IPC SHM is not contended in practice (a tiny spinlock
+guards the table; held only across the create/unlink syscalls).
+`mmap`/`ftruncate`/`mremap`/etc. operate on the returned fd as
+real kernel operations — no further handler involvement.
 
 `-w` sets initial CWD (translated). We also export a small set of
 env vars (`HOME`, `USER`, `TMPDIR`, `PATH`) before exec.
@@ -1736,11 +1756,8 @@ A new `TawcrootMethod.kt` next to `ProotMethod.kt`. Same shape:
 - Generate the wrapper script (`enter.sh` equivalent).
 - Apply the same bootstrap-cache + tar-extract pipeline as
   `ProotMethod`.
-- Create a disk-backed `/dev/shm` dir and bind it (same as proot's
-  `prootDevShmDir`). The plan to emulate `/dev/shm` in-handler via
-  `memfd_create` never landed and Firefox's parent-process
-  `shm_open(3)` hard-asserts on ENOENT without the bind. See
-  §"Bootstrap & entry" for the lifecycle.
+- No `/dev/shm` host bind — the SIGSYS handler emulates POSIX shm
+  via `memfd_create` (`src/shm.c`). See §"Bootstrap & entry".
 - Apply the libhybris symlinks (`LibhybrisLinker.link` works
   unchanged — the rootfs layout is the same).
 

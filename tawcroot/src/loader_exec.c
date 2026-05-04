@@ -21,6 +21,7 @@
 #include "loader_stack.h"
 #include "path.h"
 #include "raw_sys.h"
+#include "shm.h"
 #include "usercopy.h"
 
 /* Linux uapi mmap flags / prot. Matches loader_map.h's TAWC_MM_* but
@@ -497,6 +498,19 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 			long br = tawcroot_path_add_bind(st.bind_src[i],
 			                                 st.bind_dst[i]);
 			if (br < 0) LOADER_FAIL(86);
+		}
+
+		/* Re-register the /dev/shm name table. The internal memfds
+		 * are non-CLOEXEC and inherited verbatim across the
+		 * execveat — fd numbers stay valid, we just rebuild the
+		 * (name → fd) map and re-add fds to the reserved list so
+		 * close-trapping protects them. */
+		tawcroot_shm_reset();
+		for (uint32_t i = 0; i < st.n_shm; i++) {
+			if (!st.shm_name[i]) continue;
+			long sr = tawcroot_shm_register(st.shm_name[i],
+							st.shm_fd[i]);
+			if (sr < 0) LOADER_FAIL(89);
 		}
 
 		tawcroot_path_memoize_well_known();

@@ -155,6 +155,62 @@ test(exec_state_rejects_offset_past_strings)
 	            -22);
 }
 
+test(exec_state_carries_shm_table)
+{
+	const char *argv[] = { "/p", NULL };
+	const char *envp[] = { NULL };
+
+	const char *shm_names[] = { "moz-ipc-1", "moz-ipc-2", "media-buf" };
+	const int   shm_fds[]   = { 1042, 1099, 1130 };
+
+	tawcroot_exec_state_extras ex = { 0 };
+	ex.n_shm    = 3;
+	ex.shm_name = shm_names;
+	ex.shm_fd   = shm_fds;
+
+	size_t need = tawcroot_exec_state_estimate_bytes("/p", 1, argv, envp,
+							 &ex);
+	uint8_t *buf = malloc(need);
+	test_nonnull(buf);
+	long w = tawcroot_exec_state_write(buf, need, "/p", 1, argv, envp, &ex);
+	test_int_eq((int)w, (int)need);
+
+	const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
+	const char *ebuf[TAWCROOT_EXEC_STATE_MAX_ENV + 1];
+	tawcroot_exec_state out;
+	test_int_eq((int)tawcroot_exec_state_read(buf, need, abuf, ebuf, &out),
+		    0);
+	test_int_eq((int)out.n_shm, 3);
+	test_str_eq(out.shm_name[0], "moz-ipc-1");
+	test_str_eq(out.shm_name[1], "moz-ipc-2");
+	test_str_eq(out.shm_name[2], "media-buf");
+	test_int_eq(out.shm_fd[0], 1042);
+	test_int_eq(out.shm_fd[1], 1099);
+	test_int_eq(out.shm_fd[2], 1130);
+	free(buf);
+}
+
+test(exec_state_too_many_shm)
+{
+	const char *argv[] = { "/p", NULL };
+	const char *envp[] = { NULL };
+	const char *names[TAWCROOT_EXEC_STATE_MAX_SHM + 1];
+	int fds[TAWCROOT_EXEC_STATE_MAX_SHM + 1];
+	for (int i = 0; i < TAWCROOT_EXEC_STATE_MAX_SHM + 1; i++) {
+		names[i] = "n";
+		fds[i]   = 1000 + i;
+	}
+	tawcroot_exec_state_extras ex = { 0 };
+	ex.n_shm    = TAWCROOT_EXEC_STATE_MAX_SHM + 1;
+	ex.shm_name = names;
+	ex.shm_fd   = fds;
+
+	uint8_t buf[16 * 1024];
+	test_int_eq((int)tawcroot_exec_state_write(buf, sizeof buf, "/p", 1,
+						   argv, envp, &ex),
+		    -7 /* E2BIG */);
+}
+
 test(exec_state_with_many_args_and_env)
 {
 	enum { NA = 100, NE = 80 };

@@ -9,6 +9,7 @@
 #include "exec_state.h"
 #include "path.h"
 #include "raw_sys.h"
+#include "shm.h"
 
 #define TAWC_EACCES   13
 #define TAWC_EFAULT   14
@@ -91,6 +92,8 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * route to host paths (no rootfs_fd). */
 	const char *bind_src_arr[TAWCROOT_EXEC_STATE_MAX_BINDS];
 	const char *bind_dst_arr[TAWCROOT_EXEC_STATE_MAX_BINDS];
+	const char *shm_name_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
+	int         shm_fd_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
 	tawcroot_exec_state_extras extras = { 0 };
 	tawcroot_exec_state_extras *extras_p = NULL;
 
@@ -123,6 +126,19 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		}
 		extras.bind_src = bind_src_arr;
 		extras.bind_dst = bind_dst_arr;
+
+		/* /dev/shm name table. The internal memfds are non-CLOEXEC
+		 * and survive execveat as the same fd numbers, so the new
+		 * tawcroot just re-registers (name, fd) without re-creating
+		 * any kernel-side memfd object. Snapshot under one lock so
+		 * concurrent shm ops on other threads can't shift indices
+		 * mid-export. */
+		size_t shm_n = tawcroot_shm_export_all(
+			shm_name_arr, shm_fd_arr,
+			TAWCROOT_EXEC_STATE_MAX_SHM);
+		extras.n_shm    = (uint32_t)shm_n;
+		extras.shm_name = shm_name_arr;
+		extras.shm_fd   = shm_fd_arr;
 		extras_p = &extras;
 	}
 

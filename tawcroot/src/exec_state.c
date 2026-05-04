@@ -76,6 +76,10 @@ size_t tawcroot_exec_state_estimate_bytes(const char *path,
 			if (ex->bind_dst && ex->bind_dst[i])
 				s += local_strlen(ex->bind_dst[i]) + 1;
 		}
+		for (uint32_t i = 0; i < ex->n_shm; i++) {
+			if (ex->shm_name && ex->shm_name[i])
+				s += local_strlen(ex->shm_name[i]) + 1;
+		}
 	}
 	return tawcroot_exec_state_total_bytes((uint32_t)s);
 }
@@ -93,6 +97,15 @@ long tawcroot_exec_state_write(void *buf, size_t buf_cap,
 	if (envc > TAWCROOT_EXEC_STATE_MAX_ENV) return -TAWC_E2BIG;
 
 	if (ex && ex->n_binds > TAWCROOT_EXEC_STATE_MAX_BINDS) return -TAWC_E2BIG;
+	if (ex && ex->n_shm   > TAWCROOT_EXEC_STATE_MAX_SHM)   return -TAWC_E2BIG;
+	/* shm names are required (no absent sentinel — reader uses
+	 * CHECK_REQUIRED). Reject NULL up front to surface bad callers
+	 * rather than silently aliasing to the path string at offset 0. */
+	if (ex) {
+		for (uint32_t i = 0; i < ex->n_shm; i++) {
+			if (!ex->shm_name || !ex->shm_name[i]) return -TAWC_EINVAL;
+		}
+	}
 
 	size_t need = tawcroot_exec_state_estimate_bytes(path, argc, argv, envp, ex);
 	if (need > buf_cap) return -TAWC_ENOSPC;
@@ -159,6 +172,14 @@ long tawcroot_exec_state_write(void *buf, size_t buf_cap,
 				off += (uint32_t)n;
 			}
 		}
+		h->n_shm = ex->n_shm;
+		for (uint32_t i = 0; i < ex->n_shm; i++) {
+			size_t n = local_strlen(ex->shm_name[i]) + 1;
+			h->shm_name_off[i] = off;
+			local_memcpy(strings + off, ex->shm_name[i], n);
+			off += (uint32_t)n;
+			h->shm_fd[i] = (uint32_t)ex->shm_fd[i];
+		}
 	}
 
 	h->string_bytes = off;
@@ -182,6 +203,7 @@ long tawcroot_exec_state_read(const void *buf, size_t buf_size,
 	if (h->argc > TAWCROOT_EXEC_STATE_MAX_ARGS) return -TAWC_EINVAL;
 	if (h->envc > TAWCROOT_EXEC_STATE_MAX_ENV) return -TAWC_EINVAL;
 	if (h->n_binds > TAWCROOT_EXEC_STATE_MAX_BINDS) return -TAWC_EINVAL;
+	if (h->n_shm   > TAWCROOT_EXEC_STATE_MAX_SHM)   return -TAWC_EINVAL;
 
 	size_t need = sizeof(*h) + h->string_bytes;
 	if (buf_size < need) return -TAWC_EINVAL;
@@ -217,6 +239,9 @@ long tawcroot_exec_state_read(const void *buf, size_t buf_size,
 		CHECK_OPTIONAL(h->bind_src_off[i]);
 		CHECK_OPTIONAL(h->bind_dst_off[i]);
 	}
+	for (uint32_t i = 0; i < h->n_shm; i++) {
+		CHECK_REQUIRED(h->shm_name_off[i]);
+	}
 	#undef CHECK_REQUIRED
 	#undef CHECK_OPTIONAL
 
@@ -238,6 +263,11 @@ long tawcroot_exec_state_read(const void *buf, size_t buf_size,
 	for (uint32_t i = 0; i < h->n_binds; i++) {
 		out->bind_src[i] = h->bind_src_off[i] ? strings + h->bind_src_off[i] : (const char *)0;
 		out->bind_dst[i] = h->bind_dst_off[i] ? strings + h->bind_dst_off[i] : (const char *)0;
+	}
+	out->n_shm = h->n_shm;
+	for (uint32_t i = 0; i < h->n_shm; i++) {
+		out->shm_name[i] = strings + h->shm_name_off[i];
+		out->shm_fd[i]   = (int)h->shm_fd[i];
 	}
 	return 0;
 }

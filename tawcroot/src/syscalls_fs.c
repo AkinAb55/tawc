@@ -33,6 +33,7 @@
 #include "path.h"
 #include "proc_rewrite.h"
 #include "raw_sys.h"
+#include "shm.h"
 #include "sysnr.h"
 #include "usercopy.h"
 
@@ -44,6 +45,26 @@
 #ifndef AT_SYMLINK_NOFOLLOW
 # define AT_SYMLINK_NOFOLLOW 0x100
 #endif
+
+/* Peek the guest path to classify a possible `/dev/shm` intercept.
+ *   0 = not shm (fall through to normal translation)
+ *   1 = `/dev/shm/<name>` (writes name pointer into `*name_out`,
+ *       valid for the lifetime of `buf`)
+ *   2 = `/dev/shm` directory itself
+ * `buf` is caller-owned scratch (320 bytes covers `/dev/shm/` +
+ * 255-byte POSIX shm name with headroom; longer paths can't match). */
+enum { SHM_PEEK_NONE = 0, SHM_PEEK_NAME = 1, SHM_PEEK_DIR = 2 };
+static int peek_shm(const char *gpath, char *buf, size_t cap,
+		    const char **name_out)
+{
+	if (!gpath) return SHM_PEEK_NONE;
+	long sp = tawc_copy_string_from_guest(buf, cap, gpath);
+	if (sp < 0) return SHM_PEEK_NONE;
+	const char *n = tawcroot_shm_match(buf);
+	if (n) { *name_out = n; return SHM_PEEK_NAME; }
+	if (tawcroot_shm_is_dir(buf)) return SHM_PEEK_DIR;
+	return SHM_PEEK_NONE;
+}
 
 /* Forward decls — bodies later in the file. */
 static long fetch_and_translate(const char *guest_path,
@@ -110,6 +131,17 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		long pn = tawc_copy_string_from_guest(tmp, sizeof tmp, gpath);
 		if (pn >= 0 && is_proc_self_maps(tmp))
 			return open_proc_maps_shadow();
+	}
+
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(gpath, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME)
+			return tawcroot_shm_open(shm_name, flags, mode);
+		/* SHM_PEEK_DIR (open of /dev/shm itself) falls through; the
+		 * translator returns -ENOENT, matching what a host with no
+		 * /dev/shm dir would do. */
 	}
 
 	char path_buf[TAWC_PATH_MAX];
@@ -216,6 +248,21 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	}
 
 	if (!gpath) return -14;
+
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(gpath, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME || kind == SHM_PEEK_DIR) {
+			long r = (kind == SHM_PEEK_NAME)
+				? tawcroot_shm_stat_name(shm_name, &local)
+				: (tawcroot_shm_stat_dir(&local), 0L);
+			if (r < 0) return r;
+			long ce = tawc_copy_to_guest(out, &local, sizeof local);
+			if (ce < 0) return ce;
+			return 0;
+		}
+	}
 
 	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
 		? TAWCROOT_PATH_NOFOLLOW
@@ -508,6 +555,14 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	int flags = (int)args->d;
 	if (!gpath) return -14;
 
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(gpath, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME) return tawcroot_shm_access_name(shm_name);
+		if (kind == SHM_PEEK_DIR)  return tawcroot_shm_access_dir();
+	}
+
 	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
 		? TAWCROOT_PATH_NOFOLLOW
 		: TAWCROOT_PATH_FOLLOW;
@@ -651,9 +706,43 @@ static long handle_##name(const tawcroot_syscall_args *args,             \
 }
 
 DECLARE_AT_PASS(mkdirat,    TAWC_SYS_mkdirat,    3, TAWCROOT_PATH_PARENT_CREATE)
-DECLARE_AT_PASS(unlinkat,   TAWC_SYS_unlinkat,   3, TAWCROOT_PATH_PARENT_REMOVE)
 DECLARE_AT_PASS(fchmodat,   TAWC_SYS_fchmodat,   3, TAWCROOT_PATH_FOLLOW)
 DECLARE_AT_PASS(mknodat,    TAWC_SYS_mknodat,    4, TAWCROOT_PATH_PARENT_CREATE)
+
+/* unlinkat with /dev/shm intercept. Routes /dev/shm/<name> through the
+ * in-handler emulation; everything else through the standard
+ * translate-and-pass-through path. */
+static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	int dirfd = (int)args->a;
+	const char *gpath = (const char *)(uintptr_t)args->b;
+	int flag = (int)args->c;
+	if (!gpath) return -14;
+
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(gpath, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME) {
+			if (flag & 0x200 /*AT_REMOVEDIR*/) return -20;
+			return tawcroot_shm_unlink(shm_name);
+		}
+		if (kind == SHM_PEEK_DIR) return (flag & 0x200) ? -16 : -21;
+	}
+
+	char path_buf[TAWC_PATH_MAX];
+	char suffix[TAWC_PATH_MAX];
+	int  base_fd, use_empty;
+	long e = fetch_and_translate_at(dirfd, gpath,
+					path_buf, sizeof path_buf,
+					suffix, sizeof suffix,
+					&base_fd, &use_empty,
+					TAWCROOT_PATH_PARENT_REMOVE);
+	if (e) return e;
+	const char *p = use_empty ? "." : suffix;
+	return TAWC_RAW(TAWC_SYS_unlinkat, base_fd, (long)p, flag, 0, 0, 0);
+}
 
 /* utimensat: translate path and pass through. Special-case the
  * Linux extension `pathname == NULL` (operate on dirfd directly) by
@@ -776,6 +865,25 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 			long ce = tawc_copy_to_guest(out, &local, sizeof local);
 			if (ce < 0) return ce;
 			return rv;
+		}
+	}
+
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(path, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME || kind == SHM_PEEK_DIR) {
+			long r;
+			if (kind == SHM_PEEK_NAME) {
+				r = tawcroot_shm_statx_name(shm_name, &local,
+							    mask);
+				if (r < 0) return r;
+			} else {
+				tawcroot_shm_statx_dir(&local, mask);
+			}
+			long ce = tawc_copy_to_guest(out, &local, sizeof local);
+			if (ce < 0) return ce;
+			return 0;
 		}
 	}
 
@@ -969,6 +1077,21 @@ static long stat_via_at(const char *path, struct stat *out, int flags)
 	if (!out) return -14;
 	struct stat local;
 
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(path, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME || kind == SHM_PEEK_DIR) {
+			long r = (kind == SHM_PEEK_NAME)
+				? tawcroot_shm_stat_name(shm_name, &local)
+				: (tawcroot_shm_stat_dir(&local), 0L);
+			if (r < 0) return r;
+			long ce = tawc_copy_to_guest(out, &local, sizeof local);
+			if (ce < 0) return ce;
+			return 0;
+		}
+	}
+
 	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
 		? TAWCROOT_PATH_NOFOLLOW
 		: TAWCROOT_PATH_FOLLOW;
@@ -1007,6 +1130,13 @@ static long handle_access(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	const char *path = (const char *)(uintptr_t)args->a;
 	int mode = (int)args->b;
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(path, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME) return tawcroot_shm_access_name(shm_name);
+		if (kind == SHM_PEEK_DIR)  return tawcroot_shm_access_dir();
+	}
 	char path_buf[TAWC_PATH_MAX];
 	char suffix[TAWC_PATH_MAX];
 	int  base_fd, use_empty;
@@ -1100,6 +1230,16 @@ static long handle_unlink_or_rmdir(const tawcroot_syscall_args *args,
 {
 	(void)uc;
 	const char *path = (const char *)(uintptr_t)args->a;
+	{
+		char shm_buf[320];
+		const char *shm_name;
+		int kind = peek_shm(path, shm_buf, sizeof shm_buf, &shm_name);
+		if (kind == SHM_PEEK_NAME) {
+			if (rmdir_flag) return -20; /* ENOTDIR */
+			return tawcroot_shm_unlink(shm_name);
+		}
+		if (kind == SHM_PEEK_DIR) return rmdir_flag ? -16 : -21;
+	}
 	char path_buf[TAWC_PATH_MAX];
 	char suffix[TAWC_PATH_MAX];
 	int  base_fd, use_empty;

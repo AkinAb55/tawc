@@ -52,12 +52,13 @@ guest's filter is purely defense-in-depth on top of tawcroot's
 translation enforcement; see `notes/tawcroot.md` "Signal-handler
 virtualisation" and `tawcroot/src/syscalls_control.c::handle_seccomp`.
 
-For tawcroot also: `/dev/shm` is bound to an app-writable cache dir
-(same approach as proot) so Mozilla's parent-process `shm_open(3)`
-doesn't `MOZ_RELEASE_ASSERT` on ENOENT. Tracked separately as
-`issues/tawcroot-dev-shm-disk-backed.md` — the long-term plan is to
-emulate `/dev/shm` in-handler via `memfd_create`, but the bind is the
-working interim.
+For tawcroot, `/dev/shm` is emulated in-handler via `memfd_create`
+(`tawcroot/src/shm.c`) — no host bind. `shm_open(3)` calls land in the
+SIGSYS handler, which creates a `memfd_create(MFD_ALLOW_SEALING)`-
+backed segment and hands a fresh dup back to the guest. Cross-process
+visibility for fork+exec patterns (Mozilla parent → content IPC) is
+preserved via the non-CLOEXEC internal fd surviving `execveat` and
+the `exec_state` ferry rebuilding the (name → fd) map in the child.
 
 ### Why GDK_GL=gles:always (not disabled)
 

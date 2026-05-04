@@ -106,6 +106,7 @@ PROD_C := \
     $(SRC_T)/src/syscalls_fs.c \
     $(SRC_T)/src/syscalls_fd.c \
     $(SRC_T)/src/syscalls_control.c \
+    $(SRC_T)/src/shm.c \
     $(SRC_T)/src/signal_shadow.c \
     $(SRC_T)/src/syscalls_socket.c \
     $(SRC_T)/src/usercopy.c \

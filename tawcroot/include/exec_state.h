@@ -63,15 +63,18 @@ extern "C" {
 #endif
 
 #define TAWCROOT_EXEC_STATE_MAGIC   0x4358454Cu  /* 'LEXC' = "Loader EXeC" */
-/* Version 2 (phase 2g): adds rootfs_host_off + bind table + guest_exe_off
- * so --exec-child can re-establish tawcroot's per-process view (rootfs
- * fd, bind table, /proc/self/exe synthesis target) before manual-loading
- * the new guest. v1 readers don't exist outside the tree — both ends
- * are the same binary — so we don't try to maintain back-compat. */
-#define TAWCROOT_EXEC_STATE_VERSION 2
+/* Version 3: adds the /dev/shm name table (n_shm + shm_name_off[] +
+ * shm_fd[]) so the in-handler memfd-backed `/dev/shm` survives the
+ * --exec-child dance. The internal memfds are non-CLOEXEC and survive
+ * the execveat; we ferry their (name, fd_int) pairs through here so
+ * the new tawcroot incarnation can re-register them. v2 readers don't
+ * exist outside the tree — both ends are the same binary — so we
+ * don't maintain back-compat. */
+#define TAWCROOT_EXEC_STATE_VERSION 3
 #define TAWCROOT_EXEC_STATE_MAX_ARGS 256
 #define TAWCROOT_EXEC_STATE_MAX_ENV  256
 #define TAWCROOT_EXEC_STATE_MAX_BINDS 16
+#define TAWCROOT_EXEC_STATE_MAX_SHM   64
 
 typedef struct {
 	uint32_t magic;
@@ -92,6 +95,11 @@ typedef struct {
 	uint32_t n_binds;
 	uint32_t bind_src_off[TAWCROOT_EXEC_STATE_MAX_BINDS];
 	uint32_t bind_dst_off[TAWCROOT_EXEC_STATE_MAX_BINDS];
+	/* /dev/shm name table. fd numbers are inherited verbatim because
+	 * the internal memfds are non-CLOEXEC and survive execveat. */
+	uint32_t n_shm;
+	uint32_t shm_name_off[TAWCROOT_EXEC_STATE_MAX_SHM];
+	uint32_t shm_fd[TAWCROOT_EXEC_STATE_MAX_SHM];
 } tawcroot_exec_state_header;
 
 /* Total memfd bytes when both header + strings are written. */
@@ -118,6 +126,9 @@ typedef struct {
 	uint32_t     n_binds;
 	const char  *bind_src[TAWCROOT_EXEC_STATE_MAX_BINDS];
 	const char  *bind_dst[TAWCROOT_EXEC_STATE_MAX_BINDS];
+	uint32_t     n_shm;
+	const char  *shm_name[TAWCROOT_EXEC_STATE_MAX_SHM];
+	int          shm_fd[TAWCROOT_EXEC_STATE_MAX_SHM];
 } tawcroot_exec_state;
 
 /* Optional inputs for the writer — may all be NULL/0 to indicate "no
@@ -128,6 +139,9 @@ typedef struct {
 	uint32_t           n_binds;
 	const char *const *bind_src;        /* size n_binds */
 	const char *const *bind_dst;        /* size n_binds */
+	uint32_t           n_shm;
+	const char *const *shm_name;        /* size n_shm */
+	const int         *shm_fd;          /* size n_shm */
 } tawcroot_exec_state_extras;
 
 /* ---- Writer (handler side) ----
