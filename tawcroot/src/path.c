@@ -47,6 +47,9 @@ size_t tawcroot_rootfs_host_path_len    = 0;
 char   tawcroot_guest_exe_path[4096]    = {0};
 size_t tawcroot_guest_exe_path_len      = 0;
 
+char   tawcroot_self_host_path[4096]    = {0};
+size_t tawcroot_self_host_path_len      = 0;
+
 int    tawcroot_openat2_works           = 0;
 
 void tawcroot_set_guest_exe_path(const char *path)
@@ -63,6 +66,20 @@ void tawcroot_set_guest_exe_path(const char *path)
 	}
 	tawcroot_guest_exe_path[i]   = 0;
 	tawcroot_guest_exe_path_len  = i;
+}
+
+void tawcroot_init_self_host_path(void)
+{
+	long n = tawc_readlinkat(AT_FDCWD, "/proc/self/exe",
+				 tawcroot_self_host_path,
+				 sizeof tawcroot_self_host_path - 1);
+	if (n < 0) {
+		tawcroot_self_host_path[0]   = 0;
+		tawcroot_self_host_path_len  = 0;
+		return;
+	}
+	tawcroot_self_host_path[n]   = 0;
+	tawcroot_self_host_path_len  = (size_t)n;
 }
 
 struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];

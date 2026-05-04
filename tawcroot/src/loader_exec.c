@@ -547,6 +547,15 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 
 		tawcroot_path_probe_openat2();
 
+		/* Re-stash /proc/self/exe (libtawcroot's host path) so the
+		 * readlink handler can recognise it bouncing back through
+		 * `readlinkat(O_PATH-fd, "")` — same purpose as the call in
+		 * main.c, just for the post-execveat incarnation. The
+		 * libtawcroot.so location is pinned to the APK install for the
+		 * life of the process tree so the value stays valid even if
+		 * subsequent execveats keep fanning out. */
+		tawcroot_init_self_host_path();
+
 		if (st.guest_exe) tawcroot_set_guest_exe_path(st.guest_exe);
 		else              tawcroot_set_guest_exe_path(st.path);
 	}

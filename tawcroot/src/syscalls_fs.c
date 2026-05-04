@@ -36,6 +36,7 @@
 #include "shm.h"
 #include "syscalls_fs.h"
 #include "sysnr.h"
+#include "tawc_string.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
@@ -705,7 +706,51 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 					TAWCROOT_PATH_NOFOLLOW);
 	if (e) return e;
 	const char *p = use_empty ? "" : suffix;
-	return tawc_readlinkat(base_fd, p, buf, (size_t)size);
+
+	/* Read into a kernel-side scratch so we can post-process the result
+	 * before forwarding it. We reuse `path_buf` (dead from here on) as
+	 * the scratch — a fresh PATH_MAX buffer would push the handler
+	 * frame past the stack budget noted in notes/tawcroot.md
+	 * "Threading and `vfork` invariants". Cost vs. the pre-fix direct
+	 * kernel→guest write: every readlinkat now pays a process_vm_writev
+	 * round-trip even when no substitution fires; the equality test
+	 * itself is gated by a length pre-check and is free.
+	 *
+	 * The substitution catches two surfaces that both leak
+	 * libtawcroot.so's host path upward:
+	 *   - readlinkat(O_PATH-fd, "") — glibc realpath opens
+	 *     /proc/self/exe with O_PATH|O_NOFOLLOW (kernel fd lands on
+	 *     libtawcroot.so) then queries the empty-path symlink target.
+	 *   - readlink("/proc/self/fd/<n>") — same /proc/self/fd trick used
+	 *     by alternate realpath paths and by anything resolving its
+	 *     own binary location ($ORIGIN, Firefox XPCOM lookup).
+	 * In both, the kernel returns libtawcroot.so's path; the guest's
+	 * view doesn't contain it, so a follow-up stat()/open() ENOENTs.
+	 *
+	 * Truncation note: if the guest's `size` is shorter than our host
+	 * path, the kernel-returned bytes are truncated, the equality test
+	 * fails, and the truncated host path falls through unsubstituted.
+	 * This is harmless in practice — every realpath caller passes a
+	 * PATH_MAX-sized buffer — but worth knowing. */
+	char *scratch     = path_buf;
+	int   scratch_cap = (size > (int)sizeof path_buf)
+	                    ? (int)sizeof path_buf : size;
+	long n = tawc_readlinkat(base_fd, p, scratch, (size_t)scratch_cap);
+	if (n < 0) return n;
+	if (tawcroot_guest_exe_path_len > 0 &&
+	    tawcroot_self_host_path_len > 0 &&
+	    (size_t)n == tawcroot_self_host_path_len &&
+	    memcmp(scratch, tawcroot_self_host_path,
+	           tawcroot_self_host_path_len) == 0) {
+		size_t glen = tawcroot_guest_exe_path_len;
+		if (glen > (size_t)size) glen = (size_t)size;
+		long ce = tawc_copy_to_guest(buf, tawcroot_guest_exe_path, glen);
+		if (ce < 0) return ce;
+		return (long)glen;
+	}
+	long ce = tawc_copy_to_guest(buf, scratch, (size_t)n);
+	if (ce < 0) return ce;
+	return n;
 }
 
 static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)

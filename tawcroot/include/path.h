@@ -160,6 +160,25 @@ extern size_t tawcroot_guest_exe_path_len;
  * the path is longer than the buffer. */
 void tawcroot_set_guest_exe_path(const char *path);
 
+/* Host-side view of /proc/self/exe at production init: the absolute
+ * filesystem path of `libtawcroot.so` itself (the loader binary).
+ * Stashed once so the readlink handlers can substitute the guest exe
+ * path whenever a query routes through `/proc/self/fd/<n>` and lands
+ * on the loader's own host path — the bypass that breaks Firefox's
+ * XPCOM lookup via glibc `realpath("/proc/self/exe")`. Empty if the
+ * init readlink failed; in that case the substitution is skipped and
+ * callers see the raw host path (the pre-fix behaviour). */
+extern char   tawcroot_self_host_path[4096];
+extern size_t tawcroot_self_host_path_len;
+
+/* Read /proc/self/exe and stash it in `tawcroot_self_host_path`.
+ * Called from `tawcroot_main` (production entry, after
+ * `prod_rootfs_init` and before `tawcroot_loader_exec`) and from
+ * `tawcroot_loader_exec_child` (post-execveat re-init, since execve
+ * clears our globals and the fresh incarnation needs the path
+ * re-stashed). Idempotent. */
+void tawcroot_init_self_host_path(void);
+
 /* Probe whether the kernel supports `openat2(2)` (≥5.6). Sets
  * `tawcroot_openat2_works` to 1 on success, 0 on failure. Call
  * BEFORE the seccomp filter goes up — the probe issues an openat2

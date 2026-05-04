@@ -446,6 +446,12 @@ void tawcroot_main(int argc, char **argv)
 
 	prod_rootfs_init(rootfs, bind_specs, n_binds);
 
+	/* Stash /proc/self/exe before the guest takes over. Used by the
+	 * readlink handler to recognise libtawcroot's host path coming back
+	 * out of `readlinkat(O_PATH-fd, "")` (the bypass glibc's realpath
+	 * uses for /proc/self/exe) and substitute the guest exe path. */
+	tawcroot_init_self_host_path();
+
 	/* Phase 2e: stash the guest exe path so /proc/self/exe synthesis
 	 * returns it instead of the kernel's libtawcroot view. Set BEFORE
 	 * the loader jumps; the readlinkat handler reads it from the SIGSYS
