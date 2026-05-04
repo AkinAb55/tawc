@@ -1130,6 +1130,26 @@ is nanoseconds). There's no kernel knob to skip BPF evaluation on
 RET_ALLOW; that nanosecond per syscall is unavoidable and far
 below proot's ptrace round-trip.
 
+**Per-fd / per-arg BPF fast-paths.** Some trapped syscalls only do
+real work for a small subset of their argument values. The seccomp
+filter can `RET_ALLOW` the uninteresting calls so they never hit the
+handler. Today only `close` has one (JEQ ladder against
+`tawcroot_reserved_fds[]`; landed to fix the gpgme/`closefrom` death
+spiral, see history below). The same shape applies to others:
+
+- `fcntl`: `F_DUPFD`/`F_DUPFD_CLOEXEC` only need handling when arg2
+  ≥ `TAWCROOT_RESERVED_FD_BASE`; every other op only needs handling
+  when arg0 (fd) is in `tawcroot_reserved_fds[]`. Today's handler in
+  `syscalls_fd.c` already encodes this discrimination correctly; the
+  BPF doesn't yet, so glibc's TLS/locking, GnuTLS' fd-flag scrubbing,
+  and stdlib hot paths all trap unnecessarily on `F_GETFD`/`F_SETFD`.
+
+These are pure perf optimizations — add them when a workload is
+measurably handler-bound on the syscall in question (count
+`tawcroot_dispatch_*` invocations by syscall number under a stress
+run). Mechanical extension to `tawcroot_build_filter`: same shape as
+the close special case.
+
 ### execve handling in detail
 
 This is the trickiest part of the design and the place proot has
