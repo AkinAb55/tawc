@@ -744,41 +744,49 @@ static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return TAWC_RAW(TAWC_SYS_unlinkat, base_fd, (long)p, flag, 0, 0, 0);
 }
 
-/* utimensat: translate path and pass through. Special-case the
- * Linux extension `pathname == NULL` (operate on dirfd directly) by
- * forwarding without translation; the AT_PASS macro can't express
- * that since it rejects null paths up front.
+/* utimensat: translate path and pass through. Two special cases:
  *
- * Without this trapping, libarchive (used by pacman) hits the kernel
- * with a guest-visible path that fails to resolve — the package
- * extraction completes but every file gets the current mtime instead
- * of the archive's recorded one, drowning install logs in
- * "Can't restore time" warnings. */
+ * - `pathname == NULL` (Linux extension: operate on dirfd directly) is
+ *   forwarded unchanged; AT_PASS can't express it because it rejects
+ *   null paths up front.
+ * - AT_SYMLINK_NOFOLLOW must drive path translation too, otherwise
+ *   the resolver walks through the final symlink and we end up
+ *   utimensat-ing the link target instead of the link itself. That's
+ *   what pacman's libarchive symlink-extraction path hits (`utimensat
+ *   (AT_FDCWD, name, ts, AT_SYMLINK_NOFOLLOW)` against a freshly
+ *   created symlink whose target doesn't exist yet → ENOENT → the
+ *   "Can't restore time" warning that floods install logs).
+ *
+ * Without trapping this at all, the guest-visible path goes straight
+ * to the host kernel and fails to resolve. */
 static long handle_utimensat(const tawcroot_syscall_args *args,
 			     ucontext_t *uc)
 {
 	(void)uc;
 	int dirfd = (int)args->a;
 	const char *gpath = (const char *)(uintptr_t)args->b;
+	int flags = (int)args->d;
 	if (!gpath) {
 		/* Linux-extension: NULL pathname → operate on dirfd. The
 		 * dirfd is one of ours (translated openat handed it back);
 		 * forward unchanged. */
 		return TAWC_RAW(TAWC_SYS_utimensat, dirfd, 0,
-				args->c, args->d, 0, 0);
+				args->c, flags, 0, 0);
 	}
+	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
+		? TAWCROOT_PATH_NOFOLLOW
+		: TAWCROOT_PATH_FOLLOW;
 	char path_buf[TAWC_PATH_MAX];
 	char suffix[TAWC_PATH_MAX];
 	int  base_fd, use_empty;
 	long e = fetch_and_translate_at(dirfd, gpath,
 					path_buf, sizeof path_buf,
 					suffix, sizeof suffix,
-					&base_fd, &use_empty,
-					TAWCROOT_PATH_FOLLOW);
+					&base_fd, &use_empty, pmode);
 	if (e) return e;
 	const char *p = use_empty ? "." : suffix;
 	return TAWC_RAW(TAWC_SYS_utimensat, base_fd, (long)p,
-			args->c, args->d, 0, 0);
+			args->c, flags, 0, 0);
 }
 
 /* fchownat: translate path, but DON'T issue the host syscall (Android
