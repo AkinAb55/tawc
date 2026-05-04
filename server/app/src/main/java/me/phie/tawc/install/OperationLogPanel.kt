@@ -8,7 +8,10 @@ import android.content.ServiceConnection
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.os.IBinder
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.method.ScrollingMovementMethod
+import android.text.style.LeadingMarginSpan
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -184,10 +187,18 @@ class OperationLogPanel(private val activity: Activity) {
         if (cur.length > 80_000) {
             logText.text = cur.subSequence(40_000, cur.length).toString()
         }
-        logText.append(line)
-        logText.append("\n")
+        val withNewline = "$line\n"
+        val span = SpannableString(withNewline)
+        span.setSpan(
+            LeadingMarginSpan.Standard(0, hangingIndentPx),
+            0, withNewline.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+        )
+        logText.append(span)
         logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
     }
+
+    private val hangingIndentPx: Int =
+        (16 * activity.resources.displayMetrics.density).toInt()
 
     private fun startCollecting() {
         collectScope?.cancel()
