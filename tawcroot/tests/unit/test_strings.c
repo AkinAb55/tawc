@@ -6,13 +6,13 @@
  * test runner. Both share a single source of truth for what the helpers
  * should do; cleat asserts behavior on a concrete set of inputs.
  *
- * The mem* helpers (memcpy/memset/memmove) live in strings.c too because
- * the compiler implicitly emits calls to them under `-O2 -nostdlib` for
- * struct copies / `= 0` field stores. They're identity-named with libc's
- * versions, so under hosted glibc they shadow the libc functions -- which
- * makes hosted unit-testing of *those* particular names not possible
- * here without renaming. We test the `tawc_*` helpers; mem* coverage
- * comes from the smoke driver exercising the codegen they're emitted for.
+ * The mem* helpers (memcpy/memset/memmove/memcmp/strlen) live in strings.c
+ * too because the compiler implicitly emits calls to them under `-O2
+ * -nostdlib` for struct copies / `= 0` field stores. They're identity-named
+ * with libc's versions, so under hosted (`__STDC_HOSTED__`) builds strings.c
+ * compiles them out and we use glibc's. mem* coverage in the freestanding
+ * build comes from the smoke driver exercising the codegen they're emitted
+ * for.
  */
 
 #include <cleat/test.h>

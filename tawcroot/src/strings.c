@@ -3,13 +3,20 @@
  * the cleat-driven test orchestrator under hosted glibc for unit tests
  * (see tawcroot/tests/unit/test_strings.c). The helpers are declared in io.h.
  *
- * memcpy/memset/memmove are here too because the compiler lowers struct
- * copies and `= {0}` field stores to those names even under `-nostdlib`.
- * Keep them simple, freestanding, and async-signal safe.
+ * memcpy/memset/memmove/memcmp/strlen are here too because the compiler
+ * lowers struct copies and `= {0}` field stores to those names even under
+ * `-nostdlib`. Keep them simple, freestanding, and async-signal safe.
+ *
+ * Hosted (cleat) builds skip these defs and use glibc's instead, so we
+ * don't ship two strong copies of `memcpy` etc. into the test orchestrator
+ * and rely on link order to pick the right one. tawc_string.h does the
+ * matching include-strategy switch so callers see the same names either way.
  */
 
 #include <stddef.h>
 #include "io.h"
+
+#if !__STDC_HOSTED__
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
@@ -51,6 +58,8 @@ int memcmp(const void *a, const void *b, size_t n)
 }
 
 size_t strlen(const char *s) { return tawc_strlen(s); }
+
+#endif /* !__STDC_HOSTED__ */
 
 size_t tawc_strlen(const char *s)
 {
