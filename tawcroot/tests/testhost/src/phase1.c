@@ -2181,6 +2181,231 @@ static int test_proc_self_maps_reverse_translation(void)
 	return fails;
 }
 
+/* Read a (presumed) maps shadow fd into `out` (cap bytes), returning
+ * total bytes read. Helper for the per-form synthesis assertions
+ * below — the existing `test_proc_self_maps_reverse_translation`
+ * already exercises content rewriting against /proc/self/maps; here we
+ * just assert that the new path forms route through the same shadow,
+ * by checking for the guest probe substring AND the absence of the
+ * rootfs host prefix in each output. */
+static size_t drain_fd(int fd, char *out, size_t cap)
+{
+	size_t total = 0;
+	for (;;) {
+		long n = tawc_read(fd, out + total, cap - 1 - total);
+		if (n <= 0) break;
+		total += (size_t)n;
+		if (total + 1 >= cap) break;
+	}
+	out[total] = 0;
+	return total;
+}
+
+static int maps_content_is_rewritten(const char *buf, size_t total)
+{
+	int saw_guest = 0;
+	for (size_t i = 0; i + 10 < total; i++) {
+		if (buf[i]   == '/' && buf[i+1] == 'e' &&
+		    buf[i+2] == 't' && buf[i+3] == 'c' &&
+		    buf[i+4] == '/' && buf[i+5] == 'p' &&
+		    buf[i+6] == 'r' && buf[i+7] == 'o' &&
+		    buf[i+8] == 'b' && buf[i+9] == 'e') {
+			saw_guest = 1; break;
+		}
+	}
+	int saw_host = 0;
+	size_t pl = tawcroot_rootfs_host_path_len;
+	const char *rh = tawcroot_rootfs_host_path;
+	if (pl > 0) {
+		for (size_t i = 0; i + pl < total; i++) {
+			int eq = 1;
+			for (size_t j = 0; j < pl; j++) {
+				if (buf[i + j] != rh[j]) { eq = 0; break; }
+			}
+			if (eq) { saw_host = 1; break; }
+		}
+	}
+	return saw_guest && !saw_host;
+}
+
+/* Issue: tawcroot-proc-self-synthesis-fd-relative — strip_proc_self_prefix
+ * extended to accept /proc/self/task/<tid>/<x> and /proc/<tid>/<x> for
+ * any TID in our process; handle_openat / handle_readlinkat additionally
+ * resolve fd-relative dirfds (openat(proc_dir_fd, "self/maps", ...))
+ * via /proc/self/fd/<n> and re-classify.
+ *
+ * The kernel's /proc is opened via the IP-allowlisted raw stub so the
+ * resulting dirfd is rooted at the host's /proc, mirroring a real chroot
+ * with /proc bind-mounted. The trapped openat then sees a relative
+ * "self/maps" against that dirfd. */
+static int test_proc_self_synthesis_extensions(void)
+{
+	int fails = 0;
+
+	/* mmap a probe file from inside the rootfs so its rewritten path
+	 * shows up in maps output -- the same trick the absolute-path
+	 * test uses. */
+	long probe_fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	if (probe_fd < 0) {
+		tawc_io_kv_dec("    skipped (probe open failed): -errno",
+			       -probe_fd);
+		return 0;
+	}
+	long region = TAWC_RAW(TAWC_SYS_mmap, 0, 4096,
+			       1 /*PROT_READ*/, 2 /*MAP_PRIVATE*/,
+			       (long)probe_fd, 0);
+	int mmap_ok = !(region <= 0 && region > -4096);
+	if (!mmap_ok) {
+		tawc_close((int)probe_fd);
+		tawc_io_str("    skipped (mmap failed)\n");
+		return 0;
+	}
+
+	long mypid = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
+
+	/* (A) /proc/self/task/<pid>/maps -- new prefix peel. The main-
+	 * thread TID equals the TGID, so this works in single-threaded
+	 * testhost; the per-TID branch (n != getpid()) is exercised
+	 * indirectly via the same is_my_tid path. */
+	{
+		char path[64];
+		const char *pre = "/proc/self/task/";
+		size_t i = 0;
+		while (pre[i]) { path[i] = pre[i]; i++; }
+		i += (size_t)tawc_int_to_str(path + i, sizeof path - i,
+					     (int)mypid);
+		const char *suf = "/maps";
+		for (size_t j = 0; suf[j]; j++) path[i++] = suf[j];
+		path[i] = 0;
+
+		long mfd = inline_openat(AT_FDCWD, path, O_RDONLY, 0);
+		fails += tawc_io_step(
+			"openat(/proc/self/task/<pid>/maps) -> shadow fd",
+			mfd >= 0);
+		if (mfd >= 0) {
+			char buf[8192];
+			size_t total = drain_fd((int)mfd, buf, sizeof buf);
+			fails += tawc_io_step(
+				"task/<pid>/maps shadow content is rewritten",
+				maps_content_is_rewritten(buf, total));
+			tawc_close((int)mfd);
+		}
+	}
+
+	/* (B) fd-relative openat against the kernel's /proc -- mirrors a
+	 * sandbox that opens /proc once and reuses the dirfd for
+	 * subsequent "self/<x>" lookups. */
+	{
+		long proc_fd = tawc_openat(AT_FDCWD, "/proc",
+					   O_PATH | O_DIRECTORY | O_CLOEXEC,
+					   0);
+		if (proc_fd >= 0) {
+			long mfd;
+			INLINE_SYS6(TAWC_SYS_openat, (int)proc_fd, "self/maps",
+				    O_RDONLY, 0, 0, 0, mfd);
+			fails += tawc_io_step(
+				"openat(proc_fd, \"self/maps\") -> shadow fd",
+				mfd >= 0);
+			if (mfd >= 0) {
+				char buf[8192];
+				size_t total = drain_fd((int)mfd, buf,
+							sizeof buf);
+				fails += tawc_io_step(
+					"fd-relative maps shadow content is rewritten",
+					maps_content_is_rewritten(buf, total));
+				tawc_close((int)mfd);
+			}
+			tawc_close((int)proc_fd);
+		} else {
+			tawc_io_kv_dec("    /proc open via raw stub failed",
+				       -proc_fd);
+		}
+	}
+
+	/* (C) /proc/self/task/<pid>/exe synthesis. */
+	extern void tawcroot_set_guest_exe_path(const char *);
+	tawcroot_set_guest_exe_path("/usr/bin/some-guest");
+	{
+		char path[64];
+		const char *pre = "/proc/self/task/";
+		size_t i = 0;
+		while (pre[i]) { path[i] = pre[i]; i++; }
+		i += (size_t)tawc_int_to_str(path + i, sizeof path - i,
+					     (int)mypid);
+		const char *suf = "/exe";
+		for (size_t j = 0; suf[j]; j++) path[i++] = suf[j];
+		path[i] = 0;
+
+		char buf[256];
+		long rv;
+		INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD,
+			    path, buf, sizeof buf - 1, 0, 0, rv);
+		fails += tawc_io_step(
+			"readlinkat(/proc/self/task/<pid>/exe) -> guest exe path",
+			rv == (long)tawc_strlen("/usr/bin/some-guest"));
+		if (rv > 0) {
+			buf[rv] = 0;
+			fails += tawc_io_step(
+				"task/<pid>/exe content matches stash",
+				tawc_streq(buf, "/usr/bin/some-guest"));
+		}
+	}
+
+	/* (D) fd-relative readlinkat: open /proc/self via the raw stub
+	 * (kernel-rooted), then readlinkat(proc_self_fd, "exe", ...). */
+	{
+		long pself_fd = tawc_openat(AT_FDCWD, "/proc/self",
+					    O_PATH | O_DIRECTORY | O_CLOEXEC,
+					    0);
+		if (pself_fd >= 0) {
+			char buf[256];
+			long rv;
+			INLINE_SYS6(TAWC_SYS_readlinkat, (int)pself_fd,
+				    "exe", buf, sizeof buf - 1, 0, 0, rv);
+			fails += tawc_io_step(
+				"readlinkat(proc_self_fd, \"exe\") -> guest exe path",
+				rv == (long)tawc_strlen("/usr/bin/some-guest"));
+			if (rv > 0) {
+				buf[rv] = 0;
+				fails += tawc_io_step(
+					"fd-relative exe content matches stash",
+					tawc_streq(buf, "/usr/bin/some-guest"));
+			}
+			tawc_close((int)pself_fd);
+		} else {
+			tawc_io_kv_dec("    /proc/self open via raw stub failed",
+				       -pself_fd);
+		}
+	}
+	/* (E) Negative: /proc/<other-pid>/exe must NOT trigger synthesis.
+	 * This is the only case in this test that actually exercises
+	 * is_my_tid's /proc/<n>/status read path -- (A)-(D) all hit the
+	 * `n == getpid()` short-circuit. PID 1 (init) is always present
+	 * on Linux and definitionally not us. The synthesis stash is
+	 * still set to "/usr/bin/some-guest" here; the assertion is that
+	 * the readlinkat result does NOT come back as that string. */
+	{
+		char buf[256];
+		long rv;
+		INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD,
+			    "/proc/1/exe", buf, sizeof buf - 1, 0, 0, rv);
+		int leaked = 0;
+		if (rv > 0 && rv == (long)tawc_strlen("/usr/bin/some-guest")) {
+			buf[rv] = 0;
+			leaked = tawc_streq(buf, "/usr/bin/some-guest");
+		}
+		fails += tawc_io_step(
+			"readlinkat(/proc/1/exe) does NOT leak our stash (negative)",
+			!leaked);
+	}
+
+	tawcroot_set_guest_exe_path(0);
+
+	(void)TAWC_RAW(TAWC_SYS_munmap, region, 4096, 0, 0, 0, 0);
+	tawc_close((int)probe_fd);
+	return fails;
+}
+
 /* /dev/shm in-handler emulation: create + reuse + unlink + stat. */
 static int test_dev_shm_emulation(void)
 {
@@ -2463,6 +2688,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_b4_rootfs_prefix_boundary(rootfs);
 	fails += test_b5_bind_over_symlink_memo();
 	fails += test_proc_self_maps_reverse_translation();
+	fails += test_proc_self_synthesis_extensions();
 	fails += test_dev_shm_emulation();
 
 	if (fails == 0) {

@@ -91,7 +91,23 @@ static tawcroot_path_mode openat_mode(int flags)
 /* Forward decls — bodies live below, near the other /proc/self
  * helpers (is_proc_self_exe etc.). */
 static int  is_proc_self_maps(const char *path);
+static int  is_proc_self_exe(const char *path);
 static long open_proc_maps_shadow(void);
+static long compose_fd_relative(int dirfd, const char *gpath_str,
+				char *out, size_t cap);
+
+/* Fast-out: does this guest-relative leaf even have a chance of
+ * composing into a /proc/self/<x> target? Legitimate first chars are
+ * {s,t,m,e,digit} — covering "self/", "task/", "maps", "exe", and
+ * numeric "<tid>/" forms. Anything else (the vast majority of fd-
+ * relative opens — config files, dotfiles, library names, etc.) skips
+ * the readlinkat. */
+static int could_be_proc_relative(const char *p)
+{
+	char c = p[0];
+	return c == 's' || c == 't' || c == 'm' || c == 'e' ||
+	       (c >= '0' && c <= '9');
+}
 
 static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
@@ -111,16 +127,32 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * Only intercept O_RDONLY (no O_DIRECTORY, no O_PATH). Other flag
 	 * combos fall through to normal translation so the kernel produces
 	 * the conventional -ENOTDIR / O_PATH-fd behavior. The 64-byte peek
-	 * is wide enough for "/proc/<10-digit-pid>/maps"; longer paths can't
-	 * match anyway. */
+	 * is wide enough for "/proc/<10-digit-pid>/task/<10-digit-tid>/maps";
+	 * longer paths can't match anyway.
+	 *
+	 * Fd-relative form: openat(proc_dir_fd, "self/maps", ...) etc. We
+	 * resolve dirfd via /proc/self/fd/<n>, join with the guest path, and
+	 * re-classify. One extra readlinkat per non-AT_FDCWD relative
+	 * O_RDONLY-ish open; only fires when the absolute peek didn't match. */
 	if (gpath &&
 	    (flags & 3) == 0 /*O_RDONLY*/ &&
 	    (flags & O_DIRECTORY) == 0 &&
 	    (flags & O_PATH) == 0) {
 		char tmp[64];
 		long pn = tawc_copy_string_from_guest(tmp, sizeof tmp, gpath);
-		if (pn >= 0 && is_proc_self_maps(tmp))
-			return open_proc_maps_shadow();
+		if (pn >= 0) {
+			if (is_proc_self_maps(tmp))
+				return open_proc_maps_shadow();
+			if (dirfd != AT_FDCWD && tmp[0] != '/' &&
+			    could_be_proc_relative(tmp)) {
+				char composed[TAWC_PATH_MAX];
+				if (compose_fd_relative(dirfd, tmp,
+							composed,
+							sizeof composed) > 0
+				    && is_proc_self_maps(composed))
+					return open_proc_maps_shadow();
+			}
+		}
 	}
 
 	{
@@ -363,34 +395,161 @@ static long fetch_and_translate_at(int dirfd, const char *guest_path,
 }
 
 
-/* If `path` is "/proc/self/<x>" or "/proc/<our-pid>/<x>", return a
- * pointer to the byte after the trailing '/' (the "<x>" tail). Returns
- * NULL otherwise. The match is deliberately strict — paths like
- * "/proc/foo/../self/exe" are caught only after the guest's libc has
- * already canonicalized them, which is the typical flow. /proc/<tid>/
- * for any tid in our process is a TODO; today /proc/self covers all
- * single-threaded callers and most multi-threaded ones (libc resolves
- * $ORIGIN once, in the main thread). */
+/* Return 1 iff `n` names our process: either our TGID (== getpid()) or
+ * a TID belonging to it. Validation reads `/proc/<n>/status` and checks
+ * the `Tgid:` line. Unknown / non-existent / cross-process TIDs return 0.
+ *
+ * Not cached: only the /proc/<n>/<x> path-classification call sites
+ * reach here, and the common case (n == TGID) short-circuits without
+ * any syscall. Per-thread crash dumpers walking every TID is the worst
+ * case; if it ever shows up as hot we can stick a small MRU here. */
+static int is_my_tid(long n)
+{
+	if (n <= 0 || n > 0x7fffffff) return 0;
+	long mypid = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
+	if (n == mypid) return 1;
+
+	char path[64];
+	const char *prefix = "/proc/";
+	size_t i = 0;
+	while (prefix[i]) { path[i] = prefix[i]; i++; }
+	int wrote = tawc_int_to_str(path + i, sizeof path - i, (int)n);
+	if (wrote <= 0) return 0;
+	i += (size_t)wrote;
+	const char *suffix = "/status";
+	size_t j = 0;
+	while (suffix[j]) {
+		if (i + 1 >= sizeof path) return 0;
+		path[i++] = suffix[j++];
+	}
+	path[i] = 0;
+
+	long fd = tawc_openat(AT_FDCWD, path,
+			      0 /*O_RDONLY*/ | 0x80000 /*O_CLOEXEC*/, 0);
+	if (fd < 0) return 0;
+	char buf[512];
+	long r = tawc_read((int)fd, buf, sizeof buf - 1);
+	tawc_close((int)fd);
+	if (r <= 0) return 0;
+	buf[r] = 0;
+
+	/* Walk lines looking for "Tgid:". The kernel emits it within the
+	 * first ~12 lines, well inside the 511-byte read. Anchor at start
+	 * of line so a hypothetical other field whose value happens to
+	 * contain the byte sequence "Tgid:" can't fool the scan. */
+	const char *p = buf;
+	while (*p) {
+		if ((p == buf || p[-1] == '\n') &&
+		    p[0] == 'T' && p[1] == 'g' && p[2] == 'i' &&
+		    p[3] == 'd' && p[4] == ':') {
+			p += 5;
+			while (*p == ' ' || *p == '\t') p++;
+			long parsed = 0;
+			while (*p >= '0' && *p <= '9') {
+				parsed = parsed * 10 + (*p - '0');
+				p++;
+			}
+			return parsed == mypid;
+		}
+		while (*p && *p != '\n') p++;
+		if (*p == '\n') p++;
+	}
+	return 0;
+}
+
+/* If `path` is "/proc/self/<x>" or "/proc/<tid>/<x>" — where <tid> is
+ * our TGID or any TID belonging to it — return a pointer to "<x>". Also
+ * peels an optional "task/<tid>/" segment after `self/` or `<tid>/`,
+ * since /proc/<pid>/task/<tid>/maps is per-mm (identical to .../maps) and
+ * /exe is a symlink to the same exe. Returns NULL on no match.
+ *
+ * Strict on the prefix bytes: paths like "/proc/foo/../self/exe" are
+ * caught only after the guest's libc canonicalizes them (the typical
+ * flow). */
 static const char *strip_proc_self_prefix(const char *path)
 {
 	if (path[0] != '/' || path[1] != 'p' || path[2] != 'r' ||
 	    path[3] != 'o' || path[4] != 'c' || path[5] != '/')
 		return 0;
 	const char *t = path + 6;
+	const char *after_pid;
 	if (t[0] == 's' && t[1] == 'e' && t[2] == 'l' && t[3] == 'f' &&
-	    t[4] == '/')
-		return t + 5;
-	if (!(t[0] >= '0' && t[0] <= '9')) return 0;
-	long n = 0;
-	const char *p = t;
-	while (*p >= '0' && *p <= '9') {
-		n = n * 10 + (*p - '0'); p++;
-		if (n > 0x7fffffff) return 0;
+	    t[4] == '/') {
+		after_pid = t + 5;
+	} else if (t[0] >= '0' && t[0] <= '9') {
+		long n = 0;
+		const char *p = t;
+		while (*p >= '0' && *p <= '9') {
+			n = n * 10 + (*p - '0'); p++;
+			if (n > 0x7fffffff) return 0;
+		}
+		if (p[0] != '/') return 0;
+		if (!is_my_tid(n)) return 0;
+		after_pid = p + 1;
+	} else {
+		return 0;
 	}
-	if (p[0] != '/') return 0;
-	long mypid = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
-	if (mypid != n) return 0;
-	return p + 1;
+
+	/* Optional "task/<tid>/" peel. On any structural problem with the
+	 * inner segment (no digits, overflow, missing trailing slash, or
+	 * the tid isn't ours) we leave `after_pid` alone; the caller's
+	 * tail-match (e.g. against "maps") then fails and synthesis
+	 * doesn't fire. Returning NULL would also be safe but loses the
+	 * outer match — and `/proc/self/task/<x>` is never a synthesis
+	 * target anyway, so the difference is academic. */
+	if (after_pid[0] == 't' && after_pid[1] == 'a' &&
+	    after_pid[2] == 's' && after_pid[3] == 'k' &&
+	    after_pid[4] == '/') {
+		const char *q = after_pid + 5;
+		long m = 0;
+		const char *p = q;
+		while (*p >= '0' && *p <= '9') {
+			m = m * 10 + (*p - '0'); p++;
+			if (m > 0x7fffffff) return after_pid;
+		}
+		if (p == q || p[0] != '/') return after_pid;
+		if (!is_my_tid(m)) return after_pid;
+		return p + 1;
+	}
+	return after_pid;
+}
+
+/* Compose `dirfd`'s host path (resolved via /proc/self/fd/<n>) with a
+ * relative guest path into `out`. Used to catch fd-relative /proc/self
+ * accesses (e.g. openat(proc_dir_fd, "self/maps", ...)) before
+ * strip_proc_self_prefix runs. Returns the composed length on success
+ * or -errno. Caller passes the literal guest-supplied relative string;
+ * dirfd must be non-negative and != AT_FDCWD. */
+static long compose_fd_relative(int dirfd, const char *gpath_str,
+				char *out, size_t cap)
+{
+	if (dirfd < 0 || dirfd == AT_FDCWD) return TAWC_EINVAL;
+	if (gpath_str[0] == '/') return TAWC_EINVAL;
+	if (cap < 2) return TAWC_ENAMETOOLONG;
+
+	char link[64];
+	const char *prefix = "/proc/self/fd/";
+	size_t pl = 0;
+	while (prefix[pl]) { link[pl] = prefix[pl]; pl++; }
+	int wrote = tawc_int_to_str(link + pl, sizeof link - pl, dirfd);
+	if (wrote <= 0) return TAWC_EINVAL;
+
+	long n = tawc_readlinkat(AT_FDCWD, link, out, cap - 1);
+	if (n < 0) return n;
+	if ((size_t)n >= cap - 1) return TAWC_ENAMETOOLONG;
+	size_t dl = (size_t)n;
+	if (dl == 0) return TAWC_EINVAL;
+	if (out[dl - 1] != '/') {
+		if (dl + 1 >= cap) return TAWC_ENAMETOOLONG;
+		out[dl++] = '/';
+	}
+	size_t gi = 0;
+	while (gpath_str[gi]) {
+		if (dl + 1 >= cap) return TAWC_ENAMETOOLONG;
+		out[dl++] = gpath_str[gi++];
+	}
+	out[dl] = 0;
+	return (long)dl;
 }
 
 static int is_proc_self_exe(const char *path)
@@ -508,18 +667,29 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 
 	/* Phase 2e: synthesize /proc/self/exe from the stashed guest exe
 	 * path. The kernel's view points at libtawcroot.so; the guest
-	 * wants the path it originally asked us to exec. */
+	 * wants the path it originally asked us to exec. The fd-relative
+	 * case (readlinkat(proc_self_fd, "exe", ...)) is caught by re-
+	 * composing through the dirfd's /proc/self/fd/<n> link. */
 	{
 		char tmp[TAWC_PATH_MAX];
 		long n = tawc_copy_string_from_guest(tmp, sizeof tmp, gpath);
 		if (n < 0) return n;
-		if (tawcroot_guest_exe_path_len > 0 && is_proc_self_exe(tmp)) {
-			size_t len = tawcroot_guest_exe_path_len;
-			if (len > (size_t)size) len = (size_t)size;
-			long ce = tawc_copy_to_guest(buf,
-				tawcroot_guest_exe_path, len);
-			if (ce < 0) return ce;
-			return (long)len;
+		if (tawcroot_guest_exe_path_len > 0) {
+			int hit = is_proc_self_exe(tmp);
+			char composed[TAWC_PATH_MAX];
+			if (!hit && dirfd != AT_FDCWD && tmp[0] != '/' &&
+			    could_be_proc_relative(tmp) &&
+			    compose_fd_relative(dirfd, tmp,
+						composed, sizeof composed) > 0)
+				hit = is_proc_self_exe(composed);
+			if (hit) {
+				size_t len = tawcroot_guest_exe_path_len;
+				if (len > (size_t)size) len = (size_t)size;
+				long ce = tawc_copy_to_guest(buf,
+					tawcroot_guest_exe_path, len);
+				if (ce < 0) return ce;
+				return (long)len;
+			}
 		}
 	}
 
