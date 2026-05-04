@@ -118,8 +118,12 @@ tawcAbis.forEach { abi ->
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine("bash", "client/build-libxkbcommon", "--abi=$xkbAbiFlag")
         inputs.file("$tawcRoot/client/build-libxkbcommon")
+        // Manifest + helper changes must invalidate the cache — otherwise a
+        // bumped pin in client/deps.list silently no-ops while the .a stays
+        // built against the old commit. See CLAUDE.md "Vendored deps".
+        inputs.file("$tawcRoot/client/deps.list")
+        inputs.file("$tawcRoot/client/deps-lib.sh")
         outputs.file(xkbStaticLib)
-        outputs.upToDateWhen { File(xkbStaticLib).exists() }
     }
 
     val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
@@ -160,8 +164,10 @@ tawcAbis.forEach { abi ->
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine("bash", "client/build-proot", "--abi=$scriptAbi")
         inputs.file("$tawcRoot/client/build-proot")
+        // Pin bumps in client/deps.list must invalidate the cache.
+        inputs.file("$tawcRoot/client/deps.list")
+        inputs.file("$tawcRoot/client/deps-lib.sh")
         outputs.files(prootBin, prootLoader)
-        outputs.upToDateWhen { File(prootBin).exists() && File(prootLoader).exists() }
     }
     tasks.named("preBuild") {
         dependsOn(buildProotTask)
@@ -175,8 +181,10 @@ tawcAbis.forEach { abi ->
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine("bash", "tawcroot/build", "--abi=$scriptAbi")
         inputs.file("$tawcRoot/tawcroot/build")
+        // Pin bumps in client/deps.list must invalidate the cache (cleat).
+        inputs.file("$tawcRoot/client/deps.list")
+        inputs.file("$tawcRoot/client/deps-lib.sh")
         outputs.file(tawcrootBin)
-        outputs.upToDateWhen { File(tawcrootBin).exists() }
     }
     tasks.named("preBuild") {
         dependsOn(buildTawcrootTask)
@@ -206,15 +214,17 @@ if ("arm64-v8a" in tawcAbis) {
     val buildLibhybrisTask = tasks.register<Exec>("buildLibhybris") {
         workingDir = tawcRoot
         commandLine("bash", "client/build-libhybris-aarch64")
-        // The cross-compile script is itself incremental, but invoking
-        // it on every Gradle run still spends ~30s walking 20+ autotools
-        // / meson configure-cache checks. Tell Gradle the only thing
-        // that can affect its output is the build script itself; if
-        // the libhybris install tree already has a `lib/libhybris/`
-        // dir, treat the task as up-to-date.
+        // The cross-compile script is itself incremental, but Gradle
+        // still has to know when to invoke it. Tracked inputs:
+        //   - the build script itself
+        //   - the dep manifest + helper (so a pin bump invalidates the
+        //     cache — otherwise a moved libhybris commit would silently
+        //     keep shipping the old .so set; see CLAUDE.md "Vendored deps")
+        // The output dir snapshot covers the rest.
         inputs.file("$tawcRoot/client/build-libhybris-aarch64")
+        inputs.file("$tawcRoot/client/deps.list")
+        inputs.file("$tawcRoot/client/deps-lib.sh")
         outputs.dir(libhybrisInstallDir)
-        outputs.upToDateWhen { File("$libhybrisInstallDir/lib/libhybris").exists() }
     }
 
     val packLibhybrisTask = tasks.register<Exec>("packLibhybris") {
@@ -257,17 +267,15 @@ if ("arm64-v8a" in tawcAbis) {
     val buildXwaylandTask = tasks.register<Exec>("buildXwayland") {
         workingDir = tawcRoot
         commandLine("bash", "client/build-xwayland-aarch64")
-        // Same incremental story as `buildLibhybris`: the build script
-        // is itself idempotent, but iterating its 21 stages on every
-        // assemble (most of which no-op) still costs tens of seconds.
-        // Skip when the binary + xkb data are already present.
+        // Same incremental story as `buildLibhybris`. Tracked inputs:
+        //   - build script
+        //   - patches dir (a patch edit must rebuild)
+        //   - dep manifest + helper (a pin bump must rebuild)
         inputs.file("$tawcRoot/client/build-xwayland-aarch64")
         inputs.dir("$tawcRoot/xwayland-patches")
+        inputs.file("$tawcRoot/client/deps.list")
+        inputs.file("$tawcRoot/client/deps-lib.sh")
         outputs.dir(xwaylandInstallDir)
-        outputs.upToDateWhen {
-            File("$xwaylandInstallDir/bin/Xwayland").exists() &&
-                File("$xwaylandInstallDir/share/xkeyboard-config-2/rules/evdev").exists()
-        }
     }
 
     val packXwaylandTask = tasks.register<Exec>("packXwayland") {

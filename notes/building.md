@@ -79,15 +79,39 @@ set explicitly when invoking `./gradlew` if your default JDK isn't 21.
 
 ## Vendored repos
 
-All gitignored. Each must exist locally before the matching build script
-runs; the scripts fail fast with the clone command in the error message.
+All gitignored. The pinned commit + repo URL for every vendored git dep
+lives in **[`client/deps.list`](../client/deps.list)** — single source
+of truth. Build scripts source `client/deps-lib.sh` and call
+`dep_ensure <name>`, which clones if missing and **errors loudly** if
+the existing checkout is at the wrong commit (uncommitted edits are
+silently tolerated as long as HEAD matches the pin).
 
-| Path                  | Source                                       | Pinned to              | Used by                           |
-|-----------------------|----------------------------------------------|------------------------|-----------------------------------|
-| `./libhybris/`        | https://github.com/wmww/libhybris            | tip of our fork        | `client/build-libhybris-aarch64`  |
-| `./android-headers/`  | https://github.com/Halium/android-headers    | branch `halium-11.0`   | `client/build-libhybris-aarch64` |
-| `./libxkbcommon/`     | https://github.com/xkbcommon/libxkbcommon    | tag `xkbcommon-1.7.0`  | `client/build-libxkbcommon` (auto-clones) |
-| `./smithay/`          | https://github.com/Smithay/smithay (fork)    | per `compositor/Cargo.toml` | Rust compositor                |
+| Path                                  | Used by                                       |
+|---------------------------------------|-----------------------------------------------|
+| `./libhybris/`                        | `client/build-libhybris-aarch64`              |
+| `./android-headers/`                  | `client/build-libhybris-aarch64`              |
+| `./libxkbcommon/`                     | `client/build-libxkbcommon`                   |
+| `./proot/` (+ `./proot-deps/talloc-*` tarball) | `client/build-proot`                |
+| `./cleat/`                            | `tawcroot/build` (host + device test runners) |
+| `./xwayland-src/<lib>/` (~22 repos)   | `client/build-xwayland-aarch64`               |
+| `./smithay/`                          | Rust compositor (pinned via `compositor/Cargo.toml`, fetched by Cargo) |
+
+Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — their
+version is baked into the URL inside the build script, so a version
+bump auto-fetches a fresh extract.
+
+### Bumping a dep
+
+1. `cd <dep>; git checkout <new commit>; iterate; (push if needed)`
+2. Edit `client/deps.list` — bump the commit column.
+3. On every checkout that needs to follow: `bash client/update-deps`
+   (or `bash client/update-deps <name>` for a subset). This is the only
+   command that mutates dep checkouts behind your back.
+
+If you bumped commits but forgot to update `deps.list` (or the other
+way round), the next build fails with a clear "dep is at the wrong
+commit" error. There is intentionally no auto-update — silent drift
+is what this whole system exists to prevent.
 
 Vendoring (rather than fetching at build time) follows the same pattern
 across all our cross-builds: deterministic builds, offline-capable,

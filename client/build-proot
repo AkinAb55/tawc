@@ -31,8 +31,6 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Pinned versions. Bump deliberately.
-#
 # We use the Termux fork rather than upstream proot-me/proot. Termux
 # carries a SIGSYS-from-stacked-seccomp handler in src/tracee/seccomp.c
 # that translates deprecated syscalls (`access` → `faccessat`, `open` →
@@ -46,18 +44,20 @@ set -euo pipefail
 #
 # Termux's fork also carries Android-specific fixes for things like
 # SYSCALL_AVOIDER values, loader ELF base addresses, and the `ioctl`
-# filter rule. We pin to a known-good commit; bump deliberately when
-# upstream lands changes we want.
-PROOT_GIT="https://github.com/termux/proot.git"
-PROOT_REV="ab2e346"  # latest as of writing — Termux's main, post-merge
-
+# filter rule. The pin (sha + repo URL) lives in client/deps.list.
+#
+# talloc is a tarball, not a git checkout — version is in the URL, so
+# bumping TALLOC_VERSION below triggers a fresh download by construction
+# (no separate pin file needed).
 TALLOC_VERSION="2.4.4"
 TALLOC_TARBALL_URL="https://download.samba.org/pub/talloc/talloc-${TALLOC_VERSION}.tar.gz"
 
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROOT_DIR="$REPO_DIR/proot"
+# shellcheck source=deps-lib.sh
+source "$SCRIPT_DIR/deps-lib.sh"
+PROOT_DIR="$(dep_dir proot)"
 DEPS_DIR="$REPO_DIR/proot-deps"
 TALLOC_DIR="$DEPS_DIR/talloc-${TALLOC_VERSION}"
 JNILIBS_DIR="$REPO_DIR/server/app/src/main/jniLibs"
@@ -97,21 +97,11 @@ if [ -z "$ABI" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Source fetch.
+# Source fetch. dep_ensure clones if missing and verifies HEAD against the
+# pin in client/deps.list. Submodules and our small inline patch run after.
 fetch_proot() {
-    if [ ! -d "$PROOT_DIR/.git" ]; then
-        echo "==> cloning $PROOT_GIT -> $PROOT_DIR"
-        git clone --no-tags "$PROOT_GIT" "$PROOT_DIR"
-    fi
-    git -C "$PROOT_DIR" rev-parse --verify "$PROOT_REV" >/dev/null 2>&1 || \
-        git -C "$PROOT_DIR" fetch --depth=200 origin
-    local cur
-    cur="$(git -C "$PROOT_DIR" rev-parse --short HEAD)"
-    if [ "$cur" != "$PROOT_REV" ]; then
-        echo "==> checking out $PROOT_REV (was $cur)"
-        git -C "$PROOT_DIR" checkout --quiet "$PROOT_REV"
-    fi
-    git -C "$PROOT_DIR" submodule update --init --depth 1
+    dep_ensure proot
+    git -C "$PROOT_DIR" submodule update --init --depth 1 --quiet
     apply_local_patches
 }
 

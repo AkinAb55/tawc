@@ -76,29 +76,17 @@ set -euo pipefail
 
 TAWCROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$TAWCROOT_DIR/.." && pwd)"
+# shellcheck source=../client/deps-lib.sh
+source "$REPO_DIR/client/deps-lib.sh"
 TESTHOST_DIR="$TAWCROOT_DIR/tests/testhost"
 BUILD_ROOT="$REPO_DIR/build"
 JNILIBS_DIR="$REPO_DIR/server/app/src/main/jniLibs"
-CLEAT_DIR="$REPO_DIR/cleat"
+CLEAT_DIR="$(dep_dir cleat)"
 
-# Cleat is pinned to a specific commit. Bump deliberately. cleat is not
+# Cleat is pinned to a specific commit in client/deps.list. cleat is not
 # released; api churn is expected. See notes/tawcroot.md "Testing strategy".
-CLEAT_REPO="https://codeberg.org/sphi/cleat.git"
-CLEAT_COMMIT="60d82debf7225f571d78fcd76aac70984f8894f7"
-
 setup_cleat() {
-    if [ ! -d "$CLEAT_DIR/.git" ]; then
-        echo "==> cloning cleat into $CLEAT_DIR (pinned $CLEAT_COMMIT)"
-        git clone "$CLEAT_REPO" "$CLEAT_DIR"
-    fi
-    local have
-    have="$(git -C "$CLEAT_DIR" rev-parse HEAD)"
-    if [ "$have" != "$CLEAT_COMMIT" ]; then
-        echo "==> checking out cleat $CLEAT_COMMIT (was $have)"
-        git -C "$CLEAT_DIR" fetch origin "$CLEAT_COMMIT" || \
-            git -C "$CLEAT_DIR" fetch --all
-        git -C "$CLEAT_DIR" checkout --detach "$CLEAT_COMMIT"
-    fi
+    dep_ensure cleat
 }
 
 # NDK lookup mirrors client/build-proot (we share the same NDK install).

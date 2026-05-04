@@ -6,8 +6,8 @@
 # master so behaviour is reproducible across machines.
 #
 # The checkout lives at ./libxkbcommon/ (gitignored, matching libhybris/
-# and smithay/). Run this once after a fresh `git clone` of tawc-emu, or
-# whenever you bump the LIBXKB_TAG below.
+# and smithay/). Pin lives in client/deps.list — bump there, then run
+# `bash client/update-deps libxkbcommon`.
 #
 # Usage:
 #   bash client/build-libxkbcommon                  # build aarch64 (default)
@@ -17,12 +17,11 @@
 
 set -euo pipefail
 
-LIBXKB_TAG="xkbcommon-1.7.0"
-LIBXKB_GIT="https://github.com/xkbcommon/libxkbcommon.git"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LIBXKB_DIR="$REPO_DIR/libxkbcommon"
+# shellcheck source=deps-lib.sh
+source "$SCRIPT_DIR/deps-lib.sh"
+LIBXKB_DIR="$(dep_dir libxkbcommon)"
 
 # NDK lookup: prefer ANDROID_NDK_HOME (set by run-integration-tests.sh
 # from the Gradle config), fall back to the SDK install location used
@@ -53,23 +52,10 @@ for arg in "$@"; do
     esac
 done
 
-# Clone the pinned tag if missing. We don't track upstream master — if you
-# need to bump, change LIBXKB_TAG above and rerun with --clean.
-# An existing non-git $LIBXKB_DIR (e.g. left behind by an aborted prior
-# run, or pre-created by Gradle's outputs.file declaration when this
-# script is invoked from the build) is wiped first — git clone refuses
-# to populate a non-empty directory.
-if [ ! -d "$LIBXKB_DIR/.git" ]; then
-    [ -e "$LIBXKB_DIR" ] && rm -rf "$LIBXKB_DIR"
-    echo "==> cloning $LIBXKB_GIT @ $LIBXKB_TAG -> $LIBXKB_DIR"
-    git clone --depth 1 --branch "$LIBXKB_TAG" "$LIBXKB_GIT" "$LIBXKB_DIR"
-else
-    cur=$(git -C "$LIBXKB_DIR" describe --tags --exact-match 2>/dev/null || echo "<no tag>")
-    if [ "$cur" != "$LIBXKB_TAG" ]; then
-        echo "WARNING: $LIBXKB_DIR is at '$cur', expected '$LIBXKB_TAG'." >&2
-        echo "         Delete ./libxkbcommon and re-run to refresh." >&2
-    fi
-fi
+# Clone the pinned commit if missing; verify HEAD == pin otherwise. The
+# manifest entry's ref-hint is the upstream tag; bumping is two steps —
+# update client/deps.list, then run client/update-deps.
+dep_ensure libxkbcommon
 
 # Cross-files: regenerate every run so they always reflect the current
 # NDK location. They live inside the libxkbcommon checkout (which is

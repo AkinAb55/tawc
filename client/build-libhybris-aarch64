@@ -25,11 +25,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LIBHYBRIS_DIR="$REPO_DIR/libhybris"
-LIBHYBRIS_REPO="https://github.com/wmww/libhybris.git"
-ANDROID_HEADERS_DIR="$REPO_DIR/android-headers"
-ANDROID_HEADERS_REPO="https://github.com/Halium/android-headers.git"
-ANDROID_HEADERS_BRANCH="halium-11.0"
+# shellcheck source=deps-lib.sh
+source "$SCRIPT_DIR/deps-lib.sh"
+LIBHYBRIS_DIR="$(dep_dir libhybris)"
+ANDROID_HEADERS_DIR="$(dep_dir android-headers)"
 
 CLEAN=0
 for arg in "$@"; do
@@ -68,22 +67,11 @@ done
 
 # Vendored sources. libhybris is our fork (`wmww/libhybris`), our changes
 # stack as clean commits on top of upstream — see CLAUDE.md "Libhybris
-# fork" and `libhybris/TAWC_FORK.md`. android-headers is upstream Halium,
-# pinned to the `halium-11.0` branch. Both checkouts are gitignored.
-# A pre-existing non-git $LIBHYBRIS_DIR / $ANDROID_HEADERS_DIR (e.g. left
-# behind by Gradle's outputs.dir declaration when this script is invoked
-# from the build) is wiped first — git clone refuses a non-empty target.
-if [ ! -d "$LIBHYBRIS_DIR/.git" ]; then
-    [ -e "$LIBHYBRIS_DIR" ] && rm -rf "$LIBHYBRIS_DIR"
-    echo "==> cloning $LIBHYBRIS_REPO -> $LIBHYBRIS_DIR"
-    git clone "$LIBHYBRIS_REPO" "$LIBHYBRIS_DIR"
-fi
-if [ ! -f "$ANDROID_HEADERS_DIR/android-version.h" ]; then
-    [ -e "$ANDROID_HEADERS_DIR" ] && rm -rf "$ANDROID_HEADERS_DIR"
-    echo "==> cloning $ANDROID_HEADERS_REPO @ $ANDROID_HEADERS_BRANCH -> $ANDROID_HEADERS_DIR"
-    git clone --depth 1 --branch "$ANDROID_HEADERS_BRANCH" \
-        "$ANDROID_HEADERS_REPO" "$ANDROID_HEADERS_DIR"
-fi
+# fork" and `libhybris/TAWC_FORK.md`. android-headers is upstream Halium.
+# Both pins live in `client/deps.list`; `dep_ensure` clones if missing
+# and errors loudly if the existing checkout is at the wrong commit.
+dep_ensure libhybris
+dep_ensure android-headers
 
 # ── Build tree ──
 # We build in-tree (BUILD_DIR == LIBHYBRIS_DIR/hybris) because some

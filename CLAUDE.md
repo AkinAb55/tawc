@@ -6,6 +6,15 @@ Hi Claude! This project is Tess's Android Wayland Compositor (tawc). It's an And
 ## Building
 **[notes/building.md](notes/building.md) is the source of truth for build-time dependencies and the fresh-system build flow.** Consult it before building on a new machine, and **update it in the same change** whenever you add or change a build-time dep (host package, vendored repo, env var, toolchain version). The Quick Reference at the bottom of this file is a cheat sheet for already-set-up systems — building.md is the doc to follow when setting up.
 
+## Vendored deps
+**`client/deps.list` is the single source of truth for every vendored git dep** (libhybris, android-headers, libxkbcommon, proot, cleat, xwayland-src/*). Each entry pins a commit hash. Build scripts call `dep_ensure <name>` from `client/deps-lib.sh`, which clones if missing and **errors loudly** if the existing checkout is at the wrong commit (uncommitted edits are silently tolerated — only HEAD matters).
+
+Used by: `client/build-libhybris-aarch64`, `client/build-libxkbcommon`, `client/build-proot`, `client/build-xwayland-aarch64`, `tawcroot/build`. Gradle declares `client/deps.list` and `client/deps-lib.sh` as inputs of `buildLibxkbcommon<Abi>`, `buildLibhybris`, `buildXwayland`, so a manifest bump invalidates the cache.
+
+When you update a dep — bumping libhybris patches, pulling new xwayland, etc. — **bump the commit in `client/deps.list` in the same commit**. Otherwise other checkouts will silently keep building against the old version (or in our case, will fail loudly, which is the point). To pull a manifest update onto an existing checkout, run `bash client/update-deps` (or `bash client/update-deps <name>`) — it's the only command that mutates dep checkouts behind your back.
+
+Tarball deps (talloc, libmd) aren't in `deps.list` — their version is baked into the URL in the build script, so version bumps auto-fetch.
+
 ## Notes
 The `notes/` directory contains architecture and implementation notes. Edit/create/split/merge/rename notes as needed without being asked. Key files:
 - [architecture.md](notes/architecture.md) -- compositor module layout, design decisions, Smithay integration
@@ -87,7 +96,7 @@ bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 `compositor/build.rs`.
 
 ## Libhybris fork
-- **libhybris fork:** https://github.com/wmww/libhybris — auto-cloned to `./libhybris` by `client/build-libhybris-aarch64` on first run. Already in `.gitignore`.
+- **libhybris fork:** https://github.com/wmww/libhybris — pinned by commit hash in `client/deps.list`, auto-cloned to `./libhybris` by `client/build-libhybris-aarch64` on first run (and HEAD-verified on every run). Already in `.gitignore`.
 - **Build:** `bash client/build-libhybris-aarch64 [--clean]`. Cross-compiles for aarch64 glibc using the host toolchain — see [notes/building.md](notes/building.md) for deps. Output staged in `build/libhybris-aarch64/install/` and packed into the APK as `assets/libhybris/arm64-v8a.tar` by Gradle's `packLibhybris` task. The Kotlin installer extracts the asset on first compositor start and symlinks the tree into `<rootfs>/usr/local/lib/` at chroot install time (`LibhybrisLinker.kt`).
 - **Fork docs:** `libhybris/TAWC_FORK.md` documents the fork's lineage and our changes. Keep it up to date when modifying libhybris.
 - Our libhybris fork is a set of clean, self-contained commits on top of https://github.com/libhybris/libhybris
@@ -97,10 +106,12 @@ bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 - TAWC_FORK.md does not reference any of our commits by hash, as those would need to be kept up to date every change
 - Only commit to libhybris when and how you are told to
 - Each time we update our libhybris fork, we tag it based on the date and a counter, like `tawc-15-Apr-2026-0` (would be `...-1` for next update on same day, etc) and push the tags. This allows us to track and revert history of our changes while keeping git history clean
+- After amending/rewriting libhybris commits, **bump the libhybris commit hash in `client/deps.list`** in the same change. Otherwise other checkouts will refuse to build until they re-run `client/update-deps`. (That refusal is the system working — silent drift would be far worse.)
 - Git can be tricky, and this is an atypical workflow. Be careful and think things true when updating the libhybris git history
 
 ## Quick Reference
 - **Building from a fresh system:** see [notes/building.md](notes/building.md) for host packages, env, vendored repos, and the full walkthrough. Keep that doc in sync as you change build deps.
+- **Vendored deps:** pinned in `client/deps.list`. Build scripts auto-clone + verify HEAD; `bash client/update-deps [name…]` is the one command that mutates dep checkouts (use after pulling a manifest update or after a "wrong commit" build error). Bumping a dep = bumping `deps.list` + running `update-deps`.
 - **Build (everything):** `cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=$HOME/Android/Sdk ./gradlew assembleDebug` — Gradle auto-invokes `client/build-libhybris-aarch64`, `client/build-libxkbcommon`, `client/build-xwayland-aarch64`, `client/build-proot`, and `tawcroot/build` as needed (each task is up-to-date when its output binary already exists).
 - **Build (libhybris standalone):** `bash client/build-libhybris-aarch64 [--clean]`. Aarch64 glibc cross-build, output in `build/libhybris-aarch64/install/`; bundled into the APK by the Gradle `packLibhybris` task.
 - **Build (libxkbcommon standalone):** `bash client/build-libxkbcommon [--abi=aarch64|x86_64|both] [--clean]`. Clones a pinned upstream tag into `./libxkbcommon/` (gitignored) if missing — no patches.

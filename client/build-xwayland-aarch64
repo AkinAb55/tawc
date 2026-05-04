@@ -29,6 +29,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=deps-lib.sh
+source "$SCRIPT_DIR/deps-lib.sh"
 SRC_ROOT="$REPO_DIR/xwayland-src"
 PATCH_ROOT="$REPO_DIR/xwayland-patches"
 OUT_DIR="$REPO_DIR/build/xwayland-aarch64"
@@ -106,39 +108,56 @@ LDFLAGS_CROSS="-L$PREFIX/lib -Wl,-rpath-link,$PREFIX/lib"
 
 # ── Helpers ──
 
+# Ensure $name is checked out at its pinned commit (from client/deps.list)
+# and patches from xwayland-patches/<name>/ are applied. Idempotent: a
+# `.tawc-patches-applied-<sha>` sentinel (untracked, in the dep tree)
+# encodes a hash of the patch dir, so editing the patch set invalidates
+# it automatically. `client/update-deps` wipes any sentinel on reset,
+# so the next build re-patches when the manifest moves too.
 clone_pinned() {
-    local name="$1" url="$2" tag="$3"
-    local dst="$SRC_ROOT/$name"
-    if [ ! -d "$dst/.git" ]; then
-        echo "==> clone $name @ $tag"
-        git clone --depth 1 --branch "$tag" "$url" "$dst"
-        apply_patches "$name"
-    else
-        local cur
-        cur=$(git -C "$dst" describe --tags --exact-match 2>/dev/null || echo "<unknown>")
-        if [ "$cur" != "$tag" ]; then
-            echo "WARNING: $dst is at '$cur', expected '$tag'. Delete to refresh." >&2
-        fi
-    fi
+    local name="$1"
+    dep_ensure "$name"
+    apply_patches "$name"
 }
 
-# Apply every patch file in xwayland-patches/<name>/ to the freshly-cloned
-# tree, substituting @TAWC_TMP_PREFIX@ first. Patches are vendored from
-# termux-packages with light adjustments — see xwayland-patches/<name>/*.
-# Idempotent only by virtue of being called from clone_pinned right after
-# `git clone`, so re-running the script doesn't try to reapply on a tree
-# that's already patched.
+# Hash the substituted patch contents — covers both patch-file edits and
+# changes to TAWC_TMP_PREFIX. Cheap (sha1 over a few kB).
+_patches_hash() {
+    local patch_dir="$1"
+    cat "$patch_dir"/*.patch 2>/dev/null \
+        | sed "s|@TAWC_TMP_PREFIX@|$TAWC_TMP_PREFIX|g" \
+        | sha1sum | cut -c1-12
+}
+
 apply_patches() {
     local name="$1"
     local patch_dir="$PATCH_ROOT/$name"
     [ -d "$patch_dir" ] || return 0
-    local dst="$SRC_ROOT/$name"
+    local dst hash sentinel
+    dst="$(dep_dir "$name")"
+    hash="$(_patches_hash "$patch_dir")"
+    sentinel="$dst/.tawc-patches-applied-$hash"
+    [ -f "$sentinel" ] && return 0
+    # Revert any prior patch state before applying. dep_ensure has
+    # confirmed HEAD == pinned commit, so a full reset is safe: it's
+    # a no-op on a clean tree, and on a previously-patched tree it
+    # undoes both modifications (`reset --hard`) and added files
+    # (`clean -fdx`). This handles stale sentinels and pre-refactor
+    # patched trees (no sentinel of any kind).
+    #
+    # Build artefacts under $OUT_DIR aren't affected — only sources
+    # / autotools-generated files inside the dep tree itself, which
+    # the build_autotools / build_meson stages regenerate.
+    rm -f "$dst"/.tawc-patches-applied-*
+    git -C "$dst" reset --hard --quiet HEAD
+    git -C "$dst" clean -fdx --quiet
     for p in "$patch_dir"/*.patch; do
         [ -f "$p" ] || continue
         echo "==> patch $name: $(basename "$p")"
         sed "s|@TAWC_TMP_PREFIX@|$TAWC_TMP_PREFIX|g" "$p" \
             | ( cd "$dst" && patch -p1 --no-backup-if-mismatch )
     done
+    touch "$sentinel"
 }
 
 # Generate a meson cross-file targeting the NDK toolchain. Regenerated
@@ -234,9 +253,7 @@ stage_should_run() {
 
 stage_xorg_macros() {
     stage_should_run xorg-macros || return 0
-    clone_pinned util-macros \
-        https://gitlab.freedesktop.org/xorg/util/macros.git \
-        util-macros-1.20.2
+    clone_pinned util-macros
     # Noarch m4 macros — installs share/aclocal + .pc only. No
     # cross-compile needed; the host autoreconf consumes the macros.
     local src="$SRC_ROOT/util-macros"
@@ -248,7 +265,7 @@ stage_xorg_macros() {
 
 stage_xorgproto() {
     stage_should_run xorgproto || return 0
-    clone_pinned xorgproto https://gitlab.freedesktop.org/xorg/proto/xorgproto.git xorgproto-2024.1
+    clone_pinned xorgproto
     # xorgproto is header-only — meson install dumps headers + .pc files.
     # Use a builddir under $OUT_DIR so the source tree stays clean.
     build_meson xorgproto -Dlegacy=true
@@ -256,34 +273,32 @@ stage_xorgproto() {
 
 stage_xtrans() {
     stage_should_run xtrans || return 0
-    clone_pinned xtrans https://gitlab.freedesktop.org/xorg/lib/libxtrans.git xtrans-1.6.0
+    clone_pinned xtrans
     build_autotools xtrans --disable-docs
 }
 
 stage_wayland_protocols() {
     stage_should_run wayland-protocols || return 0
-    clone_pinned wayland-protocols \
-        https://gitlab.freedesktop.org/wayland/wayland-protocols.git \
-        1.45
+    clone_pinned wayland-protocols
     # Build-time only: the XML files + .pc.
     build_meson wayland-protocols -Dtests=false
 }
 
 stage_libxcvt() {
     stage_should_run libxcvt || return 0
-    clone_pinned libxcvt https://gitlab.freedesktop.org/xorg/lib/libxcvt.git libxcvt-0.1.3
+    clone_pinned libxcvt
     build_meson libxcvt
 }
 
 stage_pixman() {
     stage_should_run pixman || return 0
-    clone_pinned pixman https://gitlab.freedesktop.org/pixman/pixman.git pixman-0.46.4
+    clone_pinned pixman
     build_meson pixman -Dtests=disabled -Ddemos=disabled -Dgtk=disabled
 }
 
 stage_libffi() {
     stage_should_run libffi || return 0
-    clone_pinned libffi https://github.com/libffi/libffi.git v3.5.2
+    clone_pinned libffi
     build_autotools libffi \
         --disable-multi-os-directory \
         --disable-docs
@@ -295,7 +310,7 @@ stage_wayland() {
     # libwayland-{client,server,egl,cursor}. We only need the client lib
     # at runtime — Xwayland uses it to talk to the compositor. The
     # scanner is only needed at build time and we use the host's already.
-    clone_pinned wayland https://gitlab.freedesktop.org/wayland/wayland.git 1.25.0
+    clone_pinned wayland
     build_meson wayland \
         -Dscanner=false \
         -Dtests=false \
@@ -306,13 +321,13 @@ stage_wayland() {
 
 stage_libxau() {
     stage_should_run libxau || return 0
-    clone_pinned libxau https://gitlab.freedesktop.org/xorg/lib/libxau.git libXau-1.0.12
+    clone_pinned libxau
     build_autotools libxau
 }
 
 stage_xcb_proto() {
     stage_should_run xcb-proto || return 0
-    clone_pinned xcb-proto https://gitlab.freedesktop.org/xorg/proto/xcbproto.git xcb-proto-1.17.0
+    clone_pinned xcb-proto
     # noarch: Python module + XML protocol files. Configure with python
     # but no compile.
     local src="$SRC_ROOT/xcb-proto"
@@ -324,7 +339,7 @@ stage_xcb_proto() {
 
 stage_libxcb() {
     stage_should_run libxcb || return 0
-    clone_pinned libxcb https://gitlab.freedesktop.org/xorg/lib/libxcb.git libxcb-1.17.0
+    clone_pinned libxcb
     # libxcb uses libxslt + python at build to generate sources from
     # xcb-proto's XML. Cross-compile the resulting .c, but the codegen
     # itself runs on host with our staged xcbproto.
@@ -342,7 +357,7 @@ stage_libx11() {
     # load XKB keymaps); Xwayland transitively pulls libX11 via that
     # path. Patches inline FIONREAD's value (bionic compat) — see
     # xwayland-patches/libx11/.
-    clone_pinned libx11 https://gitlab.freedesktop.org/xorg/lib/libx11.git libX11-1.8.13
+    clone_pinned libx11
     build_autotools libx11 \
         --disable-xthreads \
         --disable-thread-safety-constructor \
@@ -357,7 +372,7 @@ stage_libx11() {
 
 stage_libxkbfile() {
     stage_should_run libxkbfile || return 0
-    clone_pinned libxkbfile https://gitlab.freedesktop.org/xorg/lib/libxkbfile.git libxkbfile-1.1.3
+    clone_pinned libxkbfile
     build_autotools libxkbfile
 }
 
@@ -365,7 +380,7 @@ stage_freetype() {
     stage_should_run freetype || return 0
     # Pinned upstream tag rather than the gitlab mirror so we don't need
     # to track sourceforge layout.
-    clone_pinned freetype https://gitlab.freedesktop.org/freetype/freetype.git VER-2-13-3
+    clone_pinned freetype
     build_meson freetype \
         -Dzlib=disabled \
         -Dbzip2=disabled \
@@ -377,7 +392,7 @@ stage_freetype() {
 
 stage_font_util() {
     stage_should_run font-util || return 0
-    clone_pinned font-util https://gitlab.freedesktop.org/xorg/font/util.git font-util-1.4.1
+    clone_pinned font-util
     # Noarch m4 macros + scripts; no cross-compile.
     local src="$SRC_ROOT/font-util"
     if [ ! -f "$src/configure" ]; then ( cd "$src" && autoreconf -fi ); fi
@@ -388,14 +403,14 @@ stage_font_util() {
 
 stage_libfontenc() {
     stage_should_run libfontenc || return 0
-    clone_pinned libfontenc https://gitlab.freedesktop.org/xorg/lib/libfontenc.git libfontenc-1.1.8
+    clone_pinned libfontenc
     build_autotools libfontenc \
         --with-encodingsdir="$PREFIX/share/fonts/X11/encodings"
 }
 
 stage_libxfont2() {
     stage_should_run libxfont2 || return 0
-    clone_pinned libxfont2 https://gitlab.freedesktop.org/xorg/lib/libxfont.git libXfont2-2.0.7
+    clone_pinned libxfont2
     build_autotools libxfont2 \
         --disable-devel-docs \
         --without-fop \
@@ -408,7 +423,7 @@ stage_libdrm() {
     # `-Ddrm=false`; we have to ship libdrm. Vendor-specific drivers
     # (intel/radeon/amdgpu) are turned off — only the generic xf86drm
     # API is needed for header consumption.
-    clone_pinned libdrm https://gitlab.freedesktop.org/mesa/drm.git libdrm-2.4.125
+    clone_pinned libdrm
     build_meson libdrm \
         -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled \
         -Dnouveau=disabled -Dvmwgfx=disabled -Dexynos=disabled \
@@ -420,7 +435,7 @@ stage_libdrm() {
 
 stage_libxshmfence() {
     stage_should_run libxshmfence || return 0
-    clone_pinned libxshmfence https://gitlab.freedesktop.org/xorg/lib/libxshmfence.git libxshmfence-1.3.3
+    clone_pinned libxshmfence
     # Bionic has futex via syscall but no libc futex wrappers; the
     # --disable-futex switch falls back to the eventfd-based path,
     # which works on every Android kernel.
@@ -432,6 +447,8 @@ stage_libmd() {
     stage_should_run libmd || return 0
     # Provides SHA-1 for Xwayland's MIT-MAGIC-COOKIE generation.
     # Upstream is Hadrons; their tarball is the canonical release.
+    # Tarball, not git — version embedded in the URL, so bumping it
+    # auto-fetches a fresh extract.
     local src="$SRC_ROOT/libmd"
     if [ ! -d "$src" ]; then
         echo "==> fetch libmd 1.1.0"
@@ -447,8 +464,7 @@ stage_xkbcomp() {
     # Xwayland still spawns xkbcomp at startup to compile the X server's
     # keymap (modern Xwayland can use libxkbcommon directly via patches,
     # but stock 24.1 can't). Small autotools build.
-    clone_pinned xkbcomp https://gitlab.freedesktop.org/xorg/app/xkbcomp.git \
-        xkbcomp-1.4.7
+    clone_pinned xkbcomp
     build_autotools xkbcomp
 }
 
@@ -458,8 +474,7 @@ stage_xkeyboard_config() {
     # consumed by Xwayland at runtime. We bake the on-device path
     # (XWL_INSTALL_DIR/share/X11/xkb) into Xwayland via -Dxkb_dir, so
     # this stage stages those files into $PREFIX/share/X11/xkb.
-    clone_pinned xkeyboard-config https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git \
-        xkeyboard-config-2.45
+    clone_pinned xkeyboard-config
     build_meson xkeyboard-config \
         -Dxorg-rules-symlinks=false \
         -Dcompat-rules=false
@@ -475,7 +490,7 @@ stage_xkeyboard_config() {
 
 stage_xwayland() {
     stage_should_run xwayland || return 0
-    clone_pinned xwayland https://gitlab.freedesktop.org/xorg/xserver.git xwayland-24.1.11
+    clone_pinned xwayland
     # Xwayland-24.1 has a meson build at the xserver root. Disable
     # everything we don't need: GLAMOR/GL, DRI3 (needs libdrm/xshmfence),
     # XAUTH/XDM/secure-rpc/SELinux, IPv6, listen_tcp.
@@ -543,11 +558,6 @@ stage_xkeyboard_config
 stage_xkbcomp
 stage_xwayland
 
-# More stages (libxcb, libxau, libxkbfile, freetype, libxfont2, wayland,
-# libmd, xwaylandproto, xwayland) are pending. Each will follow the same
-# clone_pinned + build_meson/build_autotools template. See
-# notes/xwayland.md (TODO) for the dep tree.
-
 echo
-echo "==> done (so far). Built into $PREFIX"
+echo "==> done. Built into $PREFIX"
 ls "$PREFIX/lib" 2>/dev/null | head -20
