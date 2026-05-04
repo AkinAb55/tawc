@@ -64,7 +64,7 @@ JNILIBS_DIR="$REPO_DIR/server/app/src/main/jniLibs"
 
 # NDK lookup mirrors client/build-libxkbcommon — see that script for rationale.
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    DEFAULT_SDK="${ANDROID_HOME:-$HOME/android-sdk}"
+    DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
     if [ -d "$DEFAULT_SDK/ndk" ]; then
         ANDROID_NDK_HOME="$DEFAULT_SDK/ndk/$(ls -1 "$DEFAULT_SDK/ndk" | sort -V | tail -1)"
     fi

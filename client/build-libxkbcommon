@@ -28,7 +28,7 @@ LIBXKB_DIR="$REPO_DIR/libxkbcommon"
 # from the Gradle config), fall back to the SDK install location used
 # elsewhere in this repo (see notes/emulator.md "One-time setup").
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    DEFAULT_SDK="${ANDROID_HOME:-$HOME/android-sdk}"
+    DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
     if [ -d "$DEFAULT_SDK/ndk" ]; then
         ANDROID_NDK_HOME="$DEFAULT_SDK/ndk/$(ls -1 "$DEFAULT_SDK/ndk" | sort -V | tail -1)"
     fi
