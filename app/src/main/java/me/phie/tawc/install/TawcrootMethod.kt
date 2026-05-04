@@ -107,7 +107,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             android.util.Base64.NO_WRAP,
         )
         // Invoke through enter.sh — same shape as host-side launchers
-        // (`client/tawc-chroot-run`). enter.sh's cd-into-$ROOTFS/tmp +
+        // (`scripts/tawc-chroot-run.sh`). enter.sh's cd-into-$ROOTFS/tmp +
         // explicit env setup matters in two places: gpg-agent (and other
         // daemons pacman-key spawns) inherit a sane TMPDIR and HOME from
         // the in-chroot login shell, and the host kernel cwd is set

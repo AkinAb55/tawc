@@ -1,6 +1,6 @@
-# client/start-emulator hardcodes emulator-5554 and x86_64-only pgrep
+# scripts/start-emulator.sh hardcodes emulator-5554 and x86_64-only pgrep
 
-`client/start-emulator` assumes the AVD always lands on serial
+`scripts/start-emulator.sh` assumes the AVD always lands on serial
 `emulator-5554` (lines 82, 90, 98, 103, 111, 118, 121, 123 — every
 `adb -s emulator-5554 ...` call). The detection at line 43 matches by
 AVD name regardless of port, so if a different AVD is already on

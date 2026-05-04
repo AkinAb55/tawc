@@ -51,6 +51,6 @@ a clean shape.
 
 ## References
 
-- `server/app/src/main/java/me/phie/tawc/install/ProotMethod.kt` — `wipe()` body, both passes
-- `server/app/src/main/java/me/phie/tawc/install/RootfsCleaner.kt` — chroot-side reference (no duplication to mimic)
+- `app/src/main/java/me/phie/tawc/install/ProotMethod.kt` — `wipe()` body, both passes
+- `app/src/main/java/me/phie/tawc/install/RootfsCleaner.kt` — chroot-side reference (no duplication to mimic)
 - [`issues/proot-wipe-su-retry-legacy.md`](proot-wipe-su-retry-legacy.md) — separate question of whether the su-retry should exist at all

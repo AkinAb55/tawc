@@ -5,22 +5,23 @@
 # Android-specific meson cross-files. Pinned to a tag rather than tracking
 # master so behaviour is reproducible across machines.
 #
-# The checkout lives at ./libxkbcommon/ (gitignored, matching libhybris/
-# and smithay/). Pin lives in client/deps.list — bump there, then run
-# `bash client/update-deps libxkbcommon`.
+# The checkout lives at ./deps/libxkbcommon/ (gitignored via deps/.gitignore,
+# alongside deps/libhybris/, deps/smithay/, etc.). Pin lives in deps/deps.list — bump
+# there, then run
+# `bash scripts/update-deps.sh libxkbcommon`.
 #
 # Usage:
-#   bash client/build-libxkbcommon                  # build aarch64 (default)
-#   bash client/build-libxkbcommon --abi=x86_64     # emulator
-#   bash client/build-libxkbcommon --abi=both       # both arches
-#   bash client/build-libxkbcommon --clean          # wipe builddir(s) first
+#   bash scripts/build-libxkbcommon.sh                  # build aarch64 (default)
+#   bash scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
+#   bash scripts/build-libxkbcommon.sh --abi=both       # both arches
+#   bash scripts/build-libxkbcommon.sh --clean          # wipe builddir(s) first
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=deps-lib.sh
-source "$SCRIPT_DIR/deps-lib.sh"
+# shellcheck source=lib/deps.sh
+source "$SCRIPT_DIR/lib/deps.sh"
 LIBXKB_DIR="$(dep_dir libxkbcommon)"
 
 # NDK lookup: prefer ANDROID_NDK_HOME (set by run-integration-tests.sh
@@ -54,7 +55,7 @@ done
 
 # Clone the pinned commit if missing; verify HEAD == pin otherwise. The
 # manifest entry's ref-hint is the upstream tag; bumping is two steps —
-# update client/deps.list, then run client/update-deps.
+# update deps/deps.list, then run scripts/update-deps.sh.
 dep_ensure libxkbcommon
 
 # Cross-files: regenerate every run so they always reflect the current
@@ -106,7 +107,10 @@ build_one() {
         rm -rf "$build_dir"
     fi
 
-    if [ ! -d "$build_dir" ]; then
+    # Check for build.ninja rather than dir existence: Gradle's
+    # `outputs.file()` may pre-create the empty parent dir before invoking
+    # the script, so a bare directory existence check would skip setup.
+    if [ ! -f "$build_dir/build.ninja" ]; then
         echo "==> meson setup $abi -> $build_dir"
         # shellcheck disable=SC2068
         ( cd "$LIBXKB_DIR" && \

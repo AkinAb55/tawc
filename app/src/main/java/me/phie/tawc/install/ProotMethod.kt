@@ -7,7 +7,7 @@ import java.io.IOException
 
 /**
  * Rootless implementation of [InstallationMethod] using the vendored
- * `proot` binary (built by `client/build-proot`, shipped in the APK
+ * `proot` binary (built by `scripts/build-proot.sh`, shipped in the APK
  * via `jniLibs/<abi>/libproot.so`).
  *
  * Unlike [ChrootMethod], proot is a userspace ptrace-based fake chroot
@@ -237,7 +237,7 @@ class ProotMethod(context: Context) : InstallationMethod {
     /**
      * Recursive delete with one wrinkle: tracees that ran under a
      * proot-via-su entry (e.g. integration tests that go through
-     * `client/tawc-chroot-run`'s `su -c '<enter.sh>'` path on rooted
+     * `scripts/tawc-chroot-run.sh`'s `su -c '<enter.sh>'` path on rooted
      * devices) leave on-disk files with `uid=0` ownership, even though
      * the install was originally proot/app-uid. Plain `chmod -R` from
      * app uid then can't make those files writable, and the
@@ -471,7 +471,7 @@ class ProotMethod(context: Context) : InstallationMethod {
             export HYBRIS_EGLPLATFORM=wayland
             # Maintain a /tmp/wayland-0 symlink alongside the absolute
             # path. WAYLAND_DISPLAY ignores it (it's an absolute path
-            # already), but `testing/run-integration-tests.sh` and
+            # already), but `scripts/run-integration-tests.sh` and
             # `notes/`-documented one-liners use `test -e
             # <rootfs>/tmp/wayland-0` as a compositor-ready probe,
             # and the symlink target follows back to the live socket.

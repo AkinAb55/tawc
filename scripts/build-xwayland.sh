@@ -1,12 +1,12 @@
 #!/bin/bash
 # Cross-compile Xwayland for aarch64 Android (bionic) and stage it for
-# packaging into the APK. Loosely modelled on `client/build-libhybris-aarch64`
+# packaging into the APK. Loosely modelled on `scripts/build-libhybris.sh`
 # but targets the Android NDK toolchain instead of the host glibc cross-
 # compiler — Xwayland is launched as a child of the compositor (which is
 # the Android app process), so it must be bionic-linked.
 #
 # This is a layered build: each upstream dependency is cloned into
-# `./xwayland-src/<lib>/` (gitignored) and cross-compiled into
+# `./deps/xwayland-src/<lib>/` (gitignored) and cross-compiled into
 # `build/xwayland-aarch64/install/{bin,lib,include,share}` with the
 # install dir acting as both the staging area and the pkg-config sysroot
 # for downstream libs.
@@ -17,9 +17,9 @@
 #   build/xwayland-aarch64/install/share/X11/xkb/   # XKB data (subset)
 #
 # Usage:
-#   bash client/build-xwayland-aarch64           # incremental
-#   bash client/build-xwayland-aarch64 --clean   # wipe install + builddirs
-#   bash client/build-xwayland-aarch64 --only=<lib>   # build just one stage
+#   bash scripts/build-xwayland.sh           # incremental
+#   bash scripts/build-xwayland.sh --clean   # wipe install + builddirs
+#   bash scripts/build-xwayland.sh --only=<lib>   # build just one stage
 #
 # Build-time deps (host packages): meson, ninja, pkg-config, python3,
 # python3-libxml2, xsltproc, autoconf, automake, libtool, perl. The NDK
@@ -29,10 +29,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=deps-lib.sh
-source "$SCRIPT_DIR/deps-lib.sh"
-SRC_ROOT="$REPO_DIR/xwayland-src"
-PATCH_ROOT="$REPO_DIR/xwayland-patches"
+# shellcheck source=lib/deps.sh
+source "$SCRIPT_DIR/lib/deps.sh"
+SRC_ROOT="$REPO_DIR/deps/xwayland-src"
+PATCH_ROOT="$REPO_DIR/deps/xwayland-patches"
 OUT_DIR="$REPO_DIR/build/xwayland-aarch64"
 PREFIX="$OUT_DIR/install"
 PC_DIR="$PREFIX/lib/pkgconfig"
@@ -108,11 +108,11 @@ LDFLAGS_CROSS="-L$PREFIX/lib -Wl,-rpath-link,$PREFIX/lib"
 
 # ── Helpers ──
 
-# Ensure $name is checked out at its pinned commit (from client/deps.list)
-# and patches from xwayland-patches/<name>/ are applied. Idempotent: a
+# Ensure $name is checked out at its pinned commit (from deps/deps.list)
+# and patches from deps/xwayland-patches/<name>/ are applied. Idempotent: a
 # `.tawc-patches-applied-<sha>` sentinel (untracked, in the dep tree)
 # encodes a hash of the patch dir, so editing the patch set invalidates
-# it automatically. `client/update-deps` wipes any sentinel on reset,
+# it automatically. `scripts/update-deps.sh` wipes any sentinel on reset,
 # so the next build re-patches when the manifest moves too.
 clone_pinned() {
     local name="$1"
@@ -356,7 +356,7 @@ stage_libx11() {
     # libxkbfile actually links libX11 (it pokes Display* internals to
     # load XKB keymaps); Xwayland transitively pulls libX11 via that
     # path. Patches inline FIONREAD's value (bionic compat) — see
-    # xwayland-patches/libx11/.
+    # deps/xwayland-patches/libx11/.
     clone_pinned libx11
     build_autotools libx11 \
         --disable-xthreads \

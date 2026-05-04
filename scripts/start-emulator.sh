@@ -13,7 +13,7 @@
 #     install -r ...`, then re-run this script (or just re-grant by
 #     hand; see notes/installation.md).
 #
-# Usage: bash client/start-emulator [--headless] [--cold]
+# Usage: bash scripts/start-emulator.sh [--headless] [--cold]
 
 set -eu
 

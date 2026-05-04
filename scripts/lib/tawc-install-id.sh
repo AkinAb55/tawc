@@ -18,7 +18,7 @@
 #
 # Caller contract:
 #   - adb on PATH, ANDROID_SERIAL already selected (source
-#     client/select-device.sh first).
+#     scripts/lib/select-device.sh first).
 #   - Read the resolved id back from $TAWC_INSTALL_ID.
 
 if [ -n "${TAWC_INSTALL_ID:-}" ]; then

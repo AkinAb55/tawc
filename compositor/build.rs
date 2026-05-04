@@ -3,25 +3,24 @@ fn main() {
 
     if target_os == "android" {
         // Locally-built static xkbcommon for the compositor. Built by
-        // `client/build-libxkbcommon`, which clones a pinned upstream tag
-        // into the (gitignored) `./libxkbcommon/` checkout and runs meson
+        // `scripts/build-libxkbcommon.sh`, which clones a pinned upstream tag
+        // into the (gitignored) `deps/libxkbcommon/` checkout and runs meson
         // with our two Android cross-files. arm64 build lives in
-        // `./libxkbcommon/builddir/`, x86_64 (emulator) in
-        // `./libxkbcommon/builddir-x86_64/`.
+        // `deps/libxkbcommon/builddir/`, x86_64 (emulator) in
+        // `deps/libxkbcommon/builddir-x86_64/`.
         let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let workspace_root = std::path::Path::new(&manifest_dir)
-            .parent().expect("compositor crate must have a parent")
-            .parent().expect("server dir must have a parent");
+        let repo_root = std::path::Path::new(&manifest_dir)
+            .parent().expect("compositor crate must have a parent");
         let builddir_name = match target_arch.as_str() {
             "aarch64" => "builddir",
             "x86_64" => "builddir-x86_64",
             other => panic!("unsupported android target arch: {}", other),
         };
-        let xkb_dir = workspace_root.join("libxkbcommon").join(builddir_name);
+        let xkb_dir = repo_root.join("deps").join("libxkbcommon").join(builddir_name);
         if !xkb_dir.join("libxkbcommon.a").is_file() {
             panic!(
-                "libxkbcommon static lib missing at {} — run `bash client/build-libxkbcommon{}` first",
+                "libxkbcommon static lib missing at {} — run `bash scripts/build-libxkbcommon.sh{}` first",
                 xkb_dir.display(),
                 if target_arch == "x86_64" { " --abi=x86_64" } else { "" },
             );

@@ -107,7 +107,7 @@ internal object ArchPacmanCommon {
         // Static archives for the same multi-language runtimes and
         // sanitizers, plus a few large standalone static libs we never
         // statically link against. We build gtk4-debug-app dynamically
-        // (see `testing/gtk4-debug-app/build.sh`), so the ld(1) `-l`
+        // (see `tests/apps/gtk4-debug-app/build.sh`), so the ld(1) `-l`
         // search of these is dead weight on disk.
         //
         // Listed by exact path on purpose. A blanket `usr/lib/*.a`
@@ -537,7 +537,7 @@ PACMAN_EOF
     /**
      * Common base package set for every Arch flavour. Kept minimal —
      * specific subsystems (debug app, integration tests) install their
-     * own deps via `testing/install-test-deps.sh` etc.
+     * own deps via `scripts/install-test-deps.sh` etc.
      */
     val DEFAULT_BASE_PACKAGES: List<String> = listOf(
         "base-devel", "git", "wayland",

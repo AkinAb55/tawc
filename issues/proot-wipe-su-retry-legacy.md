@@ -4,12 +4,12 @@
 `ProotMethod.wipe` falls back to `Su.run("find … -xdev -depth -delete")`
 when the app-uid delete fails. The kdoc rationale (`ProotMethod.kt`
 ~lines 236-249) is that integration tests on rooted devices used to
-exercise `client/tawc-chroot-run` against a proot install via a
+exercise `scripts/tawc-chroot-run.sh` against a proot install via a
 `su -c '<enter.sh>'` path, leaving pacman/package files root-owned
 on disk. Plain app-uid `chmod -R u+rwX` then couldn't make those
 files writable, and unlink failed with EACCES.
 
-`client/tawc-chroot-run` now reads `metadata.json#method` and
+`scripts/tawc-chroot-run.sh` now reads `metadata.json#method` and
 dispatches:
 
 - proot install → `run-as me.phie.tawc <enter.sh>` (no root)
@@ -53,9 +53,9 @@ without rolling other unrelated cleanup in.
 
 ## References
 
-- `server/app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
+- `app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
   — `wipe` and its kdoc
-- `server/app/src/main/java/me/phie/tawc/install/RootfsCleaner.kt`
+- `app/src/main/java/me/phie/tawc/install/RootfsCleaner.kt`
   — chroot-side reference for mount-aware deletion
-- `client/tawc-chroot-run` — the now-method-aware dispatch that made
+- `scripts/tawc-chroot-run.sh` — the now-method-aware dispatch that made
   the legacy case stop accumulating

@@ -846,7 +846,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/wmww/smithay.git?branch=tawc-patches#5842fc8d58eef33f04a5400e89fd3604427a1002"
 dependencies = [
  "appendlist",
  "atomic_float",

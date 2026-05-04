@@ -206,6 +206,7 @@ fn ensure_pidfile_helper() -> io::Result<()> {
     let helper_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
+        .join("apps")
         .join("tawc-pidfile-exec");
     let staging = format!("{}/tawc-pidfile-exec", crate::TAWC_SCRATCH);
     adb::shell(&format!("mkdir -p {}", crate::TAWC_SCRATCH))?;

@@ -1,7 +1,7 @@
 # buildLibhybris / packLibhybris Gradle tasks lack inputs/outputs declarations
 
 The two `Exec` tasks added by the libhybris-as-asset commit (`8b198ed`)
-in `server/app/build.gradle.kts` — `buildLibhybris` and `packLibhybris`
+in `app/build.gradle.kts` — `buildLibhybris` and `packLibhybris`
 — declare neither `inputs.files(...)` nor `outputs.dir/file(...)`. Both
 hang off `preBuild` via `dependsOn`.
 
@@ -24,9 +24,9 @@ Teach each task what it consumes and produces:
 ```kotlin
 val buildLibhybrisTask = tasks.register<Exec>("buildLibhybris") {
     workingDir = tawcRoot
-    commandLine("bash", "client/build-libhybris-aarch64")
+    commandLine("bash", "scripts/build-libhybris.sh")
     inputs.files(fileTree("$tawcRoot/libhybris/hybris"))
-    inputs.file("$tawcRoot/client/build-libhybris-aarch64")
+    inputs.file("$tawcRoot/scripts/build-libhybris.sh")
     outputs.dir("$libhybrisInstallDir/lib")
 }
 
@@ -43,7 +43,7 @@ val packLibhybrisTask = tasks.register<Exec>("packLibhybris") {
 ```
 
 The exact `inputs.files(...)` set for `buildLibhybris` depends on what
-`client/build-libhybris-aarch64` actually reads — that script needs an
+`scripts/build-libhybris.sh` actually reads — that script needs an
 audit before declaring inputs, since under-declaring causes stale-
 tarball bugs (worse than today's slow behaviour) and over-declaring
 just costs incremental builds. Likely candidates:

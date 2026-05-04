@@ -97,12 +97,29 @@ val rustTripleFor = mapOf(
 )
 
 // Map an Android ABI to the (script flag, builddir name) pair
-// `client/build-libxkbcommon` uses. The compositor's build.rs reads
-// `libxkbcommon/<builddir>/libxkbcommon.a` for the matching arch.
+// `scripts/build-libxkbcommon.sh` uses. The compositor's build.rs reads
+// `deps/libxkbcommon/<builddir>/libxkbcommon.a` for the matching arch.
 val xkbForAbi = mapOf(
     "arm64-v8a" to ("aarch64" to "builddir"),
     "x86_64" to ("x86_64" to "builddir-x86_64"),
 )
+
+val tawcRootForSmithay = rootProject.projectDir
+val smithayCargoToml = "$tawcRootForSmithay/deps/smithay/Cargo.toml"
+
+// Ensure the smithay checkout exists before cargo runs. Cargo's
+// `[patch.crates-io] smithay = { path = "../deps/smithay" }` errors
+// up front if the dir is missing — so this has to come before the
+// per-ABI `buildRustLibrary*` tasks. Pin lives in deps/deps.list;
+// the script is just `dep_ensure smithay`.
+val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
+    workingDir = tawcRootForSmithay
+    commandLine("bash", "scripts/setup-smithay.sh")
+    inputs.file("$tawcRootForSmithay/scripts/setup-smithay.sh")
+    inputs.file("$tawcRootForSmithay/deps/deps.list")
+    inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
+    outputs.file(smithayCargoToml)
+}
 
 tawcAbis.forEach { abi ->
     val triple = rustTripleFor[abi] ?: error("Unsupported ABI: $abi")
@@ -111,25 +128,25 @@ tawcAbis.forEach { abi ->
     // Cross-build the static libxkbcommon the Rust compositor links
     // against. Same shape as buildLibhybris: invokes the host script,
     // skipped when the output artefact already exists.
-    val tawcRoot = rootProject.projectDir.parentFile
+    val tawcRoot = rootProject.projectDir
     val (xkbAbiFlag, xkbBuilddir) = xkbForAbi[abi]
         ?: error("Unsupported ABI for libxkbcommon: $abi")
-    val xkbStaticLib = "$tawcRoot/libxkbcommon/$xkbBuilddir/libxkbcommon.a"
+    val xkbStaticLib = "$tawcRoot/deps/libxkbcommon/$xkbBuilddir/libxkbcommon.a"
     val buildLibxkbcommonTask = tasks.register<Exec>("buildLibxkbcommon$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "client/build-libxkbcommon", "--abi=$xkbAbiFlag")
-        inputs.file("$tawcRoot/client/build-libxkbcommon")
+        commandLine("bash", "scripts/build-libxkbcommon.sh", "--abi=$xkbAbiFlag")
+        inputs.file("$tawcRoot/scripts/build-libxkbcommon.sh")
         // Manifest + helper changes must invalidate the cache — otherwise a
-        // bumped pin in client/deps.list silently no-ops while the .a stays
+        // bumped pin in deps/deps.list silently no-ops while the .a stays
         // built against the old commit. See CLAUDE.md "Vendored deps".
-        inputs.file("$tawcRoot/client/deps.list")
-        inputs.file("$tawcRoot/client/deps-lib.sh")
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.file(xkbStaticLib)
     }
 
     val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
-        dependsOn(buildLibxkbcommonTask)
+        dependsOn(buildLibxkbcommonTask, setupSmithayTask)
         workingDir = file("${rootProject.projectDir}/compositor")
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine(
@@ -155,20 +172,20 @@ tawcAbis.forEach { abi ->
     // libproot-loader.so under jniLibs. Same shape as buildLibhybris:
     // invokes the host script, skipped when the output binaries
     // already exist. The script is itself incremental, so iteration
-    // is `bash client/build-proot --abi=...` direct; Gradle just
+    // is `bash scripts/build-proot.sh --abi=...` direct; Gradle just
     // makes a fresh checkout's `assembleDebug` self-contained.
     val abiToScriptArg = mapOf("arm64-v8a" to "aarch64", "x86_64" to "x86_64")
     val scriptAbi = abiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
-    val prootBin = "$tawcRoot/server/app/src/main/jniLibs/$abi/libproot.so"
-    val prootLoader = "$tawcRoot/server/app/src/main/jniLibs/$abi/libproot-loader.so"
+    val prootBin = "$tawcRoot/app/src/main/jniLibs/$abi/libproot.so"
+    val prootLoader = "$tawcRoot/app/src/main/jniLibs/$abi/libproot-loader.so"
     val buildProotTask = tasks.register<Exec>("buildProot$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "client/build-proot", "--abi=$scriptAbi")
-        inputs.file("$tawcRoot/client/build-proot")
-        // Pin bumps in client/deps.list must invalidate the cache.
-        inputs.file("$tawcRoot/client/deps.list")
-        inputs.file("$tawcRoot/client/deps-lib.sh")
+        commandLine("bash", "scripts/build-proot.sh", "--abi=$scriptAbi")
+        inputs.file("$tawcRoot/scripts/build-proot.sh")
+        // Pin bumps in deps/deps.list must invalidate the cache.
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.files(prootBin, prootLoader)
     }
     tasks.named("preBuild") {
@@ -177,15 +194,15 @@ tawcAbis.forEach { abi ->
 
     // Cross-build tawcroot (the systrap-based proot replacement) and
     // stage libtawcroot.so under jniLibs. Same shape as buildProot.
-    val tawcrootBin = "$tawcRoot/server/app/src/main/jniLibs/$abi/libtawcroot.so"
+    val tawcrootBin = "$tawcRoot/app/src/main/jniLibs/$abi/libtawcroot.so"
     val buildTawcrootTask = tasks.register<Exec>("buildTawcroot$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine("bash", "tawcroot/build", "--abi=$scriptAbi")
         inputs.file("$tawcRoot/tawcroot/build")
-        // Pin bumps in client/deps.list must invalidate the cache (cleat).
-        inputs.file("$tawcRoot/client/deps.list")
-        inputs.file("$tawcRoot/client/deps-lib.sh")
+        // Pin bumps in deps/deps.list must invalidate the cache (cleat).
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.file(tawcrootBin)
     }
     tasks.named("preBuild") {
@@ -202,20 +219,18 @@ tawcAbis.forEach { abi ->
 // (notes/emulator.md). If the user runs with `-PtawcAbis=x86_64`
 // only, we silently skip libhybris bundling.
 //
-// The actual cross-compile lives in client/build-libhybris-aarch64 so
+// The actual cross-compile lives in scripts/build-libhybris.sh so
 // it can be run by hand for development. This Gradle task just invokes
 // it and packs the result.
 if ("arm64-v8a" in tawcAbis) {
-    // The tawc repo root is one level up from the Gradle root (which
-    // is `server/`). client/build-* and build/libhybris-* live there.
-    val tawcRoot = rootProject.projectDir.parentFile
+    val tawcRoot = rootProject.projectDir
     val libhybrisAbi = "arm64-v8a"
     val libhybrisInstallDir = "$tawcRoot/build/libhybris-aarch64/install/usr/local"
     val libhybrisAssetFile = "src/main/assets/libhybris/$libhybrisAbi.tar"
 
     val buildLibhybrisTask = tasks.register<Exec>("buildLibhybris") {
         workingDir = tawcRoot
-        commandLine("bash", "client/build-libhybris-aarch64")
+        commandLine("bash", "scripts/build-libhybris.sh")
         // The cross-compile script is itself incremental, but Gradle
         // still has to know when to invoke it. Tracked inputs:
         //   - the build script itself
@@ -223,9 +238,9 @@ if ("arm64-v8a" in tawcAbis) {
         //     cache — otherwise a moved libhybris commit would silently
         //     keep shipping the old .so set; see CLAUDE.md "Vendored deps")
         // The output dir snapshot covers the rest.
-        inputs.file("$tawcRoot/client/build-libhybris-aarch64")
-        inputs.file("$tawcRoot/client/deps.list")
-        inputs.file("$tawcRoot/client/deps-lib.sh")
+        inputs.file("$tawcRoot/scripts/build-libhybris.sh")
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.dir(libhybrisInstallDir)
     }
 
@@ -258,7 +273,7 @@ if ("arm64-v8a" in tawcAbis) {
     // runtime by `CompositorService.ensureXwaylandExtracted` into
     // `<filesDir>/xwayland/`, which the compositor then exec()s as the
     // X server child for any X11 client. The cross-compile lives in
-    // `client/build-xwayland-aarch64`; see notes/xwayland.md for the
+    // `scripts/build-xwayland.sh`; see notes/xwayland.md for the
     // full pipeline. Aarch64-only — same reason as libhybris (no
     // emulator support; the bionic-Xwayland piece itself would build,
     // but there's no point shipping it without GPU acceleration).
@@ -268,15 +283,15 @@ if ("arm64-v8a" in tawcAbis) {
 
     val buildXwaylandTask = tasks.register<Exec>("buildXwayland") {
         workingDir = tawcRoot
-        commandLine("bash", "client/build-xwayland-aarch64")
+        commandLine("bash", "scripts/build-xwayland.sh")
         // Same incremental story as `buildLibhybris`. Tracked inputs:
         //   - build script
         //   - patches dir (a patch edit must rebuild)
         //   - dep manifest + helper (a pin bump must rebuild)
-        inputs.file("$tawcRoot/client/build-xwayland-aarch64")
-        inputs.dir("$tawcRoot/xwayland-patches")
-        inputs.file("$tawcRoot/client/deps.list")
-        inputs.file("$tawcRoot/client/deps-lib.sh")
+        inputs.file("$tawcRoot/scripts/build-xwayland.sh")
+        inputs.dir("$tawcRoot/deps/xwayland-patches")
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.dir(xwaylandInstallDir)
     }
 

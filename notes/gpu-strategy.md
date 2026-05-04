@@ -64,9 +64,9 @@ allowing glibc programs to load bionic-linked Android shared libraries. Used by 
 OS and Ubuntu Touch. **Actively maintained** -- Android 16 support merged March 2026.
 
 We use [our fork](https://github.com/wmww/libhybris) with stock Android TLS fixes.
-Local checkout: `./libhybris`. Host-side cross-build (output ships in
+Local checkout: `./deps/libhybris`. Host-side cross-build (output ships in
 the APK as an asset, symlinked into each rootfs at install time):
-`bash client/build-libhybris-aarch64`.
+`bash scripts/build-libhybris.sh`.
 
 Loading chain in a client:
 ```
@@ -120,7 +120,7 @@ Buffer sharing path (post-libhybris-migration):
    Wayland connection — no side-channel socket.
 4. Compositor reconstructs the handle and calls
    `AHardwareBuffer_createFromHandle(REGISTER)` (via the C helper in
-   `server/compositor/native/wlegl_import.c`) to get an AHB pointer.
+   `compositor/native/wlegl_import.c`) to get an AHB pointer.
 5. Lazy texture import: `eglGetNativeClientBufferANDROID(ahb)` →
    `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` →
    `glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES)`. Cached on
@@ -160,7 +160,7 @@ performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_su
 in `vulkanplatform_wayland.so`, presents via `android_wlegl`. Used in Sailfish OS.
 
 **Status on tawc (OnePlus 9 / Adreno 660 / Android 16 LineageOS):** ✅ working.
-- `bash client/build-libhybris-aarch64` builds the `vulkan` subdir and stages
+- `bash scripts/build-libhybris.sh` builds the `vulkan` subdir and stages
   `libvulkan.so.1` and `libhybris/vulkanplatform_wayland.so` in the APK asset
   tree; the chroot installer symlinks them into `/usr/local/lib/`.
 - `vulkaninfo --summary` works end-to-end: `android_dlopen("libvulkan.so")` succeeds,

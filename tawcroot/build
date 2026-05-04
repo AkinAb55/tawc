@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cross-compile tawcroot (the systrap-based proot replacement) for Android
 # via the NDK and stage the binaries at
-# `server/app/src/main/jniLibs/<abi>/libtawcroot.so` so they ride along
+# `app/src/main/jniLibs/<abi>/libtawcroot.so` so they ride along
 # with the APK and are reachable at runtime via
 # `applicationInfo.nativeLibraryDir`.
 #
@@ -11,7 +11,7 @@
 # binary is a static, non-PIE ET_EXEC. See notes/tawcroot.md.
 #
 # This script lives in `tawcroot/` (with the rest of the tawcroot project)
-# but stages production binaries into `server/app/src/main/jniLibs/` —
+# but stages production binaries into `app/src/main/jniLibs/` —
 # that staging is the tawc-app integration. Strip it if you ever split
 # tawcroot into its own repo.
 #
@@ -43,13 +43,13 @@
 #   ./tawcroot/                          -- tawcroot source tree (this dir)
 #   ./tawcroot/tests/testhost/           -- testhost-only sources (smoke, child, phase1)
 #   ./tawcroot/tests/{unit,handler,integration}/ -- cleat test sources
-#   ./cleat/                             -- vendored cleat repo (gitignored, cloned by this script)
+#   ./deps/cleat/                        -- vendored cleat repo (gitignored, cloned by this script)
 #   ./build/tawcroot-<abi>/              -- per-ABI build dir (gitignored)
 #   ./build/tawcroot-host/               -- host-side build (production + testhost + tests)
 #
 # Output:
-#   server/app/src/main/jniLibs/arm64-v8a/libtawcroot.so          (production)
-#   server/app/src/main/jniLibs/x86_64/libtawcroot.so             (production)
+#   app/src/main/jniLibs/arm64-v8a/libtawcroot.so          (production)
+#   app/src/main/jniLibs/x86_64/libtawcroot.so             (production)
 #   build/tawcroot-host/tawcroot                                  (production, host)
 #   build/tawcroot-host/tawcroot-testhost                         (testhost, host)
 #   build/tawcroot-host/tests                                     (cleat orchestrator)
@@ -76,20 +76,20 @@ set -euo pipefail
 
 TAWCROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$TAWCROOT_DIR/.." && pwd)"
-# shellcheck source=../client/deps-lib.sh
-source "$REPO_DIR/client/deps-lib.sh"
+# shellcheck source=../scripts/lib/deps.sh
+source "$REPO_DIR/scripts/lib/deps.sh"
 TESTHOST_DIR="$TAWCROOT_DIR/tests/testhost"
 BUILD_ROOT="$REPO_DIR/build"
-JNILIBS_DIR="$REPO_DIR/server/app/src/main/jniLibs"
+JNILIBS_DIR="$REPO_DIR/app/src/main/jniLibs"
 CLEAT_DIR="$(dep_dir cleat)"
 
-# Cleat is pinned to a specific commit in client/deps.list. cleat is not
+# Cleat is pinned to a specific commit in deps/deps.list. cleat is not
 # released; api churn is expected. See notes/tawcroot.md "Testing strategy".
 setup_cleat() {
     dep_ensure cleat
 }
 
-# NDK lookup mirrors client/build-proot (we share the same NDK install).
+# NDK lookup mirrors scripts/build-proot.sh (we share the same NDK install).
 # Only required for the Android ABIs; the host build uses the system
 # toolchain.
 find_ndk() {
@@ -360,7 +360,7 @@ build_binary() {
 # against bionic instead of host gcc. Output lands at
 # `$BUILD_ROOT/tawcroot-<abi>/tests`. Fixture / testhost / prod paths are
 # baked in via -D as on-device absolute paths under the canonical scratch
-# dir (`/data/local/tmp/tawc-dev/`, also defined in `client/tawc-scratch.sh`)
+# dir (`/data/local/tmp/tawc-dev/`, also defined in `scripts/lib/tawc-scratch.sh`)
 # — tawcroot/test --device pushes them there.
 #
 # Cleat is hosted (it uses fork/exec/stdio); links bionic dynamically.
@@ -384,7 +384,7 @@ build_tests() {
 
     # On-device paths the orchestrator will exec at runtime. Must match
     # what tawcroot/test --device pushes (and the TAWC_SCRATCH constant
-    # in client/tawc-scratch.sh).
+    # in scripts/lib/tawc-scratch.sh).
     local on_device="/data/local/tmp/tawc-dev"
 
     # NDK clang doesn't recognize -fno-tree-loop-distribute-patterns (gcc-only);

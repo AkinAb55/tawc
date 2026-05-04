@@ -20,7 +20,7 @@
  *   - TAWC_DRI_LOOP_FRAMES=N            : double-buffered animated
  *                                          loop for N frames at ~60fps
  *
- * Built inside the chroot via testing/tawc-dri-test/build.sh.
+ * Built inside the chroot via tests/apps/tawc-dri-test/build.sh.
  *
  * Exit codes:
  *   0  success — all configured presents ran clean

@@ -25,7 +25,7 @@ fn test_tawcroot_device_suite() {
         .unwrap()
         .to_path_buf();
 
-    // `--device` invokes `client/select-device.sh`, which short-circuits
+    // `--device` invokes `scripts/lib/select-device.sh`, which short-circuits
     // when ANDROID_SERIAL is already set — `run-integration-tests.sh`
     // has already selected and exported it, so we inherit that here.
     // `--no-build` skips the cross-compile: run-integration-tests.sh is

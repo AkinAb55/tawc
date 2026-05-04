@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cross-compile proot (and its libtalloc dependency) for Android via the
 # NDK and stage the resulting binaries at
-# `server/app/src/main/jniLibs/<abi>/libproot.so` so they ride along with
+# `app/src/main/jniLibs/<abi>/libproot.so` so they ride along with
 # the APK and are reachable at runtime via `applicationInfo.nativeLibraryDir`.
 #
 # proot is the rootless install method: a ptrace-based chroot lookalike
@@ -9,12 +9,12 @@
 # notes/installation.md for how it slots into the install pipeline.
 #
 # Layout (everything under the project dir, gitignored):
-#   ./proot/                 -- proot-me/proot checkout, pinned tag below
-#   ./proot-deps/talloc/     -- libtalloc tarball extract, pinned version
+#   ./deps/proot/                 -- proot-me/proot checkout, pinned tag below
+#   ./deps/proot-deps/talloc/     -- libtalloc tarball extract, pinned version
 #
 # Output:
-#   server/app/src/main/jniLibs/arm64-v8a/libproot.so
-#   server/app/src/main/jniLibs/x86_64/libproot.so
+#   app/src/main/jniLibs/arm64-v8a/libproot.so
+#   app/src/main/jniLibs/x86_64/libproot.so
 #
 # Android requires native binaries shipped under jniLibs to be named
 # lib*.so so the package installer extracts them; the actual binary is
@@ -22,11 +22,11 @@
 # from `nativeLibraryDir` — see install/method/ProotMethod.kt.
 #
 # Usage:
-#   bash client/build-proot                  # build current host's primary ABI
-#   bash client/build-proot --abi=aarch64    # explicit
-#   bash client/build-proot --abi=x86_64     # emulator
-#   bash client/build-proot --abi=both
-#   bash client/build-proot --clean          # wipe build dirs first
+#   bash scripts/build-proot.sh                  # build current host's primary ABI
+#   bash scripts/build-proot.sh --abi=aarch64    # explicit
+#   bash scripts/build-proot.sh --abi=x86_64     # emulator
+#   bash scripts/build-proot.sh --abi=both
+#   bash scripts/build-proot.sh --clean          # wipe build dirs first
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ set -euo pipefail
 #
 # Termux's fork also carries Android-specific fixes for things like
 # SYSCALL_AVOIDER values, loader ELF base addresses, and the `ioctl`
-# filter rule. The pin (sha + repo URL) lives in client/deps.list.
+# filter rule. The pin (sha + repo URL) lives in deps/deps.list.
 #
 # talloc is a tarball, not a git checkout — version is in the URL, so
 # bumping TALLOC_VERSION below triggers a fresh download by construction
@@ -55,14 +55,14 @@ TALLOC_TARBALL_URL="https://download.samba.org/pub/talloc/talloc-${TALLOC_VERSIO
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=deps-lib.sh
-source "$SCRIPT_DIR/deps-lib.sh"
+# shellcheck source=lib/deps.sh
+source "$SCRIPT_DIR/lib/deps.sh"
 PROOT_DIR="$(dep_dir proot)"
-DEPS_DIR="$REPO_DIR/proot-deps"
+DEPS_DIR="$REPO_DIR/deps/proot-deps"
 TALLOC_DIR="$DEPS_DIR/talloc-${TALLOC_VERSION}"
-JNILIBS_DIR="$REPO_DIR/server/app/src/main/jniLibs"
+JNILIBS_DIR="$REPO_DIR/app/src/main/jniLibs"
 
-# NDK lookup mirrors client/build-libxkbcommon — see that script for rationale.
+# NDK lookup mirrors scripts/build-libxkbcommon.sh — see that script for rationale.
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
     if [ -d "$DEFAULT_SDK/ndk" ]; then
@@ -98,14 +98,14 @@ fi
 
 # ---------------------------------------------------------------------------
 # Source fetch. dep_ensure clones if missing and verifies HEAD against the
-# pin in client/deps.list. Submodules and our small inline patch run after.
+# pin in deps/deps.list. Submodules and our small inline patch run after.
 fetch_proot() {
     dep_ensure proot
     git -C "$PROOT_DIR" submodule update --init --depth 1 --quiet
     apply_local_patches
 }
 
-# `proot/src/extension/ashmem_memfd/ashmem_memfd.c` uses memcpy/strerror
+# `deps/proot/src/extension/ashmem_memfd/ashmem_memfd.c` uses memcpy/strerror
 # without including <string.h>. Compiles fine under glibc (transitive
 # include) but errors under NDK clang. Idempotent via the grep guard.
 apply_local_patches() {

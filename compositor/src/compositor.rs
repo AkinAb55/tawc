@@ -383,7 +383,7 @@ impl CompositorHandler for TawcState {
         // Track the attached android_wlegl (AHB) buffer so the renderer can
         // find its texture. Smithay's `SurfaceAttributes::merge_into` already
         // sent `wl_buffer.release` for the old buffer before this handler runs
-        // (see smithay/src/wayland/compositor/handlers.rs:125), so the client
+        // (see deps/smithay/src/wayland/compositor/handlers.rs:125), so the client
         // has been told the old buffer is free exactly once. We just mirror
         // the current attachment into `surface_wlegl` for the renderer.
         use smithay::wayland::compositor::{with_states, SurfaceAttributes};

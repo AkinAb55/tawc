@@ -59,7 +59,7 @@ See [notes/text-input.md](notes/text-input.md) for design.
 
 ## Testing Infrastructure ✅
 - ✅ GTK3 debug app (`testing/gtk3-debug-app/`) -- C, built in chroot
-- ✅ Integration test harness (`testing/integration/`) -- Rust, runs on host
+- ✅ Integration test harness (`tests/integration/`) -- Rust, runs on host
 - ✅ Broadcast-based input injection (reliable, bypasses IME)
 - ✅ Text input tests (basic text, backspace, multi-word)
 See [notes/testing.md](notes/testing.md) for details.
@@ -76,8 +76,8 @@ See [notes/testing.md](notes/testing.md) for details.
 - ✅ `android_wlegl` protocol dispatch in compositor (Rust + ~50-line C helper calling `AHardwareBuffer_createFromHandle`)
 - ✅ libhybris fork: AHB gralloc backend (`AHardwareBuffer_*` via libnativewindow.so) to produce modern-format handles — without it the stock vendor gralloc1 path returns handles the Android-side mapper rejects on Android 12+ devices. Plus shared-queue and `queueBuffer`-attach patches needed by Firefox/Adreno. See `libhybris/TAWC_FORK.md`.
 - ✅ Chroot env: `HYBRIS_EGLPLATFORM=wayland`, `LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib`.
-- ✅ Dead code removed: `client/tawc-wsi/` directory (tawc-egl.c ~1500 lines), `server/compositor/protocols/tawc_buffer_v1.xml`, `src/ahb.rs`, the Unix-socket side-channel, the `surface_ahb` HashMap, the legacy `import_pending_ahbs` render path.
-- ✅ Tiny GL shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`, ~30 lines each) built host-side by `bash client/build-libhybris-aarch64` and shipped in the APK. Firefox/glxtest and GTK/libepoxy probe libGL.so/libGLESv2.so by name and need GLX symbols stubbed so Mesa GLX (broken in chroot) doesn't get reached. See `notes/wsi-layer.md` "Why GL shims still exist".
+- ✅ Dead code removed: `client/tawc-wsi/` directory (tawc-egl.c ~1500 lines), `compositor/protocols/tawc_buffer_v1.xml`, `src/ahb.rs`, the Unix-socket side-channel, the `surface_ahb` HashMap, the legacy `import_pending_ahbs` render path.
+- ✅ Tiny GL shims (`deps/libhybris-shims/libgl-shim.c`, `deps/libhybris-shims/libglesv2-shim.c`, ~30 lines each) built host-side by `bash scripts/build-libhybris.sh` and shipped in the APK. Firefox/glxtest and GTK/libepoxy probe libGL.so/libGLESv2.so by name and need GLX symbols stubbed so Mesa GLX (broken in chroot) doesn't get reached. See `notes/wsi-layer.md` "Why GL shims still exist".
 - ✅ Integration tests (text-input SHM, click-cursor AHB, firefox AHB) all pass.
 
 ## Vulkan WSI ✅ (2026-04-20)
@@ -87,7 +87,7 @@ libhybris has built-in Wayland Vulkan WSI (`vulkanplatform_wayland.so`). It inte
 Wayland platform migration is done and the compositor serves `android_wlegl`, Vulkan
 clients should work via `HYBRIS_VULKANPLATFORM=wayland`.
 
-- ✅ `vulkan` subdir built by `bash client/build-libhybris-aarch64`; ships `libvulkan.so.1`
+- ✅ `vulkan` subdir built by `bash scripts/build-libhybris.sh`; ships `libvulkan.so.1`
   (shadows `vulkan-icd-loader` via `LD_LIBRARY_PATH`) and `libhybris/vulkanplatform_wayland.so`
 - ✅ `vulkan.c` compiles with vulkan-headers 1.4.341 (Cuda NV extension guard switched
   from `VK_HEADER_VERSION >= 269` to `#ifdef VK_NV_cuda_kernel_launch` — the NV Cuda
@@ -113,7 +113,7 @@ the as-built notes.
 - ✅ Compositor moved into foreground `CompositorService` (specialUse
   type, `START_STICKY`). `nativeStartCompositor` runs once per process
   and outlives any single Activity.
-- ✅ `OutputHost` per Activity (`server/compositor/src/host.rs`) owns
+- ✅ `OutputHost` per Activity (`compositor/src/host.rs`) owns
   the EGLSurface + ANativeWindow + dimensions. Multiple hosts make
   current per render via the calloop frame timer.
 - ✅ `toplevel_to_host: HashMap<WlSurface, ActivityId>` filters the
@@ -198,7 +198,7 @@ for the full design.
   §"Which syscalls need translation" wired through the dispatch table.
 - Phase 4 — emulator integration (x86_64 AVD): `tawcroot/build`,
   jniLib packaging as `libtawcroot.so`, `TawcrootMethod.kt` next to
-  `ProotMethod.kt`, dispatch in `client/tawc-chroot-run`, wrapper
+  `ProotMethod.kt`, dispatch in `scripts/tawc-chroot-run.sh`, wrapper
   script. Run `pacman -Syu` to completion; verify the lp64-`access`-on-
   x86_64 stacked-filter case (only fires on x86_64).
 - Phase 5 — aarch64 port (real device): `arch/aarch64.h` + stub asm,
@@ -228,7 +228,7 @@ for the full design.
   suite, OnePlus 9". **Phase 5d in-app install green (2026-05-02):
   18/18 integration tests pass after installing through the
   in-app installer (`InstallActivity --es method tawcroot`)
-  rather than the adb-shell `client/tawc-chroot-run` path used
+  rather than the adb-shell `scripts/tawc-chroot-run.sh` path used
   by 5c. Three more tawcroot bugs surfaced and got fixed:
   (1) `prod_rootfs_init` / `loader_exec_child` had `probe_openat2`
   running with SIGSYS still blocked from the inherited initial
@@ -248,12 +248,12 @@ for the full design.
   `/tmp/.X11-unix → /data/data/me.phie.tawc/xtmp/.X11-unix`,
   so X clients in the chroot couldn't reach Xwayland. Switched
   to invoking the per-install `enter.sh` (same shape as
-  `client/tawc-chroot-run`) and added `DISPLAY=:0` +
+  `scripts/tawc-chroot-run.sh`) and added `DISPLAY=:0` +
   `SDL_VIDEODRIVER=wayland,x11` + the X-socket symlink to its
   profile.d body. One workaround still active and tracked
   separately: `pacman-key --init`'s `gpg-agent` spins at 100%
   CPU when started from the in-app installer process (works
-  fine via `client/tawc-chroot-run` from adb shell), so
+  fine via `scripts/tawc-chroot-run.sh` from adb shell), so
   `ArchPacmanCommon` pins `SigLevel = Never` and skips
   `pacman-key` for tawcroot installs — see
   `issues/tawcroot-gpg-agent-hangs-from-app-context.md`.**

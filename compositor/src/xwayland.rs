@@ -37,7 +37,7 @@ use crate::host::ActivityId;
 
 /// Where Xwayland's listening socket / lockfile live. Patched smithay
 /// reads `TAWC_XWL_RUNTIME_DIR` from env; cross-compiled libxcb /
-/// xtrans have this baked in (see `client/build-xwayland-aarch64`).
+/// xtrans have this baked in (see `scripts/build-xwayland.sh`).
 pub const XWL_RUNTIME_DIR: &str = "/data/data/me.phie.tawc/xtmp";
 
 /// Where the in-app extractor stages the Xwayland binary + libs.

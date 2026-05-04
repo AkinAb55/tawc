@@ -1,6 +1,6 @@
 # Shared dep-fetch + verify helper. Sourced by every build script that
 # vendors a third-party repo. Single source of truth for pins lives in
-# `client/deps.list`. See CLAUDE.md "Vendored deps" for the policy.
+# `deps/deps.list`. See CLAUDE.md "Vendored deps" for the policy.
 #
 # Public API (after sourcing):
 #   dep_dir <name>     -- echo absolute checkout path for <name>
@@ -9,7 +9,7 @@
 #   dep_reset <name>   -- fetch + `git reset --hard <commit>`. Wipes any
 #                         per-dep `.tawc-patches-applied-*` sentinel so
 #                         the build's apply_patches stage re-runs. Used
-#                         exclusively by `client/update-deps`.
+#                         exclusively by `scripts/update-deps.sh`.
 #   deps_all_names     -- echo every dep name, one per line, in manifest order.
 #
 # Concurrency: callers serialise clone/checkout via flock on
@@ -22,9 +22,10 @@
 # shellcheck shell=bash
 
 if [ -z "${DEPS_REPO_DIR:-}" ]; then
-    DEPS_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    # scripts/lib/deps.sh -> ../..  is the repo root.
+    DEPS_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
-DEPS_MANIFEST="$DEPS_REPO_DIR/client/deps.list"
+DEPS_MANIFEST="$DEPS_REPO_DIR/deps/deps.list"
 DEPS_LOCKFILE="$DEPS_REPO_DIR/build/.deps.lock"
 
 # Walk deps.list emitting (name, repo, commit, ref, dest) tab-separated.
@@ -124,10 +125,10 @@ _dep_verify_head() {
     if [ "$actual" != "$DEP_COMMIT" ]; then
         cat >&2 <<EOF
 ERROR: dep '$DEP_NAME' is at the wrong commit.
-       expected: $DEP_COMMIT  (from client/deps.list)
+       expected: $DEP_COMMIT  (from deps/deps.list)
        got:      $actual      (HEAD of ${DEP_DEST#$DEPS_REPO_DIR/})
-       Run \`bash client/update-deps $DEP_NAME\` to align, OR — if you
-       deliberately moved the dep — bump the commit in client/deps.list
+       Run \`bash scripts/update-deps.sh $DEP_NAME\` to align, OR — if you
+       deliberately moved the dep — bump the commit in deps/deps.list
        to $actual and re-run.
 EOF
         return 1

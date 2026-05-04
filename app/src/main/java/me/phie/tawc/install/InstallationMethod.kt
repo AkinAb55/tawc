@@ -136,7 +136,7 @@ interface InstallationMethod {
     /**
      * Render the contents of `enter.sh` for an installation rooted at
      * [rootfs]. Both in-app callers (via this method's [runInside])
-     * and host-side `client/tawc-chroot-run` exec this exact script,
+     * and host-side `scripts/tawc-chroot-run.sh` exec this exact script,
      * so the launcher logic only lives here.
      *
      * For [ChrootMethod] the script is a `#!/system/bin/sh` that

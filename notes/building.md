@@ -1,7 +1,7 @@
 # Building tawc
 
 > **Source of truth for build dependencies and the fresh-system build flow.**
-> Keep this file in sync with the `client/build-*` scripts and Gradle config.
+> Keep this file in sync with the `scripts/build-*.sh` scripts and Gradle config.
 > Whenever you add or change a build-time dep — host package, vendored
 > repo, env var, toolchain version — update this doc in the same change.
 > CLAUDE.md instructs agents to consult and update this file when building.
@@ -16,17 +16,17 @@ untested.
 # One-time: install host deps (see "Host packages" below)
 
 # Each iteration:
-cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
 ```
 
-Vendored repos (`./libxkbcommon/`, `./libhybris/`, `./android-headers/`)
+Vendored repos (`./deps/libxkbcommon/`, `./deps/libhybris/`, `./deps/android-headers/`)
 are auto-cloned by their respective build scripts on first invocation —
 no manual clone step is needed. Gradle drives those scripts ahead of the
 Rust compositor build, so a fresh clone goes straight to `assembleDebug`.
-To force a rebuild by hand, run `bash client/build-libxkbcommon` or
-`bash client/build-libhybris-aarch64`.
+To force a rebuild by hand, run `bash scripts/build-libxkbcommon.sh` or
+`bash scripts/build-libhybris.sh`.
 
-The result is `server/app/build/outputs/apk/debug/app-debug.apk`. Install
+The result is `app/build/outputs/apk/debug/app-debug.apk`. Install
 and launch as documented in CLAUDE.md's Quick Reference.
 
 ## Host packages
@@ -38,7 +38,7 @@ and launch as documented in CLAUDE.md's Quick Reference.
 | JDK 21    | `jdk21-openjdk`                                        | `openjdk-21-jdk`                                     |
 | Rust      | `rustup` (then `rustup default stable`)                | `rustup` (via rustup.rs)                             |
 | Cargo NDK | `cargo install cargo-ndk`                              | same                                                 |
-| Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. NDK version pinned in `server/app/build.gradle.kts` (currently 27.2.12479018). | same |
+| Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). | same |
 | Build basics | `base-devel`                                        | `build-essential pkg-config`                         |
 | Meson + Ninja (libxkbcommon) | `meson ninja`                            | `meson ninja-build`                                  |
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev wayland-protocols`                   |
@@ -73,28 +73,28 @@ export ANDROID_HOME=$HOME/Android/Sdk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
 ```
 
-`ANDROID_NDK_HOME` is auto-detected by `client/build-libxkbcommon`
+`ANDROID_NDK_HOME` is auto-detected by `scripts/build-libxkbcommon.sh`
 (it falls back to `$ANDROID_HOME/ndk/<latest>`). `JAVA_HOME` must be
 set explicitly when invoking `./gradlew` if your default JDK isn't 21.
 
 ## Vendored repos
 
 All gitignored. The pinned commit + repo URL for every vendored git dep
-lives in **[`client/deps.list`](../client/deps.list)** — single source
-of truth. Build scripts source `client/deps-lib.sh` and call
+lives in **[`deps/deps.list`](../deps/deps.list)** — single source
+of truth. Build scripts source `scripts/lib/deps.sh` and call
 `dep_ensure <name>`, which clones if missing and **errors loudly** if
 the existing checkout is at the wrong commit (uncommitted edits are
 silently tolerated as long as HEAD matches the pin).
 
 | Path                                  | Used by                                       |
 |---------------------------------------|-----------------------------------------------|
-| `./libhybris/`                        | `client/build-libhybris-aarch64`              |
-| `./android-headers/`                  | `client/build-libhybris-aarch64`              |
-| `./libxkbcommon/`                     | `client/build-libxkbcommon`                   |
-| `./proot/` (+ `./proot-deps/talloc-*` tarball) | `client/build-proot`                |
-| `./cleat/`                            | `tawcroot/build` (host + device test runners) |
-| `./xwayland-src/<lib>/` (~22 repos)   | `client/build-xwayland-aarch64`               |
-| `./smithay/`                          | Rust compositor (pinned via `compositor/Cargo.toml`, fetched by Cargo) |
+| `./deps/libhybris/`                        | `scripts/build-libhybris.sh`              |
+| `./deps/android-headers/`                  | `scripts/build-libhybris.sh`              |
+| `./deps/libxkbcommon/`                     | `scripts/build-libxkbcommon.sh`                   |
+| `./deps/proot/` (+ `./deps/proot-deps/talloc-*` tarball) | `scripts/build-proot.sh`                |
+| `./deps/cleat/`                            | `tawcroot/build` (host + device test runners) |
+| `./deps/xwayland-src/<lib>/` (~22 repos)   | `scripts/build-xwayland.sh`               |
+| `./deps/smithay/`                     | Rust compositor (`scripts/setup-smithay.sh`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
 
 Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — their
 version is baked into the URL inside the build script, so a version
@@ -103,9 +103,9 @@ bump auto-fetches a fresh extract.
 ### Bumping a dep
 
 1. `cd <dep>; git checkout <new commit>; iterate; (push if needed)`
-2. Edit `client/deps.list` — bump the commit column.
-3. On every checkout that needs to follow: `bash client/update-deps`
-   (or `bash client/update-deps <name>` for a subset). This is the only
+2. Edit `deps/deps.list` — bump the commit column.
+3. On every checkout that needs to follow: `bash scripts/update-deps.sh`
+   (or `bash scripts/update-deps.sh <name>` for a subset). This is the only
    command that mutates dep checkouts behind your back.
 
 If you bumped commits but forgot to update `deps.list` (or the other
@@ -129,13 +129,13 @@ Run the standalone scripts only when iterating on the component itself
 Cross-built once per ABI. NDK clang against bionic.
 
 ```bash
-bash client/build-libxkbcommon                  # aarch64 (default)
-bash client/build-libxkbcommon --abi=x86_64     # emulator
-bash client/build-libxkbcommon --abi=both
-bash client/build-libxkbcommon --clean          # wipe builddir(s)
+bash scripts/build-libxkbcommon.sh                  # aarch64 (default)
+bash scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
+bash scripts/build-libxkbcommon.sh --abi=both
+bash scripts/build-libxkbcommon.sh --clean          # wipe builddir(s)
 ```
 
-Output: `libxkbcommon/builddir{,-x86_64}/libxkbcommon.a`. Linked into
+Output: `deps/libxkbcommon/builddir{,-x86_64}/libxkbcommon.a`. Linked into
 `libcompositor.so` via `compositor/build.rs`.
 
 ### libhybris (shared .so set → ships in APK as asset, future)
@@ -143,8 +143,8 @@ Output: `libxkbcommon/builddir{,-x86_64}/libxkbcommon.a`. Linked into
 Cross-built once. aarch64-linux-gnu-gcc against glibc.
 
 ```bash
-bash client/build-libhybris-aarch64           # incremental
-bash client/build-libhybris-aarch64 --clean   # distclean + rebuild
+bash scripts/build-libhybris.sh           # incremental
+bash scripts/build-libhybris.sh --clean   # distclean + rebuild
 ```
 
 Output: `build/libhybris-aarch64/install/usr/local/lib/`, mirroring the
@@ -160,7 +160,7 @@ only resolve when builddir == srcdir. `--clean` runs `make distclean`
 on the source tree.
 
 Bundled into the APK by the Gradle `packLibhybris` task as
-`server/app/src/main/assets/libhybris/arm64-v8a.tar`. Extracted at
+`app/src/main/assets/libhybris/arm64-v8a.tar`. Extracted at
 first compositor start by `CompositorService.ensureLibhybrisExtracted`,
 and symlinked into each rootfs at chroot install time by
 `LibhybrisLinker.kt`. End-to-end automatic — no manual steps after
@@ -206,9 +206,9 @@ Cross-built once. NDK clang against bionic — same toolchain as the
 Rust compositor. Aarch64-only.
 
 ```bash
-bash client/build-xwayland-aarch64           # incremental
-bash client/build-xwayland-aarch64 --clean   # wipe install + builddirs
-bash client/build-xwayland-aarch64 --only=libx11   # rebuild one stage
+bash scripts/build-xwayland.sh           # incremental
+bash scripts/build-xwayland.sh --clean   # wipe install + builddirs
+bash scripts/build-xwayland.sh --only=libx11   # rebuild one stage
 ```
 
 Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`,
@@ -232,20 +232,20 @@ automatically; no separate command needed.
 
 ```bash
 # Manual invocation (Gradle does this for you):
-cd server/compositor && \
+cd compositor && \
     cargo ndk --target arm64-v8a --platform 29 -- build --release
 ```
 
 ### proot (Termux fork → ships in APK as jniLib)
 
 Cross-built once per ABI. NDK clang against bionic. Output:
-`server/app/src/main/jniLibs/<abi>/libproot.so` + `libproot-loader.so`.
+`app/src/main/jniLibs/<abi>/libproot.so` + `libproot-loader.so`.
 Auto-invoked by Gradle's `buildProot<Abi>` task; standalone:
 
 ```bash
-bash client/build-proot                # current host's primary ABI
-bash client/build-proot --abi=both     # both Android ABIs
-bash client/build-proot --clean        # wipe and rebuild
+bash scripts/build-proot.sh                # current host's primary ABI
+bash scripts/build-proot.sh --abi=both     # both Android ABIs
+bash scripts/build-proot.sh --clean        # wipe and rebuild
 ```
 
 See [proot.md](proot.md) for why we use Termux's fork.
@@ -254,7 +254,7 @@ See [proot.md](proot.md) for why we use Termux's fork.
 
 Cross-built once per ABI. NDK clang against bionic, static non-PIE
 ET_EXEC, `-nostdlib` freestanding. Output:
-`server/app/src/main/jniLibs/<abi>/libtawcroot.so`. Auto-invoked by
+`app/src/main/jniLibs/<abi>/libtawcroot.so`. Auto-invoked by
 Gradle's `buildTawcroot<Abi>` task; standalone:
 
 ```bash
@@ -270,14 +270,14 @@ See [tawcroot.md](tawcroot.md) for the design.
 ### APK assembly
 
 ```bash
-cd server && JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
 ```
 
 Invokes the Rust compositor build, copies its output into
 `jniLibs/<abi>/`; cross-builds proot and tawcroot and stages the
-result alongside; runs `client/build-libhybris-aarch64` and packs the
+result alongside; runs `scripts/build-libhybris.sh` and packs the
 result into `assets/libhybris/arm64-v8a.tar`; runs
-`client/build-xwayland-aarch64` and packs the result into
+`scripts/build-xwayland.sh` and packs the result into
 `assets/xwayland/arm64-v8a.tar`; produces
 `app/build/outputs/apk/debug/app-debug.apk`. Everything libhybris,
 proot, tawcroot, and Xwayland need ships inside this APK.
@@ -285,7 +285,7 @@ proot, tawcroot, and Xwayland need ships inside this APK.
 ## Install and launch
 
 ```bash
-adb install -r server/app/build/outputs/apk/debug/app-debug.apk && \
+adb install -r app/build/outputs/apk/debug/app-debug.apk && \
 adb shell am force-stop me.phie.tawc && \
 adb shell am start -n me.phie.tawc/.compositor.CompositorActivity \
     -d "tawc://activity/manual"
@@ -311,7 +311,7 @@ via `magiskpolicy --live` on every chroot entry.
 
 The compositor needs xkeyboard-config data for `libxkbcommon` to load
 keymaps. This is **not** built — it's a pure data drop, vendored in
-`server/app/src/main/assets/xkb/` and extracted to the app's data dir
+`app/src/main/assets/xkb/` and extracted to the app's data dir
 (`files/xkb`) by `CompositorService.onCreate` before `nativeStartCompositor`.
 Versioned via `files/xkb/.version`.
 
@@ -322,9 +322,9 @@ The data came from the chroot's `/usr/share/xkeyboard-config-2/`
 adb shell mkdir -p /data/local/tmp/tawc-dev
 adb shell "su -c 'cd /data/data/me.phie.tawc/distros/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/tawc-dev/xkb-data.tar .'"
 adb pull /data/local/tmp/tawc-dev/xkb-data.tar /tmp/xkb-data.tar
-rm -rf server/app/src/main/assets/xkb
-mkdir -p server/app/src/main/assets/xkb
-tar xf /tmp/xkb-data.tar -C server/app/src/main/assets/xkb/
+rm -rf app/src/main/assets/xkb
+mkdir -p app/src/main/assets/xkb
+tar xf /tmp/xkb-data.tar -C app/src/main/assets/xkb/
 rm /tmp/xkb-data.tar
 adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 ```
@@ -345,6 +345,6 @@ adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 See [testing.md](testing.md) for full details.
 
 ```bash
-bash testing/build-debug-app.sh                 # debug app on phone
-cd testing/integration && cargo test -- --nocapture --test-threads=1
+bash scripts/build-debug-app.sh                 # debug app on phone
+cd tests/integration && cargo test -- --nocapture --test-threads=1
 ```

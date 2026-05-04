@@ -133,14 +133,14 @@ pub fn wait_for_rendered_toplevels(
 /// launches it once before invoking `cargo test` and force-stops it
 /// after the suite. A failure here means the script wasn't used (or
 /// the compositor died mid-suite), and the right fix is to re-run
-/// `bash testing/run-integration-tests.sh` rather than to start it
+/// `bash scripts/run-integration-tests.sh` rather than to start it
 /// from inside a test.
 pub fn assert_running() {
     match is_running() {
         Ok(true) => {}
         Ok(false) => panic!(
             "tawc compositor is not running on the device — run the suite via \
-             `bash testing/run-integration-tests.sh` (which starts the compositor) \
+             `bash scripts/run-integration-tests.sh` (which starts the compositor) \
              instead of invoking `cargo test` directly"
         ),
         Err(e) => panic!("failed to check whether tawc compositor is running: {e}"),

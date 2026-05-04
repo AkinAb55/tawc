@@ -79,7 +79,7 @@ needs proot fork changes.
 
 ## References
 
-- `server/app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
+- `app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
   (`renderEnterScript` body, the `MOZ_DISABLE_*` exports inside
   `/etc/profile.d/01-tawc.sh`)
 - `notes/proot.md` "Firefox under proot" — documents the why.

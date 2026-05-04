@@ -54,7 +54,7 @@ pub struct RenderState {
     /// multiplies by the texture alpha; GTK/libhybris render RGB content
     /// with alpha=0 (GTK assumes its surfaces are opaque and never writes
     /// alpha), which makes the output fully transparent. See
-    /// `variant_for_format` in smithay/src/backend/renderer/gles/shaders/implicit/mod.rs.
+    /// `variant_for_format` in deps/smithay/src/backend/renderer/gles/shaders/implicit/mod.rs.
     pub wlegl_opaque_shader: Option<GlesTexProgram>,
     pub raw_egl_display: *const c_void,
     pub raw_egl_context: *const c_void,

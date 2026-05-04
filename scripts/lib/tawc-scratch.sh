@@ -24,11 +24,11 @@
 #     also be using.
 #
 # Callers:
-#   source client/tawc-scratch.sh   # exports TAWC_SCRATCH, mkdir's it
+#   source scripts/lib/tawc-scratch.sh   # exports TAWC_SCRATCH, mkdir's it
 #   adb push foo "$TAWC_SCRATCH/foo"
 #
 # Requires: adb on PATH, ANDROID_SERIAL already selected (e.g. by
-# sourcing client/select-device.sh first).
+# sourcing scripts/lib/select-device.sh first).
 
 export TAWC_SCRATCH=/data/local/tmp/tawc-dev
 adb shell "mkdir -p $TAWC_SCRATCH" >/dev/null

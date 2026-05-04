@@ -21,7 +21,7 @@ of the box.
   on the wire and dispatches requests. Verification:
   `apps::test_tawc_dri_extension_round_trip` exercises
   `QueryExtension` + `QueryVersion` + `PresentBuffer` from a chroot
-  xcb client (`testing/tawc-dri-test/`).
+  xcb client (`tests/apps/tawc-dri-test/`).
 - **Phase 2 step 2 — done (2026-04-29).** Server-side AHB
   allocation + shipping over `android_wlegl`. New files:
   `hw/xwayland/xwayland-tawc-libnativewindow.{c,h}` — dlopen wrapper
@@ -58,7 +58,7 @@ of the box.
   bypasses Xwayland's normal pixmap router; it's correct for pure
   AHB-presenting clients (Phase 4 GL) but means server-side X11
   drawing on the same window is incompatible — out of scope for
-  Phase 2. Test client (`testing/tawc-dri-test/tawc-dri-test.c`)
+  Phase 2. Test client (`tests/apps/tawc-dri-test/tawc-dri-test.c`)
   upgraded to allocate an AHB via `hybris_dlopen("libnativewindow.so")`
   + `AHardwareBuffer_*` (libhybris-common.so loads the bionic lib
   from the glibc chroot), CPU-fills with a green→yellow gradient
@@ -79,7 +79,7 @@ of the box.
   with a swept gradient phase) runs 120 frames in 2.0s, the
   compositor imports all 120 AHBs cleanly, and the client sustains
   ≥50fps (no server-side back-pressure). All step-2 + step-3 changes
-  consolidated into `xwayland-patches/xwayland/02-tawc-step3-ahb-present.patch`.
+  consolidated into `deps/xwayland-patches/xwayland/02-tawc-step3-ahb-present.patch`.
   `xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)` is still a NULL stub —
   step-3 doesn't go through the pixmap router. Phase-3 GL or the
   full GLAMOR rerouting (if we ever do it) will fill it in.
@@ -107,13 +107,13 @@ of the box.
   `EGL_PLATFORM_X11_KHR` dispatch in `hybris/egl/egl.c` (under
   `#ifdef WANT_X11`, parallel to the existing `WANT_WAYLAND`
   branch), and a new `x11` SUBDIRS entry in
-  `hybris/egl/platforms/Makefile.am`. `client/build-libhybris-aarch64`
+  `hybris/egl/platforms/Makefile.am`. `scripts/build-libhybris.sh`
   generates stub SONAMEs for `libX11.so.6` / `libxcb.so.1` /
   `libX11-xcb.so.1` (chroot supplies real impls at runtime, same
   pattern as the existing wayland-client/server stubs) and synthesises
   pkg-config files pointing at the host's plain-C X11/xcb headers.
   Verification: `apps::test_eglx11_renders_via_ahb` runs a
-  chroot-side EGL-on-X11 client (`testing/eglx11-test/`) for 30
+  chroot-side EGL-on-X11 client (`tests/apps/eglx11-test/`) for 30
   frames; the test asserts `eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR)`
   succeeds, GL_VENDOR=Qualcomm, and the compositor logs both
   `wlegl: create_buffer 320x240 ... fmt=1` (AHB import via
@@ -165,7 +165,7 @@ of the box.
     `apps::test_es2gears_x11_renders_via_ahb` runs es2gears for 4s
     and asserts ≥100 AHB imports, zero `createFromHandle` failures,
     no `Xwayland disconnected: Protocol error`. mesa-demos added to
-    `testing/install-test-deps.sh`.
+    `scripts/install-test-deps.sh`.
 
   **Wine-game shakedown remains future work** — left for when a
   specific Wine workload becomes interesting.
@@ -238,15 +238,15 @@ window, renders into a wl_shm buffer (magenta-tinted per the SHM
 fallback policy) on top of the compositor's gradient background.
 Covered by `apps::test_xwayland_xclock_renders_via_shm`.
 
-Build script: `client/build-xwayland-aarch64`. Pinned upstream tags
-cloned into `./xwayland-src/<lib>/`, patches in
-`./xwayland-patches/<lib>/` applied via `clone_pinned →
+Build script: `scripts/build-xwayland.sh`. Pinned upstream tags
+cloned into `./deps/xwayland-src/<lib>/`, patches in
+`./deps/xwayland-patches/<lib>/` applied via `clone_pinned →
 apply_patches`, cross-compiled with the NDK toolchain
 (`aarch64-linux-android29-clang`), staged into
 `build/xwayland-aarch64/install/{bin,lib,include,share}` which doubles
 as the pkg-config sysroot for downstream stages.
 
-### Patches (vendored in xwayland-patches/, derived from termux-packages)
+### Patches (vendored in deps/xwayland-patches/, derived from termux-packages)
 
 All patches are tiny (≤30 lines each) and cleanly forward-port from
 termux's pinned versions to our slightly-newer upstream tags. The
@@ -416,7 +416,7 @@ possible step. Build in this order:
 wire (request: `TAWCDRIPresentBuffer(window, buffer-id, w, h,
 format)`; events: buffer-release). Implement the server side as a
 no-op that just accepts and acks the request, plus a synthetic
-client (test harness in `testing/`) that opens an X connection,
+client (test harness in `tests/`) that opens an X connection,
 sends `TAWCDRIPresentBuffer` with a fabricated buffer-id, and
 verifies the round-trip. **Verification:** integration test that
 exercises the protocol with no real buffers and no GL anywhere.
@@ -471,9 +471,9 @@ hand-rolled `tawc_dri_protocol.h` mirroring `Xext/tawcdriproto.h`
 on the server side — small enough not to be worth pulling in xcbproto.
 Build wired via `--enable-x11`, `EGL_PLATFORM_X11_KHR` dispatch in
 `hybris/egl/egl.c`, X11/xcb stub `.so`s + synth pkg-config in
-`client/build-libhybris-aarch64`. **Verification:**
+`scripts/build-libhybris.sh`. **Verification:**
 `apps::test_eglx11_renders_via_ahb` runs a chroot-side EGL-on-X11
-test program (`testing/eglx11-test/`) for 30 frames and asserts the
+test program (`tests/apps/eglx11-test/`) for 30 frames and asserts the
 compositor logged `wlegl: create_buffer ... fmt=1` AND
 `wlegl: imported ANativeWindowBuffer as texture` for that surface
 (AHB, not SHM, not magenta). On OnePlus 9 Adreno 660 the client
@@ -509,7 +509,7 @@ Why this order:
 
 What can land in parallel without blocking:
 - The `TAWC-DRI` XML + protocol headers can be generated and
-  vendored into both `xwayland-src/xwayland/` and `libhybris/` early.
+  vendored into both `deps/xwayland-src/xwayland/` and `libhybris/` early.
 - The `meson.build` `-Dtawc=true` option and stub `xwayland-tawc.c`
   (returns NULL until step 2 fills it in) lands in step 1 so the
   Xwayland binary keeps building through the whole sequence.
@@ -697,7 +697,7 @@ own bash + busybox bundling rests on the same loophole at the
   `XWaylandShellHandler` on `TawcState` plus a forwarding impl on
   `LoopData` (calloop's data-type bound on `X11Wm::start_wm`).
 - `xwayland` feature added to the smithay dep in
-  `server/compositor/Cargo.toml`.
+  `compositor/Cargo.toml`.
 - `[patch.crates-io] smithay = { path = "../../smithay" }` so we
   pick up the local fork's pending patches without a github push.
   Switch back to `{ git = ..., branch = "tawc-patches" }` once the
@@ -768,19 +768,19 @@ software-only Xwayland on the emulator without the GPU stack.
 
 ```sh
 # Build everything from a fresh clone (idempotent re-runs)
-bash client/build-xwayland-aarch64
+bash scripts/build-xwayland.sh
 
 # Rebuild a single stage (after editing a stage_<name>() function)
-bash client/build-xwayland-aarch64 --only=libx11
+bash scripts/build-xwayland.sh --only=libx11
 
 # Wipe install + builddirs (forces fresh)
-bash client/build-xwayland-aarch64 --clean
+bash scripts/build-xwayland.sh --clean
 ```
 
 Add new stages by appending a `stage_<name>()` function and listing
 it at the bottom of the script. Each stage clones into
-`./xwayland-src/<name>/`, optionally applies patches from
-`./xwayland-patches/<name>/`, and installs into the shared `$PREFIX`.
+`./deps/xwayland-src/<name>/`, optionally applies patches from
+`./deps/xwayland-patches/<name>/`, and installs into the shared `$PREFIX`.
 
 ## Project policies that constrain the plan
 
@@ -819,7 +819,7 @@ seccomp binary patches) and that's what's currently shipping.
 ### Toolchain swap
 
 Cross-compile against `aarch64-linux-gnu-gcc` (the same toolchain as
-`client/build-libhybris-aarch64`), not the NDK. Set
+`scripts/build-libhybris.sh`), not the NDK. Set
 `CFLAGS=-D_GNU_SOURCE` not `-DANDROID`. Drop the bionic-only patches
 (`libxfont2/01-bionic-open-max`, `xorgproto/01-xos_r-android-passwd`,
 the FIONREAD-inline form of the libx11 patch) and replace them with
@@ -1107,9 +1107,9 @@ patcher script alongside the existing four.
   client's existing X11 connection. Wired through `--enable-x11`
   in `configure.ac`, `EGL_PLATFORM_X11_KHR` dispatch in
   `hybris/egl/egl.c`, X11/xcb stub libs and synth pkg-config in
-  `client/build-libhybris-aarch64`. Verification:
+  `scripts/build-libhybris.sh`. Verification:
   `apps::test_eglx11_renders_via_ahb` runs the new chroot client
-  (`testing/eglx11-test/`) for 30 frames, asserts EGL_VENDOR=Android
+  (`tests/apps/eglx11-test/`) for 30 frames, asserts EGL_VENDOR=Android
   + GL_RENDERER=Adreno, and confirms the compositor logged the
   AHB import + GL bind for the surface. No source-code regressions
   needed in the existing TAWC-DRI / Xwayland tests; the X server

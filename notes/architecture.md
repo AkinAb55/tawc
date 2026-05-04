@@ -2,7 +2,7 @@
 
 ## Module Layout
 
-The compositor (`server/compositor/src/`) is split into:
+The compositor (`compositor/src/`) is split into:
 
 - **lib.rs** -- JNI entry points + `run_compositor()` which sets up EGL, Wayland display,
   output, and listening socket, then hands off to the event loop.
@@ -38,7 +38,7 @@ The compositor (`server/compositor/src/`) is split into:
 - **native/wlegl_import.c** -- ~50-line C helper calling
   `AHardwareBuffer_createFromHandle(REGISTER)` (dlsym'd from libnativewindow.so).
 
-Kotlin side (`server/app/src/main/java/me/phie/tawc/`):
+Kotlin side (`app/src/main/java/me/phie/tawc/`):
 
 - **MainActivity.kt** -- Launcher (only Activity in `category.LAUNCHER`). Starts
   `CompositorService` so the Wayland socket is up, then renders the installed-distros
@@ -83,7 +83,11 @@ write access. Chroot clients access via root. Uses `ListeningSocket::bind_absolu
 
 ## Smithay Integration
 
-Using Smithay 0.7 from a custom fork (`wmww/smithay`, branch `tawc-patches`).
+Using Smithay 0.7 from a custom fork (`wmww/smithay`, branch `tawc-patches`),
+pinned in `deps/deps.list` and consumed via `[patch.crates-io] smithay = { path =
+"../deps/smithay" }` in `compositor/Cargo.toml`. Gradle's `setupSmithay` task
+clones the checkout ahead of `buildRustLibrary*`; standalone `cd compositor &&
+cargo build` requires running `bash scripts/setup-smithay.sh` first.
 
 **Features:** `wayland_frontend`, `renderer_gl`, `desktop`. Avoids all Linux-specific
 backends (DRM, GBM, libinput, udev, libseat).
@@ -131,7 +135,7 @@ event, so buffer-based retain logic would immediately remove new toplevels.
 
 ## References
 
-- [wmww/libhybris](https://github.com/wmww/libhybris) -- our fork of libhybris (bionic compatibility layer), local checkout at `./libhybris`
+- [wmww/libhybris](https://github.com/wmww/libhybris) -- our fork of libhybris (bionic compatibility layer), local checkout at `./deps/libhybris`
 - [Smithay](https://github.com/Smithay/smithay) -- Rust Wayland compositor library
 - [Xtr126/wlroots-android-bridge](https://github.com/Xtr126/wlroots-android-bridge)
 - [AHardwareBuffer NDK docs](https://developer.android.com/ndk/reference/group/a-hardware-buffer)

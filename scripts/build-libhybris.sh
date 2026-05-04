@@ -15,8 +15,8 @@
 # matching the layout of the existing on-device install.
 #
 # Usage:
-#   bash client/build-libhybris-aarch64           # incremental
-#   bash client/build-libhybris-aarch64 --clean   # wipe build tree first
+#   bash scripts/build-libhybris.sh           # incremental
+#   bash scripts/build-libhybris.sh --clean   # wipe build tree first
 #
 # Build-time deps documented in notes/building.md ("Building libhybris").
 # Keep that doc in sync with this script.
@@ -25,8 +25,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=deps-lib.sh
-source "$SCRIPT_DIR/deps-lib.sh"
+# shellcheck source=lib/deps.sh
+source "$SCRIPT_DIR/lib/deps.sh"
 LIBHYBRIS_DIR="$(dep_dir libhybris)"
 ANDROID_HEADERS_DIR="$(dep_dir android-headers)"
 
@@ -68,7 +68,7 @@ done
 # Vendored sources. libhybris is our fork (`wmww/libhybris`), our changes
 # stack as clean commits on top of upstream — see CLAUDE.md "Libhybris
 # fork" and `libhybris/TAWC_FORK.md`. android-headers is upstream Halium.
-# Both pins live in `client/deps.list`; `dep_ensure` clones if missing
+# Both pins live in `deps/deps.list`; `dep_ensure` clones if missing
 # and errors loudly if the existing checkout is at the wrong commit.
 dep_ensure libhybris
 dep_ensure android-headers
@@ -288,7 +288,7 @@ fi
 # install tree. The chroot install symlinks this into /usr/local/lib/
 # gl-shims and we put it on LD_LIBRARY_PATH ahead of /usr/local/lib so
 # `dlopen("libGL.so.1")` and `dlopen("libGLESv2.so.2")` land on our
-# shims instead of glvnd / Mesa. See client/libgl-shim.c for why.
+# shims instead of glvnd / Mesa. See deps/libhybris-shims/libgl-shim.c for why.
 #
 # Layout:
 #   gl-shims/
@@ -309,7 +309,7 @@ patchelf --set-soname libGLESv2_hybris.so "$SHIM_DIR/libGLESv2_hybris.so"
 # libGLESv2.so.2 — shim wrapping the renamed real lib.
 "$CC_BIN" -shared -fPIC \
     -o "$SHIM_DIR/libGLESv2.so.2" \
-    "$REPO_DIR/client/libglesv2-shim.c" \
+    "$REPO_DIR/deps/libhybris-shims/libglesv2-shim.c" \
     -L"$SHIM_DIR" -l:libGLESv2_hybris.so \
     -Wl,-rpath,/usr/local/lib/gl-shims \
     -Wl,--no-as-needed \
@@ -323,7 +323,7 @@ ln -sf libGLESv2.so.2 "$SHIM_DIR/libGLESv2.so"
 ln -sf libGLESv2.so.2 "$SHIM_DIR/libGL.so.1"
 "$CC_BIN" -shared -fPIC \
     -o "$SHIM_DIR/libGL.so" \
-    "$REPO_DIR/client/libgl-shim.c" \
+    "$REPO_DIR/deps/libhybris-shims/libgl-shim.c" \
     -L"$SHIM_DIR" -l:libGL.so.1 \
     -Wl,-rpath,/usr/local/lib/gl-shims \
     -Wl,--no-as-needed \

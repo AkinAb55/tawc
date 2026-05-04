@@ -69,7 +69,7 @@ when there's time.
 
 ## References
 
-- `server/app/src/main/java/me/phie/tawc/install/ProotMethod.kt` —
+- `app/src/main/java/me/phie/tawc/install/ProotMethod.kt` —
   the `// We invoke proot via the system shell rather than direct
   ProcessBuilder argv.` block in `runInside` and the
   `// No `set -e` prefix here.` block in `runShell`.

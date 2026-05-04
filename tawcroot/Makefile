@@ -27,7 +27,7 @@ REPO     := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 SRC_T    := $(REPO)/tawcroot
 SRC_TH   := $(SRC_T)/tests/testhost
 SRC_TS   := $(SRC_T)/tests
-CLEAT    := $(REPO)/cleat
+CLEAT    := $(REPO)/deps/cleat
 OUT      := $(REPO)/build/tawcroot-host
 OBJ      := $(OUT)/.obj
 
@@ -57,7 +57,7 @@ TAWC_LDFLAGS := \
 TESTHOST_EXTRA_CFLAGS := -DTAWCROOT_TESTHOST=1 -I$(SRC_TH)/include
 
 # cleat orchestrator: hosted glibc, C23 (cleat headers use nullptr /
-# [[maybe_unused]]). Warning set mirrors cleat/meson.build's cleat_c_args so
+# [[maybe_unused]]). Warning set mirrors deps/cleat/meson.build's cleat_c_args so
 # the test build stays clean against cleat + STC's intentional unused-* /
 # format-zero-length patterns.
 TESTS_CFLAGS := \
@@ -154,7 +154,7 @@ ARCH_S := $(SRC_T)/src/arch/x86_64_stub.S \
 # the loader entry trampoline so unit tests can exec it directly.
 TESTS_ARCH_S := $(SRC_T)/src/arch/x86_64_loader_jump.S
 
-# Cleat + STC source set, lifted from cleat/meson.build (cleat_test pulls
+# Cleat + STC source set, lifted from deps/cleat/meson.build (cleat_test pulls
 # cleat_dep + stc_dep). Keep in sync when bumping the pinned cleat commit
 # in tawcroot/build.
 CLEAT_C := \
@@ -196,7 +196,7 @@ TEST_C := $(shell find $(SRC_TS)/unit $(SRC_TS)/handler $(SRC_TS)/integration \
 #
 # Encoding: <obj_root>/<repo-relative source path>.o
 #   $(REPO)/tawcroot/src/main.c -> $(OBJ)/prod/tawcroot/src/main.c.o
-#   $(REPO)/cleat/stc/src/random.c -> $(OBJ)/tests/cleat/stc/src/random.c.o
+#   $(REPO)/deps/cleat/stc/src/random.c -> $(OBJ)/tests/cleat/stc/src/random.c.o
 #
 # Preserves directory structure under each obj_root, which naturally
 # disambiguates same-basename files (cleat has stc/src/random.c AND

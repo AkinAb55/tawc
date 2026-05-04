@@ -1,16 +1,16 @@
 #!/bin/bash
-# Bring every vendored dep listed in client/deps.list into sync with the
+# Bring every vendored dep listed in deps/deps.list into sync with the
 # pinned commit. Use this after pulling a manifest update, or after a
 # build errors with "dep <name> is at the wrong commit".
 #
 # This is the only command that mutates dep checkouts behind your back —
 # build scripts verify the pin and refuse to silently update. To ratchet
-# a dep forward: edit client/deps.list, then run `bash client/update-deps`
+# a dep forward: edit deps/deps.list, then run `bash scripts/update-deps.sh`
 # on every checkout that needs to follow.
 #
 # Usage:
-#   bash client/update-deps              # reset every dep to its pin
-#   bash client/update-deps libhybris    # reset just one (or a few) by name
+#   bash scripts/update-deps.sh              # reset every dep to its pin
+#   bash scripts/update-deps.sh libhybris    # reset just one (or a few) by name
 #
 # `git reset --hard` discards uncommitted edits in the dep tree. The
 # build helper (`dep_ensure`) silently tolerates dirty trees as long as
@@ -23,8 +23,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPS_REPO_DIR="$REPO_DIR"
-# shellcheck source=deps-lib.sh
-source "$SCRIPT_DIR/deps-lib.sh"
+# shellcheck source=lib/deps.sh
+source "$SCRIPT_DIR/lib/deps.sh"
 
 declare -a names=()
 if [ "$#" -eq 0 ]; then

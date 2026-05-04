@@ -14,25 +14,25 @@
 # Prerequisites:
 #   - Android device or emulator connected via adb and selected via
 #     ./.tawctarget or TAWC_TARGET=device|emulator (see
-#     client/select-device.sh)
+#     scripts/lib/select-device.sh)
 #   - In-app chroot installed at
 #     /data/data/me.phie.tawc/distros/<id>/. Auto-targeted when exactly
 #     one install is present; set TAWC_INSTALL_ID=<id> to pin one.
 #
 # Usage:
-#   bash testing/install-test-deps.sh
-#   TAWC_INSTALL_ID=void bash testing/install-test-deps.sh
+#   bash scripts/install-test-deps.sh
+#   TAWC_INSTALL_ID=void bash scripts/install-test-deps.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# shellcheck source=../client/select-device.sh
-source "$ROOT_DIR/client/select-device.sh"
-# shellcheck source=../client/tawc-scratch.sh
-source "$ROOT_DIR/client/tawc-scratch.sh"
-# shellcheck source=../client/tawc-install-id.sh
-source "$ROOT_DIR/client/tawc-install-id.sh"
+# shellcheck source=../scripts/lib/select-device.sh
+source "$ROOT_DIR/scripts/lib/select-device.sh"
+# shellcheck source=../scripts/lib/tawc-scratch.sh
+source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+# shellcheck source=../scripts/lib/tawc-install-id.sh
+source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 TAWC_DISTROS_DIR="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID"
 
@@ -149,9 +149,9 @@ echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 # the other order (a) fails when /usr/lib/firefox doesn't exist yet,
 # and (b) would have the package install clobber the fake-bwrap we
 # just dropped.
-"$ROOT_DIR/client/tawc-chroot-run" "$INSTALL_CMD"
+"$ROOT_DIR/scripts/tawc-chroot-run.sh" "$INSTALL_CMD"
 
-# Drop in `testing/fake-bwrap` over the chroot's `/usr/bin/bwrap`. The
+# Drop in `tests/apps/fake-bwrap` over the chroot's `/usr/bin/bwrap`. The
 # stock kernel on the test devices ships without `CONFIG_USER_NS`, so
 # bubblewrap's `clone(NEWUSER)` always fails — and modern Arch GTK +
 # Firefox both pull glycin, which in turn execs bwrap to sandbox each
@@ -159,7 +159,7 @@ echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 # test crashes on the first SVG icon. The replacement script walks
 # bwrap's argv, skips the sandbox flags, and execs the COMMAND
 # directly — fine on a private test rootfs, not safe in production.
-HOST_BWRAP="$ROOT_DIR/testing/fake-bwrap"
+HOST_BWRAP="$ROOT_DIR/tests/apps/fake-bwrap"
 GUEST_BWRAP="$TAWC_DISTROS_DIR/rootfs/usr/bin/bwrap"
 echo "=== Installing fake bwrap (no CONFIG_USER_NS workaround) ==="
 adb push "$HOST_BWRAP" "$TAWC_SCRATCH/fake-bwrap"
@@ -180,8 +180,8 @@ adb shell "su -c 'install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP'"
 # read-back-into-shm. Chroot doesn't need these prefs (its GPU process
 # spawns cleanly through real `chroot(2)`/`mount(2)` instead of
 # `run-as`+ptrace) but flipping them there is harmless.
-HOST_FF_CFG="$ROOT_DIR/testing/firefox.cfg"
-HOST_FF_AUTOCFG="$ROOT_DIR/testing/firefox-autoconfig.js"
+HOST_FF_CFG="$ROOT_DIR/tests/fixtures/firefox.cfg"
+HOST_FF_AUTOCFG="$ROOT_DIR/tests/fixtures/firefox-autoconfig.js"
 GUEST_FF_PREFIX="$TAWC_DISTROS_DIR/rootfs/usr/lib/firefox"
 echo "=== Installing Firefox prefs (autoconfig) ==="
 adb push "$HOST_FF_CFG" "$TAWC_SCRATCH/firefox.cfg"

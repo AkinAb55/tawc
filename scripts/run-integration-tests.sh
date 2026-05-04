@@ -9,7 +9,7 @@
 # Prerequisites:
 #   - Android device or emulator connected via adb with root (su) access
 #     and selected via ./.tawctarget or TAWC_TARGET=device|emulator
-#     (see client/select-device.sh -- no auto-fallback to a single
+#     (see scripts/lib/select-device.sh -- no auto-fallback to a single
 #     connected target).
 #   - tawc app installed (this script reinstalls it during build).
 #     libhybris ships inside the APK as an asset and is symlinked into
@@ -21,14 +21,14 @@
 #       adb shell am start -n me.phie.tawc/.install.InstallActivity \
 #           --ez autoStart true --es id <id> [--es distro <distro>]
 #   - Test-suite chroot packages installed (run
-#     `bash testing/install-test-deps.sh` once per chroot install)
+#     `bash scripts/install-test-deps.sh` once per chroot install)
 #   - JAVA_HOME set or java-21-openjdk installed at default path
 #
 # Usage:
-#   bash testing/run-integration-tests.sh                       # everything
-#   bash testing/run-integration-tests.sh <filter>              # libtest substring filter,
+#   bash scripts/run-integration-tests.sh                       # everything
+#   bash scripts/run-integration-tests.sh <filter>              # libtest substring filter,
 #                                                                 e.g. `<module>::` or `<module>::test_foo`
-#   bash testing/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
+#   bash scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -58,12 +58,12 @@ for arg in "$@"; do
     esac
 done
 
-# shellcheck source=../client/select-device.sh
-source "$ROOT_DIR/client/select-device.sh"
-# shellcheck source=../client/tawc-scratch.sh
-source "$ROOT_DIR/client/tawc-scratch.sh"
-# shellcheck source=../client/tawc-install-id.sh
-source "$ROOT_DIR/client/tawc-install-id.sh"
+# shellcheck source=../scripts/lib/select-device.sh
+source "$ROOT_DIR/scripts/lib/select-device.sh"
+# shellcheck source=../scripts/lib/tawc-scratch.sh
+source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+# shellcheck source=../scripts/lib/tawc-install-id.sh
+source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 # tawc-install-id.sh exported TAWC_INSTALL_ID (auto-detected when unset
 # and exactly one install is present; errors if 0 or >1). The cargo
@@ -84,12 +84,10 @@ if [ "$DO_BUILD" -eq 1 ]; then
     esac
 
     echo "=== Building compositor APK ($TAWC_ABIS) ==="
-    cd "$ROOT_DIR/server"
-    ./gradlew "-PtawcAbis=$TAWC_ABIS" assembleDebug --quiet
-    cd "$ROOT_DIR"
+    ( cd "$ROOT_DIR" && ./gradlew "-PtawcAbis=$TAWC_ABIS" assembleDebug --quiet )
 
     echo "=== Installing APK ==="
-    adb install -r server/app/build/outputs/apk/debug/app-debug.apk
+    adb install -r app/build/outputs/apk/debug/app-debug.apk
 
     echo "=== Verifying in-app install is present at $INSTALL_DIR ==="
     if ! adb shell "su -c 'test -x $INSTALL_DIR/enter.sh'" >/dev/null 2>&1; then
@@ -108,7 +106,7 @@ EOF
     fi
 
     echo "=== Pushing pidfile helper ==="
-    adb push testing/tawc-pidfile-exec "$TAWC_SCRATCH/tawc-pidfile-exec"
+    adb push tests/apps/tawc-pidfile-exec "$TAWC_SCRATCH/tawc-pidfile-exec"
     adb shell "su -c 'cp $TAWC_SCRATCH/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec'"
 
     # Pre-build the tawcroot device test bundle so the
@@ -169,9 +167,9 @@ else
 fi
 # Note: the debug app build is handled by the Rust test harness
 # (chroot::ensure_debug_app) with freshness caching. Chroot packages
-# are NOT auto-installed — run `bash testing/install-test-deps.sh` once
+# are NOT auto-installed — run `bash scripts/install-test-deps.sh` once
 # per chroot install.
-cd "$SCRIPT_DIR/integration"
+cd "$ROOT_DIR/tests/integration"
 set +e
 cargo test -- "${LIBTEST_ARGS[@]}"
 TEST_EXIT=$?

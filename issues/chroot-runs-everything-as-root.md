@@ -58,7 +58,7 @@ A single regular user inside the rootfs (`useradd -m user`, uid
 - Wayland client launch path (whoever ends up calling `runInside`
   to spawn user clients): pass `asUser=true`.
 - `ArchPacmanCommon.installBasePackages` etc.: keep `asUser=false`.
-- `client/tawc-chroot-run`: maybe a `--root` flag for the rare
+- `scripts/tawc-chroot-run.sh`: maybe a `--root` flag for the rare
   user case who needs the privileged shell, default to as-user.
 
 Existing rootfs ownership stays root-owned for system files. Only

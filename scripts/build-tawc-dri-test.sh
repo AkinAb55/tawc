@@ -3,22 +3,22 @@
 # inside the chroot. Run from the host. Pushes sources, compiles.
 #
 # Build deps (gcc, libxcb) are expected to already be installed in the
-# chroot — `testing/install-test-deps.sh` covers them via gtk3's
+# chroot — `scripts/install-test-deps.sh` covers them via gtk3's
 # transitive dependency on libxcb plus the existing gcc base-devel.
 #
 # Usage:
-#   testing/build-tawc-dri-test.sh
+#   scripts/build-tawc-dri-test.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# shellcheck source=../client/select-device.sh
-source "$ROOT_DIR/client/select-device.sh"
-# shellcheck source=../client/tawc-scratch.sh
-source "$ROOT_DIR/client/tawc-scratch.sh"
-# shellcheck source=../client/tawc-install-id.sh
-source "$ROOT_DIR/client/tawc-install-id.sh"
+# shellcheck source=../scripts/lib/select-device.sh
+source "$ROOT_DIR/scripts/lib/select-device.sh"
+# shellcheck source=../scripts/lib/tawc-scratch.sh
+source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+# shellcheck source=../scripts/lib/tawc-install-id.sh
+source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 app_name="tawc-dri-test"
 src_dir="$SCRIPT_DIR/$app_name"
@@ -33,7 +33,7 @@ adb shell "su -c 'mkdir -p $build_dir && \
                   cp $TAWC_SCRATCH/$app_name-build.sh $build_dir/build.sh'"
 
 echo "=== $app_name: building ==="
-"$ROOT_DIR/client/tawc-chroot-run" "/bin/bash /tmp/$app_name/build.sh"
+"$ROOT_DIR/scripts/tawc-chroot-run.sh" "/bin/bash /tmp/$app_name/build.sh"
 
 echo "=== $app_name: done ==="
 echo "Binary (inside chroot): /tmp/$app_name/$app_name"

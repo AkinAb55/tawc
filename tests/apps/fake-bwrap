@@ -8,7 +8,7 @@
 #
 # We can't get the kernel to grow user-namespace support, so for the
 # integration test rootfs we install this script over `/usr/bin/bwrap`
-# (see `testing/install-test-deps.sh`). It walks bwrap's known argument
+# (see `scripts/install-test-deps.sh`). It walks bwrap's known argument
 # list, skips the sandbox-flavour flags, and execs the COMMAND that
 # follows. The result is "no sandbox at all" — the loader process just
 # runs in the calling process's environment. Fine for tests on a

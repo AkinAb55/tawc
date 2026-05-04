@@ -69,7 +69,7 @@ fn install_method() -> &'static str {
             .unwrap_or_default();
         // Pull "method" out of the JSON without a serde dep — single
         // field, low schema risk. awk -F'"' on the matching line
-        // mirrors what `client/tawc-chroot-run` does.
+        // mirrors what `scripts/tawc-chroot-run.sh` does.
         for line in raw.lines() {
             if let Some(rest) = line.split_once("\"method\"") {
                 if let Some(after_colon) = rest.1.split_once(':') {
@@ -99,7 +99,7 @@ fn chroot_invocation(cmd: &str) -> String {
             // where the app uid has no write access, which breaks
             // its here-doc temp-file logic; cd + TMPDIR to the app's
             // own cache dir first. Same trick the host launcher
-            // (`client/tawc-chroot-run`) uses. tawcroot is the same
+            // (`scripts/tawc-chroot-run.sh`) uses. tawcroot is the same
             // shape as proot here — runs as app uid, no extra setup
             // needed beyond TMPDIR.
             let scratch = format!("/data/data/{}/cache/{}-tmp", PKG, m);

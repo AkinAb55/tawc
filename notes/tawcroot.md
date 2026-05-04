@@ -9,7 +9,7 @@ compat hacks, and a codebase shaped for our needs rather than
 inherited from proot's ptrace heritage.
 
 This doc is the design + implementation plan. The code is being built
-fresh. Refer to `proot/` (the Termux fork we currently vendor) as
+fresh. Refer to `deps/proot/` (the Termux fork we currently vendor) as
 reference when something proot solves is non-obvious — particularly
 the Android-specific quirks in its `src/tracee/seccomp.c` and the
 loader/exec dance — but **don't port proot's architecture**. proot
@@ -42,8 +42,8 @@ generic containers — is used **only by the host-side test orchestrator**
 the tawcroot binaries as subprocesses; cleat / STC code never runs
 inside `libtawcroot.so` or `tawcroot-testhost`.
 
-cleat lives in `./cleat/`, cloned at a pinned commit and `.gitignore`d
-(same pattern as `libhybris/`, `libxkbcommon/`, `proot/`). The
+cleat lives in `./deps/cleat/`, cloned at a pinned commit and `.gitignore`d
+(same pattern as `deps/libhybris/`, `deps/libxkbcommon/`, `deps/proot/`). The
 build script clones it on first run for `--abi=host`; nothing to
 package separately. Cross-builds (aarch64/x86_64) never reference
 cleat.
@@ -1687,8 +1687,8 @@ tawcroot/                            # everything tawcroot-specific lives here
 The directory is laid out so it could be lifted into its own repo (no
 external paths inside `tawcroot/`). The one tawc-app coupling is in
 `tawcroot/build`, which stages the production binary into
-`server/app/src/main/jniLibs/<abi>/libtawcroot.so` for APK packaging,
-and in `tawcroot/test --device` which sources `client/select-device.sh`
+`app/src/main/jniLibs/<abi>/libtawcroot.so` for APK packaging,
+and in `tawcroot/test --device` which sources `scripts/lib/select-device.sh`
 to pick the adb target — strip those if splitting.
 
 Build artifacts (per `tawcroot/build`):
@@ -1710,7 +1710,7 @@ Build artifacts (per `tawcroot/build`):
 
 ## Build integration
 
-A `tawcroot/build` script alongside `client/build-proot`:
+A `tawcroot/build` script alongside `scripts/build-proot.sh`:
 
 - Cross-compile with the NDK's clang for `arm64-v8a` and `x86_64`.
 - Pure C11 + a couple of `.S` files for production sources. No
@@ -1736,11 +1736,11 @@ A `tawcroot/build` script alongside `client/build-proot`:
   variant at `build/tawcroot-<abi>/libtawcroot-testhost.so` or
   `build/tawcroot-host/tawcroot-testhost`.
 - Gradle `packTawcroot` task copies the production binary into
-  `server/app/src/main/jniLibs/<abi>/libtawcroot.so`. Testhost is
+  `app/src/main/jniLibs/<abi>/libtawcroot.so`. Testhost is
   never copied — it's only used by the cleat orchestrator on host
   and by `tawcroot/test --device` via adb push.
-- Clones cleat into `./cleat/` at a pinned commit (gitignored,
-  same pattern as `libhybris/`, `libxkbcommon/`, `proot/`) on
+- Clones cleat into `./deps/cleat/` at a pinned commit (gitignored,
+  same pattern as `deps/libhybris/`, `deps/libxkbcommon/`, `deps/proot/`) on
   first `--abi=host` run. Pin lives in the build script; bumping
   it is a deliberate change. cleat brings its own vendored STC —
   we do *not* clone STC separately. **cleat is built into the
@@ -1786,7 +1786,7 @@ The Kotlin `InstallationMethod` enum already has an `extra` slot
 `InstallActivity` defaults to it on rootless devices once we're
 confident.
 
-`client/tawc-chroot-run` reads `metadata.json` to decide between
+`scripts/tawc-chroot-run.sh` reads `metadata.json` to decide between
 chroot/proot/tawcroot (today it's just chroot/proot). One more
 case in the `case method` switch.
 
@@ -1866,7 +1866,7 @@ positional args become cleat filters. `--device` mode pushes the
 NDK-cross-built orchestrator (plus tawcroot, tawcroot-testhost,
 fixtures, and the androidfilter wrap) to the canonical on-device
 scratch dir `$TAWC_SCRATCH` (`/data/local/tmp/tawc-dev/`, see
-`client/tawc-scratch.sh`), then exec's it under `su -c`. Same
+`scripts/lib/tawc-scratch.sh`), then exec's it under `su -c`. Same
 binary shape as host mode — just a different ABI and a different
 `TAWCROOT_TEST_TMPDIR` (`$TAWC_SCRATCH/tt` vs `/tmp`).
 PASSTHROUGH filters propagate through `su -c` verbatim, exit code
@@ -2016,7 +2016,7 @@ else lives on the dev box.
 ### On-Android smoke checks
 
 The four Android-only items above are wired into the existing
-`testing/run-integration-tests.sh` harness, which already supports
+`scripts/run-integration-tests.sh` harness, which already supports
 `TAWC_TARGET=device|emulator` and abstracts methods via
 `ChrootRunner`. Add tawcroot variants of the existing proot/chroot
 integration tests — they should be pure dispatch additions, not
@@ -2245,7 +2245,7 @@ coverage.
       stage). Even if the install errors out at pacman-key, the rootfs
       under `/data/data/me.phie.tawc/distros/arch/rootfs/` is intact.
    2. Per-iteration: `bash tawcroot/build --abi=<abi>`
-      then `adb push server/app/src/main/jniLibs/<abi>/libtawcroot.so
+      then `adb push app/src/main/jniLibs/<abi>/libtawcroot.so
       /data/local/tmp/tawc-dev/libtawcroot.so` then `adb shell 'su -c "cp
       /data/local/tmp/tawc-dev/libtawcroot.so <apk-lib-path>/libtawcroot.so"'`.
       Total ~3 seconds.
@@ -2258,7 +2258,7 @@ coverage.
 
 - **PHASE 5 COMPLETE on x86_64 emulator.** A full `tawcroot`-method
    Arch install via the in-app `InstallActivity` reaches `state: READY`,
-   and `bash client/tawc-chroot-run "uname -a; id; pacman --version"`
+   and `bash scripts/tawc-chroot-run.sh "uname -a; id; pacman --version"`
    produces clean Arch output (`Linux localhost ...`, `uid=0(root)`,
    `Pacman v7.1.0`) on the host shell. End-to-end app launch through
    the APK + run-as + tawcroot chain works.
@@ -2493,7 +2493,7 @@ coverage.
      to avoid Android's RET_TRAP on faccessat2), so the same
      implementation serves both numbers.
 
-   With those two fixes, `bash testing/run-integration-tests.sh
+   With those two fixes, `bash scripts/run-integration-tests.sh
    --no-build test_input_dispatch` against `--es method tawcroot`
    passes all 13 input-dispatch scenarios on the OnePlus 9 in ~22 s.
    This is the first integration-test suite running entirely under
@@ -2541,7 +2541,7 @@ coverage.
    mask change, so this only matters for the inherited initial mask
    in the post-re-exec process.
    `tawcroot/build` cross-builds for aarch64 + x86_64 and stages
-   `libtawcroot.so` into `server/app/src/main/jniLibs/<abi>/`; the APK
+   `libtawcroot.so` into `app/src/main/jniLibs/<abi>/`; the APK
    ships it like `libproot.so`. `TawcrootMethod.kt` mirrors
    `ProotMethod.kt` (rootless, app-uid-owned rootfs, same bind set, same
    pure-Kotlin tar extractor) but drops the proot-only workarounds:
@@ -2549,7 +2549,7 @@ coverage.
    in-handler), no `--link2symlink` (built into the linkat handler), no
    `MOZ_DISABLE_*_SANDBOX` envs (no ptrace tracer for Firefox's
    sandbox to fight). The install activity has a third radio button;
-   `client/tawc-chroot-run` dispatches `tawcroot` alongside chroot/proot.
+   `scripts/tawc-chroot-run.sh` dispatches `tawcroot` alongside chroot/proot.
    Outstanding: real-device run (phase 5), `pacman -Syu` to completion
    (phase 6).
 - **Phase 5 — emulator end-to-end**: ✓ DONE on x86_64. Install via APK
@@ -2820,7 +2820,7 @@ here so we don't ship MVP and discover them at runtime.
      set `rsp`/`sp` to top of synthesized stack, zero
      `rdx`/`x0` (rtld_fini), jump to ld.so's entry — or the
      binary's `e_entry` for static ELFs). See
-     `proot/src/loader/assembly-{arm64,x86_64}.h` for the exact
+     `deps/proot/src/loader/assembly-{arm64,x86_64}.h` for the exact
      register conventions.
    - **Address-space layout discipline** (~50 lines).
      libtawcroot.so is non-PIE at a high fixed address (see
@@ -3119,7 +3119,7 @@ Android 14, API 34, kernel 5.4.284):
   If something needs containers, build the structure at init from
   a flat C array, or extract a pure helper and test it under
   cleat. The bind table is the canonical example.
-- Match the project's existing conventions: scripts in `client/`,
+- Match the project's existing conventions: scripts in `scripts/`,
   installer code in `me.phie.tawc.install`, notes here.
 - When adding a new trapped syscall, add it to (1) the BPF filter
   generator, (2) the dispatch table, (3) a `tawcroot/tests/unit/` test

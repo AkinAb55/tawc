@@ -8,12 +8,14 @@ file is a submodule of a single `tests/integration.rs` test binary, so
 subset is just a libtest substring filter (`<module>::test_name`).
 
 ```
-testing/
-  gtk4-debug-app/             C + GTK4, runs on phone in chroot, structured stdout
+tests/
+  apps/gtk4-debug-app/        C + GTK4, runs on phone in chroot, structured stdout
   integration/                Rust tests on host
     tests/integration.rs        single test binary, declares the submodules
     tests/<module>.rs           one file per group; see its docstring
+scripts/
   build-debug-app.sh          Manual debug-app build script
+  run-integration-tests.sh    Build everything, deploy, run integration tests
 ```
 
 Each test module's own docstring documents what it covers and what its
@@ -50,7 +52,7 @@ TAWC_DEBUG:VULKAN_LOADED:yes|no     Whether libvulkan was mapped at READY time
 
 ```bash
 # From host (pushes source, builds in chroot):
-bash testing/build-debug-app.sh
+bash scripts/build-debug-app.sh
 
 # Or manually in chroot:
 cd /tmp/gtk4-debug-app && bash build.sh
@@ -63,7 +65,7 @@ manual runs.
 ### Running Manually
 
 ```bash
-bash client/tawc-chroot-run '/tmp/gtk4-debug-app/gtk4-debug-app text-input'
+bash scripts/tawc-chroot-run.sh '/tmp/gtk4-debug-app/gtk4-debug-app text-input'
 ```
 
 ## Integration Tests
@@ -73,8 +75,8 @@ runtime dependencies on the host.
 
 ### Running
 
-`testing/run-integration-tests.sh` is the recommended entry point. It
-picks the device via `client/select-device.sh` (resolves
+`scripts/run-integration-tests.sh` is the recommended entry point. It
+picks the device via `scripts/lib/select-device.sh` (resolves
 `./.tawctarget` / `TAWC_TARGET`; no auto-fallback to a single
 connected target — see [emulator.md](emulator.md)), builds and
 deploys everything, then runs cargo.
@@ -83,14 +85,14 @@ The script takes one optional positional arg — a libtest substring
 filter forwarded to `cargo test` — plus `--no-build` / `-n`.
 
 ```bash
-bash testing/run-integration-tests.sh                 # everything
-bash testing/run-integration-tests.sh <module>::      # one module's tests
-bash testing/run-integration-tests.sh <test_name>     # one test by name
-bash testing/run-integration-tests.sh --no-build ...  # skip rebuild/redeploy
+bash scripts/run-integration-tests.sh                 # everything
+bash scripts/run-integration-tests.sh <module>::      # one module's tests
+bash scripts/run-integration-tests.sh <test_name>     # one test by name
+bash scripts/run-integration-tests.sh --no-build ...  # skip rebuild/redeploy
 ```
 
 Direct `cargo test` invocations work too — they just need
-`source client/select-device.sh` first so cargo inherits
+`source scripts/lib/select-device.sh` first so cargo inherits
 `ANDROID_SERIAL`. The source step also enforces the standing target,
 so a stale `cargo test` from a `.tawctarget=none` checkout fails fast
 instead of attaching to the wrong target.
@@ -99,7 +101,7 @@ Prerequisites: a phone (or emulator) connected via adb, the tawc app
 installed, an in-app distro installed (via `am start … --es autoStart
 true --es id <id>`; see [installation.md](installation.md)), and the
 test suite's chroot packages installed (run
-`bash testing/install-test-deps.sh` once per chroot install — covers
+`bash scripts/install-test-deps.sh` once per chroot install — covers
 gtk3/gtk4/weston/mesa-utils/vulkan-tools). The suite auto-targets the
 unique install if there's only one, otherwise pin via
 `TAWC_INSTALL_ID=<id>`. Some modules have additional prerequisites (e.g.
@@ -154,7 +156,7 @@ Host (cargo test)                    Phone
 - **`adb.rs`**: Shell commands, chroot execution, broadcast-based input injection
 - **`chroot.rs`**: `ensure_debug_app()` (build gtk4-debug-app, cached by mtime).
   Tests do **not** install chroot packages at runtime — required packages
-  must be installed up-front via `testing/install-test-deps.sh`.
+  must be installed up-front via `scripts/install-test-deps.sh`.
 - **`debug_app.rs`**: Start/stop lifecycle, stdout reader thread, `wait_for()` with timeout
 - **`compositor.rs`**: Check whether the compositor is running (`is_running`,
   `assert_running`) and query its state via broadcast. The compositor itself

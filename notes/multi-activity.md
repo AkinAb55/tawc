@@ -455,7 +455,7 @@ The frame-timer cleanup pass already prunes dead toplevels. It gains:
 
 ## Tests
 
-Add to `testing/integration/`:
+Add to `tests/integration/`:
 
 - `test_two_toplevels_two_activities` — open two GTK4 demo windows from
   the chroot, assert two `CompositorActivity` instances exist (poll
@@ -548,36 +548,36 @@ the Tests section above.
 ## As built (2026-04-26)
 
 Files of interest:
-- `server/compositor/src/host.rs` — `OutputHost` + `SurfaceEvent` channel
+- `compositor/src/host.rs` — `OutputHost` + `SurfaceEvent` channel
   + `new_activity_id()`. The activity-id minter uses an epoch-nanos /
   counter combo instead of UUIDs to avoid pulling in the `uuid` crate;
   the values are guaranteed unique within and across runs.
-- `server/compositor/src/lib.rs` — `nativeStartCompositor` /
+- `compositor/src/lib.rs` — `nativeStartCompositor` /
   `nativeRegisterActivitySurface` / `nativeOnActivitySurfaceChanged` /
   `nativeOnActivitySurfaceDestroyed` / `nativeOnActivityDestroyed` /
   `nativeOnActivityFocusChanged` JNI plus `spawn_activity_from_native`
   / `finish_activity_from_native` reverse-JNI.
-- `server/compositor/src/event_loop.rs` — surface-event source, focus
+- `compositor/src/event_loop.rs` — surface-event source, focus
   set/clear via `set_host_foreground`, per-host render loop
   iteration, `first_alive_toplevel_of_host` for touch fallback,
   `finishActivity` cleanup when a host loses its last toplevel.
-- `server/compositor/src/compositor.rs` — `TawcState::hosts` /
+- `compositor/src/compositor.rs` — `TawcState::hosts` /
   `toplevel_to_host` / `single_activity_mode` / `foreground_host`,
   `assign_toplevel_to_host` policy returning `HostAssignment`,
   per-host configure sizing in `new_toplevel`.
-- `server/app/src/main/java/me/phie/tawc/compositor/CompositorService.kt`
+- `app/src/main/java/me/phie/tawc/compositor/CompositorService.kt`
   — foreground-service shell, posts `specialUse` notification, holds
   the Activity registry.
-- `server/app/src/main/java/me/phie/tawc/compositor/CompositorActivity.kt`
+- `app/src/main/java/me/phie/tawc/compositor/CompositorActivity.kt`
   — reads `activityId` from `intent.data?.lastPathSegment`, binds to
   Service in `onCreate`, forwards surface / touch / focus events
   tagged with the id, gates the test BroadcastReceiver on
   `hasWindowFocus()` so multi-Activity test runs don't fan out.
-- `server/app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt`
+- `app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt`
   — `attachService` captures application context for `spawnActivity`
   reverse-JNI; `finishActivity` looks up the matching Activity via
   the Service and calls `finishAndRemoveTask`.
-- `server/app/src/main/AndroidManifest.xml` — foreground-service
+- `app/src/main/AndroidManifest.xml` — foreground-service
   permissions (`SPECIAL_USE`), `documentLaunchMode="intoExisting"` +
   `taskAffinity=""` on `CompositorActivity`, `tawc://activity` intent
   filter.

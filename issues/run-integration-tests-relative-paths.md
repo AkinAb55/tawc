@@ -1,9 +1,9 @@
-# testing/run-integration-tests.sh uses relative paths after a one-time `cd`
+# scripts/run-integration-tests.sh uses relative paths after a one-time `cd`
 
-`testing/run-integration-tests.sh` does `cd "$ROOT_DIR"` early (around
+`scripts/run-integration-tests.sh` does `cd "$ROOT_DIR"` early (around
 line 91) and then references several paths relative to that cwd:
-- `server/app/build/outputs/apk/debug/app-debug.apk` (~line 94)
-- `testing/tawc-pidfile-exec` (~line 113)
+- `app/build/outputs/apk/debug/app-debug.apk` (~line 94)
+- `tests/apps/tawc-pidfile-exec` (~line 113)
 - `tawcroot/build`, `tawcroot/build-fixtures` (~lines 125-126)
 
 `set -e` means a re-ordering / refactor that breaks the cwd assumption

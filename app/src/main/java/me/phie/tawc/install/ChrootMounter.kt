@@ -12,7 +12,7 @@ import android.os.Build
  * exits — mount + chroot must therefore live in the same `su -c "..."`
  * shell. To keep that logic in one place across both in-app callers
  * ([ChrootMethod.runInside]) and host-side tooling
- * (`client/tawc-chroot-run` over `adb shell su`), we render an
+ * (`scripts/tawc-chroot-run.sh` over `adb shell su`), we render an
  * `enter.sh` shell script into `<installation-dir>/enter.sh` at install
  * time and then everyone invokes the same file. [enterScript] returns
  * its body; [mountScript] is a lower-level building block exposed for
@@ -184,7 +184,7 @@ object ChrootMounter {
      * drops into an interactive `bash -l` inside the chroot.
      *
      * Both in-app callers (via [ChrootMethod.runInside]) and host-side
-     * `client/tawc-chroot-run` invoke this exact script; the mount
+     * `scripts/tawc-chroot-run.sh` invoke this exact script; the mount
      * logic only lives here.
      */
     fun enterScript(rootfs: String): String = buildString {

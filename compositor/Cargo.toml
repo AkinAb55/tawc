@@ -22,5 +22,9 @@ wayland-protocols = { version = "0.32", features = ["server"] }
 [build-dependencies]
 cc = "1.0"
 
+# Pin smithay to our patched fork. The checkout lives at deps/smithay/,
+# auto-cloned by scripts/lib/deps.sh — gradle's setupSmithay task does it
+# automatically, or run `bash scripts/update-deps.sh smithay` standalone.
+# The actual repo + commit pin lives in deps/deps.list.
 [patch.crates-io]
-smithay = { git = "https://github.com/wmww/smithay.git", branch = "tawc-patches" }
+smithay = { path = "../deps/smithay" }

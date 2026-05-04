@@ -1,12 +1,12 @@
 # Firefox autoconfig prefs only applied via the test-deps script
 
-`testing/firefox.cfg` and `testing/firefox-autoconfig.js` set the
+`tests/fixtures/firefox.cfg` and `tests/fixtures/firefox-autoconfig.js` set the
 Firefox prefs that keep WebRender on in the parent process and force
 dmabuf/AHB output. Without them, Firefox under tawc falls back to the
 GTK/cairo software renderer and the compositor sees only `wl_shm`
 commits — magenta-tinted, no AHB.
 
-Today these prefs are only deployed by `testing/install-test-deps.sh`
+Today these prefs are only deployed by `scripts/install-test-deps.sh`
 into `/usr/lib/firefox/{firefox.cfg, defaults/pref/autoconfig.js}` of
 the chroot rootfs. End users following the documented install flow
 (Install button or `am start … --es id arch`) get a Firefox that
@@ -65,8 +65,8 @@ autoconfig in test-only setup script).
 
 ## References
 
-- `testing/install-test-deps.sh` (lines installing firefox.cfg /
+- `scripts/install-test-deps.sh` (lines installing firefox.cfg /
   autoconfig.js — the canonical reference for what we should be
   doing in production too)
-- `testing/firefox.cfg`, `testing/firefox-autoconfig.js`
+- `tests/fixtures/firefox.cfg`, `tests/fixtures/firefox-autoconfig.js`
 - `notes/firefox.md` (background on Firefox-under-tawc rendering)

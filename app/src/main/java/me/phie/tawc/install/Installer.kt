@@ -185,7 +185,7 @@ class Installer(
         checkCancel()
         // Stage 3: configure. /etc files via Distro.configure, then
         // the auto-generated enter.sh that both in-app callers (via
-        // method.runInside) and host-side client/tawc-chroot-run
+        // method.runInside) and host-side scripts/tawc-chroot-run.sh
         // invoke. enter.sh is generic across distros, so Installer
         // writes it (not Distro). Without enter.sh later pacman steps
         // can't run.

@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 /// On-device scratch dir for everything that doesn't live in the app's
 /// private data dir. Test/debug only — production never touches this.
-/// See `client/tawc-scratch.sh` for the rationale.
+/// See `scripts/lib/tawc-scratch.sh` for the rationale.
 pub const TAWC_SCRATCH: &str = "/data/local/tmp/tawc-dev";
 
 /// Install id for the in-app distro this test run targets. Used to
@@ -17,7 +17,7 @@ pub const TAWC_SCRATCH: &str = "/data/local/tmp/tawc-dev";
 /// APK can host multiple installs (e.g. an `arch` chroot alongside an
 /// `arch-tawcroot`) and the suite can target either.
 ///
-/// Resolution mirrors `client/tawc-install-id.sh`: honour
+/// Resolution mirrors `scripts/lib/tawc-install-id.sh`: honour
 /// `TAWC_INSTALL_ID` if set, otherwise enumerate
 /// `distros/*/metadata.json` on-device and use the unique match.
 /// Panics if there is no install, or more than one and no env-var pin —

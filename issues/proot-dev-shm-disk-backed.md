@@ -145,7 +145,7 @@ Implement (A) first, only add (B) when a real client demands it.
 
 ### Implementation location
 
-New extension at `proot/src/extension/dev_shm/dev_shm.c`, mirroring
+New extension at `deps/proot/src/extension/dev_shm/dev_shm.c`, mirroring
 the existing `ashmem_memfd` extension. Hook on
 `SYSCALL_ENTER_END` (path-translation event) for path-bearing
 syscalls and on `SYSCALL_EXIT_START` for any post-syscall fixup.
@@ -182,7 +182,7 @@ corner cases: `openat` with `AT_FDCWD`, relative paths,
 Two paths for landing the patch:
 
 1. **Carry locally.** Add a patch to `apply_local_patches` in
-   `client/build-proot`. Self-contained extension, low merge
+   `scripts/build-proot.sh`. Self-contained extension, low merge
    risk. Same maintenance contract as the existing
    `ashmem_memfd.c` `#include <string.h>` patch.
 
@@ -220,17 +220,17 @@ when:
 
 ## References
 
-- `server/app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
+- `app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
   (lines 53–64: `devShmDir`, lines 337–340: `-b` flag, lines
   398–399 / 474 / 482: enter.sh emission)
 - `notes/proot.md` "Firefox under proot" → item 1 (`/dev/shm` bind)
 - `notes/proot.md` "What we ship" → existing `ashmem_memfd`
   extension that this would mirror
-- Termux fork: `proot/src/extension/ashmem_memfd/ashmem_memfd.c`
+- Termux fork: `deps/proot/src/extension/ashmem_memfd/ashmem_memfd.c`
   (working example of the extension pattern)
-- Termux fork: `proot/src/tracee/seccomp.c` (working example of
+- Termux fork: `deps/proot/src/tracee/seccomp.c` (working example of
   syscall-number rewriting)
-- `client/build-proot` (where a local patch would be applied)
+- `scripts/build-proot.sh` (where a local patch would be applied)
 - Termux's `libandroid-shmem`:
   https://github.com/termux/libandroid-shmem (the ashmem-based
   approach we want to *avoid* and why)

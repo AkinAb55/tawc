@@ -19,14 +19,14 @@
 #   - host (default) — runs the cleat binary directly on the dev box.
 #   - device         — cross-builds the cleat orchestrator + tawcroot +
 #                tawcroot-testhost + fixtures via the NDK, pushes the lot
-#                to $TAWC_SCRATCH (see client/tawc-scratch.sh), and runs
+#                to $TAWC_SCRATCH (see scripts/lib/tawc-scratch.sh), and runs
 #                the orchestrator via `su -c`. Same four cleat layers as
 #                host mode (unit / handler / integration), same filter
 #                syntax, same exit code semantics — `--device` just
 #                changes where the orchestrator runs. Selection within
 #                device mode follows the rest of the tawc tree:
 #                `.tawctarget` / `TAWC_TARGET=device|emulator` (sourced
-#                from `client/select-device.sh` — the only tawc-app
+#                from `scripts/lib/select-device.sh` — the only tawc-app
 #                coupling in this script).
 #
 # Usage:
@@ -80,9 +80,9 @@ fi
 # same shape as host mode. PASSTHROUGH filters work everywhere; pass / fail
 # detection is the orchestrator's exit code, not adb-grep heuristics.
 # shellcheck disable=SC1091
-source "$REPO_DIR/client/select-device.sh"   # sets ANDROID_SERIAL (tawc-app glue)
+source "$REPO_DIR/scripts/lib/select-device.sh"   # sets ANDROID_SERIAL (tawc-app glue)
 # shellcheck disable=SC1091
-source "$REPO_DIR/client/tawc-scratch.sh"    # sets TAWC_SCRATCH, ensures it
+source "$REPO_DIR/scripts/lib/tawc-scratch.sh"    # sets TAWC_SCRATCH, ensures it
 
 DEVICE_ABI=$(adb shell getprop ro.product.cpu.abi | tr -d '\r\n')
 case "$DEVICE_ABI" in

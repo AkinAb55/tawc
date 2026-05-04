@@ -95,7 +95,7 @@ fn test_firefox_launches_with_hardware_buffers() {
         state.surfaces_shm == 0,
         "Firefox attached SHM buffers during steady-state rendering — \
          GPU process / WebRender disabled, chrome falling back to cairo? \
-         Re-check `testing/firefox.cfg` autoconfig and the chroot's \
+         Re-check `tests/fixtures/firefox.cfg` autoconfig and the chroot's \
          `/usr/lib/firefox/defaults/pref/autoconfig.js`. state={state:?}"
     );
     assert!(
@@ -731,7 +731,7 @@ fn test_es2gears_x11_renders_via_ahb() {
         "es2gears_x11 wrapper exited non-zero ({:?}). The wrapper ends \
          with `; true` so timeout's 124 doesn't fail the assertion — \
          non-zero here means the chroot couldn't even spawn the binary \
-         (missing mesa-demos? run `bash testing/install-test-deps.sh`).",
+         (missing mesa-demos? run `bash scripts/install-test-deps.sh`).",
         output.status.code()
     );
 

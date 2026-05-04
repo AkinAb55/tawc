@@ -23,7 +23,7 @@ fn rootfs_for(install_id: &str) -> String {
 /// since the last successful build. Returns the in-chroot binary path.
 ///
 /// Build deps (gtk4, pkg-config) are expected to already be installed —
-/// run `testing/install-test-deps.sh` once per chroot install.
+/// run `scripts/install-test-deps.sh` once per chroot install.
 pub fn ensure_debug_app() -> io::Result<String> {
     ensure_chroot_app("gtk4-debug-app")
 }
@@ -43,7 +43,7 @@ pub fn ensure_eglx11_test() -> io::Result<String> {
 
 /// Build a small in-chroot test binary by name, if its sources have
 /// changed since the last successful build. The source dir is
-/// `testing/<name>/` (a sibling of the integration crate); the dir
+/// `tests/apps/<name>/` (a sibling of the integration crate); the dir
 /// must contain a `build.sh` that produces an executable at the same
 /// path. Returns the in-chroot binary path.
 fn ensure_chroot_app(name: &str) -> io::Result<String> {
@@ -57,6 +57,7 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
     let source_dir: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
+        .join("apps")
         .join(name);
 
     let stamp = read_stamp(&chroot_build)?;
@@ -87,7 +88,7 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
 
     // Build inside the build install. When TAWC_BUILD_INSTALL_ID
     // overrides the test install, drive enter.sh of the build install
-    // directly via `client/tawc-chroot-run` rather than reusing
+    // directly via `scripts/tawc-chroot-run.sh` rather than reusing
     // `adb::chroot_run` (which is bound to the test install's
     // metadata.json / method).
     let output = if build_install == test_install {
@@ -98,8 +99,8 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
             .unwrap()
             .parent()
             .unwrap()
-            .join("client")
-            .join("tawc-chroot-run");
+            .join("scripts")
+            .join("tawc-chroot-run.sh");
         Command::new("bash")
             .arg(&script)
             .arg(format!("/bin/bash {}/build.sh", chroot_build))
@@ -113,7 +114,7 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
             io::ErrorKind::Other,
             format!(
                 "{name} build failed in install '{build_install}' (missing test deps? \
-                 try `bash testing/install-test-deps.sh`):\n\
+                 try `bash scripts/install-test-deps.sh`):\n\
                  stdout: {stdout}\nstderr: {stderr}",
             ),
         ));

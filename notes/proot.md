@@ -20,7 +20,7 @@ modulo two extra setup steps the proot path applies automatically
 
 ## What we ship
 
-`client/build-proot` clones two upstream sources into project-local
+`scripts/build-proot.sh` clones two upstream sources into project-local
 gitignored dirs and produces two jniLibs per ABI:
 
 | jniLib               | source                                   | role |
@@ -123,7 +123,7 @@ to make obvious):
 3. **Firefox autoconfig forcing WebRender in-parent + dmabuf**.
    Dropped at `/usr/lib/firefox/firefox.cfg` +
    `/usr/lib/firefox/defaults/pref/autoconfig.js` by
-   `testing/install-test-deps.sh`. Locks four prefs:
+   `scripts/install-test-deps.sh`. Locks four prefs:
 
    - `gfx.webrender.all = true`
    - `gfx.webrender.compositor.force-enabled = true`
@@ -144,8 +144,8 @@ to make obvious):
 
    The settings are also harmless on chroot installs (where the
    GPU process can spawn cleanly), so the autoconfig is dropped
-   unconditionally. Source files: `testing/firefox.cfg` and
-   `testing/firefox-autoconfig.js`.
+   unconditionally. Source files: `tests/fixtures/firefox.cfg` and
+   `tests/fixtures/firefox-autoconfig.js`.
 
 The fourth Firefox-specific hazard documented in earlier revisions
 of this doc — bionic `__cfi_slowpath` patching faulting under
@@ -173,7 +173,7 @@ The full list of things Android does differently that we paper over:
    own `cacheDir` before invoking proot.
 
 3. **mksh's here-doc temp files** — when the host launcher
-   (`client/tawc-chroot-run`) shells into `enter.sh` via `run-as
+   (`scripts/tawc-chroot-run.sh`) shells into `enter.sh` via `run-as
    me.phie.tawc`, the shell's default cwd is `/data/local` (uid
    `shell`'s default), where app uid has no write access. mksh's
    here-doc machinery falls over trying to create a temp file there.
@@ -222,14 +222,14 @@ The full list of things Android does differently that we paper over:
 
 ## Maintenance contract
 
-`client/build-proot` pins to a specific Termux/proot commit
+`scripts/build-proot.sh` pins to a specific Termux/proot commit
 (`PROOT_REV`). Bump deliberately when you want changes from
 upstream.
 
 We apply one tiny source patch automatically (`apply_local_patches`
-in `client/build-proot`, run after each fetch/checkout):
+in `scripts/build-proot.sh`, run after each fetch/checkout):
 
-- `proot/src/extension/ashmem_memfd/ashmem_memfd.c` needs `#include
+- `deps/proot/src/extension/ashmem_memfd/ashmem_memfd.c` needs `#include
   <string.h>` to compile under NDK clang. The patch is idempotent
   via a grep guard, so reclones are safe.
 

@@ -13,7 +13,7 @@ Host-side caching reverse proxy so the device fetches distro rootfs tarballs and
 
 ## nginx config
 
-`client/mirror-cache.conf`:
+`scripts/mirror-cache.conf`:
 
 ```nginx
 worker_processes 1;
@@ -45,7 +45,7 @@ http {
 
 ## Run script
 
-`client/start-mirror-cache`:
+`scripts/start-mirror-cache.sh`:
 
 ```bash
 #!/bin/bash
@@ -53,7 +53,7 @@ set -euo pipefail
 PREFIX=$PWD/build/mirror-cache
 mkdir -p "$PREFIX"/{cache,logs}
 trap 'kill $(jobs -p) 2>/dev/null' EXIT INT TERM
-nginx -p "$PREFIX" -c "$PWD/client/mirror-cache.conf" -g 'daemon off;' &
+nginx -p "$PREFIX" -c "$PWD/scripts/mirror-cache.conf" -g 'daemon off;' &
 # Re-apply adb reverse on every device→device transition. track-devices streams
 # one line per state change; falls back to a 2s poll loop on older adb.
 adb track-devices | while read -r serial state _; do
@@ -101,6 +101,6 @@ URL-keyed; the same proxy serves all distros with no per-distro config.
 
 ## Open work
 
-- Implement `client/mirror-cache.conf`, `client/start-mirror-cache`, and the install-side mirror-URL rewrite helper.
+- Implement `scripts/mirror-cache.conf`, `scripts/start-mirror-cache.sh`, and the install-side mirror-URL rewrite helper.
 - Pick first distro to wire up (probably Debian — biggest tarball, most-tested install path).
-- After landing, document in `notes/building.md` ("if iterating on installs, run `bash client/start-mirror-cache &` and pass `--es mirrorProxy …` to install intents") and add the host-dep line.
+- After landing, document in `notes/building.md` ("if iterating on installs, run `bash scripts/start-mirror-cache.sh &` and pass `--es mirrorProxy …` to install intents") and add the host-dep line.

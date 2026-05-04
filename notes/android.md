@@ -27,8 +27,8 @@ adb logcat -s tawc-install   # tail progress
 
 Then drive the chroot from the host with:
 ```bash
-bash client/tawc-chroot-run                    # interactive shell
-bash client/tawc-chroot-run '<command>'        # run a command and exit
+bash scripts/tawc-chroot-run.sh                    # interactive shell
+bash scripts/tawc-chroot-run.sh '<command>'        # run a command and exit
 ```
 
 `tawc-chroot-run` shells into `<installation-dir>/enter.sh` over `adb shell
@@ -84,7 +84,7 @@ Background facts that informed it:
 
 ## Kotlin App Structure
 
-The Android app code (`server/app/src/main/java/me/phie/tawc/`) is split so that
+The Android app code (`app/src/main/java/me/phie/tawc/`) is split so that
 everything talking to the Rust compositor lives in its own package, separate from
 the rest of the app's UI/management features.
 
@@ -97,13 +97,13 @@ the rest of the app's UI/management features.
     `Theme.Tawc.Compositor` style.
   - `NativeBridge.kt` — JNI surface (matches Rust JNI symbols
     `Java_me_phie_tawc_compositor_NativeBridge_*` and `find_class
-    "me/phie/tawc/compositor/NativeBridge"` in `server/compositor/src/lib.rs`).
+    "me/phie/tawc/compositor/NativeBridge"` in `compositor/src/lib.rs`).
   - `TawcInputConnection.kt` — IME bridge.
 - `install/` — Kotlin implementation of the chroot install / run /
   destroy logic. The rootfs is stored under
   `/data/data/me.phie.tawc/distros/<id>/rootfs/` so uninstalling
   the app reclaims it. The host-side counterpart is
-  `client/tawc-chroot-run`, which shells into the same auto-generated
+  `scripts/tawc-chroot-run.sh`, which shells into the same auto-generated
   `enter.sh` over `adb shell su`. See [installation.md](installation.md)
   for the package map, the `am start --es autoStart …` CLI, and the
   Android 14 FGS-from-broadcast rationale.

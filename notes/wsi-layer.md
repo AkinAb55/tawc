@@ -24,7 +24,7 @@ HYBRIS_EGLPLATFORM=wayland
 `/usr/local/lib/gl-shims` holds the GL shim libraries — populated by
 the chroot installer as a directory symlink to the APK-extracted
 libhybris tree (`/data/data/me.phie.tawc/files/libhybris/lib/gl-shims/`,
-generated host-side by `client/build-libhybris-aarch64`).
+generated host-side by `scripts/build-libhybris.sh`).
 `/usr/local/lib` is where libhybris's main `.so`s live as per-file
 symlinks pointing at the same APK-extracted tree (libEGL.so,
 libGLESv2.so, libGLESv1_CM.so, libvulkan.so.1, plus eglplatform_*.so
@@ -33,7 +33,7 @@ also a directory symlink). See `notes/installation.md`'s CONFIGURING
 stage for the exact wiring (`LibhybrisLinker.kt`).
 
 We deliberately build libhybris **without** `--enable-glvnd` (see
-`client/build-libhybris-aarch64`): the glvnd path drags `libglvnd` in
+`scripts/build-libhybris.sh`): the glvnd path drags `libglvnd` in
 as a hard runtime dep, which in turn drags `libGLX_mesa.so` — that
 can't init without a DRI render node and breaks Firefox's startup
 probes. So libhybris installs as plain `libEGL.so`, and putting
@@ -72,11 +72,11 @@ name, it picks up the distro's libglvnd dispatcher. libglvnd routes
   detect context type, and `abort()`s if the symbol is found in a
   vendor that doesn't actually serve GLX.
 
-The shims (`client/libgl-shim.c`, `client/libglesv2-shim.c`) export
+The shims (`deps/libhybris-shims/libgl-shim.c`, `deps/libhybris-shims/libglesv2-shim.c`) export
 NULL-returning `glX*` stubs and DT_NEEDED-link to a renamed copy of
 libhybris's GLES (`libGLESv2_hybris.so`) so `dlsym(handle,
 "glBindTexture")` still resolves through the dependency chain. Built
-host-side by `client/build-libhybris-aarch64`; ship as part of the
+host-side by `scripts/build-libhybris.sh`; ship as part of the
 APK's `libhybris/<abi>.tar` asset, extracted at runtime, and exposed
 in the chroot at `/usr/local/lib/gl-shims/` (directory symlink to the
 extracted tree).
@@ -131,7 +131,7 @@ See `libhybris/TAWC_FORK.md` for the full patch lineage.
 
 ## Compositor-side: `android_wlegl` server
 
-`server/compositor/src/wlegl.rs` implements the server side of
+`compositor/src/wlegl.rs` implements the server side of
 `android_wlegl` (version 2, client-side allocation only — we reject
 `get_server_buffer_handle` with BAD_VALUE).
 
@@ -148,7 +148,7 @@ Flow:
    `*mut AHardwareBuffer` in `WleglBufferData` as user-data on the new
    `wl_buffer`.
 
-The C helper (`server/compositor/native/wlegl_import.c`) is ~50 lines:
+The C helper (`compositor/native/wlegl_import.c`) is ~50 lines:
 it builds a `native_handle_t` in-line, runs `createFromHandle(REGISTER)`,
 and returns the AHB. On `WleglBufferData::drop` we call
 `tawc_wlegl_buffer_release` → `AHardwareBuffer_release`, which closes
@@ -175,7 +175,7 @@ from draining.
 We therefore rely on Smithay's standard behaviour:
 `SurfaceAttributes::merge_into` sends `wl_buffer.release` for the
 previous buffer whenever a new one is attached on the next commit
-(see `smithay/src/wayland/compositor/handlers.rs:125`). Our own code
+(see `deps/smithay/src/wayland/compositor/handlers.rs:125`). Our own code
 does not emit `wl_buffer.release` anywhere.
 
 This has a correctness benefit as well: because we hold
@@ -216,5 +216,5 @@ Prior to migration we carried:
   `AHardwareBuffer_sendHandleToUnixSocket`.
 
 Both are gone. The tiny GL shims (libgl-shim, libglesv2-shim) are
-all that's left (`client/libgl-shim.c`, `client/libglesv2-shim.c`,
-built as part of `bash client/build-libhybris-aarch64`).
+all that's left (`deps/libhybris-shims/libgl-shim.c`, `deps/libhybris-shims/libglesv2-shim.c`,
+built as part of `bash scripts/build-libhybris.sh`).

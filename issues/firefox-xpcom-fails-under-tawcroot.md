@@ -12,8 +12,8 @@ other integration tests under tawcroot pass.
 adb shell am start -n me.phie.tawc/.install.InstallActivity \
     --es autoStart true --es id void --es method tawcroot --es distro void
 # wait for install to finish (couple of minutes with Fastly mirror)
-TAWC_INSTALL_ID=void bash testing/install-test-deps.sh
-TAWC_INSTALL_ID=void bash client/tawc-chroot-run firefox --no-remote
+TAWC_INSTALL_ID=void bash scripts/install-test-deps.sh
+TAWC_INSTALL_ID=void bash scripts/tawc-chroot-run.sh firefox --no-remote
 # -> Couldn't load XPCOM.
 ```
 

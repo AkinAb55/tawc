@@ -31,7 +31,7 @@ biases the next preedit replacement into a commit.
 ## Repro
 
 ```
-TAWC_TARGET=emulator bash testing/run-integration-tests.sh --no-build "input::"
+TAWC_TARGET=emulator bash scripts/run-integration-tests.sh --no-build "input::"
 ```
 
 Each `scene_full_compose_loop_with_click_in_middle` failure pinpoints

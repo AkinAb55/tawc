@@ -29,7 +29,7 @@ This is the wrong shape for two reasons:
 Two callers, both routed through activity launch:
 
 - **In-process — `DistroInfoActivity` Delete dialog**
-  (`server/app/src/main/java/me/phie/tawc/install/DistroInfoActivity.kt:167-170`):
+  (`app/src/main/java/me/phie/tawc/install/DistroInfoActivity.kt:167-170`):
   builds an Intent for `UninstallActivity` with
   `EXTRA_AUTO_START=true` and `startActivity()`s it. Pure
   in-process work that round-trips through Android's intent system
@@ -37,8 +37,8 @@ Two callers, both routed through activity launch:
   `InstallationService.startUninstall(context, id)` as a companion-
   object helper.
 
-- **adb / CLI** (`testing/run-integration-tests.sh:101`,
-  `client/tawc-install-id.sh`, `notes/installation.md`,
+- **adb / CLI** (`scripts/run-integration-tests.sh:101`,
+  `scripts/lib/tawc-install-id.sh`, `notes/installation.md`,
   `CLAUDE.md` Quick Reference, several other notes): uses
   `am start -n …/InstallActivity --es autoStart true --es id <id> …`
   as a "headless trigger" because there isn't a non-activity
@@ -82,8 +82,8 @@ service.
 
 ## Callers to update
 
-- `testing/run-integration-tests.sh:101` — switch to broadcast.
-- `client/tawc-install-id.sh` — switch to broadcast.
+- `scripts/run-integration-tests.sh:101` — switch to broadcast.
+- `scripts/lib/tawc-install-id.sh` — switch to broadcast.
 - `CLAUDE.md` Quick Reference — update the "Install proot/chroot"
   one-liners.
 - `notes/installation.md` — rewrite the "trigger contract"
@@ -92,7 +92,7 @@ service.
   contract.
 - `notes/android.md`, `notes/emulator.md`, `notes/testing.md` —
   update example commands.
-- `testing/integration/src/lib.rs:62` — update doc comment that
+- `tests/integration/src/lib.rs:62` — update doc comment that
   cites the `am start --es autoStart` recipe.
 - `issues/firefox-test-flaky-on-cold-rootfs.md` — update repro
   commands.
@@ -108,6 +108,6 @@ companion-object helpers; only the *callers* need to change.
 
 - 2026-05-04 fix: `requestsAutoStart()` now refuses
   `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`-tagged intents
-  (`server/app/src/main/java/me/phie/tawc/install/AutoStart.kt`).
+  (`app/src/main/java/me/phie/tawc/install/AutoStart.kt`).
   That patch should be deleted alongside `AutoStart.kt` itself
   when this redesign lands.

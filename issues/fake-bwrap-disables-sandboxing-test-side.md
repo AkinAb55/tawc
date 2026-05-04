@@ -1,15 +1,15 @@
-# `testing/fake-bwrap` disables bubblewrap sandboxing — production users hit the same kernel limitation
+# `tests/apps/fake-bwrap` disables bubblewrap sandboxing — production users hit the same kernel limitation
 
-The integration test setup script (`testing/install-test-deps.sh`)
+The integration test setup script (`scripts/install-test-deps.sh`)
 installs a wrapper script over `/usr/bin/bwrap` in the chroot rootfs:
 
 ```
-HOST_BWRAP="$ROOT_DIR/testing/fake-bwrap"
+HOST_BWRAP="$ROOT_DIR/tests/apps/fake-bwrap"
 GUEST_BWRAP="/data/data/me.phie.tawc/distros/arch/rootfs/usr/bin/bwrap"
 adb shell "su -c 'install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP'"
 ```
 
-`testing/fake-bwrap` walks bubblewrap's known argv, throws away the
+`tests/apps/fake-bwrap` walks bubblewrap's known argv, throws away the
 sandbox-flavour flags (`--unshare-user`, `--bind`, `--ro-bind`,
 `--symlink`, `--setenv`, …), and `exec`s the COMMAND that follows
 with **no isolation at all** — the loader process runs in the
@@ -71,8 +71,8 @@ gap was filed away rather than addressed.
 
 ## References
 
-- `testing/fake-bwrap` (the script itself, with rationale comment)
-- `testing/install-test-deps.sh` (where it gets installed)
+- `tests/apps/fake-bwrap` (the script itself, with rationale comment)
+- `scripts/install-test-deps.sh` (where it gets installed)
 - `notes/proot.md` (related: documents Firefox-under-proot but
   doesn't cover the bwrap angle yet — would be a good update target
   when the fix lands)

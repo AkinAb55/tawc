@@ -27,9 +27,9 @@
 #   - root via Magisk `su` granted to adb shell, OR a debuggable APK.
 #
 # Usage:
-#   client/tawc-chroot-run                       # interactive shell
-#   client/tawc-chroot-run "<command>"           # run a command and exit
-#   TAWC_INSTALL_ID=<id> client/tawc-chroot-run  # pin a specific install
+#   scripts/tawc-chroot-run.sh                       # interactive shell
+#   scripts/tawc-chroot-run.sh "<command>"           # run a command and exit
+#   TAWC_INSTALL_ID=<id> scripts/tawc-chroot-run.sh  # pin a specific install
 #                                                  (otherwise auto-detected
 #                                                  if exactly one is present)
 set -euo pipefail
@@ -38,9 +38,9 @@ set -euo pipefail
 # right one. This sets ANDROID_SERIAL which adb reads natively.
 _script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
-. "$_script_dir/select-device.sh"
+. "$_script_dir/lib/select-device.sh"
 # shellcheck disable=SC1091
-. "$_script_dir/tawc-install-id.sh"
+. "$_script_dir/lib/tawc-install-id.sh"
 
 INSTALL_ID="$TAWC_INSTALL_ID"
 PKG="me.phie.tawc"

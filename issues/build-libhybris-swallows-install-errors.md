@@ -1,6 +1,6 @@
 # build-libhybris-aarch64 hides `make install` failures behind `|| true`
 
-`client/build-libhybris-aarch64` runs `make install ... || true` on the
+`scripts/build-libhybris.sh` runs `make install ... || true` on the
 common subdir and every per-component subdir (lines 254-260 area). If
 an install step legitimately fails, the script continues to the verify
 step where the missing files trip the `MISSING="..."` check — so the

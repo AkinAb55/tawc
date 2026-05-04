@@ -25,7 +25,7 @@ WRAP_SRC="$TAWCROOT_DIR/tests/handler/androidfilter/wrap.c"
 OUT_DIR="$REPO_DIR/build/tawcroot-$ABI/programs"
 mkdir -p "$OUT_DIR"
 
-# NDK lookup mirrors client/build-proot (we share the same NDK install).
+# NDK lookup mirrors scripts/build-proot.sh (we share the same NDK install).
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
     if [ -d "$DEFAULT_SDK/ndk" ]; then
