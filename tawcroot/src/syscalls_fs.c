@@ -735,16 +735,19 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 					suffix, sizeof suffix,
 					&base_fd, &use_empty, pmode);
 	if (e) return e;
-	const char *p = use_empty ? "" : suffix;
-	if (use_empty) flags |= AT_EMPTY_PATH;
-	/* Use faccessat (NR 269) instead of faccessat2 (NR 439). Android's
-	 * untrusted_app filter RET_TRAPs faccessat2 on recent platform
-	 * versions; calling it from inside our handler causes a recursive
-	 * SIGSYS that the kernel routes to default disposition (kill).
-	 * faccessat doesn't accept flags, but our common callers
-	 * (libc access(2) wrappers, bash, glibc) pass mode-only access
-	 * checks. AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW callers will see
-	 * default-symlink-follow behaviour, which matches access(2). */
+	/* Empty suffix → guest asked for "/" or for a bind dst's root.
+	 * Pass "." so the kernel resolves it to the dir base_fd points at;
+	 * AT_EMPTY_PATH would be cleaner but faccessat (NR 269) ignores
+	 * flags entirely (faccessat2 added them, but Android's
+	 * untrusted_app filter RET_TRAPs that NR — calling it from inside
+	 * our handler causes a recursive SIGSYS that gets routed to the
+	 * default disposition and kills the process). The "." rewrite
+	 * matches what handle_openat does for the same case. Without it,
+	 * `access("/", ...)` translated to `faccessat(rootfd, "", ...)`
+	 * and the kernel returned ENOENT for the empty path — which broke
+	 * xbps's `xbps_pkgdb_lock`, observed as
+	 * `[pkgdb] rootdir /: No such file or directory`. */
+	const char *p = use_empty ? "." : suffix;
 	(void)flags;
 	return TAWC_RAW(TAWC_SYS_faccessat, base_fd, (long)p,
 	                mode, 0, 0, 0);
