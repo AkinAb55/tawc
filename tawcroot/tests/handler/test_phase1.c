@@ -83,6 +83,11 @@ static void rmrf(const char *path)
  *   <root>/chain3             -- symlink -> etc/probe (3-hop relative chain)
  *   <root>/loop               -- symlink -> loop (self-loop, must ELOOP)
  *   <root>/run                -- empty dir
+ *   <root>/utime-target       -- regular file (utimensat reg-file probe)
+ *   <root>/utime-link         -- symlink -> utime-target (lutimes probe;
+ *                                exercises AT_SYMLINK_NOFOLLOW path mode —
+ *                                pre-fix the resolver followed through and
+ *                                the kernel ended up touching the target)
  */
 static bool build_fake_rootfs(const char *root)
 {
@@ -105,6 +110,9 @@ static bool build_fake_rootfs(const char *root)
 	snprintf(path, sizeof path, "%s/usr/lib/probe.so", root);
 	if (!write_file(path, "libprobe-data\n")) return false;
 
+	snprintf(path, sizeof path, "%s/utime-target", root);
+	if (!write_file(path, "utime-target-data\n")) return false;
+
 #define SYMLINK(target, sub) do { \
 		snprintf(path, sizeof path, "%s/" sub, root); \
 		(void)unlink(path); \
@@ -121,6 +129,7 @@ static bool build_fake_rootfs(const char *root)
 	SYMLINK("chain3",      "chain2");
 	SYMLINK("etc/probe",   "chain3");
 	SYMLINK("loop",        "loop");
+	SYMLINK("utime-target", "utime-link");
 #undef SYMLINK
 
 	return true;

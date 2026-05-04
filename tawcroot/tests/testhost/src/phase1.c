@@ -52,6 +52,9 @@
 #ifndef O_RDWR
 # define O_RDWR 2
 #endif
+#ifndef AT_SYMLINK_NOFOLLOW
+# define AT_SYMLINK_NOFOLLOW 0x100
+#endif
 
 /* ----- inline-asm syscall probes (issued from within phase1.c so the
  * IP is outside the stub allowlist and the filter TRAPs into our
@@ -725,6 +728,109 @@ int tawcroot_phase1_main(const char *rootfs)
 		INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD,
 			    "/tawcroot-symlink-test", 0, 0, 0, 0, rv);
 		fails += tawc_io_step("unlinkat(symlink)", rv == 0);
+	}
+
+	/* utimensat AT_SYMLINK_NOFOLLOW must update the SYMLINK's mtime,
+	 * not the target's. Pre-fix the handler ignored the flag and used
+	 * PATH_FOLLOW for translation, so the resolver walked through to
+	 * the target; the kernel then wrote the target's mtime and the
+	 * symlink stayed put — exactly libarchive's "Can't restore time"
+	 * scenario when pacman extracts a symlink whose target hasn't
+	 * landed yet (PATH_FOLLOW returns ENOENT).
+	 *
+	 * Three asserts: (a) call returns 0, (b) the symlink's own
+	 * st_mtime advanced to the value we set, (c) the target file's
+	 * st_mtime did NOT move. Each one independently catches the bug.
+	 *
+	 * /utime-link is a fresh symlink to /utime-target, both laid
+	 * down by build_fake_rootfs in test_phase1.c; using a dedicated
+	 * pair avoids coupling with /etc/probe (which other tests read). */
+	{
+		struct kernel_timespec { long tv_sec; long tv_nsec; };
+		/* Both atime and mtime explicit (no UTIME_OMIT) — keeps the
+		 * assertion below focused on the mtime component without
+		 * worrying about kernel-flag encoding. */
+		struct kernel_timespec ts[2] = {
+			{ 1234567890L, 0 },
+			{ 1234567890L, 0 },
+		};
+
+		struct stat link_before, target_before;
+		long sr = inline_fstatat(AT_FDCWD, "/utime-link",
+					 &link_before, AT_SYMLINK_NOFOLLOW);
+		fails += tawc_io_step(
+			"fstatat AT_SYMLINK_NOFOLLOW pre-utimensat (symlink)",
+			sr == 0);
+		sr = inline_fstatat(AT_FDCWD, "/utime-target",
+				    &target_before, 0);
+		fails += tawc_io_step(
+			"fstatat pre-utimensat (target file)", sr == 0);
+
+		long rv;
+		INLINE_SYS6(TAWC_SYS_utimensat, AT_FDCWD, "/utime-link",
+			    (long)ts, AT_SYMLINK_NOFOLLOW, 0, 0, rv);
+		fails += tawc_io_step(
+			"utimensat(\"/utime-link\", AT_SYMLINK_NOFOLLOW) -> 0",
+			rv == 0);
+		tawc_io_kv_dec("    rv", rv);
+
+		struct stat link_after, target_after;
+		sr = inline_fstatat(AT_FDCWD, "/utime-link",
+				    &link_after, AT_SYMLINK_NOFOLLOW);
+		fails += tawc_io_step(
+			"fstatat AT_SYMLINK_NOFOLLOW post-utimensat (symlink)",
+			sr == 0);
+		sr = inline_fstatat(AT_FDCWD, "/utime-target",
+				    &target_after, 0);
+		fails += tawc_io_step(
+			"fstatat post-utimensat (target file)", sr == 0);
+
+		fails += tawc_io_step(
+			"utimensat AT_SYMLINK_NOFOLLOW updated symlink's "
+			"own st_mtime",
+			(long)link_after.st_mtime == 1234567890L);
+		tawc_io_kv_dec("    link_before.st_mtime",
+			       (long)link_before.st_mtime);
+		tawc_io_kv_dec("    link_after.st_mtime",
+			       (long)link_after.st_mtime);
+
+		fails += tawc_io_step(
+			"utimensat AT_SYMLINK_NOFOLLOW left target's "
+			"st_mtime alone",
+			(long)target_after.st_mtime ==
+				(long)target_before.st_mtime);
+		tawc_io_kv_dec("    target_before.st_mtime",
+			       (long)target_before.st_mtime);
+		tawc_io_kv_dec("    target_after.st_mtime",
+			       (long)target_after.st_mtime);
+	}
+
+	/* utimensat without AT_SYMLINK_NOFOLLOW on a regular file: still
+	 * the common-case path (and what libarchive uses for non-symlink
+	 * extracts via futimens). Confirms the FOLLOW branch + path
+	 * translation still update mtime correctly. */
+	{
+		struct kernel_timespec { long tv_sec; long tv_nsec; };
+		struct kernel_timespec ts[2] = {
+			{ 1234567891L, 0 },
+			{ 1234567891L, 0 },
+		};
+		long rv;
+		INLINE_SYS6(TAWC_SYS_utimensat, AT_FDCWD, "/utime-target",
+			    (long)ts, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"utimensat(\"/utime-target\", 0) -> 0", rv == 0);
+		tawc_io_kv_dec("    rv", rv);
+
+		struct stat st;
+		long sr = inline_fstatat(AT_FDCWD, "/utime-target", &st, 0);
+		fails += tawc_io_step(
+			"fstatat post-utimensat (target file)", sr == 0);
+		fails += tawc_io_step(
+			"utimensat updated target file's st_mtime",
+			(long)st.st_mtime == 1234567891L);
+		tawc_io_kv_dec("    target.st_mtime (after)",
+			       (long)st.st_mtime);
 	}
 
 	/* mknodat: create a FIFO (S_IFIFO doesn't need CAP_MKNOD). The
