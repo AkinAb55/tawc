@@ -306,6 +306,30 @@ static long handle_rt_sigprocmask(const tawcroot_syscall_args *args,
 	return 0;
 }
 
+/* exit(2) — per-thread exit (kills only the calling thread, not the
+ * process; that's exit_group). Trapped purely so we can clear the
+ * dying thread's blocked-shadow slot before the kernel reaps the tid;
+ * otherwise a future thread that reuses this tid would read the previous
+ * owner's stale "SIGSYS blocked" bit until its own first rt_sigprocmask.
+ * (signal_shadow.c has the full rationale.)
+ *
+ * exit_group is not hooked: it kills every thread and the OS reclaims
+ * everything, so per-slot cleanup would be wasted work. Involuntary
+ * thread death (SIGKILL of one thread, fatal signals that bypass exit(2))
+ * still leaves a stale slot; uncommon, and the failure mode is bounded
+ * to one wrong-mask read on tid reuse.
+ *
+ * The forwarded exit(2) doesn't return; the __builtin_unreachable() is
+ * the bottom of the signal-handler control flow on the trapping thread. */
+static long handle_exit(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	long tid = TAWC_RAW(TAWC_SYS_gettid, 0, 0, 0, 0, 0, 0);
+	tawc_sigshadow_blocked_clear((int)tid);
+	TAWC_RAW(TAWC_SYS_exit, args->a, 0, 0, 0, 0, 0);
+	__builtin_unreachable();
+}
+
 void tawcroot_control_register(void)
 {
 	tawcroot_dispatch_install(TAWC_SYS_seccomp,         handle_seccomp);
@@ -314,6 +338,7 @@ void tawcroot_control_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_rt_sigprocmask,  handle_rt_sigprocmask);
 	tawcroot_dispatch_install(TAWC_SYS_io_uring_setup,  handle_io_uring_setup);
 	tawcroot_dispatch_install(TAWC_SYS_clone3,          handle_clone3);
+	tawcroot_dispatch_install(TAWC_SYS_exit,            handle_exit);
 	tawcroot_dispatch_install(TAWC_SYS_chroot,          fake_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_pivot_root,      fake_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_mount,           fake_eperm);

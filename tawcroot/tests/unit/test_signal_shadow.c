@@ -125,6 +125,90 @@ test(blocked_set_overflow_crashes_loudly)
 	test_true(sig == SIGILL || sig == SIGTRAP || sig == SIGABRT);
 }
 
+/* blocked_clear is the exit-side hook: when a thread exits its slot must
+ * stop reading as "blocked" so a future thread reusing the tid doesn't
+ * see stale state. Single-thread basics. */
+test(blocked_clear_unknown_tid_is_noop)
+{
+	tawc_sigshadow_reset();
+	tawc_sigshadow_blocked_clear(1234);
+	test_int_eq(tawc_sigshadow_blocked_get(1234), 0);
+}
+
+test(blocked_clear_resets_blocked_bit)
+{
+	tawc_sigshadow_reset();
+	tawc_sigshadow_blocked_set(7777, 1);
+	test_int_eq(tawc_sigshadow_blocked_get(7777), 1);
+
+	tawc_sigshadow_blocked_clear(7777);
+	test_int_eq(tawc_sigshadow_blocked_get(7777), 0);
+}
+
+/* The TID-reuse race: thread A blocks SIGSYS, exits without unblocking,
+ * the kernel reuses A's tid for thread B. With the exit-hook, A's slot
+ * is cleared, so B reads the default (unblocked) state. Without the
+ * hook, B would read A's stale blocked=1 until B issued its own
+ * rt_sigprocmask. Simulated by writing then clearing then reading the
+ * same tid (B from the table's perspective is indistinguishable from
+ * A — same tid value). */
+test(blocked_clear_closes_tid_reuse_race)
+{
+	tawc_sigshadow_reset();
+	int tid = 4242;
+	tawc_sigshadow_blocked_set(tid, 1);
+	tawc_sigshadow_blocked_clear(tid);
+	/* "B" inherits the same tid number; should see default 0. */
+	test_int_eq(tawc_sigshadow_blocked_get(tid), 0);
+}
+
+/* Slot reclamation: clear-then-set on a different tid that hashes to
+ * the same slot should reuse the cleared slot rather than chewing
+ * additional capacity. Pre-fill all but one slot; clear one; verify
+ * a NEW set succeeds (would trap if the cleared slot weren't reusable). */
+test(blocked_clear_makes_slot_reclaimable)
+{
+	unsigned cap = tawc_sigshadow_capacity();
+	tawc_sigshadow_reset();
+	/* Fill the table to capacity with distinct blocked tids. */
+	for (unsigned i = 0; i < cap; i++)
+		tawc_sigshadow_blocked_set((int)(1 + i * 1009), 1);
+	/* Clear one; the slot should now be reclaimable as a tombstone. */
+	tawc_sigshadow_blocked_clear((int)(1 + 5 * 1009));
+	/* A new distinct tid must successfully set blocked=1 — if the
+	 * cleared slot weren't reclaimable this would __builtin_trap. */
+	tawc_sigshadow_blocked_set(0x7fffffff, 1);
+	test_int_eq(tawc_sigshadow_blocked_get(0x7fffffff), 1);
+}
+
+/* Tombstones must not break the probe chain. Force a hash collision:
+ * insert tids X and Y where Y's slot was reached by probing past X,
+ * then clear X. A get(Y) must still find Y by probing past the
+ * tombstoned X-slot. We don't know the hash function externally, so
+ * insert many tids — at least some pair will collide — and verify
+ * that all set tids remain readable after one is cleared from the
+ * middle of the probe sequence. */
+test(blocked_clear_tombstone_does_not_break_probe_chain)
+{
+	tawc_sigshadow_reset();
+	enum { N = 64 };
+	int tids[N];
+	for (int i = 0; i < N; i++) {
+		tids[i] = 100000 + i * 17;  /* spread to maximize collision variety */
+		tawc_sigshadow_blocked_set(tids[i], 1);
+	}
+	/* Clear half of them, alternating, to scatter tombstones through
+	 * probe chains. */
+	for (int i = 0; i < N; i += 2)
+		tawc_sigshadow_blocked_clear(tids[i]);
+	/* The other half must still be findable. */
+	for (int i = 1; i < N; i += 2)
+		test_int_eq(tawc_sigshadow_blocked_get(tids[i]), 1);
+	/* Cleared ones must read as 0. */
+	for (int i = 0; i < N; i += 2)
+		test_int_eq(tawc_sigshadow_blocked_get(tids[i]), 0);
+}
+
 test(action_default_is_zero)
 {
 	tawc_sigshadow_reset();
