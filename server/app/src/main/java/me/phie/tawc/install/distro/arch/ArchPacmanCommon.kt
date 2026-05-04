@@ -492,13 +492,22 @@ PACMAN_EOF
      * current DB unconditionally.
      *
      * Wiping `/var/cache/pacman/pkg/` afterwards drops every cached
-     * `.pkg.tar.xz` (uninstalled and currently-installed alike). On a
-     * Wayland-only chroot we never reinstall in place, so keeping the
-     * cache around just costs hundreds of MB on NAND. (pacman's own
-     * `-Scc --noconfirm` is intentionally a no-op for safety —
-     * `--noconfirm` forces the "remove also currently-installed
-     * versions?" prompt to default-no, leaving everything cached.
-     * Plain `rm` is the only path that actually clears it.)
+     * `.pkg.tar.xz` (uninstalled and currently-installed alike). The
+     * install-time cache holds the exact tarballs we just unpacked,
+     * ~hundreds of MB on a fresh install. None of the typical follow-
+     * up operations actually consult them: a system upgrade pulls
+     * *new* versions (so the cached old versions aren't read), and
+     * installing a new package fetches a fresh tarball. The only
+     * operation that would hit the cache is a same-version reinstall,
+     * which is rare and not worth the NAND.
+     *
+     * (pacman's own `-Scc --noconfirm` is intentionally a no-op for
+     * safety — `--noconfirm` forces the "remove also currently-
+     * installed versions?" prompt to default-no, leaving everything
+     * cached. Plain `rm` is the only path that actually clears it.
+     * `find -mindepth 1 -delete` rather than `rm -rf .../pkg/*` because
+     * the glob expansion of hundreds of files blows past ARG_MAX on
+     * shells that pre-expand.)
      */
     fun installBasePackages(
         method: InstallationMethod,
