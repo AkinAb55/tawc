@@ -1601,6 +1601,307 @@ static int test_rt_sigaction_b2_sizing(void)
 	return fails;
 }
 
+/* Multi-thread SIGSYS-blocked shadow, end-to-end through the handler.
+ * Closes issues/tawcroot-signal-shadow-multithread-e2e-test.md.
+ *
+ * The unit suite exercises the lock-free primitives directly (16-thread
+ * blocked isolation, 4×4 writer/reader seqlock, tombstone probe-chain
+ * preservation, slot reclamation). What was missing — and what this
+ * test adds — is concurrent coverage with traffic actually flowing
+ * through `handle_rt_sigprocmask` / `handle_exit` on each TID. We
+ * spawn N kernel threads via raw clone(2); each blocks/unblocks SIGSYS
+ * through the guest's normal sigprocmask, runs a trapping path syscall
+ * (proves the kernel mask is clear despite shadow saying "blocked"),
+ * reads its mask back, and asserts the SIGSYS bit matches what it
+ * just set on every iteration. On thread exit, handle_exit's
+ * shadow-clear hook fires (exit(2) is in the trapped set).
+ *
+ * pthreads are unavailable (testhost is freestanding -nostdlib), so we
+ * use raw clone(2). clone3 is intercepted with -ENOSYS, but plain
+ * clone (NR 56 on x86_64, 220 on aarch64) is not in our trapped set —
+ * RET_ALLOWed by the filter. */
+
+/* clone(2) trampoline: parent gets the new TID (or -errno) back; child
+ * runs `func(arg)` on the supplied stack and SYS_exits with the return
+ * value. NOT exit_group — we want only the calling thread to die so
+ * the testhost stays alive to join. */
+extern long tawcroot_test_clone(int (*func)(void *), void *stack_top,
+				 void *arg, unsigned long flags);
+
+#if defined(__x86_64__)
+__asm__(
+	".text\n"
+	".globl tawcroot_test_clone\n"
+	".hidden tawcroot_test_clone\n"
+	".type tawcroot_test_clone, @function\n"
+	"tawcroot_test_clone:\n"
+	/* SysV ABI: rdi=func, rsi=stack_top, rdx=arg, rcx=flags. */
+	"	sub	$16, %rsi\n"
+	"	mov	%rdi, 0(%rsi)\n"	/* child stack[0] = func */
+	"	mov	%rdx, 8(%rsi)\n"	/* child stack[8] = arg  */
+	"	mov	%rcx, %rdi\n"		/* clone arg0 = flags */
+	"	xor	%rdx, %rdx\n"		/* parent_tidptr = NULL */
+	"	xor	%r10, %r10\n"		/* child_tidptr  = NULL */
+	"	xor	%r8, %r8\n"		/* tls           = 0    */
+	"	mov	$56, %eax\n"		/* NR_clone (x86_64) */
+	"	syscall\n"
+	"	test	%rax, %rax\n"
+	"	jnz	1f\n"			/* parent: tid in rax */
+	/* child: rsp = (stack_top - 16); pop func, pop arg, call. */
+	"	pop	%rax\n"			/* func -> rax */
+	"	pop	%rdi\n"			/* arg  -> rdi */
+	"	call	*%rax\n"
+	"	mov	%eax, %edi\n"		/* exit code = func rv */
+	"	mov	$60, %eax\n"		/* NR_exit (per-thread) */
+	"	syscall\n"
+	"	ud2\n"
+	"1:	ret\n"
+	".size tawcroot_test_clone, .-tawcroot_test_clone\n"
+);
+#elif defined(__aarch64__)
+__asm__(
+	".text\n"
+	".globl tawcroot_test_clone\n"
+	".hidden tawcroot_test_clone\n"
+	".type tawcroot_test_clone, %function\n"
+	"tawcroot_test_clone:\n"
+	/* AAPCS64: x0=func, x1=stack_top, x2=arg, x3=flags. */
+	"	sub	x1, x1, #16\n"
+	"	str	x0, [x1, #0]\n"		/* child stack[0] = func */
+	"	str	x2, [x1, #8]\n"		/* child stack[8] = arg  */
+	"	mov	x0, x3\n"		/* clone arg0 = flags */
+	/* aarch64 clone(flags, stack, parent_tid, tls, child_tid). */
+	"	mov	x2, #0\n"
+	"	mov	x3, #0\n"
+	"	mov	x4, #0\n"
+	"	mov	x8, #220\n"		/* NR_clone */
+	"	svc	#0\n"
+	"	cbz	x0, 1f\n"		/* x0 == 0 means child */
+	"	ret\n"				/* parent: x0 = tid */
+	"1:\n"
+	"	ldr	x1, [sp, #0]\n"		/* func */
+	"	ldr	x0, [sp, #8]\n"		/* arg */
+	"	blr	x1\n"
+	/* func returned in x0; SYS_exit expects status in x0. */
+	"	mov	x8, #93\n"		/* NR_exit (aarch64) */
+	"	svc	#0\n"
+	"	brk	#0\n"
+	".size tawcroot_test_clone, .-tawcroot_test_clone\n"
+);
+#endif
+
+#define MT_THREADS    8
+#define MT_ITERS    200
+#define MT_STACK   (128 * 1024)
+
+/* clone flags: pthread_create's set sans CLONE_PARENT_SETTID /
+ * CLONE_CHILD_CLEARTID / CLONE_SETTLS. Sharing VM/SIGHAND/THREAD is
+ * what makes the new thread share our SIGSYS handler installation and
+ * get its own kernel TID. */
+#define MT_CLONE_FLAGS                                                  \
+	(0x00000100UL  /*CLONE_VM      */ |                             \
+	 0x00000200UL  /*CLONE_FS      */ |                             \
+	 0x00000400UL  /*CLONE_FILES   */ |                             \
+	 0x00000800UL  /*CLONE_SIGHAND */ |                             \
+	 0x00010000UL  /*CLONE_THREAD  */ |                             \
+	 0x00040000UL  /*CLONE_SYSVSEM */)
+
+struct mt_state {
+	volatile int  done;             /* 1 once worker is about to exit  */
+	volatile int  iters_completed;  /* monotonic from 0..MT_ITERS      */
+	int           last_observed;    /* -1 = OK; else error code        */
+	int           tid;              /* kernel TID (gettid)             */
+};
+
+static struct mt_state g_mt[MT_THREADS];
+
+/* Worker — runs on the cloned thread. The only inter-thread channel is
+ * its `mt_state` slot (volatile + atomic store on `done`). Returns the
+ * status that the asm trampoline forwards into SYS_exit. */
+static int mt_worker(void *p)
+{
+	struct mt_state *st = (struct mt_state *)p;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_gettid, 0, 0, 0, 0, 0, 0, rv);
+	st->tid = (int)rv;
+
+	const uint64_t sigsys_bit = 1ULL << (31 - 1);  /* SIGSYS = 31 */
+	int observed_match = 1;
+
+	for (int i = 0; i < MT_ITERS; i++) {
+		int want_blocked = i & 1;
+		int how = want_blocked ? 0 /*SIG_BLOCK*/ : 1 /*SIG_UNBLOCK*/;
+		uint64_t set = sigsys_bit;
+
+		/* Block / unblock SIGSYS through the guest's sigprocmask
+		 * (TRAPs into handle_rt_sigprocmask, which updates this
+		 * thread's per-tid blocked shadow). */
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, how, &set, 0, 8,
+			    0, 0, rv);
+		if (rv != 0) { observed_match = 0; st->last_observed = (int)-rv; break; }
+
+		/* Trapping path syscall — the handler runs on this thread
+		 * with the shadow update fresh. If the kernel mask actually
+		 * had SIGSYS blocked, the trap wouldn't fire and we'd see
+		 * a kernel-issued openat with -ENOENT (rootfs not bound
+		 * outside the handler). With the contract intact, this
+		 * resolves through the rootfs to /etc/probe. */
+		long fd;
+		INLINE_SYS6(TAWC_SYS_openat, AT_FDCWD, "/etc/probe",
+			    O_RDONLY, 0, 0, 0, fd);
+		if (fd < 0) { observed_match = 0; st->last_observed = (int)-fd; break; }
+		tawc_close((int)fd);
+
+		/* Read the current mask back. The shadow's SIGSYS bit
+		 * must match what we asked for. */
+		uint64_t cur = 0;
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, 0 /*SIG_BLOCK*/,
+			    0, &cur, 8, 0, 0, rv);
+		if (rv != 0) { observed_match = 0; st->last_observed = (int)-rv; break; }
+		int sigsys_blocked = (cur & sigsys_bit) != 0;
+		if (sigsys_blocked != want_blocked) {
+			observed_match = 0;
+			/* 0xb0 = "we asked for unblocked, got blocked"
+			 * 0xb1 = "we asked for blocked,   got unblocked"
+			 * (high bit makes it unambiguous vs errno values). */
+			st->last_observed = sigsys_blocked ? 0xb0 : 0xb1;
+			break;
+		}
+		st->iters_completed = i + 1;
+	}
+	if (observed_match) st->last_observed = -1;
+
+	/* Best-effort restore: leave SIGSYS unblocked. handle_exit will
+	 * clear the slot regardless, but explicit unblock keeps the
+	 * single-writer-per-tid invariant clean. */
+	{
+		uint64_t set = sigsys_bit;
+		long rv2;
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, 1 /*SIG_UNBLOCK*/,
+			    &set, 0, 8, 0, 0, rv2);
+		(void)rv2;
+	}
+
+	/* Publish done=1 with release ordering — main reads with acquire,
+	 * sees a fully-written `last_observed` / `iters_completed` /
+	 * `tid`. The subsequent SYS_exit (issued by the trampoline) is
+	 * a hard happens-before edge with handle_exit's shadow-clear. */
+	__atomic_store_n(&st->done, 1, __ATOMIC_RELEASE);
+	return 0;
+}
+
+static int test_sigsys_block_shadow_multithread(void)
+{
+	int fails = 0;
+
+	for (int i = 0; i < MT_THREADS; i++) {
+		g_mt[i].done = 0;
+		g_mt[i].iters_completed = 0;
+		g_mt[i].last_observed = -2;  /* "never ran" sentinel */
+		g_mt[i].tid = 0;
+	}
+
+	/* Allocate per-thread stacks. We deliberately don't munmap on
+	 * teardown: by the time main observes done=1 the worker may
+	 * still be executing instructions on its stack en route to
+	 * SYS_exit, and we'd race the kernel. The testhost exits within
+	 * a second of this test, so leaking 8 × 128 KiB is fine. */
+	void *stacks[MT_THREADS];
+	for (int i = 0; i < MT_THREADS; i++) {
+		long rv = TAWC_RAW(TAWC_SYS_mmap, 0, MT_STACK,
+				   3 /*PROT_READ|PROT_WRITE*/,
+				   0x22 /*MAP_PRIVATE|MAP_ANONYMOUS*/,
+				   -1, 0);
+		stacks[i] = (rv > 0 || rv < -4095) ? (void *)rv : 0;
+		fails += tawc_io_step("mt: mmap thread stack",
+				      stacks[i] != 0);
+	}
+	if (fails) return fails;
+
+	int n_spawned = 0;
+	for (int i = 0; i < MT_THREADS; i++) {
+		unsigned char *stack_top =
+			(unsigned char *)stacks[i] + MT_STACK;
+		long tid = tawcroot_test_clone(mt_worker, stack_top,
+					       &g_mt[i], MT_CLONE_FLAGS);
+		if (tid <= 0) {
+			tawc_io_kv_dec("    clone errno (-rv)", -tid);
+			fails += tawc_io_step("mt: clone thread", 0);
+			break;
+		}
+		n_spawned++;
+	}
+	fails += tawc_io_step("mt: spawned all N threads",
+			      n_spawned == MT_THREADS);
+
+	/* Spin-wait for every thread to publish done=1. Workers do
+	 * MT_ITERS × ~6 trapping syscalls; that's tens of millions of
+	 * cycles total across N threads. We don't have access to
+	 * clock_gettime here without going through a lot of setup, so
+	 * just bound the spin generously (~3s on a 3 GHz host) and
+	 * report time-out as a failure if it ever happens. */
+	int all_done_final = 0;
+	for (long spin = 0; spin < 200000000L; spin++) {
+		int all_done = 1;
+		for (int i = 0; i < n_spawned; i++) {
+			if (__atomic_load_n(&g_mt[i].done,
+					    __ATOMIC_ACQUIRE) != 1) {
+				all_done = 0;
+				break;
+			}
+		}
+		if (all_done) { all_done_final = 1; break; }
+#if defined(__x86_64__)
+		__asm__ __volatile__ ("pause" ::: "memory");
+#elif defined(__aarch64__)
+		__asm__ __volatile__ ("yield" ::: "memory");
+#endif
+	}
+	fails += tawc_io_step("mt: all threads finished within bound",
+			      all_done_final);
+
+	for (int i = 0; i < n_spawned; i++) {
+		int ok = (g_mt[i].last_observed == -1) &&
+			 (g_mt[i].iters_completed == MT_ITERS);
+		if (!ok) {
+			tawc_io_kv_dec("    thread idx", i);
+			tawc_io_kv_dec("    tid", g_mt[i].tid);
+			tawc_io_kv_dec("    iters", g_mt[i].iters_completed);
+			tawc_io_kv_hex("    last_observed",
+				       (unsigned long)(unsigned int)
+					   g_mt[i].last_observed);
+		}
+		fails += tawc_io_step(
+			"mt: thread mask round-trip consistent across iters",
+			ok);
+	}
+
+	/* Verify the main thread's own shadow wasn't corrupted by
+	 * concurrent writers. (The shadow is per-tid, so it shouldn't
+	 * be — this is a belt-and-braces check.) Set + clear once and
+	 * confirm the round-trip. */
+	{
+		long rv;
+		uint64_t set = 1ULL << (31 - 1);
+		uint64_t cur = 0;
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, 0 /*SIG_BLOCK*/,
+			    &set, 0, 8, 0, 0, rv);
+		fails += tawc_io_step("mt: main thread can still block SIGSYS shadow",
+				      rv == 0);
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, 0 /*SIG_BLOCK*/,
+			    0, &cur, 8, 0, 0, rv);
+		fails += tawc_io_step(
+			"mt: main thread shadow read-back shows SIGSYS blocked",
+			rv == 0 && (cur & (1ULL << (31 - 1))) != 0);
+		INLINE_SYS6(TAWC_SYS_rt_sigprocmask, 1 /*SIG_UNBLOCK*/,
+			    &set, 0, 8, 0, 0, rv);
+		fails += tawc_io_step("mt: main thread can unblock SIGSYS shadow",
+				      rv == 0);
+	}
+
+	return fails;
+}
+
 /* Phase 2e — /proc/self/exe synthesis. The handler stashes the
  * guest's requested exec path; readlinkat against /proc/self/exe
  * (and /proc/<our-pid>/exe) returns that stash, NOT the kernel's
@@ -2157,6 +2458,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_guest_seccomp_prctl_handling();
 	fails += test_sigsys_virtualization();
 	fails += test_rt_sigaction_b2_sizing();
+	fails += test_sigsys_block_shadow_multithread();
 	fails += test_proc_self_exe_synthesis();
 	fails += test_b4_rootfs_prefix_boundary(rootfs);
 	fails += test_b5_bind_over_symlink_memo();
