@@ -29,6 +29,7 @@
 #include <linux/stat.h>
 
 #include "dispatch.h"
+#include "io.h"
 #include "path.h"
 #include "raw_sys.h"
 #include "sysnr.h"
@@ -527,6 +528,7 @@ static long handle_##name(const tawcroot_syscall_args *args,             \
 DECLARE_AT_PASS(mkdirat,    TAWC_SYS_mkdirat,    3, TAWCROOT_PATH_PARENT_CREATE)
 DECLARE_AT_PASS(unlinkat,   TAWC_SYS_unlinkat,   3, TAWCROOT_PATH_PARENT_REMOVE)
 DECLARE_AT_PASS(fchmodat,   TAWC_SYS_fchmodat,   3, TAWCROOT_PATH_FOLLOW)
+DECLARE_AT_PASS(mknodat,    TAWC_SYS_mknodat,    4, TAWCROOT_PATH_PARENT_CREATE)
 
 /* utimensat: translate path and pass through. Special-case the
  * Linux extension `pathname == NULL` (operate on dirfd directly) by
@@ -1063,7 +1065,148 @@ static long handle_rename_legacy(const tawcroot_syscall_args *args,
 			   -100 /*AT_FDCWD*/,
 			   (const char *)(uintptr_t)args->b, 0);
 }
+
+/* Legacy x86_64 mknod(path, mode, dev). aarch64 has no mknod — only
+ * mknodat — so this is x86_64-only. Routes to the modern mknodat
+ * with our base_fd / suffix. */
+static long handle_mknod(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const char *gpath = (const char *)(uintptr_t)args->a;
+	if (!gpath) return -14;
+	char path_buf[TAWC_PATH_MAX];
+	char suffix[TAWC_PATH_MAX];
+	int  base_fd, use_empty;
+	long e = fetch_and_translate(gpath, path_buf, sizeof path_buf,
+				     suffix, sizeof suffix,
+				     &base_fd, &use_empty,
+				     TAWCROOT_PATH_PARENT_CREATE);
+	if (e) return e;
+	if (use_empty) return -22;  /* EINVAL — can't mknod the dir itself */
+	return TAWC_RAW(TAWC_SYS_mknodat, base_fd, (long)suffix,
+			args->b, args->c, 0, 0);
+}
 #endif  /* __x86_64__ */
+
+/* Build a "/proc/self/fd/<base_fd>[/suffix]" path into `out`. Used by
+ * the path-bearing syscall handlers that don't have an *at variant
+ * (statfs, *xattr): we open the rootfs/bind dir as `base_fd`, then
+ * pass /proc/self/fd/<n>/<suffix> to the kernel as the path. The
+ * kernel resolves /proc/self/fd/<n> to the dir's underlying inode
+ * and walks the suffix from there.
+ *
+ * `use_empty=1` means the syscall should target `base_fd` itself
+ * (suffix == ""); we omit the trailing "/<suffix>" so the path is
+ * just "/proc/self/fd/<n>". Returns 0 / -ENAMETOOLONG. */
+static long build_proc_fd_path(char *out, size_t cap,
+			       int base_fd, const char *suffix, int use_empty)
+{
+	const char *prefix = "/proc/self/fd/";
+	size_t i = 0;
+	while (prefix[i]) {
+		if (i + 1 >= cap) return -36;
+		out[i] = prefix[i];
+		i++;
+	}
+	int wrote = tawc_int_to_str(out + i, cap - i, base_fd);
+	if (wrote <= 0) return -36;
+	i += (size_t)wrote;
+	if (!use_empty) {
+		if (i + 1 >= cap) return -36;
+		out[i++] = '/';
+		size_t j = 0;
+		while (suffix[j]) {
+			if (i + 1 >= cap) return -36;
+			out[i++] = suffix[j++];
+		}
+	}
+	if (i >= cap) return -36;
+	out[i] = 0;
+	return 0;
+}
+
+/* statfs(path, buf): translate path, then dispatch using a /proc/self/
+ * fd-anchored path. statfs has no fd-relative variant; we could `openat
+ * O_PATH` + fstatfs, but on Android-shipped 5.4 kernels fstatfs against
+ * an O_PATH fd returns -EBADF. The /proc/self/fd path gets the same
+ * effect (kernel resolves through the fd) with no version surprises. */
+static long handle_statfs(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const char *gpath = (const char *)(uintptr_t)args->a;
+	if (!gpath) return -14;
+	char path_buf[TAWC_PATH_MAX];
+	char suffix[TAWC_PATH_MAX];
+	int  base_fd, use_empty;
+	long e = fetch_and_translate(gpath, path_buf, sizeof path_buf,
+				     suffix, sizeof suffix,
+				     &base_fd, &use_empty,
+				     TAWCROOT_PATH_FOLLOW);
+	if (e) return e;
+	char host_path[TAWC_PATH_MAX];
+	long bp = build_proc_fd_path(host_path, sizeof host_path,
+				     base_fd, suffix, use_empty);
+	if (bp < 0) return bp;
+	return TAWC_RAW(TAWC_SYS_statfs, (long)host_path, args->b, 0, 0, 0, 0);
+}
+
+/* Path-bearing xattr handlers. The xattr syscalls don't have an *at
+ * family; we route through `/proc/self/fd/<base_fd>/<suffix>`. The
+ * `l*xattr` variants don't follow leaf symlinks: we use NOFOLLOW path
+ * mode (so the resolver leaves the leaf alone) and dispatch to the
+ * matching `l*xattr` syscall (the kernel handles the leaf-NOFOLLOW
+ * itself).
+ *
+ * Empty-suffix corner case: if the guest path resolves to the rootfs/
+ * bind dir itself (`use_empty == 1`), the dispatched path is just
+ * `/proc/self/fd/<n>`, which IS a symlink in procfs. FOLLOW variants
+ * are correct (the kernel walks the magic symlink and lands on the
+ * dirfd's underlying inode); NOFOLLOW variants would target the
+ * procfs entry itself rather than the dirfd's inode — semantically
+ * wrong, so we short-circuit `l*xattr` on the empty suffix with
+ * -EOPNOTSUPP. Programs almost never l*xattr the rootfs/bind root
+ * directly, but the code shouldn't silently misroute when they do.
+ *
+ * `f*xattr` (fd-based) is NOT trapped — fds are opaque to us and the
+ * kernel's resolution against an open fd is already correct.
+ *
+ * Most calls will return -EOPNOTSUPP / -ENOTSUP from the kernel
+ * (Android app-private storage doesn't carry xattrs); the value of
+ * trapping is that the guest sees the right errno against the right
+ * path rather than a host-relative error. */
+#define DECLARE_PATH_XATTR(name, sysnr, narg, pmode)                      \
+static long handle_##name(const tawcroot_syscall_args *args, ucontext_t *uc) \
+{                                                                          \
+	(void)uc;                                                          \
+	const char *gpath = (const char *)(uintptr_t)args->a;              \
+	if (!gpath) return -14;                                            \
+	char path_buf[TAWC_PATH_MAX];                                      \
+	char suffix[TAWC_PATH_MAX];                                        \
+	int  base_fd, use_empty;                                           \
+	long e = fetch_and_translate(gpath, path_buf, sizeof path_buf,     \
+				     suffix, sizeof suffix,                \
+				     &base_fd, &use_empty, pmode);         \
+	if (e) return e;                                                   \
+	if (use_empty && (pmode) == TAWCROOT_PATH_NOFOLLOW)                \
+		return -95; /* EOPNOTSUPP — see big comment above */       \
+	char host_path[TAWC_PATH_MAX];                                     \
+	long bp = build_proc_fd_path(host_path, sizeof host_path,          \
+				     base_fd, suffix, use_empty);          \
+	if (bp < 0) return bp;                                             \
+	return TAWC_RAW(sysnr, (long)host_path,                            \
+			args->b, args->c, args->d,                         \
+			(narg) > 4 ? args->e : 0,                          \
+			(narg) > 5 ? args->f : 0);                         \
+}
+
+DECLARE_PATH_XATTR(setxattr,     TAWC_SYS_setxattr,     5, TAWCROOT_PATH_FOLLOW)
+DECLARE_PATH_XATTR(lsetxattr,    TAWC_SYS_lsetxattr,    5, TAWCROOT_PATH_NOFOLLOW)
+DECLARE_PATH_XATTR(getxattr,     TAWC_SYS_getxattr,     4, TAWCROOT_PATH_FOLLOW)
+DECLARE_PATH_XATTR(lgetxattr,    TAWC_SYS_lgetxattr,    4, TAWCROOT_PATH_NOFOLLOW)
+DECLARE_PATH_XATTR(listxattr,    TAWC_SYS_listxattr,    3, TAWCROOT_PATH_FOLLOW)
+DECLARE_PATH_XATTR(llistxattr,   TAWC_SYS_llistxattr,   3, TAWCROOT_PATH_NOFOLLOW)
+DECLARE_PATH_XATTR(removexattr,  TAWC_SYS_removexattr,  2, TAWCROOT_PATH_FOLLOW)
+DECLARE_PATH_XATTR(lremovexattr, TAWC_SYS_lremovexattr, 2, TAWCROOT_PATH_NOFOLLOW)
 
 void tawcroot_fs_register(void)
 {
@@ -1095,6 +1238,22 @@ void tawcroot_fs_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_renameat,    handle_renameat);
 	tawcroot_dispatch_install(TAWC_SYS_renameat2,   handle_renameat2);
 	tawcroot_dispatch_install(TAWC_SYS_truncate,    handle_truncate);
+	tawcroot_dispatch_install(TAWC_SYS_mknodat,     handle_mknodat);
+	tawcroot_dispatch_install(TAWC_SYS_statfs,      handle_statfs);
+
+	/* Path-bearing xattr family. f*xattr variants take an fd and stay
+	 * untrapped — the kernel's fd-based resolution is already correct.
+	 * Most of these will return -EOPNOTSUPP on Android app-private
+	 * storage; trapping ensures the failure is against the guest-
+	 * visible path rather than a host-relative one. */
+	tawcroot_dispatch_install(TAWC_SYS_setxattr,    handle_setxattr);
+	tawcroot_dispatch_install(TAWC_SYS_lsetxattr,   handle_lsetxattr);
+	tawcroot_dispatch_install(TAWC_SYS_getxattr,    handle_getxattr);
+	tawcroot_dispatch_install(TAWC_SYS_lgetxattr,   handle_lgetxattr);
+	tawcroot_dispatch_install(TAWC_SYS_listxattr,   handle_listxattr);
+	tawcroot_dispatch_install(TAWC_SYS_llistxattr,  handle_llistxattr);
+	tawcroot_dispatch_install(TAWC_SYS_removexattr, handle_removexattr);
+	tawcroot_dispatch_install(TAWC_SYS_lremovexattr,handle_lremovexattr);
 
 #if defined(__x86_64__)
 	/* Legacy x86_64 syscalls — the lp64-`access`-on-x86_64 set that
@@ -1112,5 +1271,6 @@ void tawcroot_fs_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_link,        handle_link_legacy);
 	tawcroot_dispatch_install(TAWC_SYS_symlink,     handle_symlink_legacy);
 	tawcroot_dispatch_install(TAWC_SYS_rename,      handle_rename_legacy);
+	tawcroot_dispatch_install(TAWC_SYS_mknod,       handle_mknod);
 #endif
 }

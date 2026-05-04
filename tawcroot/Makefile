@@ -74,6 +74,7 @@ TESTS_CFLAGS := \
     -ffile-prefix-map=$(REPO)/= \
     -DTAWCROOT_TESTHOST_BIN=\"$(OUT)/tawcroot-testhost\" \
     -DTAWCROOT_PROD_BIN=\"$(OUT)/tawcroot\" \
+    -DTAWCROOT_PROD_OBJ_DIR=\"$(OBJ)/prod/tawcroot/src\" \
     -DTAWCROOT_STATIC_EXIT42_BIN=\"$(OUT)/programs/static_exit42\" \
     -DTAWCROOT_STATIC_ARGC_RANDOM_BIN=\"$(OUT)/programs/static_argc_random\" \
     -DTAWCROOT_DYNAMIC_EXIT42_BIN=\"$(OUT)/programs/dynamic_exit42\" \
@@ -93,10 +94,12 @@ PROD_C := \
     $(SRC_T)/src/io.c \
     $(SRC_T)/src/strings.c \
     $(SRC_T)/src/filter.c \
+    $(SRC_T)/src/filter_build.c \
     $(SRC_T)/src/handler.c \
     $(SRC_T)/src/dispatch.c \
     $(SRC_T)/src/path.c \
     $(SRC_T)/src/path_fold.c \
+    $(SRC_T)/src/path_orchestrate.c \
     $(SRC_T)/src/path_resolve.c \
     $(SRC_T)/src/identity.c \
     $(SRC_T)/src/syscalls_fs.c \
@@ -121,7 +124,9 @@ PROD_C := \
 # has no `tawc_write` etc.
 PROD_C_FOR_TESTS := \
     $(SRC_T)/src/strings.c \
+    $(SRC_T)/src/filter_build.c \
     $(SRC_T)/src/path_fold.c \
+    $(SRC_T)/src/path_orchestrate.c \
     $(SRC_T)/src/path_resolve.c \
     $(SRC_T)/src/loader_elf.c \
     $(SRC_T)/src/loader_map.c \

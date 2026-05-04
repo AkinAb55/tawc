@@ -1,9 +1,18 @@
-/* End-to-end test of the SIGSYS-handler-side execve interception:
- * production tawcroot --exec-via-handler exercises
- * `tawcroot_exec_handler_perform()`, which builds an exec_state in a
- * memfd, opens /proc/self/exe, and execveats into us with
- * --exec-child <fd> — the same dance the real SIGSYS handler will
- * perform when it traps the guest's `execve(2)`.
+/* End-to-end test of the SIGSYS-handler-side execve interception via
+ * the testhost-only `--exec-via-handler` diagnostic.
+ *
+ * `--exec-via-handler` exercises `tawcroot_exec_handler_perform()`,
+ * which builds an exec_state in a memfd, opens /proc/self/exe, and
+ * execveats into us with `--exec-child <fd>` — the same dance the
+ * real SIGSYS handler will perform when it traps the guest's
+ * `execve(2)`. Production gates `--exec-via-handler` off (only the
+ * `--exec-child` re-entry is reachable in production); tawcroot-
+ * testhost exposes both halves so we can test the round-trip.
+ *
+ * The handler's `/proc/self/exe` re-exec lands back in testhost main
+ * with `--exec-child <bare-int>`, which testhost dispatches to the
+ * production loader-child path (see main.c). So this test exercises
+ * the same code path production runs at SIGSYS-driven exec time.
  *
  * Success of these tests means front + back halves of the phase-2.6
  * dance are wired correctly. The remaining phase-2.6 work (hooking
@@ -16,8 +25,8 @@
 #include <cleat/subproc.h>
 #include <stc/cstr.h>
 
-#ifndef TAWCROOT_PROD_BIN
-# error "TAWCROOT_PROD_BIN must be defined"
+#ifndef TAWCROOT_TESTHOST_BIN
+# error "TAWCROOT_TESTHOST_BIN must be defined"
 #endif
 #ifndef TAWCROOT_STATIC_EXIT42_BIN
 # error "TAWCROOT_STATIC_EXIT42_BIN must be defined"
@@ -28,7 +37,7 @@
 
 static int run(const char *const *extra_args)
 {
-	VecStr cmd = c_init(vec_str, {TAWCROOT_PROD_BIN});
+	VecStr cmd = c_init(vec_str, {TAWCROOT_TESTHOST_BIN});
 	for (const char *const *p = extra_args; *p; p++) {
 		vec_str_push(&cmd, *p);
 	}

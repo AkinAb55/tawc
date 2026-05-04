@@ -1059,13 +1059,25 @@ the dispatch table is generated from a syscall list at build time.
   segments, synthesizes the initial stack/auxv, and jumps to ld.so's
   entry point without a second `execve`. See "execve handling" below.
 
-- `mknod`, `mknodat` — translate. Will likely fail with `-EPERM`
-  for character/block devices because Android `untrusted_app`
-  doesn't permit `mknod`. Pass the error through.
+- `mknod`, `mknodat`, `statfs` — trapped, translated, dispatched.
+  `mknod`/`mknodat` route to the modern `mknodat` against
+  `(base_fd, suffix)`; FIFO/socket nodes succeed on tmpfs; char/
+  block devices typically fail `-EPERM` because Android
+  `untrusted_app` doesn't permit `mknod`. `statfs` dispatches via
+  `/proc/self/fd/<base_fd>/<suffix>` (no `*at` form, and `fstatfs`
+  on an `O_PATH` fd is unreliable on Android-shipped 5.4 kernels).
+  `fstatfs` (fd-based) stays untrapped.
 
-- `mount`, `umount`, `setxattr`/`getxattr`/`*xattr` family —
-  translate paths. Most will fail at the kernel layer; that's
-  fine.
+- `setxattr`/`getxattr`/`listxattr`/`removexattr` and the `l*`
+  symlink-NOFOLLOW variants — trapped, translated, dispatched
+  through `/proc/self/fd/<base_fd>/<suffix>`. `f*xattr` (fd-based)
+  stay untrapped — kernel resolution against an open fd is already
+  correct. Most calls return `-EOPNOTSUPP` from Android app-private
+  storage; the value of trapping is that the failure is against the
+  guest-visible path, not a host-relative one.
+
+- `mount`, `umount` — translate paths. Most will fail at the
+  kernel layer; that's fine.
 
 - `io_uring_setup` — return `-ENOSYS`. This isn't a feature we
   defer; leaving io_uring un-trapped lets the guest submit
@@ -1748,16 +1760,41 @@ implemented.** A change without its tests is not a change.
 
 ### The two-binary split
 
-Production tawcroot must not contain test scaffolding — no
-argv-reachable test branches, no smoke driver, no `--run-test`
-hook. The test layer lives in two places:
+Production tawcroot must not contain test scaffolding or diagnostic
+argv branches — no smoke driver, no `--run-test` hook, no loader
+diagnostics on the production CLI. The production argv surface is
+exactly two entries:
+
+- `tawcroot -r ROOTFS [-b SRC:DST]... -- CMD [ARGS...]` — the
+  rootfs-mode launch path.
+- `tawcroot --exec-child <fd>` — re-entry from the SIGSYS execve
+  handler dance (`exec_handler.c` writes exec_state into a memfd
+  and re-execs `/proc/self/exe` with this argv). Not test-only —
+  the handler uses it during normal guest exec, so it must stay
+  reachable in production.
+
+Testhost-only diagnostic flags live behind `#ifdef TAWCROOT_TESTHOST`
+in `main.c`:
+
+- `--exec PATH [ARGS...]` — invoke the manual ELF loader directly,
+  no path translation, no handler/filter. Lets integration tests
+  exercise the loader vtable in isolation.
+- `--exec-via-handler PATH [ARGS...]` — drive
+  `tawcroot_exec_handler_perform()` end-to-end (memfd write →
+  `/proc/self/exe` re-exec → `--exec-child`). When testhost is the
+  re-exec target, its own `--exec-child` dispatch checks whether
+  `argv[2]` is a bare integer (loader-child path, production
+  semantics) or `--state-fd=<n>` (foundation-smoke path).
+
+The test layer lives in two places:
 
 1. **`tawcroot-testhost`** — a *second* binary built from the
    same production sources plus `tawcroot/tests/testhost/src/{testhost_main,
    smoke,child,phase1}.c`, compiled with `-DTAWCROOT_TESTHOST`. Same
    `_start`, same raw-syscall stub, same filter, same handler — the
    only difference is `main.c` routes argv-dispatch into
-   `tawcroot_testhost_main()` (which lives outside `tawcroot/src/`).
+   `tawcroot_testhost_main()` (which lives outside `tawcroot/src/`)
+   for non-loader argv, plus the diagnostic loader flags above.
    The smoke driver issues inline-asm syscalls *from inside the
    testhost* so each one's IP is outside the stub allowlist and the
    filter TRAPs into the real handler. Handler-level tests cannot

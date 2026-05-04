@@ -29,8 +29,10 @@
 #include <stdint.h>
 
 #include "fdtab.h"
+#include "io.h"
 #include "path.h"
 #include "path_oracle.h"
+#include "path_orchestrate.h"
 #include "path_resolve.h"
 #include "raw_sys.h"
 
@@ -79,38 +81,27 @@ void tawcroot_path_probe_openat2(void)
 	}
 }
 
-/* Forward declarations of internal helpers used both above and below
- * the memoization block. The bodies live further down. */
-static size_t pstrlen(const char *s);
-static int    pmemeq(const char *a, const char *b, size_t n);
-
-/* Well-known-symlink memoization. After fold_absolute, we check each
- * memoized src against the path's first segment (component boundary
- * required). If matched, we replace the segment with the target form
- * and re-run the fold so any `..`/`.` in the target collapses. Targets
- * may be relative ("usr/lib") or absolute ("/usr/lib") — the absolute
- * case is handled by re-fold which strips a leading `/`.
+/* Well-known-symlink memoization. After fold_absolute, the orchestrator
+ * checks each memoized src against the path's first segment (component
+ * boundary required). If matched, the segment is replaced with the
+ * target form and the fold re-runs so any `..`/`.` in the target
+ * collapses. Targets may be relative ("usr/lib") or absolute
+ * ("/usr/lib") — the absolute case is handled by re-fold which strips
+ * a leading `/`.
  *
  * The hit set is the typical glibc-rootfs symlink layout. Bumps go
  * through this table, not run-time discovery — finder cost is paid
- * once at init. */
+ * once at init. The match logic itself lives in path_orchestrate.c so
+ * tests can supply their own table. */
 #define MEMO_MAX 16
 
-struct symlink_memo {
-	char   src[32];
-	size_t src_len;
-	char   target[256];
-	size_t target_len;
-	int    target_absolute;
-};
-
-static struct symlink_memo g_memo[MEMO_MAX];
-static size_t              g_n_memo = 0;
+static struct tawcroot_symlink_memo g_memo[MEMO_MAX];
+static size_t                       g_n_memo = 0;
 
 static void memo_one(const char *prefix)
 {
 	if (g_n_memo >= MEMO_MAX) return;
-	size_t plen = pstrlen(prefix);
+	size_t plen = tawc_strlen(prefix);
 	if (plen + 1 > sizeof g_memo[0].src) return;
 
 	char buf[256];
@@ -121,7 +112,7 @@ static void memo_one(const char *prefix)
 	if ((size_t)n == sizeof buf) return;  /* truncated — skip memo */
 	buf[n] = 0;
 
-	struct symlink_memo *m = &g_memo[g_n_memo++];
+	struct tawcroot_symlink_memo *m = &g_memo[g_n_memo++];
 	for (size_t i = 0; i < plen; i++) m->src[i] = prefix[i];
 	m->src[plen] = 0;
 	m->src_len = plen;
@@ -129,7 +120,7 @@ static void memo_one(const char *prefix)
 	int abs = (buf[0] == '/');
 	const char *t = abs ? buf + 1 : buf;
 	while (*t == '/') t++;
-	size_t tlen = pstrlen(t);
+	size_t tlen = tawc_strlen(t);
 	if (tlen + 1 > sizeof m->target) {
 		g_n_memo--;
 		return;
@@ -150,60 +141,6 @@ void tawcroot_path_memoize_well_known(void)
 	memo_one("sbin");
 	memo_one("usr/sbin");
 	memo_one("var/run");
-}
-
-/* Apply memoization to a folded suffix in place. Returns 1 if the
- * suffix changed (caller may want to re-fold), 0 otherwise.
- *
- * Mode-aware: when the memoized symlink IS the final component of the
- * input (i.e. suf == src exactly, no trailing path), we only rewrite
- * for FOLLOW mode. Under NOFOLLOW / PARENT_CREATE / PARENT_REMOVE the
- * symlink itself is the operation target (lstat'ing it, readlink'ing
- * it, removing it, etc.) and rewriting would silently change which
- * inode the syscall hits. A skipped sole-component match `continue`s
- * (rather than returning) so a later memo entry whose `src` happens
- * to also be a path-prefix can still apply — `g_memo` does not
- * guarantee unique srcs across entries. */
-static int apply_memo(char *suf, size_t cap, tawcroot_path_mode mode)
-{
-	size_t suf_len = pstrlen(suf);
-	for (size_t i = 0; i < g_n_memo; i++) {
-		const struct symlink_memo *m = &g_memo[i];
-		if (m->src_len > suf_len) continue;
-		if (!pmemeq(suf, m->src, m->src_len)) continue;
-		if (suf_len > m->src_len && suf[m->src_len] != '/') continue;
-		if (suf_len == m->src_len && mode != TAWCROOT_PATH_FOLLOW) {
-			continue;
-		}
-		size_t after_src_len = suf_len - m->src_len;
-		size_t need = m->target_len + after_src_len + 1;
-		if (need > cap) return 0;
-
-		/* Shift the trailing remainder (including the terminating
-		 * NUL) into its new position. Direction of copy matters:
-		 * when target_len > src_len we're growing the prefix and
-		 * the destination range overlaps the source from the right
-		 * — copy right-to-left. When target_len < src_len we're
-		 * shrinking and the destination overlaps from the left —
-		 * copy left-to-right. The previous unconditional
-		 * right-to-left form would (in the shrink case) read from
-		 * positions it had already overwritten, truncating the
-		 * path at `target_len` — e.g. memoizing /usr/sbin (-> bin)
-		 * over /usr/sbin/bash silently dropped "/bash". */
-		if (m->target_len > m->src_len) {
-			for (size_t k = 0; k <= after_src_len; k++) {
-				suf[m->target_len + after_src_len - k] =
-					suf[m->src_len   + after_src_len - k];
-			}
-		} else if (m->target_len < m->src_len) {
-			for (size_t k = 0; k <= after_src_len; k++) {
-				suf[m->target_len + k] = suf[m->src_len + k];
-			}
-		}
-		for (size_t k = 0; k < m->target_len; k++) suf[k] = m->target[k];
-		return 1;
-	}
-	return 0;
 }
 
 long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
@@ -287,119 +224,13 @@ long tawcroot_reopen_reserved_fd(int *fd_p, const char *host_path)
 	return resv;
 }
 
-/* ---------------------------------------------------------------- */
-/* Small libc-free helpers                                          */
-
-static size_t pstrlen(const char *s)
-{
-	const char *p = s; while (*p) p++; return (size_t)(p - s);
-}
-
-static int pmemeq(const char *a, const char *b, size_t n)
-{
-	for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return 0;
-	return 1;
-}
-
 /* `tawcroot_path_fold_absolute` is implemented in `path_fold.c` (pure,
- * no syscalls — also linked into the cleat unit-test orchestrator). */
+ * no syscalls — also linked into the cleat unit-test orchestrator).
+ * The post-fold orchestration (bind → memo → resolver → bind) is in
+ * `path_orchestrate.c`. */
 
 /* ---------------------------------------------------------------- */
-/* Relative-path resolver: convert kernel-cwd into a guest-absolute
- * path, then prepend the relative remainder.
- *
- * If the kernel cwd is outside the configured rootfs host path, return
- * -ENOENT so we don't accidentally leak host paths (or, worse, route
- * a guest open into the host filesystem). */
-
-static long resolve_relative(const char *rel, char *abs, size_t abs_cap)
-{
-	if (tawcroot_rootfs_host_path_len == 0) return -2;
-
-	char cwd[TAWC_PATH_MAX];
-	long r = TAWC_RAW(TAWC_SYS_getcwd, (long)cwd, (long)sizeof cwd,
-			  0, 0, 0, 0);
-	if (r < 0) return r;
-	if ((size_t)r == 0) return -2;
-
-	/* getcwd returns the length INCLUDING the NUL on aarch64+x86_64
-	 * Linux. Older kernels may return without NUL — the manpage is
-	 * fuzzy; we treat trailing NULs defensively. */
-	size_t cwd_len = (size_t)r;
-	while (cwd_len > 0 && cwd[cwd_len - 1] == 0) cwd_len--;
-
-	/* Match the rootfs host prefix. The prefix match is by bytes, but a
-	 * sibling whose path *starts* with the rootfs name must NOT count as
-	 * inside (e.g. rootfs="/tmp/rfs" must not absorb "/tmp/rfs-evil/x"
-	 * just because "/tmp/rfs" is a byte-prefix of "/tmp/rfs-evil"). After
-	 * matching, require the next byte to be either end-of-string (cwd
-	 * IS the rootfs) or a `/` (cwd is a child of the rootfs). */
-	if (cwd_len < tawcroot_rootfs_host_path_len ||
-	    !pmemeq(cwd, tawcroot_rootfs_host_path,
-		    tawcroot_rootfs_host_path_len)) {
-		return -2;   /* ENOENT — cwd is outside the rootfs view */
-	}
-	if (cwd_len > tawcroot_rootfs_host_path_len &&
-	    cwd[tawcroot_rootfs_host_path_len] != '/') {
-		return -2;   /* sibling whose name shares the rootfs prefix */
-	}
-
-	/* Build the joined absolute guest path:
-	 *   "/" + (cwd - prefix) + "/" + rel
-	 * We drop the prefix (which includes no trailing slash). */
-	size_t off = 0;
-	if (off >= abs_cap) return -36;
-	abs[off++] = '/';
-
-	for (size_t i = tawcroot_rootfs_host_path_len; i < cwd_len; i++) {
-		if (off >= abs_cap) return -36;
-		abs[off++] = cwd[i];
-	}
-	if (off >= abs_cap) return -36;
-	if (off > 1 && abs[off - 1] != '/') {
-		if (off >= abs_cap) return -36;
-		abs[off++] = '/';
-	}
-
-	size_t rel_len = pstrlen(rel);
-	if (off + rel_len + 1 > abs_cap) return -36;
-	for (size_t i = 0; i < rel_len; i++) abs[off++] = rel[i];
-	abs[off] = 0;
-	return 0;
-}
-
-/* ---------------------------------------------------------------- */
-/* Public API                                                        */
-
-/* Re-route the folded suffix through a bind if it matches the longest
- * `dst` prefix. The folded suffix has NO leading '/'. The bind dst is
- * stored the same way. Match condition:
- *   suffix == dst                    (exact)        OR
- *   suffix starts with dst + '/'    (prefix component boundary)
- * Without the boundary check, "/system_ext" would be matched by a
- * bind with dst "system" (would be misrouted). */
-static void route_through_binds(tawcroot_path_result *r, char *suf)
-{
-	size_t suf_len = pstrlen(suf);
-	const struct tawcroot_bind *best = 0;
-	for (size_t i = 0; i < tawcroot_n_binds; i++) {
-		const struct tawcroot_bind *b = &tawcroot_binds[i];
-		if (b->dst_len > suf_len) continue;
-		if (!pmemeq(suf, b->dst, b->dst_len)) continue;
-		if (suf_len > b->dst_len && suf[b->dst_len] != '/') continue;
-		if (!best || b->dst_len > best->dst_len) best = b;
-	}
-	if (!best) return;
-
-	/* Rewrite: base_fd = best->src_fd, suffix = bytes after best->dst
-	 * (skipping any leading '/'). */
-	r->base_fd = best->src_fd;
-	size_t k = best->dst_len;
-	while (suf[k] == '/') k++;
-	size_t j = 0;
-	while (suf[k]) suf[j++] = suf[k++];
-	suf[j] = 0;
-}
+/* Production oracle + cwd source for the orchestration.             */
 
 /* Production oracle: readlink against tawcroot_rootfs_fd via raw
  * syscall. The empty-suffix case (rootfs root itself) is handled
@@ -421,18 +252,55 @@ static const struct tawcroot_path_oracle prod_oracle = {
 	.readlink = prod_readlink,
 };
 
-/* After fold + memo, run the manual symlink resolver. See the banner
- * at the top of `include/path_resolve.h` for why this exists and how
- * to drop it on a 5.6+-only target.
- *
- * LEGACY-5.4: drop this helper and its two call sites below to delete
- * the kernel-version-portability code path. */
-static long apply_resolver(char *out_suffix, size_t out_cap,
-			   tawcroot_path_mode mode)
+/* Production cwd-to-guest-absolute resolver: read the kernel cwd via
+ * raw `getcwd`, validate against the rootfs host prefix, and write
+ * the in-rootfs guest-absolute view (e.g. host `/data/.../rootfs/foo`
+ * → guest `/foo`). Returns -ENOENT if the cwd is outside the rootfs
+ * view (we deliberately don't leak host paths through guest errors). */
+static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
 {
-	return tawcroot_path_resolve_symlinks(out_suffix, out_cap,
-					      mode, &prod_oracle);
+	(void)ctx;
+	if (tawcroot_rootfs_host_path_len == 0) return -2;
+
+	char cwd[TAWC_PATH_MAX];
+	long r = TAWC_RAW(TAWC_SYS_getcwd, (long)cwd, (long)sizeof cwd,
+			  0, 0, 0, 0);
+	if (r < 0) return r;
+	if ((size_t)r == 0) return -2;
+
+	/* getcwd returns the length INCLUDING the NUL on aarch64+x86_64
+	 * Linux. Older kernels may return without NUL — the manpage is
+	 * fuzzy; we treat trailing NULs defensively. */
+	size_t cwd_len = (size_t)r;
+	while (cwd_len > 0 && cwd[cwd_len - 1] == 0) cwd_len--;
+
+	/* Match the rootfs host prefix by bytes, with a component-
+	 * boundary requirement on the next byte so a sibling whose name
+	 * happens to share the rootfs prefix (e.g. rootfs="/tmp/rfs"
+	 * vs. cwd="/tmp/rfs-evil/x") doesn't count as inside. */
+	if (cwd_len < tawcroot_rootfs_host_path_len) return -2;
+	for (size_t i = 0; i < tawcroot_rootfs_host_path_len; i++) {
+		if (cwd[i] != tawcroot_rootfs_host_path[i]) return -2;
+	}
+	if (cwd_len > tawcroot_rootfs_host_path_len &&
+	    cwd[tawcroot_rootfs_host_path_len] != '/') return -2;
+
+	/* Write the guest-absolute view: drop the host prefix, keep the
+	 * leading '/' (or synthesize one if cwd IS the rootfs root). */
+	size_t off = 0;
+	if (off + 1 >= out_cap) return -36;
+	out[off++] = '/';
+	for (size_t i = tawcroot_rootfs_host_path_len; i < cwd_len; i++) {
+		if (cwd[i] == '/' && i == tawcroot_rootfs_host_path_len) continue;
+		if (off + 1 >= out_cap) return -36;
+		out[off++] = cwd[i];
+	}
+	out[off] = 0;
+	return 0;
 }
+
+/* ---------------------------------------------------------------- */
+/* Public API                                                        */
 
 tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 					     char *out_suffix, size_t out_cap,
@@ -440,6 +308,7 @@ tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 {
 	tawcroot_path_result r;
 	r.err     = 0;
+	r.base_fd = -1;
 
 	if (!guest_path || out_cap == 0) {
 		r.err = -14;  /* EFAULT */
@@ -464,65 +333,16 @@ tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 		if (br < 0) { r.err = (int)br; return r; }
 	}
 
-	r.base_fd = tawcroot_rootfs_fd;
-
-	/* Order of operations after fold (review finding B5+D3):
-	 *
-	 *   fold → bind → (if no bind) memo → resolver → bind
-	 *
-	 * Why bind comes first: the user-supplied bind table is the
-	 * authoritative replacement for a subtree of the guest view. A
-	 * rootfs-side symlink memo (e.g. /lib → usr/lib) must not silently
-	 * defeat a bind on /lib. If the early bind matches, we skip memo
-	 * and the rootfs-fd-based resolver entirely — both are properties
-	 * of the rootfs view, not the bind src.
-	 *
-	 * Why bind comes again at the end: a memo may surface a bind that
-	 * didn't match the literal input. Example: bind on /usr/lib + memo
-	 * /lib → usr/lib. Input /lib/x doesn't match the bind directly, but
-	 * after memo it becomes usr/lib/x and the bind on /usr/lib then
-	 * applies.
-	 *
-	 * The resolver still runs against the rootfs only when no bind
-	 * matched the literal input — it uses prod_oracle which readlinks
-	 * via tawcroot_rootfs_fd, so it is only correct for in-rootfs paths. */
-
-	if (guest_path[0] != '/') {
-		char joined[TAWC_PATH_MAX];
-		long jr = resolve_relative(guest_path, joined, sizeof joined);
-		if (jr < 0) { r.err = jr; return r; }
-		long fr = tawcroot_path_fold_absolute(joined, out_suffix, out_cap);
-		if (fr < 0) { r.err = fr; return r; }
-	} else {
-		long fr = tawcroot_path_fold_absolute(guest_path, out_suffix, out_cap);
-		if (fr < 0) { r.err = fr; return r; }
-	}
-
-	/* Bind first. If matched, the bind src takes over -- skip memo
-	 * and resolver, both of which are rootfs-view-only. */
-	route_through_binds(&r, out_suffix);
-	if (r.base_fd != tawcroot_rootfs_fd) return r;
-
-	/* Well-known-symlink rewrite. If the rewrite kicks in, the suffix
-	 * may now contain `..`/`.` from the target, so re-fold. Bound
-	 * iterations to avoid pathological loops. */
-	for (int hop = 0; hop < 8; hop++) {
-		if (!apply_memo(out_suffix, out_cap, mode)) break;
-		char tmp[TAWC_PATH_MAX];
-		size_t i = 0;
-		tmp[i++] = '/';
-		size_t j = 0;
-		while (out_suffix[j] && i + 1 < sizeof tmp) tmp[i++] = out_suffix[j++];
-		tmp[i] = 0;
-		long rf = tawcroot_path_fold_absolute(tmp, out_suffix, out_cap);
-		if (rf < 0) { r.err = rf; return r; }
-	}
-
-	/* LEGACY-5.4 */
-	long er = apply_resolver(out_suffix, out_cap, mode);
-	if (er < 0) { r.err = er; return r; }
-
-	/* Final bind pass — memo may have surfaced a match. */
-	route_through_binds(&r, out_suffix);
-	return r;
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd   = tawcroot_rootfs_fd,
+		.binds            = tawcroot_binds,
+		.n_binds          = tawcroot_n_binds,
+		.memos            = g_memo,
+		.n_memos          = g_n_memo,
+		.oracle           = &prod_oracle,
+		.cwd_to_guest_abs = prod_cwd_to_guest_abs,
+		.cwd_ctx          = 0,
+	};
+	return tawcroot_path_translate_with_ctx(&ctx, guest_path,
+						out_suffix, out_cap, mode);
 }

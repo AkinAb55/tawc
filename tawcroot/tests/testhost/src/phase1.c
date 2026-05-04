@@ -282,10 +282,16 @@ int tawcroot_phase1_main(const char *rootfs)
 	tawcroot_path_probe_openat2();
 	tawc_io_kv_dec("    openat2_works", (long)tawcroot_openat2_works);
 
-	int trap_nrs[64];
-	size_t n_traps = tawcroot_dispatch_trap_list(trap_nrs,
-		sizeof trap_nrs / sizeof trap_nrs[0]);
+	int trap_nrs[256];
+	const size_t trap_cap = sizeof trap_nrs / sizeof trap_nrs[0];
+	size_t n_traps = tawcroot_dispatch_trap_list(trap_nrs, trap_cap);
 	tawc_io_kv_dec("    trapped syscalls", (long)n_traps);
+	/* trap_list returns the *true* count even when the buffer was
+	 * truncated. Mirror the production guard in main.c so growth past
+	 * trap_cap surfaces loudly rather than silently OOB-reading the
+	 * truncated array into the filter generator. */
+	fails += tawc_io_step("trap count fits trap_nrs[]", n_traps <= trap_cap);
+	if (n_traps > trap_cap) return 1;
 
 	long flt = tawcroot_install_filter(trap_nrs, n_traps);
 	fails += tawc_io_step("install seccomp filter (phase-1 set)",
@@ -702,6 +708,133 @@ int tawcroot_phase1_main(const char *rootfs)
 		INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD,
 			    "/tawcroot-symlink-test", 0, 0, 0, 0, rv);
 		fails += tawc_io_step("unlinkat(symlink)", rv == 0);
+	}
+
+	/* mknodat: create a FIFO (S_IFIFO doesn't need CAP_MKNOD). The
+	 * test fixture rootfs lives on tmpfs which supports mkfifo, so a
+	 * successful return tells us the dispatch is wired up AND the
+	 * path translation routed to the rootfs view (not the host). */
+	{
+		long rv;
+		/* S_IFIFO (0010000) | 0644 */
+		const long mode = 0010000 | 0644;
+		INLINE_SYS6(TAWC_SYS_mknodat, AT_FDCWD, "/tawcroot-mknod-fifo",
+			    mode, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"mknodat(\"/tawcroot-mknod-fifo\", S_IFIFO|0644) -> 0",
+			rv == 0);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* Verify the FIFO landed in the rootfs view. */
+		struct stat st;
+		INLINE_SYS6(TAWC_SYS_fstatat, AT_FDCWD, "/tawcroot-mknod-fifo",
+			    &st, 0, 0, 0, rv);
+		fails += tawc_io_step("fstatat sees FIFO", rv == 0);
+		fails += tawc_io_step("S_ISFIFO on the new node",
+				      (st.st_mode & 0170000) == 0010000);
+
+		INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD, "/tawcroot-mknod-fifo",
+			    0, 0, 0, 0, rv);
+		fails += tawc_io_step("unlinkat(FIFO) -> 0", rv == 0);
+	}
+
+#if defined(__x86_64__)
+	/* Legacy mknod (NR 133): same FIFO test via the legacy syscall.
+	 * aarch64 has no legacy mknod (only mknodat NR 33). */
+	{
+		long rv;
+		const long mode = 0010000 | 0644;
+		INLINE_SYS6(TAWC_SYS_mknod, "/tawcroot-mknod-legacy",
+			    mode, 0, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"legacy mknod(\"/tawcroot-mknod-legacy\", S_IFIFO|0644) -> 0",
+			rv == 0);
+		tawc_io_kv_dec("    rv", rv);
+		INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD, "/tawcroot-mknod-legacy",
+			    0, 0, 0, 0, rv);
+		fails += tawc_io_step("unlinkat(legacy FIFO) -> 0", rv == 0);
+	}
+#endif
+
+	/* statfs: should route through translation and return 0 against an
+	 * in-rootfs path. The struct-statfs contents we don't validate
+	 * here — that depends on the host fs the fixture lives on. The
+	 * 128-byte stack buffer is comfortably larger than the kernel's
+	 * statfs64 (88 bytes including padding). */
+	{
+		long rv;
+		char sb[128];
+		INLINE_SYS6(TAWC_SYS_statfs, "/etc/probe", sb, 0, 0, 0, 0, rv);
+		fails += tawc_io_step("statfs(\"/etc/probe\") -> 0", rv == 0);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* Outside-rootfs path must still translate (clamp) and not
+		 * leak host paths. /../etc/probe folds to /etc/probe inside
+		 * the rootfs view. */
+		INLINE_SYS6(TAWC_SYS_statfs, "/../etc/probe", sb,
+			    0, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"statfs(\"/../etc/probe\") -> 0 (clamp)",
+			rv == 0);
+	}
+
+	/* getxattr: the test rootfs (tmpfs) doesn't carry user xattrs we
+	 * set; expect -ENODATA (-61) for an unset key, NOT -ENOSYS. The
+	 * point is that the dispatch is registered and the kernel saw the
+	 * call against an in-rootfs path. */
+	{
+		long rv;
+		char buf[64];
+		INLINE_SYS6(TAWC_SYS_getxattr, "/etc/probe", "user.tawcroot.test",
+			    buf, sizeof buf, 0, 0, rv);
+		fails += tawc_io_step(
+			"getxattr(\"/etc/probe\", \"user.tawcroot.test\") "
+			"-> -ENODATA / -EOPNOTSUPP (not -ENOSYS)",
+			rv == -61 /*ENODATA*/ || rv == -95 /*EOPNOTSUPP*/);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* lgetxattr: same syscall family, NOFOLLOW path mode. */
+		INLINE_SYS6(TAWC_SYS_lgetxattr, "/etc/probe", "user.tawcroot.test",
+			    buf, sizeof buf, 0, 0, rv);
+		fails += tawc_io_step(
+			"lgetxattr(\"/etc/probe\", \"user.tawcroot.test\") "
+			"-> -ENODATA / -EOPNOTSUPP",
+			rv == -61 || rv == -95);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* listxattr: same shape, expect 0-length list or -EOPNOTSUPP. */
+		INLINE_SYS6(TAWC_SYS_listxattr, "/etc/probe", buf, sizeof buf,
+			    0, 0, 0, rv);
+		fails += tawc_io_step(
+			"listxattr(\"/etc/probe\") -> >=0 / -EOPNOTSUPP",
+			rv >= 0 || rv == -95);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* l*xattr against the rootfs root (suffix=="") must short-
+		 * circuit to -EOPNOTSUPP. The handler dispatches through
+		 * /proc/self/fd/<n>, which IS itself a magic symlink in
+		 * procfs — the kernel's NOFOLLOW lsetxattr would target the
+		 * procfs entry rather than the dirfd's underlying inode.
+		 * The handler returns -EOPNOTSUPP rather than misroute. */
+		INLINE_SYS6(TAWC_SYS_lgetxattr, "/", "user.tawcroot.test",
+			    buf, sizeof buf, 0, 0, rv);
+		fails += tawc_io_step("lgetxattr(\"/\") -> -EOPNOTSUPP", rv == -95);
+		tawc_io_kv_dec("    rv", rv);
+		INLINE_SYS6(TAWC_SYS_llistxattr, "/", buf, sizeof buf,
+			    0, 0, 0, rv);
+		fails += tawc_io_step("llistxattr(\"/\") -> -EOPNOTSUPP", rv == -95);
+		tawc_io_kv_dec("    rv", rv);
+
+		/* getxattr (FOLLOW variant) on the rootfs root is fine —
+		 * the magic symlink resolves to the dirfd's inode and the
+		 * call returns -ENODATA / -EOPNOTSUPP from the kernel as
+		 * usual. */
+		INLINE_SYS6(TAWC_SYS_getxattr, "/", "user.tawcroot.test",
+			    buf, sizeof buf, 0, 0, rv);
+		fails += tawc_io_step(
+			"getxattr(\"/\") -> -ENODATA / -EOPNOTSUPP",
+			rv == -61 || rv == -95);
+		tawc_io_kv_dec("    rv", rv);
 	}
 
 	/* fchownat: fake-root no-op should succeed even though our host

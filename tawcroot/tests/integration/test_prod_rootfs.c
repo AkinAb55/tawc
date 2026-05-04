@@ -190,6 +190,13 @@ test(prod_rootfs_bind_overrides_rootfs)
 	rmrf(FAKE_BINDSRC);
 }
 
+test(prod_rootfs_no_args_prints_usage)
+{
+	/* `tawcroot` with no argv tail at all: argc < 2 → usage(2). */
+	const char *args[] = { NULL };
+	test_int_eq(run_with(args), 2);
+}
+
 test(prod_rootfs_missing_double_dash_is_usage)
 {
 	/* No `--` separator means we never enter the "command + args"

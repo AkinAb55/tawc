@@ -1,0 +1,89 @@
+/* Path-translation orchestration — fold → bind → memo → resolver → bind.
+ *
+ * `tawcroot_path_translate` (path.c) is the production wrapper. It owns
+ * fd lifecycle (rootfs/bind reopen after closefrom), reads the
+ * process-global rootfs/bind/memo tables, and wires up a raw_sys-backed
+ * cwd source and readlink oracle. It then calls into
+ * `tawcroot_path_translate_with_ctx` here, which is pure with respect
+ * to the OS — every external dependency is in the context struct, so
+ * the orchestration itself compiles into both the freestanding
+ * production binary and the hosted-glibc cleat test orchestrator
+ * (PROD_C_FOR_TESTS in tawcroot/Makefile).
+ *
+ * Tests use this directly to exercise the inter-stage seams (B5/D3
+ * findings: bind-vs-memo collisions, fold→memo→resolve→bind ordering,
+ * symlink-target re-fold correctness). The pure sub-stages already had
+ * unit coverage before this refactor; the orchestration didn't because
+ * `tawcroot_path_translate` reached `getcwd`, `readlinkat`, and process
+ * globals through `raw_sys.h`, which the hosted build can't link.
+ */
+
+#pragma once
+
+#include <stddef.h>
+
+#include "path.h"
+#include "path_oracle.h"
+
+/* Memoized well-known symlink. Populated at init by
+ * `tawcroot_path_memoize_well_known()` in path.c (production); tests
+ * supply their own arrays directly via the context.
+ *
+ * The match condition is "src is a path-prefix of suf, with a
+ * component boundary" — see `apply_memo` in path_orchestrate.c. The
+ * target replaces src in-place; if `target_absolute` is set the
+ * caller is expected to re-fold (the orchestration loop handles
+ * that). */
+struct tawcroot_symlink_memo {
+	char   src[32];
+	size_t src_len;
+	char   target[256];
+	size_t target_len;
+	int    target_absolute;
+};
+
+/* Context for `tawcroot_path_translate_with_ctx`. Production fills
+ * this from process globals; tests build their own.
+ *
+ * Lifetime: caller-owned. The orchestration reads it but does not
+ * outlive the call.
+ */
+struct tawcroot_path_translate_ctx {
+	/* `base_fd` filled into the result when no bind matches. In
+	 * production this is the live rootfs O_PATH fd; tests typically
+	 * pass a sentinel value (e.g. -100) and assert on the field. */
+	int    rootfs_base_fd;
+
+	/* Bind table. Empty (`n_binds == 0`) is fine. */
+	const struct tawcroot_bind         *binds;
+	size_t                              n_binds;
+
+	/* Well-known-symlink memo table. Empty is fine. */
+	const struct tawcroot_symlink_memo *memos;
+	size_t                              n_memos;
+
+	/* Readlink oracle for the manual symlink resolver. May be NULL,
+	 * in which case the resolver pass is skipped entirely (the
+	 * orchestration only does fold + memo + bind, no symlink
+	 * walking). Production always supplies one; tests that don't
+	 * care about symlinks usually pass an oracle whose `readlink`
+	 * returns -EINVAL ("no symlinks anywhere") or NULL when they
+	 * specifically want to verify the no-resolver path. */
+	const struct tawcroot_path_oracle  *oracle;
+
+	/* Resolve the current working directory to a guest-absolute path
+	 * (must start with '/', NUL-terminated). Called only when the
+	 * input path is relative.
+	 *
+	 * Returns 0 on success and writes into `out` (capacity `out_cap`).
+	 * Negative return is a -errno passed through to the caller (e.g.
+	 * -ENOENT when cwd is outside the rootfs view). May be NULL; in
+	 * that case relative inputs return -ENOENT. */
+	long  (*cwd_to_guest_abs)(void *cwd_ctx, char *out, size_t out_cap);
+	void   *cwd_ctx;
+};
+
+tawcroot_path_result tawcroot_path_translate_with_ctx(
+	const struct tawcroot_path_translate_ctx *ctx,
+	const char *guest_path, char *out_suffix, size_t out_cap,
+	tawcroot_path_mode mode);

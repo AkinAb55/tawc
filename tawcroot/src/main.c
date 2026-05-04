@@ -3,29 +3,32 @@
  * `_start` (arch/<arch>_stub.S) tail-calls into `tawcroot_main`. From here
  * the production build parses the CLI and dispatches.
  *
- * Modes:
+ * Production CLI (must stay tight — anything reachable here is a
+ * supported surface):
  *   tawcroot -r ROOTFS [-b SRC:DST]... -- CMD [ARGS...]
  *     The "real" production mode (phase 2d). Opens the rootfs, builds
  *     the bind table, installs handler+filter, and manual-loads CMD
  *     from inside the rootfs view (path translation in effect).
- *   tawcroot --exec PATH [ARGS...]
+ *   tawcroot --exec-child <fd>
+ *     Re-entry from the SIGSYS execve handler dance. Reads exec_state
+ *     from the inherited memfd and resumes through the loader. Not
+ *     test-scaffolding — the handler in exec_handler.c re-execs into
+ *     this branch as part of normal operation.
+ *
+ * Testhost-only diagnostic argv (gated behind TAWCROOT_TESTHOST so
+ * production never exposes them):
+ *   tawcroot-testhost --exec PATH [ARGS...]
  *     Loader-only diagnostic — host-fs paths, no translation, no
- *     handler/filter. Used by the integration smoke that exercises
- *     manual-load in isolation.
- *   tawcroot --exec-via-handler PATH [ARGS...]
+ *     handler/filter. Lets integration tests exercise manual-load in
+ *     isolation.
+ *   tawcroot-testhost --exec-via-handler PATH [ARGS...]
  *     Diagnostic for the SIGSYS-handler-side execve interception
  *     (writes a memfd and re-execs ourselves into --exec-child). No
  *     real seccomp trap; the handler function is called directly.
- *   tawcroot --exec-child <fd>
- *     Re-entry from the execve handler dance. Reads exec_state from
- *     the inherited memfd and resumes through the loader.
  *
- * Production must NOT contain test-only argv branches or smoke
- * scaffolding. The `--exec*` modes above are diagnostic, not test-
- * scaffolding, but their exposure on the CLI is reviewed in the
- * code-review notes (D8) and tracked. The cleat test runner
- * (`build/tawcroot-host/tests`) execs `tawcroot-testhost` for
- * handler-layer tests. See notes/tawcroot.md "Testing strategy".
+ * The cleat test runner (`build/tawcroot-host/tests`) execs
+ * `tawcroot-testhost` for these and for handler-layer smoke. See
+ * notes/tawcroot.md "Testing strategy".
  */
 
 #include <stdint.h>
@@ -46,7 +49,6 @@
 int tawcroot_testhost_main(int argc, char **argv);
 #endif
 
-#ifndef TAWCROOT_TESTHOST
 static int streq(const char *a, const char *b)
 {
 	while (*a && *a == *b) { a++; b++; }
@@ -99,7 +101,14 @@ static void capture_host_auxv(int argc, char **argv)
 }
 
 /* Tiny ASCII-decimal parser for `--exec-child <fd>`. Returns the
- * parsed value or -1 on garbage / overflow / leading sign. */
+ * parsed value or -1 on garbage / overflow / leading sign.
+ *
+ * Rejecting leading `-`/`+` is intentional: the testhost dispatcher
+ * disambiguates `--exec-child <bare-int>` (loader child path,
+ * production semantics) from `--exec-child --state-fd=<n>` (smoke
+ * child) by trying parse_fd on argv[2] and falling through on -1.
+ * "--state-fd=..." starts with `-`, so it never parses as a valid
+ * fd here. Don't relax this without auditing the testhost dispatch. */
 static long parse_fd(const char *s)
 {
 	if (!s || !*s) return -1;
@@ -112,6 +121,25 @@ static long parse_fd(const char *s)
 	return v;
 }
 
+static __attribute__((noreturn)) void usage(int code)
+{
+#ifdef TAWCROOT_TESTHOST
+	tawc_io_str("tawcroot-testhost: usage:\n"
+	            "  tawcroot-testhost                         (foundation smoke)\n"
+	            "  tawcroot-testhost --exec PATH [ARGS...]   (loader diagnostic)\n"
+	            "  tawcroot-testhost --exec-via-handler PATH [ARGS...]\n"
+	            "  tawcroot-testhost --exec-child <fd>       (handler re-exec target)\n"
+	            "  tawcroot-testhost -r ROOTFS [-b SRC:DST]...\n");
+#else
+	tawc_io_str("tawcroot: usage:\n"
+	            "  tawcroot -r ROOTFS [-b SRC:DST]... -- CMD [ARGS...]\n"
+	            "  tawcroot --exec-child <fd>\n");
+#endif
+	tawc_exit_group(code);
+	__builtin_unreachable();
+}
+
+#ifndef TAWCROOT_TESTHOST
 /* Linux openat flags. The full open(2) bitfield isn't worth pulling in
  * <fcntl.h> for; pin the values we need. */
 #define O_RDONLY    0
@@ -135,17 +163,6 @@ static long parse_bind_spec(const char *spec, char *src_buf, size_t cap,
 	*dst_out = spec + i + 1;
 	if (**dst_out == 0) return -22;
 	return 0;
-}
-
-static __attribute__((noreturn)) void usage(int code)
-{
-	tawc_io_str("tawcroot: usage:\n"
-	            "  tawcroot -r ROOTFS [-b SRC:DST]... -- CMD [ARGS...]\n"
-	            "  tawcroot --exec PATH [ARGS...]            (no translation)\n"
-	            "  tawcroot --exec-via-handler PATH [ARGS...]\n"
-	            "  tawcroot --exec-child <fd>\n");
-	tawc_exit_group(code);
-	__builtin_unreachable();
 }
 
 /* Set up rootfs/binds/handler/filter for production "real" mode.
@@ -322,42 +339,62 @@ static void prod_rootfs_init(const char *rootfs,
 void tawcroot_main(int argc, char **argv)
 {
 #ifdef TAWCROOT_TESTHOST
+	/* Testhost dispatch. argc==1 (smoke parent) skips capture_host_auxv
+	 * since the smoke doesn't go through the loader. The loader-bearing
+	 * branches all need auxv populated (HWCAP / SYSINFO_EHDR / etc). */
+	if (argc >= 2) {
+		capture_host_auxv(argc, argv);
+
+		if (streq(argv[1], "--exec")) {
+			if (argc < 3) usage(2);
+			struct tawc_loader_exec_args ea = {
+				.guest_path = argv[2],
+				.argc       = argc - 2,
+				.argv       = (const char *const *)(argv + 2),
+				.envp       = (const char *const *)derive_envp(argc, argv),
+				.platform   = HOST_PLATFORM,
+			};
+			tawcroot_loader_exec(&ea);
+		}
+
+		if (streq(argv[1], "--exec-via-handler")) {
+			if (argc < 3) usage(2);
+			const char *path = argv[2];
+			long rc = tawcroot_exec_handler_perform(
+				path,
+				argc - 2,
+				(const char *const *)(argv + 2),
+				(const char *const *)derive_envp(argc, argv));
+			tawc_io_str("tawcroot: --exec-via-handler: handler returned ");
+			tawc_io_dec(rc);
+			tawc_io_str("\n");
+			tawc_exit_group(50);
+		}
+
+		/* --exec-child has two flavors in testhost: the loader re-exec
+		 * target (bare-integer fd, used by --exec-via-handler's
+		 * /proc/self/exe re-exec) and the foundation-smoke child
+		 * (--state-fd=<n> companion arg). Disambiguate on whether
+		 * argv[2] parses as a bare integer; if not, fall through to
+		 * the testhost smoke dispatch below. */
+		if (streq(argv[1], "--exec-child") && argc >= 3) {
+			long fd = parse_fd(argv[2]);
+			if (fd >= 0) {
+				tawcroot_loader_exec_child((int)fd, HOST_PLATFORM);
+			}
+		}
+	}
+
 	int rc = tawcroot_testhost_main(argc, argv);
 	tawc_exit_group(rc);
 #else
 	if (argc < 2) usage(2);
 
-	/* Capture before any --exec* dispatch so every loader path has
+	/* Capture before any --exec-child dispatch so the loader path has
 	 * the host's HWCAP / SYSINFO_EHDR / etc. ready to forward. The
 	 * --exec-child path runs this on its own re-exec, so the values
 	 * are fresh per tawcroot incarnation. */
 	capture_host_auxv(argc, argv);
-
-	if (streq(argv[1], "--exec")) {
-		if (argc < 3) usage(2);
-		struct tawc_loader_exec_args ea = {
-			.guest_path = argv[2],
-			.argc       = argc - 2,
-			.argv       = (const char *const *)(argv + 2),
-			.envp       = (const char *const *)derive_envp(argc, argv),
-			.platform   = HOST_PLATFORM,
-		};
-		tawcroot_loader_exec(&ea);
-	}
-
-	if (streq(argv[1], "--exec-via-handler")) {
-		if (argc < 3) usage(2);
-		const char *path = argv[2];
-		long rc = tawcroot_exec_handler_perform(
-			path,
-			argc - 2,
-			(const char *const *)(argv + 2),
-			(const char *const *)derive_envp(argc, argv));
-		tawc_io_str("tawcroot: --exec-via-handler: handler returned ");
-		tawc_io_dec(rc);
-		tawc_io_str("\n");
-		tawc_exit_group(50);
-	}
 
 	if (streq(argv[1], "--exec-child")) {
 		if (argc < 3) usage(2);

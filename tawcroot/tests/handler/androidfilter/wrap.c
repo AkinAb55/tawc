@@ -105,32 +105,48 @@ static long sys_seccomp(unsigned int op, unsigned int flags, void *args)
 
 static bool install_filter(bool include_legacy_x86_64)
 {
-	int trap_nrs[32];
+	/* Cap mirrors the production trap_nrs[256] in main.c. The current
+	 * trap set fits comfortably in 64 slots, but the array+guard pair
+	 * is the cheap defense against silent truncation as the set
+	 * grows — see the same pattern in main.c and phase1.c. */
+	int trap_nrs[64];
+	const size_t trap_cap = sizeof trap_nrs / sizeof trap_nrs[0];
 	size_t n = 0;
 
-	trap_nrs[n++] = WRAP_NR_openat2;
-	trap_nrs[n++] = WRAP_NR_faccessat2;
-	trap_nrs[n++] = WRAP_NR_clone3;
+#define WRAP_PUSH(_nr) do {                                              \
+		if (n >= trap_cap) {                                     \
+			fprintf(stderr,                                  \
+				"wrap: trap_nrs[%zu] overflow at %s\n",  \
+				trap_cap, #_nr);                         \
+			return false;                                    \
+		}                                                        \
+		trap_nrs[n++] = (_nr);                                   \
+	} while (0)
+
+	WRAP_PUSH(WRAP_NR_openat2);
+	WRAP_PUSH(WRAP_NR_faccessat2);
+	WRAP_PUSH(WRAP_NR_clone3);
 
 #if defined(__x86_64__)
 	if (include_legacy_x86_64) {
-		trap_nrs[n++] = WRAP_NR_access;
-		trap_nrs[n++] = WRAP_NR_open;
-		trap_nrs[n++] = WRAP_NR_chmod;
-		trap_nrs[n++] = WRAP_NR_chown;
-		trap_nrs[n++] = WRAP_NR_mkdir;
-		trap_nrs[n++] = WRAP_NR_rmdir;
-		trap_nrs[n++] = WRAP_NR_unlink;
-		trap_nrs[n++] = WRAP_NR_symlink;
-		trap_nrs[n++] = WRAP_NR_link;
-		trap_nrs[n++] = WRAP_NR_rename;
-		trap_nrs[n++] = WRAP_NR_readlink;
-		trap_nrs[n++] = WRAP_NR_stat;
-		trap_nrs[n++] = WRAP_NR_lstat;
+		WRAP_PUSH(WRAP_NR_access);
+		WRAP_PUSH(WRAP_NR_open);
+		WRAP_PUSH(WRAP_NR_chmod);
+		WRAP_PUSH(WRAP_NR_chown);
+		WRAP_PUSH(WRAP_NR_mkdir);
+		WRAP_PUSH(WRAP_NR_rmdir);
+		WRAP_PUSH(WRAP_NR_unlink);
+		WRAP_PUSH(WRAP_NR_symlink);
+		WRAP_PUSH(WRAP_NR_link);
+		WRAP_PUSH(WRAP_NR_rename);
+		WRAP_PUSH(WRAP_NR_readlink);
+		WRAP_PUSH(WRAP_NR_stat);
+		WRAP_PUSH(WRAP_NR_lstat);
 	}
 #else
 	(void)include_legacy_x86_64;
 #endif
+#undef WRAP_PUSH
 
 	/* Prologue: arch != ours -> KILL_PROCESS. Then load nr at offset 0
 	 * once and run a linear JEQ chain. This mimics Android's bionic
@@ -146,9 +162,11 @@ static bool install_filter(bool include_legacy_x86_64)
 	 *     ret TRAP
 	 *   ret ALLOW
 	 *
-	 * Kernel BPF instruction limit is 4096; we use ~5 + 2*N <= 50.
+	 * Kernel BPF instruction limit is 4096; we use ~5 + 2*N. With
+	 * trap_cap=64 the worst case is ~133 instructions; size prog[]
+	 * comfortably above that.
 	 */
-	struct sock_filter prog[64];
+	struct sock_filter prog[256];
 	size_t i = 0;
 	prog[i++] = BPF_S(BPF_LD | BPF_W | BPF_ABS, 4);
 	prog[i++] = BPF_J(BPF_JMP | BPF_JEQ | BPF_K, WRAP_AUDIT_ARCH, 1, 0);
