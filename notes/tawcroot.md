@@ -2658,8 +2658,16 @@ coverage.
         "Couldn't load XPCOM." and exited. Fix: pass
         `extras.guest_exe = NULL` from the exec handler so
         `--exec-child` falls back to `st.path` (the actual exec
-        target). `readlink /proc/self/exe` now correctly returns
-        the binary the guest just exec'd.
+        target). A second pass was needed (regression caught
+        2026-05-04): `st.path` is whatever the guest passed to
+        `execve`, not the post-symlink real-path. Firefox launched
+        via `/usr/sbin/firefox` (→ `/usr/bin/firefox` →
+        `/usr/lib/firefox/firefox`) put `$ORIGIN` at `/usr/sbin`,
+        re-breaking the libxul.so dlopen. `tawcroot_set_guest_exe_path`
+        now runs the path through `tawcroot_path_translate` with
+        `PATH_FOLLOW` so `/proc/self/exe` returns the canonical
+        guest-absolute path, matching what the kernel would have
+        produced under a real chroot.
      3. **Bind src host paths weren't tracked.** The bind table
         previously stored only `src_fd`, recovering the host path
         via `readlinkat /proc/self/fd/<src_fd>` at exec-handler

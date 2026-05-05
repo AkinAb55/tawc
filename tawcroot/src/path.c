@@ -59,6 +59,39 @@ void tawcroot_set_guest_exe_path(const char *path)
 		tawcroot_guest_exe_path_len = 0;
 		return;
 	}
+
+	/* Canonicalize through the rootfs symlink view so /proc/self/exe
+	 * synthesis returns what the kernel would have under a real chroot:
+	 * the post-symlink real-path of the executable. Without this,
+	 * $ORIGIN-rooted RPATH/RUNPATH lookups break when the exec target
+	 * goes through a symlink — e.g. Firefox launched via /usr/sbin/firefox
+	 * (→ /usr/bin/firefox → /usr/lib/firefox/firefox) would have $ORIGIN
+	 * resolve to /usr/sbin and fail to dlopen libxul.so ("Couldn't load
+	 * XPCOM"). Only applies when the resolved path stays in the rootfs
+	 * view (base_fd == rootfs_fd); paths that route through a bind
+	 * fall through to verbatim because the translator's suffix is
+	 * relative to the bind src, not guest-absolute, and reconstructing
+	 * the guest path from base_fd matters too little to justify the
+	 * extra plumbing — exec'd binaries live in the rootfs proper in
+	 * every flow we care about. */
+	if (tawcroot_rootfs_fd >= 0) {
+		char suffix[TAWC_PATH_MAX];
+		tawcroot_path_result r = tawcroot_path_translate(
+			path, suffix, sizeof suffix, TAWCROOT_PATH_FOLLOW);
+		if (r.err == 0 && r.base_fd == tawcroot_rootfs_fd) {
+			tawcroot_guest_exe_path[0] = '/';
+			size_t i = 0;
+			while (suffix[i] &&
+			       i + 2 < sizeof tawcroot_guest_exe_path) {
+				tawcroot_guest_exe_path[i + 1] = suffix[i];
+				i++;
+			}
+			tawcroot_guest_exe_path[i + 1] = 0;
+			tawcroot_guest_exe_path_len    = i + 1;
+			return;
+		}
+	}
+
 	size_t i = 0;
 	while (path[i] && i + 1 < sizeof tawcroot_guest_exe_path) {
 		tawcroot_guest_exe_path[i] = path[i];
