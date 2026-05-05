@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Context
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
@@ -84,21 +85,32 @@ class InstallationStore(context: Context) {
 
     /**
      * Total bytes used by [id]'s installation dir (rootfs + metadata +
-     * enter.sh). For chroot installs the rootfs is root-owned, so
-     * `du` only sees the right size under `su`. For proot installs
-     * everything is app-uid-owned and `du` runs without privileges.
-     * Returns -1 on failure (e.g. chroot-method install on a device
-     * where `su` was revoked between install and now).
+     * enter.sh). Only the `chroot` method puts root-owned files on
+     * disk (the rootfs's own uids); `proot` and `tawcroot` are
+     * app-uid-owned end-to-end and `du` runs unprivileged. Returns -1
+     * on failure (e.g. chroot-method install on a device where `su`
+     * was revoked between install and now, or no `su` on PATH at
+     * all — DistroInfoActivity then renders "?" instead of crashing).
      *
      * Blocks on the shell; call from a background dispatcher.
      */
     fun computeSizeBytes(id: String): Long {
         val dir = installationDir(id)
         if (!dir.exists()) return 0L
-        val needsRoot = load(id)?.method != Installation.METHOD_PROOT
+        val needsRoot = load(id)?.method == Installation.METHOD_CHROOT
         val cmd = "du -sk '${dir.absolutePath}' 2>/dev/null | awk '{print \$1}'"
         val output: String = if (needsRoot) {
-            val r = Su.run(cmd)
+            // ProcessBuilder("su").start() throws IOException with
+            // "Permission denied" or "No such file" on devices where su
+            // isn't reachable from the app uid (rootless, or Magisk
+            // policy hasn't granted us yet). Without this catch the
+            // exception bubbles out of runInterruptible and crashes
+            // the activity.
+            val r = try {
+                Su.run(cmd)
+            } catch (_: IOException) {
+                return -1L
+            }
             if (!r.ok) return -1L
             r.output
         } else {
@@ -107,9 +119,13 @@ class InstallationStore(context: Context) {
             // the single short line `du -sk … | awk` produces today.
             // Propagate cancellation so DistroInfoActivity's
             // runInterruptible can abort when the user backs out.
-            val proc = ProcessBuilder("/system/bin/sh", "-c", cmd)
-                .redirectErrorStream(true)
-                .start()
+            val proc = try {
+                ProcessBuilder("/system/bin/sh", "-c", cmd)
+                    .redirectErrorStream(true)
+                    .start()
+            } catch (_: IOException) {
+                return -1L
+            }
             val captured = proc.inputStream.bufferedReader().use { it.readText() }
             try {
                 proc.waitFor()
