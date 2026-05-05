@@ -100,8 +100,8 @@ This split is deliberate:
 
 ### Rust: `OutputHost` per Activity, plus an assignment table
 
-Today `RenderState` holds a single `egl_surface` and `LoopData` holds a
-single `output_size`. Both move into a per-host record:
+Pre-refactor, `RenderState` held a single `egl_surface` and the calloop
+data wrapper held a single `output_size`. Both move into a per-host record:
 
 ```rust
 struct OutputHost {
@@ -510,7 +510,7 @@ Each phase is independently testable; nothing assumes a future phase exists.
 1. **Refactor to `OutputHost` with one host.** Compositor still has one
    EGLSurface, one Activity. The point is to land the host abstraction on
    the native side so subsequent phases just add hosts.
-   `LoopData.output_size` and `RenderState.egl_surface` move into
+   `output_size` and `RenderState.egl_surface` move into
    `TawcState.hosts: HashMap<ActivityId, OutputHost>` (length 1, with a
    hardcoded default `ActivityId` for the initial Activity).
 2. **`toplevel_to_host` assignment table.** Single host still, but the

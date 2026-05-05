@@ -59,11 +59,15 @@ Kotlin side (`app/src/main/java/me/phie/tawc/`):
 
 ## Key Design Decisions
 
-- `TawcState` (protocol) and `RenderState` (GPU) are separate structs. Both live in
-  `LoopData` which calloop passes to all callbacks.
-- `dispatch_clients()` is called in BOTH the display fd callback AND the frame timer.
-  The fd callback handles the fast path; the timer catch ensures no messages are delayed
-  by more than one frame. Do not remove either call.
+- `TawcState` is the single calloop data type — protocol state, `RenderState`, the
+  `wl_output`, frame counters, etc. all live on it. Upstream smithay's
+  `add_pre_commit_hook<D, _>` asserts at runtime that the type passed to handler
+  callbacks matches the type `CompositorState` was constructed for, so a wrapper
+  struct is not an option. `Display<TawcState>` lives inside a calloop `Generic`
+  source rather than on the state struct (avoids a self-referential cycle).
+- `dispatch_clients()` runs only from the Wayland fd `Generic` source; the frame
+  timer flushes pending writes but does not dispatch. Smithay's calloop integration
+  wakes the fd source whenever a client message arrives.
 - Per-surface state structs (`SurfaceWleglState`, `SurfaceShmState`) live in
   `TawcState` but contain texture fields written by `render.rs`. This cross-cutting
   is intentional (avoids duplicate lookup tables).

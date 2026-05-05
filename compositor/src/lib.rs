@@ -173,6 +173,9 @@ fn jstring_to_id(env: &mut JNIEnv, s: JString) -> ActivityId {
     env.get_string(&s).map(|s| s.into()).unwrap_or_else(|_| "primary".to_string())
 }
 
+// JNI ABI requires non-unsafe `extern "system" fn`. The Surface jobject is
+// already validated by Android before it reaches this entry point.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeRegisterActivitySurface(
     mut env: JNIEnv,
@@ -619,7 +622,7 @@ fn run_compositor(
         let _ = std::fs::create_dir_all(parent);
     }
     event_loop::run(
-        wl_display, state, WAYLAND_SOCKET_PATH, scale,
+        wl_display, state, WAYLAND_SOCKET_PATH,
         touch_channel, text_input_channel, state_query_channel, surface_event_channel,
         &RUNNING,
     )

@@ -192,7 +192,7 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                 if num_fds_got != inner.expected_fds {
                     resource.post_error(
                         android_wlegl::Error::BadHandle,
-                        &format!(
+                        format!(
                             "expected {} fds, got {}",
                             inner.expected_fds, num_fds_got
                         ),

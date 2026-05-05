@@ -336,11 +336,12 @@ pub fn import_shm_buffers(state: &mut TawcState) -> bool {
         }
     }
 
-    // Collect (surface, buffer, buffer_scale, viewport_dst) tuples that need
-    // importing. We also pick up buffer_scale and viewport here so SHM
-    // surfaces start with the right values; the commit handler keeps these
-    // refreshed for state-only commits (set_buffer_scale, viewport changes).
-    let mut to_import: Vec<(WlSurface, wl_buffer::WlBuffer, i32, Option<(i32, i32)>)> = Vec::new();
+    // (surface, buffer, buffer_scale, viewport_dst). buffer_scale and
+    // viewport are captured here so SHM surfaces start with the right
+    // values; the commit handler keeps them refreshed for state-only
+    // commits (set_buffer_scale, viewport changes).
+    type ImportEntry = (WlSurface, wl_buffer::WlBuffer, i32, Option<(i32, i32)>);
+    let mut to_import: Vec<ImportEntry> = Vec::new();
 
     for root in &all_roots {
         with_surface_tree_downward(

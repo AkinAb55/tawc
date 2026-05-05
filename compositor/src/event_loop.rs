@@ -36,11 +36,11 @@ use crate::render;
 /// `socket_path` is bound and inserted as a calloop source as the last
 /// step before entering the dispatch loop — see the comment at the
 /// caller in `lib.rs::run_compositor` for why we don't bind earlier.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     display: Display<TawcState>,
-    state: TawcState,
+    mut state: TawcState,
     socket_path: &str,
-    scale: i32,
     touch_channel: Channel<TouchEvent>,
     text_input_channel: Channel<TextInputEvent>,
     state_query_channel: Channel<()>,
@@ -423,7 +423,7 @@ pub fn run(
         // frame_count > 0 so the log doesn't fire every tick when the
         // compositor is idle (no foreground host means rendering is
         // skipped entirely and frame_count stays at 0 forever).
-        if data.frame_count > 0 && data.frame_count % 300 == 0 {
+        if data.frame_count > 0 && data.frame_count.is_multiple_of(300) {
             info!(
                 "Compositor: {} frames, {} toplevels, {} wlegl, {} shm, {} hosts",
                 data.frame_count,
@@ -436,8 +436,6 @@ pub fn run(
 
         TimeoutAction::ToDuration(Duration::from_millis(16))
     })?;
-
-    let mut state = state;
 
     // Spawn Xwayland (best-effort: failure logs and continues — the
     // Wayland-only subset of the compositor still works without it).
@@ -469,12 +467,6 @@ pub fn run(
         Ok(PostAction::Continue)
     })?;
     info!("Wayland socket: {}", socket_path);
-
-    // Touch the unused locals so the compiler doesn't complain. `scale`
-    // is still in the public signature for symmetry with the JNI side
-    // (lib.rs computes it once and passes it down even though TawcState
-    // already carries it).
-    let _ = scale;
 
     info!("Entering calloop event loop");
 

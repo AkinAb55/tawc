@@ -694,14 +694,12 @@ own bash + busybox bundling rests on the same loophole at the
 
 - `compositor/src/xwayland.rs` — spawns Xwayland on event-loop start,
   wires `X11Wm` on `XWaylandEvent::Ready`, implements `XwmHandler` +
-  `XWaylandShellHandler` on `TawcState` plus a forwarding impl on
-  `LoopData` (calloop's data-type bound on `X11Wm::start_wm`).
+  `XWaylandShellHandler` directly on `TawcState` (which is the calloop
+  data type — no wrapper struct).
 - `xwayland` feature added to the smithay dep in
   `compositor/Cargo.toml`.
-- `[patch.crates-io] smithay = { path = "../../smithay" }` so we
-  pick up the local fork's pending patches without a github push.
-  Switch back to `{ git = ..., branch = "tawc-patches" }` once the
-  fork is pushed.
+- `[patch.crates-io] smithay = { path = "../deps/smithay" }` pulls
+  in the fork; the commit is pinned in `deps/deps.list`.
 - `TawcState` gained `xwayland_shell_state`, `xwm`,
   `x11_surfaces: Vec<X11Surface>`, `x11_to_host: HashMap<…>`, and
   `xdisplay`. `CompositorHandler::client_compositor_state` now

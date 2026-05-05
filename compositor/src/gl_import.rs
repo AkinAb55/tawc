@@ -71,16 +71,16 @@ impl AhbTextureImporter {
             };
 
             let importer = Self {
-                egl_get_native_client_buffer: std::mem::transmute(
+                egl_get_native_client_buffer: std::mem::transmute::<*const c_void, FnEglGetNativeClientBufferANDROID>(
                     load_egl("eglGetNativeClientBufferANDROID")?
                 ),
-                gl_gen_textures: std::mem::transmute(load_gl(&gles_lib, b"glGenTextures\0")?),
-                gl_bind_texture: std::mem::transmute(load_gl(&gles_lib, b"glBindTexture\0")?),
-                gl_tex_parameteri: std::mem::transmute(load_gl(&gles_lib, b"glTexParameteri\0")?),
-                gl_egl_image_target_texture_2d_oes: std::mem::transmute(
+                gl_gen_textures: std::mem::transmute::<*const c_void, FnGlGenTextures>(load_gl(&gles_lib, b"glGenTextures\0")?),
+                gl_bind_texture: std::mem::transmute::<*const c_void, FnGlBindTexture>(load_gl(&gles_lib, b"glBindTexture\0")?),
+                gl_tex_parameteri: std::mem::transmute::<*const c_void, FnGlTexParameteri>(load_gl(&gles_lib, b"glTexParameteri\0")?),
+                gl_egl_image_target_texture_2d_oes: std::mem::transmute::<*const c_void, FnGlEGLImageTargetTexture2DOES>(
                     load_egl("glEGLImageTargetTexture2DOES")?
                 ),
-                gl_get_error: std::mem::transmute(load_gl(&gles_lib, b"glGetError\0")?),
+                gl_get_error: std::mem::transmute::<*const c_void, FnGlGetError>(load_gl(&gles_lib, b"glGetError\0")?),
             };
 
             // Leak the library handle to keep it loaded (it's already loaded by the process anyway)

@@ -22,7 +22,6 @@ use std::process::Stdio;
 
 use log::{error, info, warn};
 use smithay::utils::{Logical, Rectangle};
-use smithay::wayland::compositor::CompositorHandler;
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::{
     xwm::{Reorder, ResizeEdge, XwmId},
@@ -40,12 +39,6 @@ pub const XWL_RUNTIME_DIR: &str = "/data/data/me.phie.tawc/xtmp";
 
 /// Where the in-app extractor stages the Xwayland binary + libs.
 pub const XWL_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/xwayland";
-
-/// Where libhybris is extracted by `ensureLibhybrisExtracted`. The
-/// bionic Xwayland baseline doesn't load libhybris itself (no GLAMOR,
-/// no AHB allocation in the server yet); when Phase 2 lands the server
-/// will dlopen libnativewindow.so directly, which is bionic-native.
-pub const LIBHYBRIS_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/libhybris";
 
 /// Spawn Xwayland and insert it as a calloop event source. On the
 /// `Ready` event the X11 window manager is constructed and stashed on

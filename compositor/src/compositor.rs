@@ -204,13 +204,6 @@ pub struct TawcState {
     /// XWayland Ready event arrives.
     pub xdisplay: Option<u32>,
 
-    // -----------------------------------------------------------------
-    // Calloop-data fields. These were on the now-removed LoopData
-    // wrapper; merged in so TawcState IS the calloop data type. Required
-    // by upstream smithay's add_pre_commit_hook<D, _> assertion that the
-    // type passed to handler callbacks matches the type CompositorState
-    // was constructed for.
-    // -----------------------------------------------------------------
     pub render: crate::render::RenderState,
     /// The single `wl_output` global advertised today. Mode / scale are
     /// updated when the primary host's geometry changes; multi-output
