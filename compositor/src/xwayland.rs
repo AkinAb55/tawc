@@ -21,7 +21,6 @@
 use std::process::Stdio;
 
 use log::{error, info, warn};
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::compositor::CompositorHandler;
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
@@ -32,7 +31,6 @@ use smithay::xwayland::{
 use smithay::wayland::selection::SelectionTarget;
 
 use crate::compositor::TawcState;
-use crate::event_loop::LoopData;
 use crate::host::ActivityId;
 
 /// Where Xwayland's listening socket / lockfile live. Patched smithay
@@ -53,7 +51,7 @@ pub const LIBHYBRIS_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/libhybris
 /// `Ready` event the X11 window manager is constructed and stashed on
 /// the state.
 pub fn start_xwayland(
-    handle: &smithay::reexports::calloop::LoopHandle<'static, LoopData>,
+    handle: &smithay::reexports::calloop::LoopHandle<'static, TawcState>,
     state: &TawcState,
 ) {
     let handle_for_wm = handle.clone();
@@ -157,17 +155,19 @@ pub fn start_xwayland(
     info!("xwayland: spawned Xwayland; waiting for Ready");
 
     let xwayland_client_for_handler = client.clone();
-    let result = handle.insert_source(xwayland, move |event, _, data: &mut LoopData| match event {
+    let dh_for_wm = dh.clone();
+    let result = handle.insert_source(xwayland, move |event, _, data: &mut TawcState| match event {
         XWaylandEvent::Ready { x11_socket, display_number } => {
             info!("xwayland: Ready, display={}", display_number);
             match X11Wm::start_wm(
                 handle_for_wm.clone(),
+                &dh_for_wm,
                 x11_socket,
                 xwayland_client_for_handler.clone(),
             ) {
                 Ok(wm) => {
-                    data.state.xwm = Some(wm);
-                    data.state.xdisplay = Some(display_number);
+                    data.xwm = Some(wm);
+                    data.xdisplay = Some(display_number);
                     info!("xwayland: X11Wm attached, DISPLAY=:{}", display_number);
                 }
                 Err(e) => {
@@ -192,16 +192,6 @@ pub fn start_xwayland(
 impl XWaylandShellHandler for TawcState {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.xwayland_shell_state
-    }
-}
-
-// X11Wm::start_wm needs the calloop data type to implement
-// XwmHandler + XWaylandShellHandler. Our calloop data is `LoopData`
-// (which wraps `TawcState`); these forwarding impls delegate
-// straight to the inner state.
-impl XWaylandShellHandler for LoopData {
-    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
-        self.state.xwayland_shell_state()
     }
 }
 
@@ -368,90 +358,6 @@ impl XwmHandler for TawcState {
     fn cleared_selection(&mut self, _xwm: XwmId, _selection: SelectionTarget) {}
 }
 
-// Forwarding impl on LoopData (the calloop-data type), delegating to
-// the inner TawcState. Required because X11Wm::start_wm bounds on the
-// LoopHandle's data type implementing XwmHandler.
-impl XwmHandler for LoopData {
-    fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm {
-        self.state.xwm_state(xwm)
-    }
-    fn new_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.new_window(xwm, window)
-    }
-    fn new_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.new_override_redirect_window(xwm, window)
-    }
-    fn map_window_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.map_window_request(xwm, window)
-    }
-    fn mapped_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.mapped_override_redirect_window(xwm, window)
-    }
-    fn unmapped_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.unmapped_window(xwm, window)
-    }
-    fn destroyed_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.destroyed_window(xwm, window)
-    }
-    fn configure_request(
-        &mut self,
-        xwm: XwmId,
-        window: X11Surface,
-        x: Option<i32>,
-        y: Option<i32>,
-        w: Option<u32>,
-        h: Option<u32>,
-        reorder: Option<Reorder>,
-    ) {
-        self.state.configure_request(xwm, window, x, y, w, h, reorder)
-    }
-    fn configure_notify(
-        &mut self,
-        xwm: XwmId,
-        window: X11Surface,
-        geometry: Rectangle<i32, Logical>,
-        above: Option<u32>,
-    ) {
-        self.state.configure_notify(xwm, window, geometry, above)
-    }
-    fn maximize_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.maximize_request(xwm, window)
-    }
-    fn unmaximize_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.unmaximize_request(xwm, window)
-    }
-    fn fullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.fullscreen_request(xwm, window)
-    }
-    fn unfullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.unfullscreen_request(xwm, window)
-    }
-    fn resize_request(&mut self, xwm: XwmId, window: X11Surface, button: u32, edges: ResizeEdge) {
-        self.state.resize_request(xwm, window, button, edges)
-    }
-    fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32) {
-        self.state.move_request(xwm, window, button)
-    }
-    fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
-        self.state.allow_selection_access(xwm, selection)
-    }
-    fn send_selection(
-        &mut self,
-        xwm: XwmId,
-        selection: SelectionTarget,
-        mime_type: String,
-        fd: std::os::unix::io::OwnedFd,
-    ) {
-        self.state.send_selection(xwm, selection, mime_type, fd)
-    }
-    fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        self.state.new_selection(xwm, selection, mime_types)
-    }
-    fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
-        self.state.cleared_selection(xwm, selection)
-    }
-}
-
 /// `PendingHost` is the host an X11Surface was assigned to at
 /// map_window_request time. The wl_surface backing arrives later (via
 /// xwayland_shell_v1.set_serial), at which point the compositor's
@@ -577,3 +483,4 @@ pub fn associate_pending_x11_surfaces(state: &mut TawcState) {
         }
     }
 }
+

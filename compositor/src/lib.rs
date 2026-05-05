@@ -582,8 +582,6 @@ fn run_compositor(
     } else {
         (0, 0)
     };
-    let state = TawcState::new(&mut wl_display, scale, initial_logical);
-
     // --- Output (geometry updated when first Activity surface arrives) ---
     let output = smithay::output::Output::new(
         "tawc-0".to_string(),
@@ -592,6 +590,7 @@ fn run_compositor(
             subpixel: smithay::output::Subpixel::Unknown,
             make: "tawc".into(),
             model: "Android".into(),
+            serial_number: String::new(),
         },
     );
     let initial_mode_size: smithay::utils::Size<i32, smithay::utils::Physical> =
@@ -603,7 +602,9 @@ fn run_compositor(
         Some((0, 0).into()),
     );
     // GlobalId is not RAII — the global lives as long as the Display.
-    let _output_global = output.create_global::<TawcState>(&state.display_handle);
+    let _output_global = output.create_global::<TawcState>(&wl_display.handle());
+
+    let state = TawcState::new(&mut wl_display, scale, initial_logical, render_state, output);
 
     // --- Run ---
     // Note: the listening socket is bound inside `event_loop::run` as the
@@ -618,7 +619,7 @@ fn run_compositor(
         let _ = std::fs::create_dir_all(parent);
     }
     event_loop::run(
-        wl_display, state, render_state, WAYLAND_SOCKET_PATH, output, scale,
+        wl_display, state, WAYLAND_SOCKET_PATH, scale,
         touch_channel, text_input_channel, state_query_channel, surface_event_channel,
         &RUNNING,
     )

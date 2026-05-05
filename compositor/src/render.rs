@@ -37,8 +37,9 @@ const BACKGROUND_COLOR: Color32F = Color32F::new(0.0784, 0.0706, 0.0941, 1.0);
 
 /// GPU-side rendering state, separate from Wayland protocol state.
 ///
-/// Lives in LoopData alongside TawcState. Anything that touches the
-/// GlesRenderer, EGL, or GL textures belongs here — not in TawcState.
+/// Lives on TawcState (as the `render` field). Anything that touches the
+/// GlesRenderer, EGL, or GL textures belongs here — the rest of TawcState
+/// owns Wayland protocol state.
 ///
 /// `egl_surface` no longer lives here: each `OutputHost` owns its own
 /// EGLSurface bound to that Activity's `ANativeWindow`. Use
@@ -109,7 +110,7 @@ impl RenderState {
 
 // SAFETY: Contains raw EGL pointers (raw_egl_display, raw_egl_context) which are
 // !Send. RenderState is created on the compositor thread and only accessed from the
-// calloop event loop on that same thread. Calloop requires Send for LoopData even
+// calloop event loop on that same thread. Calloop requires Send for TawcState even
 // though it never actually moves data across threads.
 unsafe impl Send for RenderState {}
 
@@ -242,7 +243,7 @@ void main() {
 /// surfaces. The texture is cached on the wl_buffer's user-data so repeat
 /// attaches don't re-import.
 /// Returns true if any new texture was imported (caller uses for dirty tracking).
-pub fn import_wlegl_buffers(state: &mut TawcState, render: &mut RenderState) -> bool {
+pub fn import_wlegl_buffers(state: &mut TawcState) -> bool {
     let buffers: Vec<WlBuffer> = state
         .surface_wlegl
         .values()
@@ -260,7 +261,7 @@ pub fn import_wlegl_buffers(state: &mut TawcState, render: &mut RenderState) -> 
                 continue; // already imported
             }
         }
-        if ensure_wlegl_texture(render, data) {
+        if ensure_wlegl_texture(&state.render, data) {
             imported = true;
         }
     }
@@ -303,7 +304,7 @@ fn ensure_wlegl_texture(render: &RenderState, data: &WleglBufferData) -> bool {
 
 /// Walk all toplevel surface trees and import any new SHM buffers as textures.
 /// Releases old buffers when replaced. Returns true if any buffer was imported.
-pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) -> bool {
+pub fn import_shm_buffers(state: &mut TawcState) -> bool {
     use smithay::backend::renderer::buffer_type;
     use smithay::backend::renderer::BufferType;
     use smithay::wayland::compositor::BufferAssignment;
@@ -396,7 +397,7 @@ pub fn import_shm_buffers(state: &mut TawcState, renderer: &mut GlesRenderer) ->
             }
         };
         let damage = [Rectangle::from_size(Size::from((width, height)))];
-        match renderer.import_shm_buffer(&buf, None, &damage) {
+        match state.render.renderer.import_shm_buffer(&buf, None, &damage) {
             Ok(texture) => {
                 let is_new = !state.surface_shm.contains_key(&surface);
                 let shm_state = state
@@ -627,8 +628,7 @@ fn draw_surfaces(
 /// draw all surfaces assigned to it, swap. Caller skips hosts whose
 /// `egl_surface` is `None`.
 pub fn render_frame(
-    state: &TawcState,
-    render: &mut RenderState,
+    state: &mut TawcState,
     host: &mut OutputHost,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let egl_surface = host
@@ -636,24 +636,16 @@ pub fn render_frame(
         .as_mut()
         .expect("render_frame called for host without EGLSurface");
 
-    // Clone shader refs up front — `frame` below takes an exclusive borrow on
-    // `render.renderer` so we can't re-borrow render fields through it.
-    let wlegl_shader = render.wlegl_opaque_shader.clone();
-    let shm_shader = render.shm_tint_shader.clone();
-    let mut target = render.renderer.bind(egl_surface)?;
-
     let output_size = host.physical_size;
-    let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
-
-    // Flat background matching the Material3 dark surface used by the rest
-    // of the app (home / install / distro-info screens).
-    frame.clear(BACKGROUND_COLOR, &[Rectangle::from_size(output_size)])?;
-
     let scale = state.output_scale;
     let screen_h = output_size.h;
-
-    // Draw wlegl (AHB-backed GPU) surfaces.
     let host_id = host.activity_id.clone();
+
+    // Collect draws BEFORE borrowing the renderer. Once `frame` exists it
+    // holds an exclusive borrow on `state.render.renderer`, and
+    // `collect_surface_draws` takes `&TawcState` — which would re-borrow
+    // the whole struct (including `render`) and clash. Done up front this
+    // ordering is fine.
     let wlegl_draws = collect_surface_draws(state, &host_id, |surf| {
         let ws = state.surface_wlegl.get(surf)?;
         let buf = ws.current_buffer.as_ref()?;
@@ -665,9 +657,6 @@ pub fn render_frame(
         );
         Some((tex, ws.committed_width, ws.committed_height, lw, lh))
     });
-    draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
-
-    // Draw SHM fallback surfaces (magenta-tinted to make the fallback obvious)
     let shm_draws = collect_surface_draws(state, &host_id, |surf| {
         if state.surface_wlegl.contains_key(surf) { return None; }
         let ss = state.surface_shm.get(surf)?;
@@ -678,6 +667,24 @@ pub fn render_frame(
         );
         Some((tex, ss.committed_width, ss.committed_height, lw, lh))
     });
+
+    // Now bind the renderer. Disjoint-field-borrow on TawcState lets us
+    // reach into `state.render` for the rest of the function without
+    // re-borrowing `state` as a whole.
+    let render = &mut state.render;
+    let wlegl_shader = render.wlegl_opaque_shader.clone();
+    let shm_shader = render.shm_tint_shader.clone();
+    let mut target = render.renderer.bind(egl_surface)?;
+    let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
+
+    // Flat background matching the Material3 dark surface used by the rest
+    // of the app (home / install / distro-info screens).
+    frame.clear(BACKGROUND_COLOR, &[Rectangle::from_size(output_size)])?;
+
+    // Draw wlegl (AHB-backed GPU) surfaces.
+    draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
+
+    // Draw SHM fallback surfaces (magenta-tinted to make the fallback obvious)
     draw_surfaces(&shm_draws, &mut frame, scale, screen_h, shm_shader.as_ref(),
         &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))])?;
 

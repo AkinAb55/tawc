@@ -10,14 +10,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info};
 
 use smithay::backend::renderer::gles::GlesTexture;
-use smithay::delegate_compositor;
-use smithay::delegate_data_device;
-use smithay::delegate_output;
-use smithay::delegate_seat;
-use smithay::delegate_shm;
-use smithay::delegate_xdg_decoration;
-use smithay::delegate_xdg_shell;
+use smithay::delegate_dispatch2;
 use smithay::input::{Seat, SeatHandler, SeatState};
+use smithay::input::dnd::DndGrabHandler;
 use smithay::input::keyboard::XkbConfig;
 use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::protocol::wl_buffer;
@@ -33,7 +28,7 @@ use smithay::wayland::compositor::{
     self, CompositorClientState, CompositorHandler, CompositorState,
 };
 use smithay::wayland::selection::data_device::{
-    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::desktop::PopupManager;
@@ -46,8 +41,6 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
-use smithay::delegate_viewporter;
-use smithay::delegate_xwayland_shell;
 
 use crate::host::{ActivityId, OutputHost};
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
@@ -210,10 +203,37 @@ pub struct TawcState {
     /// X display number Xwayland is listening on. None until the
     /// XWayland Ready event arrives.
     pub xdisplay: Option<u32>,
+
+    // -----------------------------------------------------------------
+    // Calloop-data fields. These were on the now-removed LoopData
+    // wrapper; merged in so TawcState IS the calloop data type. Required
+    // by upstream smithay's add_pre_commit_hook<D, _> assertion that the
+    // type passed to handler callbacks matches the type CompositorState
+    // was constructed for.
+    // -----------------------------------------------------------------
+    pub render: crate::render::RenderState,
+    /// The single `wl_output` global advertised today. Mode / scale are
+    /// updated when the primary host's geometry changes; multi-output
+    /// support is left to a later phase (see `notes/multi-activity.md`).
+    pub output: smithay::output::Output,
+    pub start_time: std::time::Instant,
+    pub frame_count: u64,
+    /// Set when buffer contents change; cleared after rendering.
+    /// Skips GPU work when the screen hasn't changed.
+    pub needs_render: bool,
+    /// Number of toplevels visible in the last rendered frame.
+    /// Used by the state query to verify the screen actually reflects cleanup.
+    pub last_rendered_toplevels: usize,
 }
 
 impl TawcState {
-    pub fn new(display: &mut Display<Self>, output_scale: i32, output_logical_size: (i32, i32)) -> Self {
+    pub fn new(
+        display: &mut Display<Self>,
+        output_scale: i32,
+        output_logical_size: (i32, i32),
+        render: crate::render::RenderState,
+        output: smithay::output::Output,
+    ) -> Self {
         let dh = display.handle();
 
         // v6 so we can send wl_surface.preferred_buffer_scale per surface
@@ -298,6 +318,12 @@ impl TawcState {
             x11_surfaces: Vec::new(),
             x11_to_host: HashMap::new(),
             xdisplay: None,
+            render,
+            output,
+            start_time: std::time::Instant::now(),
+            frame_count: 0,
+            needs_render: true,
+            last_rendered_toplevels: 0,
         }
     }
 
@@ -652,24 +678,16 @@ impl ClientData for ClientState {
 }
 
 impl DataDeviceHandler for TawcState {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
-impl ClientDndGrabHandler for TawcState {}
-impl ServerDndGrabHandler for TawcState {}
+impl WaylandDndGrabHandler for TawcState {}
+impl DndGrabHandler for TawcState {}
 
 impl SelectionHandler for TawcState {
     type SelectionUserData = ();
 }
 
-delegate_compositor!(TawcState);
-delegate_data_device!(TawcState);
-delegate_output!(TawcState);
-delegate_shm!(TawcState);
-delegate_xdg_decoration!(TawcState);
-delegate_xdg_shell!(TawcState);
-delegate_seat!(TawcState);
-delegate_viewporter!(TawcState);
-delegate_xwayland_shell!(TawcState);
+delegate_dispatch2!(TawcState);

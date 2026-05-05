@@ -53,4 +53,4 @@ libxshmfence	https://gitlab.freedesktop.org/xorg/lib/libxshmfence.git	89f0647485
 xkbcomp	https://gitlab.freedesktop.org/xorg/app/xkbcomp.git	e26102f28f08e5432b1ad44bbaef7f32aff199f6	xkbcomp-1.4.7	deps/xwayland-src/xkbcomp
 xkeyboard-config	https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git	a8b1be93168cbd3246359c724f090e821079b313	xkeyboard-config-2.45	deps/xwayland-src/xkeyboard-config
 xwayland	https://gitlab.freedesktop.org/xorg/xserver.git	a0241c1d38297a800d2aae3d8ca7213b7b873879	xwayland-24.1.11	deps/xwayland-src/xwayland
-smithay	https://github.com/wmww/smithay.git	5842fc8d58eef33f04a5400e89fd3604427a1002	tawc-patches	deps/smithay
+smithay	https://github.com/wmww/smithay.git	50fd903006cac6d7ad95202b3c066eb356d87412	tawc-patches	deps/smithay

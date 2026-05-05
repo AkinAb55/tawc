@@ -59,7 +59,7 @@ pub struct OutputHost {
 // SAFETY: `native_window` is a raw `ANativeWindow*` (refcount is
 // thread-safe per the NDK contract). `EGLSurface` and `EGLContext` are
 // !Send by default but only ever touched from the compositor thread —
-// calloop requires `LoopData: Send` even though it never moves data
+// calloop requires `TawcState: Send` even though it never moves data
 // across threads. Mirrors `RenderState`'s `Send` impl.
 unsafe impl Send for OutputHost {}
 
