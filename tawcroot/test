@@ -25,7 +25,7 @@
 #                syntax, same exit code semantics — `--device` just
 #                changes where the orchestrator runs. Selection within
 #                device mode follows the rest of the tawc tree:
-#                `.tawctarget` / `TAWC_TARGET=device|emulator` (sourced
+#                `.tawctarget` / `TAWC_TARGET=physical|emulator` (sourced
 #                from `scripts/lib/select-device.sh` — the only tawc-app
 #                coupling in this script).
 #
@@ -54,12 +54,12 @@ for arg in "$@"; do
     esac
 done
 
-# `TAWC_TARGET=device|emulator` flips device mode on without `--device`,
+# `TAWC_TARGET=physical|emulator` flips device mode on without `--device`,
 # matching the convention other tawc scripts use. An explicit
 # `--host` / `--device` flag wins over the env var.
 if [ "$MODE_EXPLICIT" = "0" ]; then
     case "${TAWC_TARGET:-}" in
-        device|emulator)    MODE=device ;;
+        physical|emulator)  MODE=device ;;
     esac
 fi
 

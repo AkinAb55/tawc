@@ -13,7 +13,7 @@
 #
 # Prerequisites:
 #   - Android device or emulator connected via adb and selected via
-#     ./.tawctarget or TAWC_TARGET=device|emulator (see
+#     ./.tawctarget or TAWC_TARGET=physical|emulator (see
 #     scripts/lib/select-device.sh)
 #   - In-app chroot installed at
 #     /data/data/me.phie.tawc/distros/<id>/. Auto-targeted when exactly

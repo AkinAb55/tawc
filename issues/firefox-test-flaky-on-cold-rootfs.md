@@ -27,11 +27,11 @@ adb shell am start -n me.phie.tawc/.install.UninstallActivity --es autoStart tru
 # wait for uninstall
 adb shell am start -n me.phie.tawc/.install.InstallActivity --es autoStart true --es id arch --es method proot
 # wait ~6 min for install
-TAWC_TARGET=device bash scripts/install-test-deps.sh
-TAWC_TARGET=device bash scripts/run-integration-tests.sh --no-build
+TAWC_TARGET=physical bash scripts/install-test-deps.sh
+TAWC_TARGET=physical bash scripts/run-integration-tests.sh --no-build
 # -> apps::test_firefox_launches_with_hardware_buffers FAILS
 
-TAWC_TARGET=device bash scripts/run-integration-tests.sh --no-build
+TAWC_TARGET=physical bash scripts/run-integration-tests.sh --no-build
 # -> ALL PASS, including the firefox test
 ```
 

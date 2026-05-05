@@ -2017,7 +2017,7 @@ else lives on the dev box.
 
 The four Android-only items above are wired into the existing
 `scripts/run-integration-tests.sh` harness, which already supports
-`TAWC_TARGET=device|emulator` and abstracts methods via
+`TAWC_TARGET=physical|emulator` and abstracts methods via
 `ChrootRunner`. Add tawcroot variants of the existing proot/chroot
 integration tests — they should be pure dispatch additions, not
 new test logic. The emulator covers the lp64 `access`-on-x86_64

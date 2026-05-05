@@ -369,7 +369,7 @@ Windowed mode notes:
   the "(:0, )" in the warning is Qt's logger context, not the actual
   DISPLAY value.
 
-Pick a target with `TAWC_TARGET=device` or `TAWC_TARGET=emulator`,
+Pick a target with `TAWC_TARGET=physical` or `TAWC_TARGET=emulator`,
 or set the same value as one word in `./.tawctarget` for a standing
 default. The host scripts (`run-integration-tests.sh`, …) source
 `scripts/lib/select-device.sh`, which resolves the target and sets

@@ -11,7 +11,7 @@
 #   4. (none) -- treated as 'none', see below.
 #
 # Valid target values:
-#   device    -> first non-emulator adb device.
+#   physical  -> first non-emulator adb device (a real phone).
 #   emulator  -> first emulator-* adb device.
 #   none      -> no target permitted; this script errors out. This is
 #                 the safe default when the project has no .tawctarget,
@@ -19,7 +19,7 @@
 #                 talk to whatever happens to be plugged in.
 #
 # We never auto-pick a target just because exactly one is connected.
-# `device` requires a real device; `emulator` requires an emulator.
+# `physical` requires a real device; `emulator` requires an emulator.
 # If the requested kind is missing the script errors instead of falling
 # back to the other kind. Ditto if .tawctarget says `emulator` and the
 # AVD isn't running.
@@ -49,7 +49,7 @@ fi
 case "$_target" in
     none)
         echo "ERROR: target is 'none' (no .tawctarget, or set to 'none')." >&2
-        echo "       Set TAWC_TARGET=device|emulator or ANDROID_SERIAL=<serial>." >&2
+        echo "       Set TAWC_TARGET=physical|emulator or ANDROID_SERIAL=<serial>." >&2
         return 1 2>/dev/null || exit 1
         ;;
     emulator)
@@ -62,10 +62,10 @@ case "$_target" in
         fi
         export ANDROID_SERIAL="$_emu"
         ;;
-    device)
+    physical)
         _dev=$(adb devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
         if [ -z "$_dev" ]; then
-            echo "ERROR: target is 'device' but no real device is connected." >&2
+            echo "ERROR: target is 'physical' but no real device is connected." >&2
             return 1 2>/dev/null || exit 1
         fi
         export ANDROID_SERIAL="$_dev"
@@ -77,7 +77,7 @@ case "$_target" in
             _src="./.tawctarget"
         fi
         echo "ERROR: unknown target '$_target' from $_src" >&2
-        echo "       (expected 'device', 'emulator', or 'none')" >&2
+        echo "       (expected 'physical', 'emulator', or 'none')" >&2
         return 1 2>/dev/null || exit 1
         ;;
 esac

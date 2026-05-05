@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - Android device or emulator connected via adb with root (su) access
-#     and selected via ./.tawctarget or TAWC_TARGET=device|emulator
+#     and selected via ./.tawctarget or TAWC_TARGET=physical|emulator
 #     (see scripts/lib/select-device.sh -- no auto-fallback to a single
 #     connected target).
 #   - tawc app installed (this script reinstalls it during build).

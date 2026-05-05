@@ -24,14 +24,14 @@ X11 integration tests turn red until the symlink is manually removed.
 ```bash
 # Healthy state.
 adb shell su -c 'rm -f /data/data/me.phie.tawc/distros/void/rootfs/tmp/.X11-unix'
-TAWC_TARGET=device bash scripts/run-integration-tests.sh --no-build apps::test_eglx11
+TAWC_TARGET=physical bash scripts/run-integration-tests.sh --no-build apps::test_eglx11
 # -> ok
 
 # Poison the state by exercising enter.sh as root.
 adb shell "su -c '/data/data/me.phie.tawc/distros/void/enter.sh \$(echo -n true | base64 -w0)'"
 
 # All X11 tests now fail.
-TAWC_TARGET=device bash scripts/run-integration-tests.sh --no-build apps::test_eglx11
+TAWC_TARGET=physical bash scripts/run-integration-tests.sh --no-build apps::test_eglx11
 # -> xcb_connect failed (DISPLAY=:0)
 
 # Recovery.
