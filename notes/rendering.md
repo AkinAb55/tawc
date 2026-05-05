@@ -95,8 +95,28 @@ per surface. Surfaces using the AHB channel protocol are never checked for SHM b
 - `weston-simple-egl` (AHB)
 - `gtk3-widget-factory` (AHB + SHM popups)
 - Firefox / WebRender (AHB)
-- `gtk4-demo` 4.22.2 (AHB, no magenta tint; manually tested 2026-04-20,
-  including the Assistant dialog with text-input-v3 keyboard show)
+- `gtk4-demo` / `gtk4-widget-factory` 4.22.2 on Void (AHB, no magenta tint;
+  manually tested 2026-04-20 and re-verified 2026-05-04)
+
+### GTK4 minimum version
+
+**GTK4 must be ≥ 4.22 on libhybris/Adreno.** GTK4 4.18.x's GpuRenderer has a
+regression that produces blank windows (background fills, no widget content
+or text) when committing AHB buffers via `android_wlegl`. The same path
+works on GTK4 ≥ 4.20-ish (4.22.2 verified). Symptom on 4.18: every GTK4 app
+renders an off-white window with at most a faint headerbar strip; cairo
+fallback (`GSK_RENDERER=cairo`) renders correctly via SHM. GTK3 and
+non-GTK GLES/Vulkan clients are unaffected.
+
+The bug exists across all `GSK_RENDERER` flavours (`gl|ngl|vulkan`) and
+isn't fixable via `GSK_GPU_DISABLE` flags or any compositor-side change
+we've tried — it's in GTK4 4.18's GpuRenderer interaction with libhybris-
+wrapped Adreno EGL, fixed upstream by GTK4 4.22.
+
+In practice: **Manjaro ARM ships gtk4 1:4.18.6-1 in arm-testing as of
+2026-05-04 — too old.** Void aarch64 ships gtk4-4.22.2_1 — works. The
+fix is to update the Manjaro arm-testing channel; until then GTK4 apps on
+Manjaro fall back to cairo with the magenta tint (or just won't render).
 
 ### SELinux and Memfd Sharing
 
