@@ -485,6 +485,15 @@ impl XdgShellHandler for TawcState {
                 wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
             );
             state.size = Some((w, h).into());
+            // Send xdg_toplevel.configure_bounds so clients that ignore
+            // Maximized still cap their natural size to the screen. GTK4
+            // 4.18 widget-factory ignores Maximized and produces a
+            // 1369x1200 buffer (gtk4-widget-factory's natural width) on a
+            // 540x1200 logical screen, ending up rendered as a 2738x2400
+            // physical surface most of which is off-screen — symptom is
+            // a "blank" window. Sending bounds tells GTK4 the maximum
+            // size it should pick.
+            state.bounds = Some((w, h).into());
         });
         surface.send_configure();
 
