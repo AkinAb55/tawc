@@ -1,30 +1,24 @@
 #!/bin/bash
 # Enter the in-app Linux installation via adb.
 #
-# Both install methods (chroot and proot) render their per-install
+# All install methods render their per-install
 # `<distros>/<id>/enter.sh` script with the launcher logic baked in;
-# this script just delivers the (base64-encoded) command to the right
-# script via the right adb-side wrapper:
+# this script just reads the recorded method from `metadata.json`,
+# then dispatches:
 #
-#   - chroot installs need root, so we go via `adb shell su -c '<enter.sh>
-#     <b64>'`.
-#   - proot installs run as the app uid, so we go via `adb shell run-as
-#     me.phie.tawc <enter.sh> <b64>`. (Requires the APK to be debuggable
-#     — true for the dev/debug build, not for release.)
-#
-# We read the install's recorded method from `metadata.json`. `run-as`
-# works for both methods (since both are this app's own data dir), so
-# the read itself doesn't need root. If `run-as` isn't available
-# (release build) we fall back to `su` and let chroot vs proot dispatch
-# the rest.
+#   - tawcroot / proot installs run as the app uid in the app's
+#     untrusted_app SELinux domain — invoked via the dev exec broker
+#     (see notes/exec-broker.md), which forks ProcessBuilder inside
+#     the app process. Production-faithful, no `run-as` quirks.
+#   - chroot installs need root (chroot(2) is privileged), so they
+#     go via `adb shell su -c '<enter.sh> <b64>'`.
 #
 # Requires:
-#   - the `me.phie.tawc` app installed
-#   - an installation present at /data/data/me.phie.tawc/distros/<id>/
-#     (install via `am start -n me.phie.tawc/.install.InstallActivity
-#     --es autoStart true --es id <id> [--es method chroot|proot]`,
-#     or the home-screen Install button).
-#   - root via Magisk `su` granted to adb shell, OR a debuggable APK.
+#   - the `me.phie.tawc` debug-build APK installed (broker is
+#     debug-build-only)
+#   - the app launched at least once so the broker is bound (this
+#     script auto-launches MainActivity if the broker isn't reachable)
+#   - root via Magisk `su` for chroot installs only
 #
 # Usage:
 #   scripts/tawc-chroot-run.sh                       # interactive shell
@@ -40,6 +34,8 @@ _script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
 . "$_script_dir/lib/select-device.sh"
 # shellcheck disable=SC1091
+. "$_script_dir/lib/tawc-exec.sh"
+# shellcheck disable=SC1091
 . "$_script_dir/lib/tawc-install-id.sh"
 
 INSTALL_ID="$TAWC_INSTALL_ID"
@@ -48,16 +44,13 @@ INSTALL_DIR="/data/data/$PKG/distros/$INSTALL_ID"
 ENTER="$INSTALL_DIR/enter.sh"
 META="$INSTALL_DIR/metadata.json"
 
-# Read the install method from metadata.json. Try `run-as` first (works
-# for any debuggable build, no root needed), fall back to `su` for
-# release builds with root. If neither works, the existence check below
-# fires a more useful error than a silent failure here.
+# Read the install method from metadata.json via the broker (runs as
+# app uid, can read the private data dir directly).
 read_method() {
     local raw
-    raw=$(adb shell "run-as $PKG cat $META 2>/dev/null || su -c 'cat $META' 2>/dev/null") || true
-    # "method": "chroot" | "method": "proot". The metadata.json schema
-    # has a single `method` field, but use awk + first-match-then-exit
-    # rather than greedy sed so a future field whose name happens to
+    raw=$("$TAWC_EXEC_BIN" /system/bin/cat "$META" 2>/dev/null) || true
+    # "method": "chroot" | "method": "proot" | "method": "tawcroot".
+    # First-match-then-exit so a future field whose name happens to
     # contain the substring "method" doesn't masquerade.
     echo "$raw" | awk -F'"' '/"method"[[:space:]]*:/{print $4; exit}'
 }
@@ -88,30 +81,26 @@ case "$METHOD" in
             exec adb shell -t "su -c '$ENTER'"
         fi
         ;;
-    proot)
-        # run-as me.phie.tawc switches to the app uid. Default TMPDIR
-        # is unset and mksh falls back to /tmp / /data/local, neither
-        # writable by app uid — its here-doc temp file then fails. cd +
-        # set TMPDIR to the app's cache dir before exec'ing enter.sh.
-        SCRATCH="/data/data/$PKG/cache/proot-tmp"
+    proot|tawcroot)
+        # Both run as the app uid. Default TMPDIR is unset and mksh
+        # falls back to /tmp / /data/local — neither writable by the
+        # app uid, which breaks its here-doc temp-file path. `cd` and
+        # set TMPDIR to a cache subdir first. (proot actually uses
+        # TMPDIR for its own scratch; tawcroot doesn't but mksh's
+        # here-doc path still wants somewhere writable.)
+        SCRATCH="/data/data/$PKG/cache/$METHOD-tmp"
+        # `/system/bin/sh $ENTER` (not `exec $ENTER` directly): SELinux's
+        # untrusted_app domain doesn't allow execve of files in app
+        # data_file, but reading them does work — so the inner sh
+        # interprets enter.sh as text rather than the kernel exec'ing
+        # the script's #! line itself.
         if [ $# -gt 0 ]; then
             cmd_b64=$(printf '%s' "$*" | base64 | tr -d '\n')
-            exec adb shell "run-as $PKG sh -c 'mkdir -p $SCRATCH && cd $SCRATCH && export TMPDIR=$SCRATCH && exec $ENTER $cmd_b64'"
+            exec "$TAWC_EXEC_BIN" --cwd "$SCRATCH" --env "TMPDIR=$SCRATCH" --env "PATH=/system/bin:/system/xbin" \
+                /system/bin/sh -c "mkdir -p $SCRATCH && cd $SCRATCH && exec /system/bin/sh $ENTER $cmd_b64"
         else
-            exec adb shell -t "run-as $PKG sh -c 'mkdir -p $SCRATCH && cd $SCRATCH && export TMPDIR=$SCRATCH && exec $ENTER'"
-        fi
-        ;;
-    tawcroot)
-        # Same shape as proot — runs as app uid via run-as, scratch dir
-        # under cacheDir. tawcroot doesn't need its own per-process tmp
-        # dir (no extracted loader stub like proot), but mksh's
-        # here-doc still wants TMPDIR pointed somewhere writable.
-        SCRATCH="/data/data/$PKG/cache/tawcroot-tmp"
-        if [ $# -gt 0 ]; then
-            cmd_b64=$(printf '%s' "$*" | base64 | tr -d '\n')
-            exec adb shell "run-as $PKG sh -c 'mkdir -p $SCRATCH && cd $SCRATCH && export TMPDIR=$SCRATCH && exec $ENTER $cmd_b64'"
-        else
-            exec adb shell -t "run-as $PKG sh -c 'mkdir -p $SCRATCH && cd $SCRATCH && export TMPDIR=$SCRATCH && exec $ENTER'"
+            exec "$TAWC_EXEC_BIN" --cwd "$SCRATCH" --env "TMPDIR=$SCRATCH" --env "PATH=/system/bin:/system/xbin" \
+                /system/bin/sh -c "mkdir -p $SCRATCH && cd $SCRATCH && exec /system/bin/sh $ENTER"
         fi
         ;;
     *)

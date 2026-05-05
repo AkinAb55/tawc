@@ -62,6 +62,8 @@ done
 source "$ROOT_DIR/scripts/lib/select-device.sh"
 # shellcheck source=../scripts/lib/tawc-scratch.sh
 source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+# shellcheck source=../scripts/lib/tawc-exec.sh
+source "$ROOT_DIR/scripts/lib/tawc-exec.sh"
 # shellcheck source=../scripts/lib/tawc-install-id.sh
 source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
@@ -81,7 +83,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
     bash "$ROOT_DIR/scripts/app-build-install.sh" --no-launch
 
     echo "=== Verifying in-app install is present at $INSTALL_DIR ==="
-    if ! adb shell "su -c 'test -x $INSTALL_DIR/enter.sh'" >/dev/null 2>&1; then
+    if ! "$TAWC_EXEC_BIN" /system/bin/sh -c "test -x $INSTALL_DIR/enter.sh" >/dev/null 2>&1; then
         cat >&2 <<EOF
 ERROR: in-app install not found at $INSTALL_DIR/.
 
@@ -98,7 +100,9 @@ EOF
 
     echo "=== Pushing pidfile helper ==="
     adb push tests/apps/tawc-pidfile-exec "$TAWC_SCRATCH/tawc-pidfile-exec"
-    adb shell "su -c 'cp $TAWC_SCRATCH/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec'"
+    # `cp` + chmod via the broker — runs as the app uid, which owns the
+    # rootfs tree. No su required.
+    "$TAWC_EXEC_BIN" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec"
 
     # Pre-build the tawcroot device test bundle so the
     # `tawcroot::test_tawcroot_device_suite` integration case can run
@@ -134,9 +138,10 @@ adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
 adb logcat -c >/dev/null 2>&1 || true
 COMPOSITOR_READY=0
 for _ in $(seq 1 150); do
-    if adb shell "pidof me.phie.tawc >/dev/null && \
-                  su -c 'test -e $INSTALL_DIR/rootfs/tmp/wayland-0' && \
-                  echo ready" 2>/dev/null | grep -q ready &&
+    # Wayland socket lives in the app's private data dir; probe via
+    # the broker (runs as the app uid).
+    if adb shell 'pidof me.phie.tawc >/dev/null' 2>/dev/null && \
+       "$TAWC_EXEC_BIN" /system/bin/sh -c "test -e /data/data/me.phie.tawc/wayland-0" 2>/dev/null && \
        adb logcat -d -s tawc-native 2>/dev/null | grep -q "Entering calloop event loop"; then
         COMPOSITOR_READY=1
         break

@@ -72,19 +72,19 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
         .args(["push", &source_dir.to_string_lossy(), &staging])
         .output()?;
 
-    // Copy into the build install's rootfs. su lets us reach the
-    // staging dir (shell-uid-owned, under TAWC_SCRATCH) and the rootfs
-    // path regardless of install method, but the resulting files land
-    // owned by uid 0. For proot/tawcroot installs the in-chroot build
-    // runs as the app uid (see [adb::chroot_run] dispatch), so chmod
-    // the tree world-writable afterwards — otherwise `ld` can't
-    // replace the build output. Harmless for chroot installs since
-    // the build runs as root there.
-    adb::shell(&format!(
-        "su -c 'mkdir -p {dir} && cp {src}/* {dir} && chmod -R a+rwX {dir}'",
-        dir = build_fs_build_dir,
-        src = staging
-    ))?;
+    // Copy sources into the build install's rootfs via the broker
+    // (runs as the app uid, which owns the rootfs tree — no su, no
+    // ownership-flip, no chmod dance). The chmod -R a+rwX is left
+    // belt-and-suspenders so it keeps working if the broker is later
+    // bypassed for any reason.
+    adb::chroot_host_exec(&[
+        "/system/bin/sh", "-c",
+        &format!(
+            "mkdir -p {dir} && cp {src}/* {dir} && chmod -R a+rwX {dir}",
+            dir = build_fs_build_dir,
+            src = staging
+        ),
+    ])?;
 
     // Build inside the build install. When TAWC_BUILD_INSTALL_ID
     // overrides the test install, drive enter.sh of the build install
@@ -124,12 +124,15 @@ fn ensure_chroot_app(name: &str) -> io::Result<String> {
     // binary across. Both rootfs's are the same arch (all installs on
     // a given device share `host_arch`), so the binary is portable.
     if build_install != test_install {
-        adb::shell(&format!(
-            "su -c 'mkdir -p {test_dir} && cp {build_dir}/{name} {test_dir}/{name} && chmod a+rx {test_dir}/{name}'",
-            test_dir = test_fs_build_dir,
-            build_dir = build_fs_build_dir,
-            name = name,
-        ))?;
+        adb::chroot_host_exec(&[
+            "/system/bin/sh", "-c",
+            &format!(
+                "mkdir -p {test_dir} && cp {build_dir}/{name} {test_dir}/{name} && chmod a+rx {test_dir}/{name}",
+                test_dir = test_fs_build_dir,
+                build_dir = build_fs_build_dir,
+                name = name,
+            ),
+        ])?;
     }
 
     // Stamp lives in the test install (the binary alongside it is

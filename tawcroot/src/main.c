@@ -33,6 +33,9 @@
 
 #include <stdint.h>
 
+#include <signal.h>
+#include <sys/prctl.h>
+
 #include "tawcroot.h"
 #include "exec_handler.h"
 #include "fdtab.h"
@@ -53,6 +56,28 @@ static int streq(const char *a, const char *b)
 {
 	while (*a && *a == *b) { a++; b++; }
 	return *a == 0 && *b == 0;
+}
+
+/* Bind every tawcroot incarnation's lifetime to its parent: when the
+ * parent thread dies, the kernel SIGKILLs us. Without this, fork-then-
+ * execveat re-spawns from inside the SIGSYS handler get reparented to
+ * init when the wrapping shell dies (e.g. SIGPIPE through `adb shell`),
+ * leaving stray `tawcroot --exec-child <fd>` workers pinned in the rootfs.
+ *
+ * Production launches go through the in-app exec broker (see
+ * notes/exec-broker.md): the broker process and the tawcroot it spawns
+ * are both `untrusted_app:s0`, so PDEATHSIG fires reliably and the
+ * broker also walks /proc to SIGKILL any descendants that escape past
+ * destroyForcibly. No cross-SELinux-domain quirks to work around.
+ *
+ * Race: if the parent already died between our fork and this prctl,
+ * PDEATHSIG won't fire (the trigger event is past). Re-check getppid
+ * == 1 and bail. Run as the very first thing in tawcroot_main, before
+ * any setup that could itself outlive a dead parent. */
+static void bind_to_parent(void)
+{
+	(void)tawc_prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+	if (tawc_getppid() == 1) tawc_exit_group(0);
 }
 
 /* Locate envp by walking past argv's NULL terminator on the kernel-
@@ -342,6 +367,8 @@ static void prod_rootfs_init(const char *rootfs,
 
 void tawcroot_main(int argc, char **argv)
 {
+	bind_to_parent();
+
 #ifdef TAWCROOT_TESTHOST
 	/* Testhost dispatch. argc==1 (smoke parent) skips capture_host_auxv
 	 * since the smoke doesn't go through the loader. The loader-bearing

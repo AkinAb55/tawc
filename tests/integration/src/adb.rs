@@ -7,13 +7,30 @@ const PKG: &str = "me.phie.tawc";
 /// Path to the on-device chroot wrapper rendered by the in-app
 /// installer (see [`ChrootMounter.enterScript`] /
 /// [`ProotMethod.renderEnterScript`]). Mount + chroot logic lives
-/// there; these helpers just deliver the (base64-encoded) command via
-/// the right adb-side wrapper.
+/// there; these helpers just deliver the (base64-encoded) command to
+/// it via the right adb-side wrapper.
 fn enter_script() -> String {
     format!("/data/data/{}/distros/{}/enter.sh", PKG, crate::install_id())
 }
 fn meta_path() -> String {
     format!("/data/data/{}/distros/{}/metadata.json", PKG, crate::install_id())
+}
+
+/// Path to the host-side tawc-exec helper. Absolute path lets tests
+/// invoke it without needing it on $PATH. Built by
+/// `scripts/build-tawc-exec.sh`. Override via `TAWC_EXEC_BIN`.
+fn tawc_exec_bin() -> &'static str {
+    static B: OnceLock<String> = OnceLock::new();
+    B.get_or_init(|| {
+        if let Ok(env) = std::env::var("TAWC_EXEC_BIN") { return env; }
+        // CARGO_MANIFEST_DIR is `tests/integration`; the binary lives
+        // at <repo>/build/tawc-exec/tawc-exec.
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors().nth(2).map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        repo.join("build").join("tawc-exec").join("tawc-exec")
+            .to_string_lossy().into_owned()
+    }).as_str()
 }
 
 /// Run an adb shell command, wait for completion, return output.
@@ -23,46 +40,94 @@ pub fn shell(cmd: &str) -> io::Result<Output> {
         .output()
 }
 
-/// Run a command inside the in-app Arch chroot on the phone. Routes
-/// through `su -c` for chroot installs (the mount + chroot syscalls
-/// in `enter.sh` need root) and through `run-as` for proot installs
-/// (proot tracees that run as root via `su` hit a bionic-loader TLS
-/// abort while loading vendor GPU libs; running them as the app uid
-/// matches the packaging context the libs expect). Method is read
-/// from the install's `metadata.json` once per process.
+/// Execute a command on the device as the app uid (no `su`, no
+/// `run-as`) via the dev exec broker. Same address-space + SELinux
+/// domain (`untrusted_app`) as the running app.
+///
+/// `argv[0]` must be an absolute path or one resolvable on the
+/// (empty-by-default) child PATH; pass `--cwd` / `--env` separately
+/// if needed by using the broker directly. For these tests the helper
+/// is mainly used to copy files into the rootfs.
+pub fn chroot_host_exec(argv: &[&str]) -> io::Result<Output> {
+    Command::new(tawc_exec_bin()).args(argv).output()
+}
+
+/// Run a command inside the in-app Linux install on the phone.
+///
+/// For `tawcroot` / `proot` installs: routed through the dev exec
+/// broker (see `notes/exec-broker.md`), which runs the command as the
+/// app uid in the app's `untrusted_app` SELinux domain — same context
+/// as a user-launched run.
+///
+/// For `chroot` installs: still through `adb shell su -c '<enter.sh>
+/// ...'` because `chroot(2)` requires CAP_SYS_CHROOT.
+///
+/// Method is read from the install's `metadata.json` once per process.
 pub fn chroot_run(cmd: &str) -> io::Result<Output> {
-    shell(&chroot_invocation(cmd))
+    let b64 = b64_encode(cmd.as_bytes());
+    match install_method() {
+        m @ ("proot" | "tawcroot") => {
+            let scratch = format!("/data/data/{}/cache/{}-tmp", PKG, m);
+            let inner = format!(
+                "mkdir -p {scratch} && cd {scratch} && exec /system/bin/sh {enter} {b64}",
+                scratch = scratch,
+                enter = enter_script(),
+                b64 = b64,
+            );
+            Command::new(tawc_exec_bin())
+                .args(["--cwd", &scratch,
+                       "--env", &format!("TMPDIR={}", scratch),
+                       "--env", "PATH=/system/bin:/system/xbin",
+                       "/system/bin/sh", "-c", &inner])
+                .output()
+        }
+        // Chroot still needs root. Same shape as before.
+        _ => shell(&format!("su -c '{} {}'", enter_script(), b64)),
+    }
 }
 
 /// Spawn a command in the chroot with piped stdout/stderr (non-blocking).
 /// Returns the Child process. Caller is responsible for reading output.
 pub fn chroot_spawn(cmd: &str) -> io::Result<std::process::Child> {
-    Command::new("adb")
-        .args(["shell", &chroot_invocation(cmd)])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let b64 = b64_encode(cmd.as_bytes());
+    match install_method() {
+        m @ ("proot" | "tawcroot") => {
+            let scratch = format!("/data/data/{}/cache/{}-tmp", PKG, m);
+            let inner = format!(
+                "mkdir -p {scratch} && cd {scratch} && exec /system/bin/sh {enter} {b64}",
+                scratch = scratch,
+                enter = enter_script(),
+                b64 = b64,
+            );
+            Command::new(tawc_exec_bin())
+                .args(["--cwd", &scratch,
+                       "--env", &format!("TMPDIR={}", scratch),
+                       "--env", "PATH=/system/bin:/system/xbin",
+                       "/system/bin/sh", "-c", &inner])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        }
+        _ => Command::new("adb")
+            .args(["shell", &format!("su -c '{} {}'", enter_script(), b64)])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn(),
+    }
 }
 
-/// Detected install method (`"chroot"` or `"proot"`), cached after
-/// the first probe. Returning the string keeps callers free to pass
-/// it through to log lines without round-tripping through an enum.
+/// Detected install method (`"chroot"` / `"proot"` / `"tawcroot"`),
+/// cached after the first probe. Returning the string keeps callers
+/// free to pass it through to log lines without round-tripping
+/// through an enum.
 fn install_method() -> &'static str {
     static M: OnceLock<String> = OnceLock::new();
     M.get_or_init(|| {
-        // `run-as` first because it doesn't need root and works on
-        // both rooted and rootless devices for debuggable APKs (we
-        // are debuggable). Fall back to `su` for non-debuggable
-        // builds. If both fail the test will fail loudly later
-        // anyway, so we don't try to be clever about reporting.
+        // Read metadata.json via the broker. Runs as the app uid, so
+        // it can read the private data dir without root or run-as.
         let meta = meta_path();
-        let probe = format!(
-            "run-as {pkg} cat {meta} 2>/dev/null || su -c 'cat {meta}' 2>/dev/null",
-            pkg = PKG,
-            meta = meta,
-        );
-        let raw = Command::new("adb")
-            .args(["shell", &probe])
+        let raw = Command::new(tawc_exec_bin())
+            .args(["/system/bin/cat", &meta])
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -85,35 +150,6 @@ fn install_method() -> &'static str {
         // missing-method panic anyway.
         "chroot".to_string()
     }).as_str()
-}
-
-fn chroot_invocation(cmd: &str) -> String {
-    // Base64 alphabet has no shell metacharacters, so embedding the
-    // payload bare in the wrapped shell command is safe.
-    let b64 = b64_encode(cmd.as_bytes());
-    let enter = enter_script();
-    match install_method() {
-        m @ ("proot" | "tawcroot") => {
-            // run-as switches to the app uid before exec'ing
-            // enter.sh. mksh's default cwd under run-as is /data/local
-            // where the app uid has no write access, which breaks
-            // its here-doc temp-file logic; cd + TMPDIR to the app's
-            // own cache dir first. Same trick the host launcher
-            // (`scripts/tawc-chroot-run.sh`) uses. tawcroot is the same
-            // shape as proot here — runs as app uid, no extra setup
-            // needed beyond TMPDIR.
-            let scratch = format!("/data/data/{}/cache/{}-tmp", PKG, m);
-            format!(
-                "run-as {pkg} sh -c 'mkdir -p {scratch} && cd {scratch} && export TMPDIR={scratch} && exec {enter} {b64}'",
-                pkg = PKG,
-                scratch = scratch,
-                enter = enter,
-                b64 = b64,
-            )
-        }
-        // Chroot (or unknown — treat as chroot) goes through su.
-        _ => format!("su -c '{} {}'", enter, b64),
-    }
 }
 
 /// Standard base64 (RFC 4648) with `=` padding, no line breaks. Inlined

@@ -108,7 +108,10 @@ impl ChrootProcess {
     /// Returns false if the process has exited (crashed/closed).
     pub fn is_running(&self) -> bool {
         let Some(pid) = self.pid else { return false };
-        let ok = adb::shell(&format!("su -c 'test -d /proc/{}'", pid));
+        // /proc is world-readable (mode 0555 / public), so plain `adb
+        // shell` (uid `shell`) sees every PID's directory regardless
+        // of which uid the process belongs to.
+        let ok = adb::shell(&format!("test -d /proc/{}", pid));
         ok.map(|o| o.status.success()).unwrap_or(false)
     }
 
@@ -142,20 +145,18 @@ impl ChrootProcess {
     /// Read the PID from the pidfile, then get the PGID from /proc/PID/stat.
     /// Returns (pid, pgid).
     fn read_pid_and_pgid(&self) -> Option<(u32, u32)> {
-        let output = adb::shell(&format!(
-            "su -c 'cat {} 2>/dev/null'",
-            self.pidfile_device
-        ))
-        .ok()?;
+        // Pidfile lives inside the chroot rootfs (under app data) — read
+        // via the broker (runs as the app uid).
+        let output = adb::chroot_host_exec(&[
+            "/system/bin/cat", &self.pidfile_device,
+        ]).ok()?;
         let pid: u32 = String::from_utf8_lossy(&output.stdout)
             .trim()
             .parse()
             .ok()?;
 
-        // Read PGID from /proc/PID/stat on the host.
-        // Format: pid (comm) state ppid pgrp ...
-        // comm can contain spaces, so find the last ')' to skip it.
-        let stat_output = adb::shell(&format!("su -c 'cat /proc/{}/stat'", pid)).ok()?;
+        // /proc/PID/stat is world-readable; plain adb shell suffices.
+        let stat_output = adb::shell(&format!("cat /proc/{}/stat", pid)).ok()?;
         let stat = String::from_utf8_lossy(&stat_output.stdout);
         let stat = stat.trim();
         let after_comm = stat.rfind(')')? + 2;
@@ -171,7 +172,9 @@ impl ChrootProcess {
 
     /// Remove the pidfile from the device.
     fn cleanup_pidfile(&self) {
-        let _ = adb::shell(&format!("su -c 'rm -f {}'", self.pidfile_device));
+        let _ = adb::chroot_host_exec(&[
+            "/system/bin/rm", "-f", &self.pidfile_device,
+        ]);
     }
 }
 
@@ -214,10 +217,12 @@ fn ensure_pidfile_helper() -> io::Result<()> {
         .args(["push", &helper_src.to_string_lossy(), &staging])
         .output()?;
     let helper_dev = pidfile_helper_device();
-    adb::shell(&format!(
-        "su -c 'cp {} {} && chmod +x {}'",
-        staging, helper_dev, helper_dev
-    ))?;
+    // Copy into the rootfs via the broker — runs as the app uid which
+    // owns the rootfs tree.
+    adb::chroot_host_exec(&[
+        "/system/bin/sh", "-c",
+        &format!("cp {} {} && chmod +x {}", staging, helper_dev, helper_dev),
+    ])?;
     *pushed = true;
     Ok(())
 }
@@ -268,9 +273,10 @@ fn kill_process_tree(pid: u32, timeout: Duration) -> Result<(), String> {
 
 /// Collect all unique PGIDs from a process and its descendants.
 /// Runs `ps` on the Android host — this works because chroot shares the
-/// host PID namespace (no PID namespace isolation).
+/// host PID namespace (no PID namespace isolation). `ps -eo` works as
+/// the plain `shell` uid; `/proc` is world-readable.
 fn collect_descendant_pgids(root_pid: u32) -> Vec<u32> {
-    let output = match adb::shell("su -c 'ps -eo pid,ppid,pgid'") {
+    let output = match adb::shell("ps -eo pid,ppid,pgid") {
         Ok(o) => o,
         Err(_) => return vec![],
     };

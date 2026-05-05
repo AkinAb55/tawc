@@ -76,9 +76,11 @@ fi
 # ---- device mode ---------------------------------------------------------
 # Cleat cross-compiles cleanly under the NDK (it's plain POSIX C + a
 # vendored stc). We push the cross-built `tests` orchestrator alongside
-# tawcroot / tawcroot-testhost / fixtures and run it via su, exactly the
-# same shape as host mode. PASSTHROUGH filters work everywhere; pass / fail
-# detection is the orchestrator's exit code, not adb-grep heuristics.
+# tawcroot / tawcroot-testhost / fixtures and run it via su, exactly
+# the same shape as host mode. PASSTHROUGH filters work everywhere;
+# pass/fail detection is the orchestrator's exit code, not adb-grep
+# heuristics. su is required for the test runner here; see the run-
+# command comment further down for why.
 # shellcheck disable=SC1091
 source "$REPO_DIR/scripts/lib/select-device.sh"   # sets ANDROID_SERIAL (tawc-app glue)
 # shellcheck disable=SC1091
@@ -131,10 +133,15 @@ for f in "$LOCAL_FIXTURES_DIR"/*; do
     push_one "$f" "$FIXTURES/$(basename "$f")"
 done
 
-# Cleat tests create rootfs trees under TAWCROOT_TEST_TMPDIR with paths
-# like "$TMPDIR/tawcroot-test-rootfs-phase1"; clearing keeps reruns
-# deterministic when a previous run died mid-test. Done via su because
-# the previous run's tree is owned by root.
+# Cleat tests create rootfs trees under TAWCROOT_TEST_TMPDIR. Done via
+# su because (a) prior-run trees may be root-owned, and (b) some
+# handler tests use mknod()/mknodat() (FIFO creation), which Android's
+# SELinux policy gates behind privileged contexts — `shell` uid is
+# denied `mknod` permission on `shell_data_file`, and `untrusted_app`
+# can't exec the freshly-built test binaries at all (W^X for app data).
+# So this is the one test path that genuinely needs root, even though
+# **production tawcroot is rootless**: this is testing infrastructure
+# verifying the handler intercepts mknod, not a runtime requirement.
 adb shell "su -c 'rm -rf $TMPDIR_ON_DEVICE/tawcroot-test-rootfs-* && mkdir -p $TMPDIR_ON_DEVICE'"
 
 # Forward PASSTHROUGH filters verbatim — the cross-compiled cleat

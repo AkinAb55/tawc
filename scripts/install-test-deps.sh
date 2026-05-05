@@ -31,16 +31,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/select-device.sh"
 # shellcheck source=../scripts/lib/tawc-scratch.sh
 source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+# shellcheck source=../scripts/lib/tawc-exec.sh
+source "$ROOT_DIR/scripts/lib/tawc-exec.sh"
 # shellcheck source=../scripts/lib/tawc-install-id.sh
 source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 TAWC_DISTROS_DIR="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID"
 
-# Read the distro key out of metadata.json. Matches what
-# DistroRegistry uses (`arch`, `manjaro`, `void`). Path lives behind
-# `su` for chroot installs but is app-uid-readable for proot — the `su`
-# call works for both.
-DISTRO_KEY=$(adb shell "su -c 'cat $TAWC_DISTROS_DIR/metadata.json'" \
+# Read the distro key out of metadata.json via the broker (runs as app
+# uid, can read the private data dir directly — works for every install
+# method, no root needed).
+DISTRO_KEY=$("$TAWC_EXEC_BIN" /system/bin/cat "$TAWC_DISTROS_DIR/metadata.json" \
     | tr -d '\r' \
     | sed -n 's/.*"distro"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n1)
@@ -163,7 +164,9 @@ HOST_BWRAP="$ROOT_DIR/tests/apps/fake-bwrap"
 GUEST_BWRAP="$TAWC_DISTROS_DIR/rootfs/usr/bin/bwrap"
 echo "=== Installing fake bwrap (no CONFIG_USER_NS workaround) ==="
 adb push "$HOST_BWRAP" "$TAWC_SCRATCH/fake-bwrap"
-adb shell "su -c 'install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP'"
+# `install -m 0755` via the broker — runs as the app uid, which owns
+# the rootfs tree, so no su needed.
+"$TAWC_EXEC_BIN" /system/bin/sh -c "install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP"
 
 # Firefox autoconfig. Without this, Firefox 150 on the test devices
 # tries to spawn a separate GPU process for WebRender. Under proot the
@@ -186,7 +189,7 @@ GUEST_FF_PREFIX="$TAWC_DISTROS_DIR/rootfs/usr/lib/firefox"
 echo "=== Installing Firefox prefs (autoconfig) ==="
 adb push "$HOST_FF_CFG" "$TAWC_SCRATCH/firefox.cfg"
 adb push "$HOST_FF_AUTOCFG" "$TAWC_SCRATCH/firefox-autoconfig.js"
-adb shell "su -c 'install -m 0644 $TAWC_SCRATCH/firefox.cfg $GUEST_FF_PREFIX/firefox.cfg && \
-                  install -m 0644 -D $TAWC_SCRATCH/firefox-autoconfig.js $GUEST_FF_PREFIX/defaults/pref/autoconfig.js'"
+"$TAWC_EXEC_BIN" /system/bin/sh -c "install -m 0644 $TAWC_SCRATCH/firefox.cfg $GUEST_FF_PREFIX/firefox.cfg && \
+                             install -m 0644 -D $TAWC_SCRATCH/firefox-autoconfig.js $GUEST_FF_PREFIX/defaults/pref/autoconfig.js"
 
 echo "=== Done ==="

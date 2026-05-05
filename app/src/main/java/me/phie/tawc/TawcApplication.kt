@@ -2,6 +2,7 @@ package me.phie.tawc
 
 import android.app.Application
 import android.util.Log
+import me.phie.tawc.dev.ExecBroker
 import me.phie.tawc.install.BootstrapCache
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationMethod
@@ -40,6 +41,14 @@ class TawcApplication : Application() {
             } catch (t: Throwable) {
                 Log.w(TAG, "enter.sh refresh failed", t)
             }
+        }
+        // Dev-only exec broker. Started here (not from MainActivity)
+        // so it's available no matter which Activity / Service the
+        // cold-start went through — the install + integration test
+        // flows often start at InstallActivity. Release builds skip
+        // this entirely. See notes/exec-broker.md.
+        if (BuildConfig.DEBUG) {
+            ExecBroker.start()
         }
     }
 

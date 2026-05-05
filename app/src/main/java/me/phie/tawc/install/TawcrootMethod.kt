@@ -121,9 +121,20 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         // the install service's. Without this, gpg-agent inherits a
         // signal mask / pgrp combination that causes its main loop to
         // spin at 100% CPU instead of cleanly daemonising.
+        //
+        // We invoke `sh <enter.sh>` instead of execing enter.sh directly
+        // so the kernel never has to `execute_no_trans` an `app_data_file`.
+        // From API 29+ the `untrusted_app` SELinux domain denies that
+        // (Android's W^X rule for the app data dir), which surfaces as
+        // `setsid: exec <enter.sh>: Permission denied` even though the
+        // file mode and DAC are fine. Reading the script as data and
+        // letting `/system/bin/sh` (a `system_file`) interpret it
+        // sidesteps the restriction; host-side launchers go through
+        // `run-as` (which runs in `runas_app`, where exec_no_trans on
+        // app_data_file is allowed) so they keep working unchanged.
         val enterAbs = enterFile.absolutePath
         val tawcrootCmd =
-            "exec setsid ${shellQuote(enterAbs)} ${shellQuote(cmdB64)} 2>&1 < /dev/null"
+            "exec setsid /system/bin/sh ${shellQuote(enterAbs)} ${shellQuote(cmdB64)} 2>&1 < /dev/null"
         return runShell(listOf("/system/bin/sh"), tawcrootCmd, onLine)
     }
 

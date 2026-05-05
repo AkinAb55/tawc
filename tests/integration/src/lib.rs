@@ -39,13 +39,11 @@ fn resolve_install_id() -> String {
         "for d in /data/data/{pkg}/distros/*/metadata.json; \
          do test -f \"$d\" && basename \"$(dirname \"$d\")\"; done"
     );
-    let cmd = format!(
-        "run-as {pkg} sh -c '{probe}' 2>/dev/null; su -c '{probe}' 2>/dev/null"
-    );
-    let output = std::process::Command::new("adb")
-        .args(["shell", &cmd])
-        .output()
-        .expect("failed to invoke `adb shell` to resolve TAWC_INSTALL_ID");
+    // Run via the dev exec broker (runs as the app uid). No root, no
+    // run-as. Same code path the host scripts use; see
+    // `notes/exec-broker.md`.
+    let output = crate::adb::chroot_host_exec(&["/system/bin/sh", "-c", &probe])
+        .expect("failed to invoke broker to resolve TAWC_INSTALL_ID");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut ids: Vec<&str> = stdout
         .lines()

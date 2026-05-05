@@ -27,6 +27,9 @@ static inline long tawc_exit_group(int status)
 static inline long tawc_getpid(void)
 { return TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0); }
 
+static inline long tawc_getppid(void)
+{ return TAWC_RAW(TAWC_SYS_getppid, 0, 0, 0, 0, 0, 0); }
+
 static inline long tawc_getuid(void)
 { return TAWC_RAW(TAWC_SYS_getuid, 0, 0, 0, 0, 0, 0); }
 

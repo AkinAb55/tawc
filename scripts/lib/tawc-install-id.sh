@@ -29,13 +29,15 @@ fi
 _pkg=me.phie.tawc
 _distros=/data/data/$_pkg/distros
 
-# Try run-as first (works for any debuggable build, no root needed),
-# fall back to su for non-debuggable builds with root. The for-loop
-# expands the metadata.json glob; if there are no matches, test -f
-# silently fails on the literal pattern and we get empty output.
+# Run the probe inside the app via the dev exec broker — that gets us
+# read access to the app's private data dir without root and without
+# `run-as`'s SELinux domain quirks. See notes/exec-broker.md.
+_lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=tawc-exec.sh
+. "$_lib_dir/tawc-exec.sh"
+
 _probe='for d in '"$_distros"'/*/metadata.json; do test -f "$d" && basename "$(dirname "$d")"; done'
-_ids=$(adb shell "run-as $_pkg sh -c '$_probe' 2>/dev/null; \
-                  su -c '$_probe' 2>/dev/null" \
+_ids=$("$TAWC_EXEC_BIN" /system/bin/sh -c "$_probe" 2>/dev/null \
        | tr -d '\r' \
        | awk 'NF' \
        | sort -u)

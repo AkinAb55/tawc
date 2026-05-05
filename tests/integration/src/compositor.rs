@@ -153,17 +153,17 @@ pub fn assert_running() {
 /// process is listening, so the file alone would falsely indicate
 /// readiness on the very next test run.
 pub fn is_running() -> io::Result<bool> {
-    // /tmp inside the chroot is the rootfs's /tmp dir; from outside,
-    // that's /data/data/me.phie.tawc/distros/<id>/rootfs/tmp. The
-    // compositor puts its socket at /data/data/me.phie.tawc/wayland-0
-    // and 01-tawc.sh symlinks it to /tmp/wayland-0 inside the chroot —
-    // the symlink is what we check here.
-    let cmd = format!(
-        "pidof me.phie.tawc >/dev/null && \
-         su -c 'test -e /data/data/me.phie.tawc/distros/{}/rootfs/tmp/wayland-0' \
-         && echo ready",
-        crate::install_id(),
-    );
-    let output = adb::shell(&cmd)?;
-    Ok(String::from_utf8_lossy(&output.stdout).contains("ready"))
+    // The compositor binds its socket at /data/data/me.phie.tawc/wayland-0;
+    // pidof is shell-readable (process is in untrusted_app but `pidof`
+    // just walks /proc, world-readable). The socket file lives in app
+    // data, so probe it through the broker (runs as app uid).
+    let pid_output = adb::shell("pidof me.phie.tawc")?;
+    if pid_output.stdout.iter().filter(|b| b.is_ascii_digit()).count() == 0 {
+        return Ok(false);
+    }
+    let exists = adb::chroot_host_exec(&[
+        "/system/bin/sh", "-c",
+        "test -e /data/data/me.phie.tawc/wayland-0",
+    ])?;
+    Ok(exists.status.success())
 }
