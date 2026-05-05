@@ -20,7 +20,7 @@ source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
 source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 app_name="gtk4-debug-app"
-src_dir="$SCRIPT_DIR/$app_name"
+src_dir="$ROOT_DIR/tests/apps/$app_name"
 chroot_root="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/rootfs"
 build_dir="$chroot_root/tmp/$app_name"
 
