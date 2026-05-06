@@ -15,6 +15,7 @@ import me.phie.tawc.install.InstallActivity
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.install.distro.DistroRegistry
+import me.phie.tawc.tasks.TaskManagerActivity
 import me.phie.tawc.ui.buildHomeScreen
 import me.phie.tawc.ui.primaryButton
 import me.phie.tawc.ui.verticalLp
@@ -52,6 +53,13 @@ class MainActivity : AppCompatActivity() {
 
         listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scaffold.content.addView(listContainer, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
+        scaffold.content.addView(
+            primaryButton("Task manager") {
+                startActivity(Intent(this@MainActivity, TaskManagerActivity::class.java))
+            },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
+        )
 
         scaffold.content.addView(
             primaryButton("Install new distro") {

@@ -92,6 +92,11 @@
             android:exported="false"
             android:label="Install methods" />
 
+        <activity
+            android:name=".tasks.TaskManagerActivity"
+            android:exported="false"
+            android:label="Task manager" />
+
         <service
             android:name=".install.InstallationService"
             android:exported="false"

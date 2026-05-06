@@ -28,6 +28,7 @@ import kotlinx.coroutines.runInterruptible
 import me.phie.tawc.MainActivity
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
+import me.phie.tawc.tasks.ProcessScanner
 
 /**
  * Foreground service that runs install / uninstall jobs in a coroutine
@@ -543,80 +544,32 @@ class InstallationService : Service() {
     }
 
     /**
-     * Kill any process attached to [id]'s install dir — chrooted
-     * descendants (pacman, gpg-agent) by `/proc/<pid>/root` dev:ino,
-     * out-of-chroot helpers (tar, find) by argv-mentions-install-path
-     * via `/proc/<pid>/cmdline`. Runs via su when available (so we
-     * can see and signal root processes), falls back to the app uid
-     * shell otherwise (proot installs are app-uid-owned end-to-end).
+     * Kill any process attached to [id]'s install dir — guests inside
+     * the rootfs by `cwd`/`exe`/`root`, plus out-of-rootfs helpers
+     * (`tar`, `find`) by argv-mentions-install-path. Best-effort: the
+     * post-cancel uninstall calls [ProcessScanner.killAllInRootfs]
+     * again with the same parameters, which catches anything this
+     * missed.
      *
-     * `installPath` is `<dataDir>/distros/<id>` and `rootfsPath` is
-     * `<installPath>/rootfs`, so the substring grep on installPath
-     * catches both rootfs-internal and installDir-relative paths.
-     *
-     * Best-effort: errors are logged and swallowed. The post-cancel
-     * uninstall path runs its own
-     * [RootfsCleaner.killChrootProcessesScript] later, which catches
-     * anything this missed.
+     * `includeChroot` is `true` for chroot installs (need `su` to see
+     * root-owned procs); `false` for proot/tawcroot (app-uid only,
+     * no su prompt).
      */
     private fun runCancelKillScript(id: String) {
         val store = InstallationStore(applicationContext)
         val installDir = store.installationDir(id)
-        val installPath = installDir.absolutePath
         val rootfsPath = store.rootfsDir(id).absolutePath
-        val needsRoot = store.load(id)?.method != Installation.METHOD_PROOT
-        // Single-quoted shell literals — paths come from
-        // [InstallationStore] under app dataDir / a regex-validated
-        // id, so they don't carry single quotes. The grep is plain
-        // -F (fixed-string) on the install path, which handles
-        // anything else.
-        val script = buildString {
-            appendLine("ROOT_DI=${'$'}(stat -c '%d:%i' '$rootfsPath' 2>/dev/null || true)")
-            appendLine("killed=0; scanned=0")
-            appendLine("for entry in /proc/[0-9]*; do")
-            appendLine("    [ -e \"\$entry\" ] || continue")
-            appendLine("    pid=${'$'}{entry##*/}")
-            // Skip self and direct parent (the wrapping shell / su)
-            // so the script can't accidentally signal-kill its own
-            // process tree mid-sweep.
-            appendLine("    [ \"\$pid\" = \"\$\$\" ] && continue")
-            appendLine("    [ \"\$pid\" = \"\$PPID\" ] && continue")
-            appendLine("    scanned=${'$'}((scanned + 1))")
-            appendLine("    hit=")
-            appendLine("    rdi=${'$'}(stat -L -c '%d:%i' \"\$entry/root\" 2>/dev/null || true)")
-            appendLine("    if [ -n \"\$ROOT_DI\" ] && [ \"\$rdi\" = \"\$ROOT_DI\" ]; then hit=1; fi")
-            appendLine("    if [ -z \"\$hit\" ]; then")
-            appendLine("        if tr '\\0' ' ' < \"\$entry/cmdline\" 2>/dev/null | grep -F -q '$installPath'; then")
-            appendLine("            hit=1")
-            appendLine("        fi")
-            appendLine("    fi")
-            appendLine("    if [ -n \"\$hit\" ]; then")
-            appendLine("        cmd=${'$'}(cat \"\$entry/comm\" 2>/dev/null || true)")
-            appendLine("        echo \"cancel-kill pid=${'$'}pid cmd=${'$'}cmd\"")
-            appendLine("        kill -KILL \"\$pid\" 2>/dev/null || true")
-            appendLine("        killed=${'$'}((killed + 1))")
-            appendLine("    fi")
-            appendLine("done")
-            appendLine("echo \"cancel-kill: swept \$scanned procs, killed \$killed\"")
-        }
+        val includeChroot = store.load(id)?.method == ChrootMethod.KEY
         try {
-            if (needsRoot && Su.rootAvailable()) {
-                Su.run(script) { appendLog("cancel-kill: $it") }
-            } else {
-                // App-uid only: limited to our own processes (Android
-                // hidepid policy) but proot installs run as us anyway.
-                val pb = ProcessBuilder("/system/bin/sh").redirectErrorStream(true)
-                val proc = pb.start()
-                proc.outputStream.bufferedWriter().use { w ->
-                    w.write(script); w.write("\n")
-                }
-                proc.inputStream.bufferedReader().use { r ->
-                    r.forEachLine { appendLog("cancel-kill: $it") }
-                }
-                proc.waitFor()
-            }
+            ProcessScanner.killAllInRootfs(
+                rootfsPath = rootfsPath,
+                installId = id,
+                includeChroot = includeChroot,
+                extraCmdlinePath = installDir.absolutePath,
+                log = { appendLog("cancel-kill: $it") },
+            )
         } catch (t: Throwable) {
-            Log.w(TAG, "cancel-kill script failed (best-effort)", t)
+            Log.w(TAG, "cancel-kill failed (best-effort)", t)
         }
     }
 

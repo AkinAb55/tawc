@@ -1,5 +1,6 @@
 package me.phie.tawc.install
 
+import me.phie.tawc.tasks.ProcessScanner
 import java.io.File
 import java.io.IOException
 
@@ -10,13 +11,13 @@ import java.io.IOException
  * `install` only runs against a `(no dir)` slot), so every byte that
  * leaves the rootfs goes through here. The sequence is:
  *
- *   1. **Kill chroot processes** by dev:inode of `/proc/<pid>/root`
- *      (and cwd as a fallback). The canonical leak is the
+ *   1. **Kill chroot processes** via [ProcessScanner.killAllInRootfs]
+ *      (`includeChroot=true`). The canonical leak is the
  *      `gpg-agent --daemon` that `pacman-key --init` detaches; left
  *      alive it holds FDs into the rootfs and races the delete, which
  *      on Android 14 spins vold's FUSE accounting into a `vdc volume
- *      abort_fuse` storm bad enough to ANR system_server. We send
- *      SIGKILL twice with a beat between to catch fork-on-signal
+ *      abort_fuse` storm bad enough to ANR system_server. The scanner
+ *      sends KILL twice with a beat between to catch fork-on-signal
  *      respawns.
  *   2. **Strict unmount** via [ChrootMounter.unmount] (mount-master
  *      mode). Refuses with a non-zero exit if any mount remains under
@@ -55,11 +56,17 @@ object RootfsCleaner {
         val installPath = installDir.absolutePath
 
         log("kill: chroot processes (root=$rootfsPath)")
-        val killRes = Su.run(killChrootProcessesScript(rootfsPath)) { log("kill: $it") }
-        if (!killRes.ok) {
+        try {
+            ProcessScanner.killAllInRootfs(
+                rootfsPath = rootfsPath,
+                installId = installDir.name,
+                includeChroot = true,
+                log = { log("kill: $it") },
+            )
+        } catch (t: Throwable) {
             // Don't abort — we're about to nuke the rootfs anyway and
             // the unmount step below catches any actual blockers.
-            log("kill: warning, exit=${killRes.exitCode}")
+            log("kill: warning, ${t.javaClass.simpleName}: ${t.message}")
         }
 
         log("unmount: $rootfsPath")
@@ -108,55 +115,4 @@ object RootfsCleaner {
         }
     }
 
-    /**
-     * Shell snippet that kills (-KILL, twice with a beat between) every
-     * process whose `/proc/<pid>/root` is the chroot rootfs. Compares by
-     * device:inode rather than path string, because Android's app data
-     * dir has two equivalent paths (`/data/data/<pkg>` vs
-     * `/data/user/0/<pkg>`) — `/proc/<pid>/root` reports one and our
-     * Kotlin `File.absolutePath` returns the other. Also matches
-     * processes with cwd inside the rootfs, which catches anything that
-     * chdir'd into the chroot but didn't chroot itself.
-     */
-    private fun killChrootProcessesScript(rootfs: String): String = """
-        ROOT_DI=${'$'}(stat -c '%d:%i' '$rootfs' 2>/dev/null) || ROOT_DI=
-        if [ -z "${'$'}ROOT_DI" ]; then
-            echo "rootfs '$rootfs' not stat-able; skipping process cleanup"
-            exit 0
-        fi
-        kill_chroot_procs() {
-            killed=0
-            scanned=0
-            for entry in /proc/[0-9]*; do
-                [ -e "${'$'}entry" ] || continue
-                pid=${'$'}{entry##*/}
-                if [ "${'$'}pid" = "$$" ] || [ "${'$'}pid" = "${'$'}PPID" ]; then
-                    continue
-                fi
-                scanned=${'$'}((scanned + 1))
-                hit=
-                # `stat` *without* -L on /proc/<pid>/root returns the procfs
-                # symlink's own inode, not the target's. Force-follow with -L.
-                rdi=${'$'}(stat -L -c '%d:%i' "${'$'}entry/root" 2>/dev/null) || rdi=
-                [ "${'$'}rdi" = "${'$'}ROOT_DI" ] && hit=1
-                if [ -z "${'$'}hit" ]; then
-                    cwd=${'$'}(readlink "${'$'}entry/cwd" 2>/dev/null) || cwd=
-                    case "${'$'}cwd" in
-                        "$rootfs"|"$rootfs"/*) hit=1 ;;
-                    esac
-                fi
-                if [ -n "${'$'}hit" ]; then
-                    cmd=${'$'}(cat "${'$'}entry/comm" 2>/dev/null)
-                    echo "killing pid=${'$'}pid (cmd=${'$'}cmd)"
-                    kill -KILL "${'$'}pid" 2>/dev/null || true
-                    killed=${'$'}((killed + 1))
-                fi
-            done
-            echo "swept ${'$'}scanned procs, killed ${'$'}killed (rootfs dev:ino=${'$'}ROOT_DI)"
-        }
-        kill_chroot_procs
-        # Daemons sometimes respawn or fork on signal — wait, then re-sweep.
-        sleep 1
-        kill_chroot_procs
-    """.trimIndent()
 }
