@@ -21,13 +21,24 @@ would defeat the cache and make timing comparisons meaningless.
 ```bash
 # Terminal A: start the proxy (foregrounds; ^C to stop). State and
 # cache live under build/cache-proxy/ — preserved across runs.
-bash scripts/cache-proxy.sh
+bash scripts/cache-proxy.sh run
 
 # Terminal B: install with the proxy URL passed in.
 adb shell am start -n me.phie.tawc/.install.InstallActivity \
     --es autoStart true --es id manjaro --es method tawcroot \
     --es distro manjaro --es mirrorProxy 'http://127.0.0.1:8080/proxy/'
 ```
+
+The script has subcommands — run `bash scripts/cache-proxy.sh` (no args)
+or `… help` for the full list. Beyond `run`, useful ones are:
+
+- `list` — per-host sizes + total (sorted by size desc).
+- `list <regex>` — every cached URL matching `<regex>` (extended regex)
+  with sizes + total. Use to find what's actually in the cache before
+  selectively evicting.
+- `wipe <regex>` — delete every cache entry whose URL matches. No
+  confirmation prompt — pair with `list <regex>` first to preview.
+  Errors out on no match (so a stale regex doesn't silently no-op).
 
 The proxy script polls `adb devices` once a second and applies
 `adb reverse tcp:8080 tcp:8080` to every device that's currently
@@ -37,9 +48,10 @@ change on every connect/disconnect transition.
 
 The cache is **persistent across runs** — `build/cache-proxy/` is
 gitignored along with the rest of `build/`, but never auto-wiped. To
-sweep it manually: `rm -rf build/cache-proxy/cache/`. Selective evict
-by md5 path under `build/cache-proxy/cache/`. CLAUDE.md instructs
-agents not to wipe it without explicit user request.
+sweep it manually: `rm -rf build/cache-proxy/cache/`. For selective
+evict use `bash scripts/cache-proxy.sh wipe <regex>` (URLs are matched
+as extended regex). CLAUDE.md instructs agents not to wipe it without
+explicit user request.
 
 ## Architecture
 
@@ -172,7 +184,7 @@ config.
 - The mirror config baked into the rootfs hard-codes the
   `127.0.0.1:8080` URLs. After a proxied install, running pacman /
   xbps inside the chroot **without** the proxy running will fail.
-  Re-run `bash scripts/cache-proxy.sh` (and let it apply
+  Re-run `bash scripts/cache-proxy.sh run` (and let it apply
   `adb reverse`), or rewrite the mirrorlist by hand. We accept this
   for dev because the user opts in explicitly per install.
 - Range requests (HTTP 206) aren't cached because stock nginx

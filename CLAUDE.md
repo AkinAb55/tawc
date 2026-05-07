@@ -47,9 +47,9 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 - Issues should be markdown documents starting with a title and one-line explanation, followed by a complete description with all relevant details
 
 ## Cache proxy
-The dev-time host nginx caching reverse proxy lives at `build/cache-proxy/` (started by `bash scripts/cache-proxy.sh`; see [notes/cache-proxy.md](notes/cache-proxy.md))
+The dev-time host nginx caching reverse proxy lives at `build/cache-proxy/` (started by `bash scripts/cache-proxy.sh run`; see [notes/cache-proxy.md](notes/cache-proxy.md))
 - **Always use the cache proxy for installs during development and testing.** Pass `--es mirrorProxy 'http://127.0.0.1:8080/proxy/'` on every `am start … .install.InstallActivity` invocation, and on every test path that exercises an install.
-- **Never start the cache proxy yourself.** If a test fails because `127.0.0.1:8080` is refused, the right response is "ask the user to run the proxy with `bash scripts/cache-proxy.sh`", not "start it for them".
+- **Never start the cache proxy yourself.** If a test fails because `127.0.0.1:8080` is refused, the right response is "ask the user to run the proxy with `bash scripts/cache-proxy.sh run`", not "start it for them".
 - **Never wipe `build/cache-proxy/cache/`.** If you suspect something is broken, ask the user to delete stuff manually.
 
 ## Workflow
