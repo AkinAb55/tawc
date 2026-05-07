@@ -149,21 +149,35 @@ interface InstallationMethod {
     fun enterScript(context: Context, rootfs: String): String
 
     companion object {
-        /** Maps a stored `Installation.method` string to the implementation. */
+        /**
+         * Map a stored `Installation.method` string to the
+         * implementation, or null if the method is unknown OR disabled
+         * in this build (see [EnabledMethods]). A null on the install
+         * path is rejected up front by the service gate; on the
+         * uninstall path the caller falls back to [defaultForHost] so
+         * a legacy slot recorded against a now-disabled method is
+         * still cleanable.
+         */
         fun forKey(context: Context, key: String): InstallationMethod? = when (key) {
-            ChrootMethod.KEY -> ChrootMethod
-            ProotMethod.KEY -> ProotMethod(context)
-            TawcrootMethod.KEY -> TawcrootMethod(context)
+            ChrootMethod.KEY -> if (EnabledMethods.chroot) ChrootMethod else null
+            ProotMethod.KEY -> if (EnabledMethods.proot) ProotMethod(context) else null
+            TawcrootMethod.KEY -> if (EnabledMethods.tawcroot) TawcrootMethod(context) else null
             else -> null
         }
 
         /**
-         * Auto-pick a method for a fresh install. Prefer chroot when
-         * `su` is available (faster runtime, integrates with
-         * libhybris) and fall back to proot when it isn't. Callers
-         * may override at install time via the UI / `--es method` CLI.
+         * Auto-pick a method for a fresh install. tawcroot first
+         * whenever it's enabled (the default and only officially
+         * supported method); otherwise the next enabled method in
+         * preference order: proot, then chroot (only if `su` works).
+         * Callers may override at install time via the UI /
+         * `--es method` CLI.
          */
-        fun defaultForHost(context: Context): InstallationMethod =
-            if (Su.rootAvailable()) ChrootMethod else ProotMethod(context)
+        fun defaultForHost(context: Context): InstallationMethod {
+            if (EnabledMethods.tawcroot) return TawcrootMethod(context)
+            if (EnabledMethods.proot) return ProotMethod(context)
+            if (EnabledMethods.chroot && Su.rootAvailable()) return ChrootMethod
+            error("no install methods enabled — check BuildConfig.METHOD_*_ENABLED")
+        }
     }
 }

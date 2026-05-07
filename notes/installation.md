@@ -15,6 +15,32 @@ This is the *only* chroot system in the project. The earlier
 have been deleted; their logic now lives in this package and the
 auto-generated `enter.sh`.
 
+## Install methods
+
+Three [InstallationMethod] implementations exist. **tawcroot is the
+default and only officially supported method**; chroot/proot are
+dev-only and only ship in debug builds.
+
+| key       | builds it ships in     | notes |
+|-----------|------------------------|-------|
+| tawcroot  | debug + release (default) | Custom systrap-based syscall emulator (`tawcroot/`). Rootless. The default for new installs and the only one users see in release builds. |
+| proot     | debug only             | Termux fork of proot, ptrace-based fake chroot. Rootless. Kept for performance comparisons + as a fallback during tawcroot bring-up. |
+| chroot    | debug only             | Real `chroot(2)` via Magisk `su`. Fastest path with no syscall translation, but only works on rooted devices and is not exposed to release users. |
+
+### Build-time selection
+
+`app/build.gradle.kts` flips the `BuildConfig.METHOD_*_ENABLED` booleans
+per build type. Defaults: debug ships all three for dev-loop coverage,
+release ships only tawcroot. Override either side with
+`-PtawcMethods=tawcroot[,proot[,chroot]]` (e.g. for testing the proot
+path against a release-shaped APK). tawcroot must always be enabled.
+
+The `EnabledMethods` helper exposes those booleans to the runtime:
+`InstallationMethod.forKey` returns null for any method the build
+doesn't ship, the install form hides the picker entirely when only one
+method is enabled, and any APK that doesn't ship proot drops
+`libproot.so` / `libproot-loader.so` at packaging time.
+
 ## On-disk layout
 
 Everything lives under the app's private data dir:
@@ -762,9 +788,10 @@ keeps the trigger surface debug-only.
   pick it up automatically. The `(distro, arch)` lookup in
   [DistroRegistry.forInstallation] is what dispatches to the right
   one at runtime.
-- **proot (rootless) installations** — add a `ProotMethod.kt` next to
-  `ChrootMounter` / `ChrootRunner`, route through a strategy chosen
-  from `Installation.method`. The `metadata.json` field exists for this.
+- (Done) **proot (rootless) installations** — `ProotMethod.kt` ships
+  alongside `ChrootMounter` / `ChrootRunner` and is routed via the
+  `Installation.method` strategy field. **Superseded by tawcroot for
+  release builds; see "Install methods" above.**
 - **Multiple installs** — vary the id passed in via the `--es id …`
   extra. The store/service/activity already carry the id end-to-end.
   The `(distro, arch)` registry lookup means two installations of

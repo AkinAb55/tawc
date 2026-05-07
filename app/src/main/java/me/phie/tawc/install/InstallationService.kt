@@ -273,13 +273,17 @@ class InstallationService : Service() {
             rejectInstall(id, "no Distro supports ABI ${android.os.Build.SUPPORTED_ABIS.joinToString(",")}")
             return
         }
-        // Resolve the install method (chroot vs proot). An explicit
-        // bad key is a clean reject; null falls back to the host
-        // default (chroot if `su` works, proot otherwise — see
-        // [InstallationMethod.defaultForHost]).
+        // Resolve the install method. An explicit bad key (or one that
+        // this build doesn't ship — see [EnabledMethods]) is a clean
+        // reject; null falls back to the host default (tawcroot when
+        // enabled — the default for new installs).
         val method = if (methodKey != null) {
             InstallationMethod.forKey(applicationContext, methodKey) ?: run {
-                rejectInstall(id, "unknown method '$methodKey' (try chroot or proot)")
+                rejectInstall(
+                    id,
+                    "method '$methodKey' is not enabled in this build " +
+                        "(enabled: ${EnabledMethods.keys.joinToString()})",
+                )
                 return
             }
         } else {

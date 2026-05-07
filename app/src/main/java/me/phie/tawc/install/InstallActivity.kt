@@ -133,9 +133,20 @@ class InstallActivity : AppCompatActivity() {
 
         s.addView(buildInstallDirField(available, savedLabelText), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
-        // Method picker. Defaults to tawcroot (the recommended method);
-        // saved instance state overrides for rotation.
-        s.addView(buildMethodPicker(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+        // Method picker + info link only render when this APK ships
+        // more than one install method. The single-method case (default
+        // for release: tawcroot only) hides both — there's nothing for
+        // the user to choose, and the "What's the difference?" page
+        // would compare a single option against nothing. Saved
+        // instance state overrides the default for rotation.
+        if (!EnabledMethods.onlyOne) {
+            s.addView(buildMethodPicker(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+        } else {
+            // Pin the single enabled method as the selection so
+            // beginInstall doesn't fall back to tawcroot's KEY when
+            // the only enabled method happens to be something else.
+            selectedMethod = EnabledMethods.keys.single()
+        }
 
         // Dev-only "Use cache proxy" checkbox. Hidden in release builds
         // — production must never even ask the user about a localhost
@@ -144,19 +155,21 @@ class InstallActivity : AppCompatActivity() {
             s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
         }
 
-        // "What's the difference?" link to the install method info
-        // page. Borderless text button so it reads as a help affordance,
-        // not a primary action.
-        s.addView(
-            MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
-                text = "What's the difference?"
-                setTextColor(getColor(R.color.tawc_accent))
-                setOnClickListener {
-                    startActivity(Intent(this@InstallActivity, InstallMethodInfoActivity::class.java))
-                }
-            },
-            verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
-        )
+        if (!EnabledMethods.onlyOne) {
+            // "What's the difference?" link to the install method info
+            // page. Borderless text button so it reads as a help affordance,
+            // not a primary action.
+            s.addView(
+                MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+                    text = "What's the difference?"
+                    setTextColor(getColor(R.color.tawc_accent))
+                    setOnClickListener {
+                        startActivity(Intent(this@InstallActivity, InstallMethodInfoActivity::class.java))
+                    }
+                },
+                verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
+            )
+        }
 
         installButton = primaryButton("Install") { beginInstall() }
         s.addView(installButton, verticalLp(MATCH_PARENT, WRAP_CONTENT))
@@ -321,10 +334,11 @@ class InstallActivity : AppCompatActivity() {
     }
 
     /**
-     * Build the method picker (tawcroot / proot / chroot radio group),
-     * vertical and in recommendation order: tawcroot first as the
-     * default for new installs, proot as the established rootless
-     * fallback, chroot last for rooted-only setups.
+     * Build the method picker. One radio per build-enabled method
+     * ([EnabledMethods]) in recommendation order: tawcroot first as
+     * the default, proot as the established rootless fallback, chroot
+     * last for rooted-only setups. Caller in [buildFormSection] omits
+     * the picker entirely when only one method is enabled.
      */
     private fun buildMethodPicker(): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -337,48 +351,38 @@ class InstallActivity : AppCompatActivity() {
         // Use generateViewId() rather than hand-picked constants —
         // any literal we'd reach for in the AAPT range collides with
         // future R.id.* once we add a layout XML.
-        val tawcrootId = View.generateViewId()
-        val prootId = View.generateViewId()
-        val chrootId = View.generateViewId()
-
-        val tawcroot = RadioButton(this).apply {
-            id = tawcrootId
-            text = "tawcroot (recommended)"
+        val idByKey = mutableMapOf<String, Int>()
+        val keyById = mutableMapOf<Int, String>()
+        for (key in EnabledMethods.keys) {
+            val rid = View.generateViewId()
+            idByKey[key] = rid
+            keyById[rid] = key
+            val rb = RadioButton(this).apply {
+                id = rid
+                text = when (key) {
+                    TawcrootMethod.KEY -> "tawcroot (recommended)"
+                    ProotMethod.KEY -> "proot"
+                    ChrootMethod.KEY -> "chroot (requires root)"
+                    else -> key
+                }
+                // Chroot greys out on un-rooted devices so the
+                // limitation is visible at the form level.
+                if (key == ChrootMethod.KEY) isEnabled = rootAvailable
+            }
+            methodGroup.addView(rb, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
-        val proot = RadioButton(this).apply {
-            id = prootId
-            text = "proot"
-        }
-        val chroot = RadioButton(this).apply {
-            id = chrootId
-            text = "chroot (requires root)"
-            // Greyed-out on un-rooted devices so the limitation is
-            // visible at the form level — service-side gate will also
-            // refuse but the user shouldn't reach the tap to find out.
-            isEnabled = rootAvailable
-        }
-        methodGroup.addView(tawcroot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        methodGroup.addView(proot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        methodGroup.addView(chroot, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         container.addView(methodGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // Initial selection: explicit override → use it; else default
-        // to tawcroot (the recommended method).
-        val initial = selectedMethod ?: TawcrootMethod.KEY
-        methodGroup.check(when (initial) {
-            ChrootMethod.KEY    -> chrootId
-            ProotMethod.KEY     -> prootId
-            else                -> tawcrootId
-        })
+        // Initial selection: saved/intent override if it points at an
+        // enabled method, else the first enabled key (tawcroot under
+        // the default ordering).
+        val initial = selectedMethod?.takeIf { idByKey.containsKey(it) }
+            ?: EnabledMethods.keys.first()
+        idByKey[initial]?.let { methodGroup.check(it) }
         selectedMethod = initial
 
         methodGroup.setOnCheckedChangeListener { _, checkedId ->
-            selectedMethod = when (checkedId) {
-                chrootId    -> ChrootMethod.KEY
-                prootId     -> ProotMethod.KEY
-                tawcrootId  -> TawcrootMethod.KEY
-                else        -> selectedMethod
-            }
+            keyById[checkedId]?.let { selectedMethod = it }
         }
         return container
     }
@@ -387,7 +391,7 @@ class InstallActivity : AppCompatActivity() {
         // Only the chroot path needs `su`. Proot/tawcroot are rootless
         // by definition, so a missing-root device fails this check only
         // if the user picked chroot anyway.
-        val methodKey = selectedMethod ?: TawcrootMethod.KEY
+        val methodKey = selectedMethod ?: EnabledMethods.keys.firstOrNull() ?: TawcrootMethod.KEY
         if (methodKey == ChrootMethod.KEY && !Su.rootAvailable()) {
             // We don't have a panel anymore; surface as a quick
             // toast-style status on the form. Service-level gate would

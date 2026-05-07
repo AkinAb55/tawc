@@ -259,3 +259,14 @@ for the full design.
   `issues/tawcroot-gpg-agent-hangs-from-app-context.md`.**
 - Phase 6 — hardening + perf: stacked-filter edge cases, tune
   the trapped-syscall set.
+- Phase 7 — release-shape cleanup (2026-05-05): tawcroot
+  promoted to default + only officially supported method.
+  Build-time gating in `app/build.gradle.kts` (debug ships all
+  three for dev coverage; release ships only tawcroot;
+  `-PtawcMethods=...` overrides). `EnabledMethods` drives
+  `InstallationMethod.forKey` + the install form, which now
+  hides the method picker / "What's the difference?" link
+  whenever only one method ships. APKs that don't ship proot
+  drop `libproot.so` / `libproot-loader.so` at packaging time.
+  See [notes/installation.md](notes/installation.md) "Install
+  methods".

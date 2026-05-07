@@ -3,6 +3,26 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Per-build enabled install methods. Defaults: debug ships all three
+// (tawcroot/proot/chroot for dev-loop coverage), release ships only
+// tawcroot (the default and only officially supported method —
+// chroot/proot are dev-only). Override either side with
+// `-PtawcMethods=tawcroot[,proot[,chroot]]`. tawcroot must always be
+// enabled — it's the default for new installs and the fallback for
+// uninstalls of legacy slots that recorded a now-disabled method.
+val explicitTawcMethods: Set<String>? = (project.findProperty("tawcMethods") as String?)
+    ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+val debugMethods: Set<String> = explicitTawcMethods ?: setOf("tawcroot", "proot", "chroot")
+val releaseMethods: Set<String> = explicitTawcMethods ?: setOf("tawcroot")
+val knownMethods = setOf("tawcroot", "proot", "chroot")
+run {
+    val unknown = (debugMethods + releaseMethods) - knownMethods
+    require(unknown.isEmpty()) { "Unknown tawcMethods: $unknown (allowed: $knownMethods)" }
+    require("tawcroot" in debugMethods && "tawcroot" in releaseMethods) {
+        "tawcroot must be enabled (got tawcMethods=$explicitTawcMethods)"
+    }
+}
+
 android {
     namespace = "me.phie.tawc"
     compileSdk = 34
@@ -17,8 +37,33 @@ android {
     }
 
     buildTypes {
-        release {
+        getByName("debug") {
+            buildConfigField("boolean", "METHOD_TAWCROOT_ENABLED", "${"tawcroot" in debugMethods}")
+            buildConfigField("boolean", "METHOD_PROOT_ENABLED",    "${"proot" in debugMethods}")
+            buildConfigField("boolean", "METHOD_CHROOT_ENABLED",   "${"chroot" in debugMethods}")
+        }
+        getByName("release") {
             isMinifyEnabled = false
+            buildConfigField("boolean", "METHOD_TAWCROOT_ENABLED", "${"tawcroot" in releaseMethods}")
+            buildConfigField("boolean", "METHOD_PROOT_ENABLED",    "${"proot" in releaseMethods}")
+            buildConfigField("boolean", "METHOD_CHROOT_ENABLED",   "${"chroot" in releaseMethods}")
+        }
+    }
+
+    // Drop the proot binaries from any APK that doesn't ship the proot
+    // method. The Gradle build still produces them when *some* enabled
+    // variant uses proot (the debug variant by default), so the per-
+    // variant exclusion is the bit that actually matters for the
+    // shipped APK size / surface area.
+    androidComponents {
+        onVariants { variant ->
+            val variantMethods = if (variant.buildType == "release") releaseMethods else debugMethods
+            if ("proot" !in variantMethods) {
+                variant.packaging.jniLibs.excludes.addAll(
+                    "**/libproot.so",
+                    "**/libproot-loader.so",
+                )
+            }
         }
     }
 
@@ -180,22 +225,30 @@ tawcAbis.forEach { abi ->
     // already exist. The script is itself incremental, so iteration
     // is `bash scripts/build-proot.sh --abi=...` direct; Gradle just
     // makes a fresh checkout's `assembleDebug` self-contained.
+    //
+    // Skipped entirely when no enabled variant ships the proot method
+    // (e.g. `-PtawcMethods=tawcroot` everywhere) — the per-variant
+    // packaging exclusion above also drops the staged .so files from
+    // any APK that doesn't use them.
     val abiToScriptArg = mapOf("arm64-v8a" to "aarch64", "x86_64" to "x86_64")
     val scriptAbi = abiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
-    val prootBin = "$tawcRoot/app/src/main/jniLibs/$abi/libproot.so"
-    val prootLoader = "$tawcRoot/app/src/main/jniLibs/$abi/libproot-loader.so"
-    val buildProotTask = tasks.register<Exec>("buildProot$capAbi") {
-        workingDir = tawcRoot
-        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "scripts/build-proot.sh", "--abi=$scriptAbi")
-        inputs.file("$tawcRoot/scripts/build-proot.sh")
-        // Pin bumps in deps/deps.list must invalidate the cache.
-        inputs.file("$tawcRoot/deps/deps.list")
-        inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        outputs.files(prootBin, prootLoader)
-    }
-    tasks.named("preBuild") {
-        dependsOn(buildProotTask)
+    val anyVariantUsesProot = "proot" in debugMethods || "proot" in releaseMethods
+    if (anyVariantUsesProot) {
+        val prootBin = "$tawcRoot/app/src/main/jniLibs/$abi/libproot.so"
+        val prootLoader = "$tawcRoot/app/src/main/jniLibs/$abi/libproot-loader.so"
+        val buildProotTask = tasks.register<Exec>("buildProot$capAbi") {
+            workingDir = tawcRoot
+            environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+            commandLine("bash", "scripts/build-proot.sh", "--abi=$scriptAbi")
+            inputs.file("$tawcRoot/scripts/build-proot.sh")
+            // Pin bumps in deps/deps.list must invalidate the cache.
+            inputs.file("$tawcRoot/deps/deps.list")
+            inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            outputs.files(prootBin, prootLoader)
+        }
+        tasks.named("preBuild") {
+            dependsOn(buildProotTask)
+        }
     }
 
     // Cross-build tawcroot (the systrap-based proot replacement) and

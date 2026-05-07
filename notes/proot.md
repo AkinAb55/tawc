@@ -6,9 +6,11 @@ ptrace-based fake chroot. This note covers what makes it work on
 Android, the non-obvious bits we hit during integration, and the
 maintenance contract for the vendored sources.
 
-The chroot install method (Magisk `su` + real `chroot(2)` + bind
-mounts) remains the default on rooted devices — it's faster and
-doesn't have proot's caveats. proot is the rootless fallback.
+**Status: dev-only.** [tawcroot](tawcroot.md) is the default and only
+officially supported install method; release builds ship only tawcroot
+(see `notes/installation.md` "Install methods"). proot remains in
+debug builds for performance comparisons and as a fallback during
+tawcroot bring-up — it's not exposed to release users.
 
 libhybris-driven GPU acceleration works under proot too: `ProotMethod`
 binds `/apex /vendor /system /system_ext /linkerconfig` into the

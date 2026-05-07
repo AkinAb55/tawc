@@ -11,9 +11,10 @@ import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.verticalLp
 
 /**
- * Read-only reference page describing the three install methods. Linked
- * from the install form so the user can compare tradeoffs without
- * digging through `notes/`. Content lives here (in code, not
+ * Read-only reference page describing the install methods this APK
+ * ships ([EnabledMethods]). Linked from the install form when more
+ * than one method is enabled — the single-method case skips the link
+ * since there's nothing to compare. Content lives here (in code, not
  * `notes/installation.md`) so it ships in the APK and is reachable
  * offline.
  */
@@ -25,32 +26,41 @@ class InstallMethodInfoActivity : AppCompatActivity() {
         val pad = (16 * resources.displayMetrics.density).toInt()
         val content = scaffold.content
 
-        section(
-            content, pad,
-            "tawcroot (recommended)",
-            "Custom systrap-based syscall emulator written for tawc. Like " +
-                "proot it needs no root, but uses a more efficient " +
-                "ptrace alternative and is built specifically to handle " +
-                "the Wayland / GPU paths the compositor needs. Default " +
-                "for new installs.",
-        )
-        section(
-            content, pad,
-            "proot",
-            "Userspace chroot via the Termux fork of proot. Rootless and " +
-                "broadly compatible — pacman, package builds and most " +
-                "desktop apps work. Slower than tawcroot because every " +
-                "syscall is intercepted via ptrace.",
-        )
-        section(
-            content, pad,
-            "chroot (requires root)",
-            "Real Linux chroot via su. Fastest path with no syscall " +
-                "translation overhead, but only works on rooted devices " +
-                "(Magisk / Phh-style su). The chroot mounts /apex, " +
-                "/vendor, /system and /linkerconfig from Android so " +
-                "libhybris GPU drivers can resolve their dependencies.",
-        )
+        if (EnabledMethods.tawcroot) {
+            section(
+                content, pad,
+                "tawcroot (recommended)",
+                "Custom systrap-based syscall emulator written for tawc. Like " +
+                    "proot it needs no root, but uses a more efficient " +
+                    "ptrace alternative and is built specifically to handle " +
+                    "the Wayland / GPU paths the compositor needs. Default " +
+                    "for new installs and the only officially supported " +
+                    "method.",
+            )
+        }
+        if (EnabledMethods.proot) {
+            section(
+                content, pad,
+                "proot (dev only)",
+                "Userspace chroot via the Termux fork of proot. Rootless and " +
+                    "broadly compatible — pacman, package builds and most " +
+                    "desktop apps work. Slower than tawcroot because every " +
+                    "syscall is intercepted via ptrace. Available in debug " +
+                    "builds for comparison; not shipped to release users.",
+            )
+        }
+        if (EnabledMethods.chroot) {
+            section(
+                content, pad,
+                "chroot (requires root, dev only)",
+                "Real Linux chroot via su. Fastest path with no syscall " +
+                    "translation overhead, but only works on rooted devices " +
+                    "(Magisk / Phh-style su). The chroot mounts /apex, " +
+                    "/vendor, /system and /linkerconfig from Android so " +
+                    "libhybris GPU drivers can resolve their dependencies. " +
+                    "Available in debug builds; not shipped to release users.",
+            )
+        }
 
         setContentView(scaffold.root)
     }

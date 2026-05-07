@@ -8,6 +8,11 @@ same compat envelope at meaningfully lower syscall overhead, fewer
 compat hacks, and a codebase shaped for our needs rather than
 inherited from proot's ptrace heritage.
 
+**Status: default and only officially supported install method.**
+Release builds ship only tawcroot; chroot/proot are dev-only and only
+appear in debug builds. See `notes/installation.md` "Install methods"
+for the build-time gating.
+
 This doc is the design + implementation plan. The code is being built
 fresh. Refer to `deps/proot/` (the Termux fork we currently vendor) as
 reference when something proot solves is non-obvious — particularly
