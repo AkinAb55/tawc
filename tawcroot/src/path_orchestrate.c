@@ -106,6 +106,7 @@ static void route_through_binds(tawcroot_path_result *r, char *suf,
 	const struct tawcroot_bind *best = 0;
 	for (size_t i = 0; i < n_binds; i++) {
 		const struct tawcroot_bind *b = &binds[i];
+		if (!b->active) continue;
 		if (b->dst_len > suf_len) continue;
 		if (memcmp(suf, b->dst, b->dst_len) != 0) continue;
 		if (suf_len > b->dst_len && suf[b->dst_len] != '/') continue;
@@ -145,6 +146,101 @@ static long join_cwd_rel(const char *cwd_abs, const char *rel,
 	}
 	out[off] = 0;
 	return 0;
+}
+
+long tawcroot_path_binds_reanchor(struct tawcroot_bind *binds, size_t n_binds,
+                                  const char *cur_root, size_t cur_len,
+                                  const char *new_root, size_t new_len)
+{
+	if (!cur_root || !new_root || (n_binds && !binds)) return TAWC_EFAULT;
+
+	long worst = 0;
+	for (size_t i = 0; i < n_binds; i++) {
+		struct tawcroot_bind *b = &binds[i];
+		if (!b->active) continue;
+
+		/* Compose old host path = cur_root + "/" + dst. We don't
+		 * actually materialise the full string; just compare in
+		 * three pieces against new_root and capture the trailing
+		 * remainder if it lies inside. */
+		size_t total = cur_len + 1 + b->dst_len;
+
+		/* Bind WAS the new root: cur_root + "/" + dst exactly
+		 * equals new_root. The new view's "/" is now this bind's
+		 * src. The rootfs_fd swap (caller's responsibility) opens
+		 * the same underlying directory; the bind is redundant. */
+		if (total == new_len &&
+		    memcmp(cur_root, new_root, cur_len) == 0 &&
+		    new_root[cur_len] == '/' &&
+		    memcmp(b->dst, new_root + cur_len + 1, b->dst_len) == 0) {
+			b->active  = 0;
+			b->dst_len = 0;
+			b->dst[0]  = 0;
+			continue;
+		}
+
+		/* Bind lies inside the new root: prefix-match new_root
+		 * against (cur_root "/" dst) with a component-boundary
+		 * check on the byte AFTER new_root in the composed path. */
+		int outside = 0;
+		if (new_len > total) outside = 1;
+		else {
+			for (size_t k = 0; k < new_len; k++) {
+				char composed_k;
+				if (k < cur_len)        composed_k = cur_root[k];
+				else if (k == cur_len)  composed_k = '/';
+				else                    composed_k = b->dst[k - cur_len - 1];
+				if (composed_k != new_root[k]) {
+					outside = 1;
+					break;
+				}
+			}
+			if (!outside) {
+				/* new_root is a strict prefix; the next
+				 * byte in the composed path must be '/'. */
+				char next;
+				if (new_len < cur_len)        next = cur_root[new_len];
+				else if (new_len == cur_len)  next = '/';
+				else                          next = b->dst[new_len - cur_len - 1];
+				if (next != '/') outside = 1;
+			}
+		}
+		if (outside) {
+			b->active  = 0;
+			b->dst_len = 0;
+			b->dst[0]  = 0;
+			continue;
+		}
+
+		/* Remainder = composed[new_len + 1 .. ]. */
+		size_t rem_start = new_len + 1;
+		size_t rem_len   = total - rem_start;
+		if (rem_len + 1 > sizeof b->dst) {
+			/* Overflow — drop the bind (matches the dst-too-long
+			 * rejection in tawcroot_path_add_bind). Other binds
+			 * still get processed; surface the error to caller
+			 * for visibility. */
+			b->active  = 0;
+			b->dst_len = 0;
+			b->dst[0]  = 0;
+			worst = TAWC_ENAMETOOLONG;
+			continue;
+		}
+
+		/* Copy out to a temp first — destination overlaps source
+		 * when rem_start lands inside b->dst[]. */
+		char tmp[sizeof b->dst];
+		for (size_t k = 0; k < rem_len; k++) {
+			size_t src_idx = rem_start + k;
+			if (src_idx < cur_len)        tmp[k] = cur_root[src_idx];
+			else if (src_idx == cur_len)  tmp[k] = '/';
+			else                          tmp[k] = b->dst[src_idx - cur_len - 1];
+		}
+		for (size_t k = 0; k < rem_len; k++) b->dst[k] = tmp[k];
+		b->dst[rem_len] = 0;
+		b->dst_len      = rem_len;
+	}
+	return worst;
 }
 
 tawcroot_path_result tawcroot_path_translate_with_ctx(

@@ -106,16 +106,16 @@ static long handle_seccomp(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 
 /* Defense-in-depth denials. Trapped so the guest can't mutate kernel
- * state our path-translation layer assumes is fixed: chroot/pivot_root
- * would desync our root-relative bookkeeping (every translated absolute
- * path then resolves against the wrong kernel root); mount/umount2
- * would tear down our setup binds (/dev/shm, /proc, libhybris stage);
- * unshare/setns would hand the guest a namespace where our fd-relative
- * /proc walks no longer name what we think they name. None of today's
- * targets need them, and emulating any of them honestly is a much
- * bigger project (re-translating every cached path, tracking nested
- * roots, etc.). Lying with -EPERM is the same posture proot takes.
- * See issues/tawcroot-phase3-syscall-gaps.md §1. */
+ * state our path-translation layer assumes is fixed: pivot_root would
+ * desync our root-relative bookkeeping (we don't model mounts, so the
+ * "pivot the rootfs onto a sibling mount" semantics have nothing to
+ * pivot to); mount/umount2 would tear down our setup binds (/dev/shm,
+ * /proc, libhybris stage); unshare/setns would hand the guest a
+ * namespace where our fd-relative /proc walks no longer name what we
+ * think they name. Lying with -EPERM is the same posture proot takes.
+ *
+ * chroot is NOT in this list — it has its own handler in chroot.c
+ * that swaps the root-view bookkeeping. */
 static long fake_eperm(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args;
@@ -339,7 +339,6 @@ void tawcroot_control_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_io_uring_setup,  handle_io_uring_setup);
 	tawcroot_dispatch_install(TAWC_SYS_clone3,          handle_clone3);
 	tawcroot_dispatch_install(TAWC_SYS_exit,            handle_exit);
-	tawcroot_dispatch_install(TAWC_SYS_chroot,          fake_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_pivot_root,      fake_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_mount,           fake_eperm);
 	tawcroot_dispatch_install(TAWC_SYS_umount2,         fake_eperm);

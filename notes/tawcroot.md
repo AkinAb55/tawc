@@ -178,45 +178,18 @@ fake-root uid/stat behavior, hardlink-as-symlink fallback,
 loader-injection. Most of what mature proot does beyond that
 (fake-`mknod`, mount-namespace shims, finer `/proc` synthesis — including
 `/proc/<pid>/maps` reverse-translation since post-manual-load
-mappings show host-side rootfs paths there — **nested
-`chroot(2)` tracking** — proot fakes it by tracking an inner-root
-prefix and adjusting translation; we currently `-EPERM` it and
-will likely revisit when an ALARM/pacman flow trips on it —
-full `io_uring` SQE rewriting, perhaps in time binder-fd
-rewriting) we'll likely end up wanting too as we feed more
-workloads through tawcroot. Add on demand, not proactively.
+mappings show host-side rootfs paths there — full `io_uring` SQE
+rewriting, perhaps in time binder-fd rewriting) we'll likely end
+up wanting too as we feed more workloads through tawcroot. Add on
+demand, not proactively.
 
-Specifically for nested `chroot`: don't *implement* it now, but
-don't paint the architecture into a corner that makes adding it
-hard. Concretely:
-
-- **Path translation must take its "current root" from a per-
-  process state snapshot, not scattered statics.** Today that
-  snapshot has `rootfs_fd`, bind entries, and an empty current-root
-  prefix; a future nested-chroot implementation adds an `inner_root`
-  prefix string and the translator consults it before falling through
-  to `rootfs_fd`. The `-EPERM` `chroot` handler still exists, but
-  flipping it to "publish a new state snapshot with the requested
-  inner root and return 0" is a localized change. Because SIGSYS
-  handlers can run concurrently in multiple threads, this future
-  publish step must use the lock-free snapshot rules in §"Threading
-  and `vfork` invariants", not an in-place mutable string.
-- **Per-process state is preserved across `fork` naturally**
-  (it's just process memory) and re-established by
-  `--exec-child` on every guest exec — so the same plumbing
-  that carries the rootfs fd carries the inner-root prefix
-  later. The Approach-A re-exec therefore ferries "the per-process
-  tawcroot state" forward, not just "the rootfs path", through the
-  versioned `exec_state_fd` described below. That blob has room for
-  more fields than we use today.
-- **`getcwd` reverse-translation already needs a "current root"
-  notion** (to decide what prefix to strip); writing it against
-  the per-process state struct from the start costs nothing and
-  means nested-chroot's `getcwd` story drops in for free.
-
-Future-Claude implementing nested chroot should be able to do it
-in one `.c` file plus a couple of fields on the state struct,
-not by restructuring the translator.
+`chroot(2)` is implemented (see §"chroot emulation"). The
+emulation uses `tawcroot_rootfs_fd` + `tawcroot_rootfs_host_path`
++ `active`-flagged bind entries as the "current root view";
+chroot swaps all of them in place and rebuilds the symlink memo
+cache. The handler lives in one .c file (`src/chroot.c`) plus a
+pure helper (`tawcroot_path_binds_reanchor` in
+`path_orchestrate.c`).
 
 The architecture is therefore deliberately structured to make adding
 those things later cheap, not just to ship MVP fast:
@@ -687,27 +660,47 @@ The handler runs in the calling thread's context. With multiple
 guest threads, multiple SIGSYS handlers can run concurrently in
 their own stacks. This is safe by construction because:
 
-- Core tawcroot globals (rootfs_fd, bind table, resolver state) are
-  immutable post-init. The MVP deliberately does **not** maintain a
-  mutable guest-cwd string; `AT_FDCWD` resolution derives from the
-  kernel's current cwd via raw `getcwd` + reverse translation. The
-  fd-provenance table and guest-visible `SIGSYS` shadow are explicit
-  exceptions: fixed-size, handler-safe, and updated only through
-  trapped control syscalls.
+- Core tawcroot globals (rootfs_fd, bind table, well-known-symlink
+  memo cache, the rootfs host-path string) are written exactly twice
+  in a process's lifetime: once at supervisor init, and again only by
+  the `chroot(2)` handler when the guest issues a chroot. The MVP
+  deliberately does **not** maintain a mutable guest-cwd string;
+  `AT_FDCWD` resolution derives from the kernel's current cwd via
+  raw `getcwd` + reverse translation. The fd-provenance table and
+  guest-visible `SIGSYS` shadow are explicit exceptions: fixed-size,
+  handler-safe, and updated only through trapped control syscalls.
 - All per-call state is stack-local.
 - We never call any libc function with hidden mutable state from
   the handler (no `getenv`, no `errno` read, no stdio).
 
-`vfork` shares VM with the parent until `execve`. The same
-immutability/snapshot rule covers it: a `vfork`'d child running our
-handler must not mutate ordinary globals that the parent depends on.
-Any mutable process-wide state (fd provenance, guest `SIGSYS` shadow,
-future nested-chroot tracking) must use an explicitly designed
-lock-free snapshot scheme that is safe for concurrent signal handlers
-(for example, fixed-size double-buffered state plus an atomic sequence
-counter), or it must be re-derived from kernel state per call. Do not
-add a plain mutable C string/global that handlers read while another
-thread can update it.
+The chroot path-mutation race. `chroot` is the one syscall that
+re-writes core globals after init. The writes are sequenced (zero
+the length, then bytes, then republish length; deactivate-then-clear
+for binds; write the new fd last) so concurrent readers fall into
+one of two states: they see the OLD coherent view, or they see a
+"length zero" / "no binds" intermediate that every reader interprets
+as "path outside the rootfs view → -ENOENT". The latter is a
+transient ENOENT the guest retries past in microseconds. Without
+explicit memory barriers this isn't a hard guarantee on aarch64, but
+the failure mode is bounded: a concurrent reader can at worst observe
+a transient ENOENT or wrong-route on a single path-bearing syscall.
+For the workloads we target (pacman 6.x's chroot is single-threaded
+post-startup; container runtimes that chroot from a worker thread
+don't run on Android) this is acceptable. If a future workload needs
+strict multi-threaded chroot safety, switch to a seqlock-snapshot
+protocol (writer increments seq; readers retry on odd-seen or
+mismatch).
+
+`vfork` shares VM with the parent until `execve`. A `vfork`'d child
+running our handler must not mutate ordinary globals that the parent
+depends on. Any mutable process-wide state outside the chroot/init
+exception (fd provenance, guest `SIGSYS` shadow, future namespace
+tracking) must use an explicitly designed lock-free snapshot scheme
+that is safe for concurrent signal handlers (for example, fixed-size
+double-buffered state plus an atomic sequence counter), or it must be
+re-derived from kernel state per call. Do not add a plain mutable C
+string/global that handlers read while another thread can update it
+without the bounded-failure analysis the chroot path has.
 
 ### Guest signal/seccomp control
 
@@ -1312,6 +1305,91 @@ outside the rootfs), we return `-ENOENT` rather than leaking host
 paths. proot returns the host path unchanged in that case which is
 a small info leak.
 
+### chroot emulation
+
+We don't have CAP_SYS_CHROOT inside the Android app sandbox, so
+`chroot(2)` can't be forwarded to the kernel. Returning `-EPERM`
+(the original posture) breaks pacman 6.x's `_alpm_run_chroot`,
+which calls `chroot(handle->root)` unconditionally — every
+post-install scriptlet and post-transaction hook fails on a fresh
+Manjaro install (~80 errors per `pacman -Syyu`); the rootfs is left
+without GTK icon caches, GSettings schemas, mime caches, etc. So
+we *emulate* the syscall instead.
+
+The emulation lives in `src/chroot.c`. Per-process state that
+defines "the current root view":
+
+- `tawcroot_rootfs_fd` — O_PATH dirfd. Initially the rootfs the
+  supervisor opened; replaced atomically(-ish) on each successful
+  `chroot()`. The *previous* fd stays in the reserved-fd list so
+  the guest can't close it; it leaks until process exit (one fd
+  per chroot, capped by the typical "chroot at startup" idiom).
+- `tawcroot_rootfs_host_path[+_len]` — kernel-canonical host path
+  of the current root, recovered via `readlink("/proc/self/fd/<n>")`
+  on the new fd. `getcwd` reverse-translation, `/proc/self/maps`
+  rewriting, and the relative-path resolver all read this.
+- `tawcroot_binds[]` — every bind has an `active` flag and a `dst`
+  field that's stored **current-root-relative**. On chroot, each
+  bind's host coordinate (`old_root_host + "/" + dst`) is checked
+  against the new root: inside → strip prefix → re-anchor; sibling
+  or outside → mark inactive (the src_fd stays reserved); exact
+  match for the new root → mark inactive (the rootfs_fd swap
+  covers it). The pure helper is
+  `tawcroot_path_binds_reanchor` in `path_orchestrate.c`.
+- The well-known-symlink memo cache (`g_memo` in `path.c`) gets
+  rebuilt against the new rootfs_fd. Old entries memoized symlinks
+  in the *outer* root and would silently route inside the chroot
+  to wrong targets if not refreshed.
+
+`tawcroot_guest_exe_path` (used to synthesize `/proc/self/exe`)
+and `tawcroot_self_host_path` (host path of libtawcroot.so) are
+**unchanged** by chroot. Real Linux behaves the same: the kernel's
+`/proc/<pid>/exe` is fixed at exec time and survives chroot
+verbatim — even if the chroot makes it unreachable inside the new
+view.
+
+Edge cases the design handles cleanly:
+
+- **chroot("/")** (the pacman 6.x case): all path translation
+  surfaces collapse to identity. binds_reanchor leaves every dst
+  unchanged. The memo rebuild re-reads the same symlinks.
+- **chroot to a non-existent / non-directory target**: the openat
+  with `O_DIRECTORY` returns the kernel's errno; we propagate.
+  No state mutates.
+- **chroot through a symlink**: the path translator's symlink
+  resolver runs in `FOLLOW` mode, so chroot("/foo") where /foo is
+  a symlink lands at the resolved target.
+- **chroot with `..` chains**: folded by `tawcroot_path_fold_absolute`;
+  clamped at the *current* root before openat.
+- **chroot into a bind dst**: the path translator returns the
+  bind's `src_fd` as `base_fd`; openat lands at the bind src's
+  host path; the canonical `/proc/self/fd/<new>` readlink picks
+  that up — this is the new root. binds_reanchor sees the new
+  root host path bears no relationship to any existing bind's
+  composed `cur_root + "/" + dst` (the bind src lives outside
+  the rootfs by construction), so every bind — including the one
+  we just chrooted into — falls through to the "outside" branch
+  and gets deactivated. **Limitation**: binds NESTED under the
+  chrooted-into bind dst (a rare configuration: bind A at
+  `usr/sub` *and* bind B at `usr/sub/inner`) are also
+  deactivated rather than re-anchored to "inner". Fixing this
+  would require comparing the new root host path against each
+  bind src's host path in addition to the rootfs prefix; not in
+  scope for current workloads.
+- **Repeated chroot**: each call uses the *current* state as the
+  outer root, so chroot("/usr") then chroot("/lib") inside that
+  goes one level deeper. (Real chroot is not strictly nestable
+  for non-root, but our emulation mirrors the kernel-permissive
+  posture — same as a process with CAP_SYS_CHROOT.)
+- **Kernel cwd outside the new view**: `getcwd` returns `-ENOENT`
+  (existing posture for any cwd outside the rootfs view, just
+  newly relevant after chroot moves the goalposts).
+
+`pivot_root` continues to return `-EPERM`. Real pivot_root requires
+two separate mounts and exchanges them; we don't model mounts at
+all (binds aren't kernel mounts), so there's nothing useful to
+emulate. No targeted workload hits it.
+
 ## Seccomp filter
 
 Hand-written cBPF. The list of trapped syscalls is the runtime
@@ -1655,7 +1733,9 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   │                   #   (tawcroot/tests/unit/test_strings.c)
 │   ├── path.c          # translate(), reverse-translate, bind table, memo, openat2 probe
 │   ├── path_fold.c     # absolute-path folder (`.`/`..`/empty/`//`) — pure
+│   ├── path_orchestrate.c # fold→bind→memo→resolve→bind staging, binds_reanchor — pure
 │   ├── path_resolve.c  # symlink walker — pure, oracle-driven
+│   ├── chroot.c        # chroot(2) emulation — root-view swap on guest call
 │   ├── exec_handler.c  # execve guest-side entry (build memfd state + execveat)
 │   ├── exec_state.c    # exec-state (de)serialization
 │   ├── loader_elf.c    # ELF phdr parsing

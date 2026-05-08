@@ -217,6 +217,7 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
 	if (resv < 0) return resv;
 
 	b->src_fd  = (int)resv;
+	b->active  = 1;
 	b->dst_len = n;
 	for (size_t i = 0; i < n; i++) b->dst[i] = d[i];
 	b->dst[n] = 0;
@@ -332,7 +333,10 @@ tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 
 	/* No lazy-reopen needed: handle_close fake-succeeds for reserved
 	 * fds, so the guest cannot kill rootfs_fd or bind src_fds. The
-	 * globals read below are immutable post-init. */
+	 * globals read below are written post-init only by the chroot(2)
+	 * handler (chroot.c). A concurrent multi-threaded chroot races
+	 * against the snapshot we take here — see notes/tawcroot.md
+	 * §"chroot emulation" for the bounded-failure analysis. */
 
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd   = tawcroot_rootfs_fd,

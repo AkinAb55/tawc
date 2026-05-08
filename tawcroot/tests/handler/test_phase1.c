@@ -123,6 +123,10 @@ static bool build_fake_rootfs(const char *root)
 	 * (review finding B5) can use /lib64 without disturbing the /lib
 	 * suppression-mode test that uses /lib. */
 	SYMLINK("usr/lib",     "lib64");
+	/* Symlink visible AFTER chroot("/usr") — the chroot-symlink-follow
+	 * test re-chroots through this. Target "lib" is rel-to-dirname,
+	 * so from <rootfs>/usr/sublink it resolves to <rootfs>/usr/lib. */
+	SYMLINK("lib",         "usr/sublink");
 	SYMLINK("/etc/passwd", "etc/host-secret");
 	SYMLINK("/etc/probe",  "altpath");
 	SYMLINK("chain2",      "chain1");
@@ -190,7 +194,16 @@ register_dynamic_tests
 
 	const char *args[] = {
 		"-r", FAKE_ROOTFS,
+		/* The lib64 bind is the long-standing B5 test setup
+		 * (bind-vs-symlink-memo precedence). The usr/test-bind
+		 * bind is consumed by the chroot suite — when chroot
+		 * targets /usr, lib64's host path falls outside the new
+		 * view (deactivated) while usr/test-bind re-anchors to
+		 * "test-bind" inside the new root. Both binds use the
+		 * same src dir; that's deliberate, and harmless — they
+		 * each open their own O_PATH fd. */
 		"-b", FAKE_BINDSRC ":lib64",
+		"-b", FAKE_BINDSRC ":usr/test-bind",
 		NULL
 	};
 	steps_register_from_testhost(c_sv("phase1"), args);

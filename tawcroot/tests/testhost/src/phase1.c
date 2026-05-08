@@ -2505,6 +2505,313 @@ static int test_dev_shm_emulation(void)
 	return fails;
 }
 
+/* ----- chroot ----------------------------------------------------- */
+
+static long inline_chroot(const char *path)
+{
+	long rv;
+	INLINE_SYS6(TAWC_SYS_chroot, path, 0, 0, 0, 0, 0, rv);
+	return rv;
+}
+
+/* chroot(NULL) -> -EFAULT, no state change. */
+static int test_chroot_efault_on_null(void)
+{
+	int fails = 0;
+	long rv = inline_chroot((const char *)0);
+	fails += tawc_io_step("chroot(NULL) -> -EFAULT", rv == -14);
+	tawc_io_kv_dec("    rv", rv);
+
+	/* State is still the original rootfs — verify by re-opening
+	 * /etc/probe. */
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot(NULL): /etc/probe still openable", fd >= 0);
+	if (fd >= 0) tawc_close((int)fd);
+	return fails;
+}
+
+/* chroot to a regular file -> -ENOTDIR. The path translator says yes
+ * (file exists, fold is fine); openat with O_DIRECTORY rejects with
+ * -ENOTDIR. The error must propagate without mutating the rootfs view. */
+static int test_chroot_enotdir_on_regular_file(void)
+{
+	int fails = 0;
+	long rv = inline_chroot("/etc/probe");
+	fails += tawc_io_step("chroot(\"/etc/probe\") -> -ENOTDIR", rv == -20);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after rejection: /etc/probe still readable", fd >= 0);
+	if (fd >= 0) tawc_close((int)fd);
+	return fails;
+}
+
+static int test_chroot_enoent_on_missing(void)
+{
+	int fails = 0;
+	long rv = inline_chroot("/does/not/exist");
+	fails += tawc_io_step("chroot(\"/does/not/exist\") -> -ENOENT", rv == -2);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after -ENOENT: rootfs view intact", fd >= 0);
+	if (fd >= 0) tawc_close((int)fd);
+	return fails;
+}
+
+/* chroot("/") is the pacman 6.x case: identity transform. The path
+ * layer folds to base_fd=rootfs_fd, suffix="". We open ".", reserve a
+ * second fd (the old one stays reserved), update host_path to the
+ * canonical readlink(/proc/self/fd/<new>) value, re-anchor binds (all
+ * survive — every bind dst is now under the same host root), and
+ * rebuild memos. Verify: post-call openat still routes correctly. */
+static int test_chroot_identity(void)
+{
+	int fails = 0;
+	long rv = inline_chroot("/");
+	fails += tawc_io_step("chroot(\"/\") -> 0 (identity)", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot(\"/\"): /etc/probe still readable", fd >= 0);
+	if (fd >= 0) {
+		char buf[64];
+		long n = tawc_read((int)fd, buf, sizeof buf - 1);
+		int eq = 0;
+		if (n > 0) {
+			buf[n] = 0;
+			const char *want = "hello-from-rootfs";
+			eq = 1;
+			for (size_t k = 0; want[k]; k++) {
+				if (buf[k] != want[k]) { eq = 0; break; }
+			}
+		}
+		fails += tawc_io_step(
+			"after chroot(\"/\"): probe contents intact", eq);
+		tawc_close((int)fd);
+	}
+
+	/* The /lib symlink memo still works: openat("/lib/probe.so")
+	 * resolves to <root>/usr/lib/probe.so. Memos got rebuilt against
+	 * the new (== old) rootfs_fd. */
+	long fd2 = inline_openat(AT_FDCWD, "/lib/probe.so", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot(\"/\"): /lib symlink memo rebuilt",
+		fd2 >= 0);
+	if (fd2 >= 0) tawc_close((int)fd2);
+	return fails;
+}
+
+/* `..` chains in the chroot target fold inside the rootfs view, same
+ * as every other path-bearing syscall. chroot("/foo/../..") clamps to
+ * "/", same as test_chroot_identity. */
+static int test_chroot_dotdot_clamps(void)
+{
+	int fails = 0;
+	long rv = inline_chroot("/foo/../..");
+	fails += tawc_io_step(
+		"chroot(\"/foo/../..\") -> 0 (clamped to /)", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after clamped chroot: rootfs view intact", fd >= 0);
+	if (fd >= 0) tawc_close((int)fd);
+	return fails;
+}
+
+/* The big one: chroot("/usr") changes the root view to <rootfs>/usr.
+ * Mutates state for the rest of the suite — must run LAST.
+ *
+ * Verify:
+ *   - chroot returns 0
+ *   - rootfs_fd / host_path got swapped (peek at globals)
+ *   - openat("/lib/probe.so") in the new view opens
+ *     <rootfs>/usr/lib/probe.so (since /lib in the new chroot is a
+ *     real dir, not a symlink — there's no /lib in <rootfs>/usr/)
+ *   - openat("/etc/probe") -> -ENOENT (no /etc in /usr)
+ *   - the "lib64" bind got deactivated (its host path was
+ *     <rootfs>/lib64, outside the new view)
+ *   - the "usr/test-bind" bind got re-anchored to "test-bind" — its
+ *     probe.txt content is reachable as /test-bind/probe.txt
+ *   - chdir("/") + getcwd reports "/"
+ *
+ * The test precondition is two binds set up by test_phase1.c args:
+ *     -b FAKE_BINDSRC:lib64        (will be dropped by chroot("/usr"))
+ *     -b FAKE_BINDSRC:usr/test-bind (will be re-anchored to test-bind)
+ */
+static int test_chroot_into_subdir(void)
+{
+	int fails = 0;
+
+	/* Confirm preconditions: both binds exist and are active before
+	 * the chroot. If they're not, the test setup is wrong and we
+	 * should skip (rather than report a false negative). */
+	int has_lib64_pre = 0, has_test_bind_pre = 0;
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (!b->active) continue;
+		if (b->dst_len == 5 &&
+		    b->dst[0] == 'l' && b->dst[1] == 'i' &&
+		    b->dst[2] == 'b' && b->dst[3] == '6' && b->dst[4] == '4')
+			has_lib64_pre = 1;
+		if (b->dst_len == 13 && tawc_streq(b->dst, "usr/test-bind"))
+			has_test_bind_pre = 1;
+	}
+	if (!has_lib64_pre || !has_test_bind_pre) {
+		tawc_io_str("    (test_chroot_into_subdir skipped — "
+		            "missing -b lib64 or -b usr/test-bind)\n");
+		return 0;
+	}
+
+	long rv = inline_chroot("/usr");
+	fails += tawc_io_step("chroot(\"/usr\") -> 0", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+	if (rv != 0) return fails;  /* nothing else to check */
+
+	/* Path inside the new root resolves through the new fd. */
+	long fd = inline_openat(AT_FDCWD, "/lib/probe.so", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot(\"/usr\"): /lib/probe.so opens (new root view)",
+		fd >= 0);
+	if (fd >= 0) {
+		char buf[64];
+		long n = tawc_read((int)fd, buf, sizeof buf - 1);
+		int eq = 0;
+		if (n > 0) {
+			buf[n] = 0;
+			const char *want = "libprobe-data";
+			eq = 1;
+			for (size_t k = 0; want[k]; k++) {
+				if (buf[k] != want[k]) { eq = 0; break; }
+			}
+		}
+		fails += tawc_io_step(
+			"  contents = libprobe-data (right file)", eq);
+		tawc_close((int)fd);
+	}
+
+	/* Path that lived OUTSIDE the new chroot is gone. */
+	long fd_oob = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot: /etc/probe -> -ENOENT (outside chroot)",
+		fd_oob == -2);
+	tawc_io_kv_dec("    rv", fd_oob);
+
+	/* The lib64 bind is gone (host path <rootfs>/lib64 outside view). */
+	long fd_dropped = inline_openat(AT_FDCWD, "/lib64/probe.txt",
+					O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot: dropped bind /lib64/probe.txt -> -ENOENT",
+		fd_dropped < 0);
+	tawc_io_kv_dec("    rv", fd_dropped);
+
+	/* The usr/test-bind bind survived, re-anchored to "test-bind". */
+	long fd_kept = inline_openat(AT_FDCWD, "/test-bind/probe.txt",
+				     O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot: kept bind /test-bind/probe.txt opens",
+		fd_kept >= 0);
+	if (fd_kept >= 0) {
+		char buf[64];
+		long n = tawc_read((int)fd_kept, buf, sizeof buf - 1);
+		int eq = 0;
+		if (n > 0) {
+			buf[n] = 0;
+			const char *want = "from-bind-src";
+			eq = 1;
+			for (size_t k = 0; want[k]; k++) {
+				if (buf[k] != want[k]) { eq = 0; break; }
+			}
+		}
+		fails += tawc_io_step(
+			"  contents = from-bind-src (bind routed)", eq);
+		tawc_close((int)fd_kept);
+	}
+
+	/* Verify the bind table state directly: lib64 inactive,
+	 * usr/test-bind re-anchored to "test-bind" and active. */
+	int lib64_inactive = 1, test_bind_anchored = 0;
+	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		if (b->active && b->dst_len == 5 &&
+		    b->dst[0] == 'l' && b->dst[1] == 'i' &&
+		    b->dst[2] == 'b' && b->dst[3] == '6' && b->dst[4] == '4')
+			lib64_inactive = 0;
+		if (b->active && b->dst_len == 9 &&
+		    tawc_streq(b->dst, "test-bind"))
+			test_bind_anchored = 1;
+	}
+	fails += tawc_io_step("bind /lib64 marked inactive", lib64_inactive);
+	fails += tawc_io_step(
+		"bind usr/test-bind re-anchored to test-bind",
+		test_bind_anchored);
+
+	/* getcwd: chdir to "/" then verify it reports "/". The kernel cwd
+	 * may still be inside the original rootfs (whatever the previous
+	 * test left it at); chdir("/") inside the new view sets it to
+	 * <rootfs>/usr, and getcwd should reverse-translate to "/". */
+	long cd;
+	INLINE_SYS6(TAWC_SYS_chdir, "/", 0, 0, 0, 0, 0, cd);
+	fails += tawc_io_step("chdir(\"/\") inside new chroot -> 0",
+			      cd == 0);
+	char cwd[256];
+	long g;
+	INLINE_SYS6(TAWC_SYS_getcwd, cwd, sizeof cwd, 0, 0, 0, 0, g);
+	cwd[sizeof cwd - 1] = 0;
+	int cwd_ok = g > 0 && cwd[0] == '/' && cwd[1] == 0;
+	fails += tawc_io_step(
+		"getcwd inside new chroot reports \"/\" (post-chroot view)",
+		cwd_ok);
+	tawc_io_str("    cwd = '"); tawc_io_str(cwd); tawc_io_str("'\n");
+
+	return fails;
+}
+
+/* chroot follows symlinks. After test_chroot_into_subdir leaves us at
+ * <rootfs>/usr, /sublink is a symlink (target "lib") that the path
+ * translator's FOLLOW-mode resolver walks — the chroot lands at
+ * <rootfs>/usr/lib. Verify by reading probe.so from the new "/" view.
+ *
+ * Runs LAST in the chroot suite — after this the rootfs_fd is at
+ * <rootfs>/usr/lib, two levels deep. */
+static int test_chroot_through_symlink_follows_post(void)
+{
+	int fails = 0;
+	long rv = inline_chroot("/sublink");
+	fails += tawc_io_step(
+		"chroot(\"/sublink\") -> 0 (symlink → lib)", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+	if (rv != 0) return fails;
+
+	/* New root is <rootfs>/usr/lib; probe.so lives directly there. */
+	long fd = inline_openat(AT_FDCWD, "/probe.so", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"after chroot through symlink: /probe.so opens at target",
+		fd >= 0);
+	if (fd >= 0) {
+		char buf[64];
+		long n = tawc_read((int)fd, buf, sizeof buf - 1);
+		int eq = 0;
+		if (n > 0) {
+			buf[n] = 0;
+			const char *want = "libprobe-data";
+			eq = 1;
+			for (size_t k = 0; want[k]; k++) {
+				if (buf[k] != want[k]) { eq = 0; break; }
+			}
+		}
+		fails += tawc_io_step(
+			"  contents = libprobe-data (symlink resolved)", eq);
+		tawc_close((int)fd);
+	}
+	return fails;
+}
+
 /* ----- main ------------------------------------------------------- */
 
 int tawcroot_phase1_main(const char *rootfs)
@@ -2690,6 +2997,18 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_proc_self_maps_reverse_translation();
 	fails += test_proc_self_synthesis_extensions();
 	fails += test_dev_shm_emulation();
+
+	/* chroot tests. The non-mutating cases run first (NULL, ENOTDIR,
+	 * ENOENT, identity, ..-clamp); the mutating "chroot into /usr"
+	 * test runs LAST because it permanently swaps the rootfs view —
+	 * nothing else can usefully run after it. */
+	fails += test_chroot_efault_on_null();
+	fails += test_chroot_enotdir_on_regular_file();
+	fails += test_chroot_enoent_on_missing();
+	fails += test_chroot_identity();
+	fails += test_chroot_dotdot_clamps();
+	fails += test_chroot_into_subdir();
+	fails += test_chroot_through_symlink_follows_post();
 
 	if (fails == 0) {
 		tawc_io_str("PHASE-1 SMOKE: PASS\n");

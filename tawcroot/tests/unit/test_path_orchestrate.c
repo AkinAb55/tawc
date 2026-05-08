@@ -97,6 +97,7 @@ static long mock_cwd(void *ctx, char *out, size_t out_cap)
 static void mk_bind(struct tawcroot_bind *b, int fd, const char *dst)
 {
 	b->src_fd  = fd;
+	b->active  = 1;
 	size_t n = strlen(dst);
 	b->dst_len = n;
 	memcpy(b->dst, dst, n);
@@ -557,6 +558,238 @@ test(orch_zero_capacity_is_efault)
 	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
 		&ctx, "/foo", out, 0, TAWCROOT_PATH_FOLLOW);
 	test_int_eq(r.err, -14);
+}
+
+/* ----- chroot bind re-anchoring (tawcroot_path_binds_reanchor) -----
+ *
+ * Pure on bind state — exercised here directly. The handler-layer
+ * tests in tests/testhost/src/phase1.c cover the integration via a
+ * real chroot syscall on a fake rootfs; these exercise the corner
+ * cases that are awkward to set up there (overflow, exact-match-of-
+ * new-root, mixed-state arrays). */
+
+static struct tawcroot_bind mk_bind_with_dst(const char *dst)
+{
+	struct tawcroot_bind b = {0};
+	b.src_fd  = -1;
+	b.active  = 1;
+	size_t n = strlen(dst);
+	b.dst_len = n;
+	for (size_t i = 0; i < n; i++) b.dst[i] = dst[i];
+	b.dst[n] = 0;
+	return b;
+}
+
+test(reanchor_identity_keeps_all_binds_intact)
+{
+	/* chroot to the SAME root: all binds survive with identical
+	 * dsts. Models pacman 6.x's chroot("/") path. */
+	struct tawcroot_bind binds[2];
+	binds[0] = mk_bind_with_dst("dev/shm");
+	binds[1] = mk_bind_with_dst("usr/lib");
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 2,
+		"/data/rootfs", 12,
+		"/data/rootfs", 12);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 1);
+	test_str_eq(binds[0].dst, "dev/shm");
+	test_int_eq(binds[1].active, 1);
+	test_str_eq(binds[1].dst, "usr/lib");
+}
+
+test(reanchor_inside_chroot_strips_prefix)
+{
+	/* chroot to /data/rootfs/usr — bind originally at usr/lib re-
+	 * anchors to lib (host path /data/rootfs/usr/lib stays valid;
+	 * the chroot just renames it). */
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("usr/lib");
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 1);
+	test_str_eq(binds[0].dst, "lib");
+	test_int_eq((int)binds[0].dst_len, 3);
+}
+
+test(reanchor_outside_chroot_drops_bind)
+{
+	/* chroot to /data/rootfs/usr — bind at lib64 (host path
+	 * /data/rootfs/lib64) is sibling of /usr, not under it; drop. */
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("lib64");
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+	test_int_eq((int)binds[0].dst_len, 0);
+}
+
+test(reanchor_exact_match_of_new_root_drops_bind)
+{
+	/* chroot lands EXACTLY on a bind dst's host path. The new
+	 * rootfs_fd opens the same dir; the bind would be redundant
+	 * (and would route the same paths twice). Drop it. */
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("usr");
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+}
+
+test(reanchor_component_boundary_required)
+{
+	/* New root /data/rootfs/usr must NOT swallow a bind whose host
+	 * path is /data/rootfs/usrlocal (sibling, shares prefix bytes
+	 * but not at a component boundary). The bind is sibling-out,
+	 * deactivate. */
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("usrlocal");
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+}
+
+test(reanchor_inactive_bind_left_alone)
+{
+	/* An already-inactive bind isn't re-evaluated. */
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("usr/lib");
+	binds[0].active = 0;
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+	test_str_eq(binds[0].dst, "usr/lib");   /* untouched */
+}
+
+test(reanchor_mixed_array)
+{
+	/* Realistic case: chroot to /data/rootfs/usr with three binds
+	 * — one inside, one outside, one at the new root. Each should
+	 * end up in the right state independently. */
+	struct tawcroot_bind binds[3];
+	binds[0] = mk_bind_with_dst("usr/lib");      /* inside  → re-anchor */
+	binds[1] = mk_bind_with_dst("dev/shm");      /* outside → drop */
+	binds[2] = mk_bind_with_dst("usr");          /* exact   → drop */
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 3,
+		"/data/rootfs", 12,
+		"/data/rootfs/usr", 16);
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 1);
+	test_str_eq(binds[0].dst, "lib");
+	test_int_eq(binds[1].active, 0);
+	test_int_eq(binds[2].active, 0);
+}
+
+test(reanchor_overflow_drops_bind_returns_enametoolong)
+{
+	/* Construct a pathological case: cur_root very short, dst as
+	 * long as the buffer almost allows, new_root short enough that
+	 * stripping a 1-char prefix grows the dst by a lot... actually
+	 * it's hard to GROW with this scheme since stripping always
+	 * shortens. Try the real overflow case: rem_len > sizeof dst.
+	 * That's only possible if the input dst is right at the limit
+	 * AND the new_root is shorter than (cur_root + "/"). Wait —
+	 * with this routing rem_len = total - new_len - 1
+	 *                         = cur_len + 1 + dst_len - new_len - 1
+	 *                         = cur_len + dst_len - new_len.
+	 * If new_len > cur_len, rem_len < dst_len. If new_len < cur_len
+	 * (meaning the new root has fewer bytes than the old, which is
+	 * unusual but possible if the chroot target prefix-matches via
+	 * a different absolute path), rem_len > dst_len. So construct
+	 * cur="/aaaaa" (6), new="/a" (2), bind dst at the buffer limit
+	 * minus 4. */
+	struct tawcroot_bind binds[1];
+	char dst_buf[sizeof binds[0].dst];
+	for (size_t i = 0; i < sizeof dst_buf - 1; i++) dst_buf[i] = 'b';
+	dst_buf[sizeof dst_buf - 1] = 0;
+	binds[0] = mk_bind_with_dst(dst_buf);
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/aaaaa", 6,
+		"/a",     2);
+	/* This case has new_root /a as a prefix of cur_root /aaaaa
+	 * (prefix-match without component boundary on next byte 'a' →
+	 * outside), so it's actually deactivated as outside-of-view
+	 * rather than overflow. Hits the "no component boundary" path. */
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+
+	/* Real overflow: new root is one byte shorter than cur_root and
+	 * IS a prefix at a component boundary. Unusual in production,
+	 * but easy to construct. cur="/a/bb" (5), new="/a" (2), dst at
+	 * the buffer limit. After stripping new_root + "/" = 3 bytes
+	 * from "/a/bb/<dst>", remainder is "bb/<dst>" — longer than
+	 * the original dst by exactly 3 bytes. Choose dst length so
+	 * remainder overflows. */
+	for (size_t i = 0; i < sizeof dst_buf - 1; i++) dst_buf[i] = 'c';
+	dst_buf[sizeof dst_buf - 1] = 0;
+	binds[0] = mk_bind_with_dst(dst_buf);
+	rv = tawcroot_path_binds_reanchor(
+		binds, 1,
+		"/a/bb", 5,
+		"/a",    2);
+	test_int_eq(rv, -36);              /* -ENAMETOOLONG */
+	test_int_eq(binds[0].active, 0);   /* overflowed bind dropped */
+}
+
+test(reanchor_chroot_into_bind_src_drops_all_binds)
+{
+	/* When the guest chroots into a bind dst, the path translator
+	 * routes the chroot target through the bind and openat lands
+	 * at the bind src's host path. binds_reanchor then sees the
+	 * new root (= bind src's host path, e.g. "/tmp/x") has no
+	 * shared prefix with the rootfs-anchored composed
+	 * `cur_root + "/" + dst` (e.g. "/data/rootfs/usr/test-bind").
+	 *
+	 * Outcome: every bind drops, including the one we chrooted
+	 * into. The chroot still works (the new rootfs_fd points at
+	 * the bind src dir); we just lose the bind table. Workloads
+	 * that chroot into a bind don't typically need other binds
+	 * after, so this is acceptable. The notes document this
+	 * limitation in §"chroot emulation". */
+	struct tawcroot_bind binds[2];
+	binds[0] = mk_bind_with_dst("usr/test-bind");   /* the chrooted-into bind */
+	binds[1] = mk_bind_with_dst("usr/test-bind/inner"); /* nested under it */
+	long rv = tawcroot_path_binds_reanchor(
+		binds, 2,
+		"/data/rootfs", 12,
+		"/tmp/x",       6);   /* bind src host path */
+	test_int_eq(rv, 0);
+	test_int_eq(binds[0].active, 0);
+	test_int_eq(binds[1].active, 0);   /* nested-under bind also lost */
+}
+
+test(reanchor_zero_binds_is_noop)
+{
+	long rv = tawcroot_path_binds_reanchor(
+		0, 0, "/x", 2, "/x/y", 4);
+	test_int_eq(rv, 0);
+}
+
+test(reanchor_null_paths_efault)
+{
+	struct tawcroot_bind binds[1];
+	binds[0] = mk_bind_with_dst("foo");
+	long rv = tawcroot_path_binds_reanchor(binds, 1, 0, 0, "/x", 2);
+	test_int_eq(rv, -14);
+	rv = tawcroot_path_binds_reanchor(binds, 1, "/x", 2, 0, 0);
+	test_int_eq(rv, -14);
 }
 
 /* ----- Memo loop bound ----- */

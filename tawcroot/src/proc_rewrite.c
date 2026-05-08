@@ -69,6 +69,7 @@ long tawcroot_proc_reverse_translate_path(
 	size_t                       best_pl = 0;
 	for (size_t i = 0; i < ctx->n_binds; i++) {
 		const struct tawcroot_bind *b = &ctx->binds[i];
+		if (!b->active) continue;
 		size_t bsl = 0;
 		while (b->src[bsl]) bsl++;
 		size_t pl = match_host_prefix(host_path, host_len, b->src, bsl);

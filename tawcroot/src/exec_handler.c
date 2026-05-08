@@ -99,10 +99,6 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		 * dlopen's libxul.so relative to it) sees /bin/bash and prints
 		 * "Couldn't load XPCOM." */
 		extras.guest_exe   = (const char *)0;
-		uint32_t nb = (uint32_t)tawcroot_n_binds;
-		if (nb > TAWCROOT_EXEC_STATE_MAX_BINDS)
-			nb = TAWCROOT_EXEC_STATE_MAX_BINDS;
-		extras.n_binds = nb;
 		/* Source host paths come straight off the bind table.
 		 * Earlier revisions recovered them via readlinkat
 		 * /proc/self/fd/<src_fd>, which broke once gpgme's fork-child
@@ -110,18 +106,33 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		 * the strings around makes the dependency on a live src_fd
 		 * disappear.
 		 *
-		 * No lock needed (compare with the shm snapshot below): the
-		 * bind table is append-only and populated exactly once per
-		 * tawcroot incarnation, inside supervisor_init, BEFORE the
-		 * loader jumps to the guest. By the time a guest thread can
-		 * trigger a SIGSYS execve trap and reach this snapshot, the
-		 * table is frozen. shm by contrast is mutated by the guest
-		 * at runtime (shm_open / shm_unlink interception), so its
-		 * snapshot needs the export lock. */
-		for (uint32_t i = 0; i < nb; i++) {
-			bind_src_arr[i] = tawcroot_binds[i].src;
-			bind_dst_arr[i] = tawcroot_binds[i].dst;
+		 * No lock needed for the bind-table snapshot itself: the
+		 * append-only contract is no longer strictly true (chroot
+		 * mutates `active` and rewrites `dst` in place for
+		 * surviving binds), but a re-anchor only runs when the
+		 * guest issues `chroot()` — chroot is itself trapped, so a
+		 * concurrent execve trap on another thread would have to
+		 * race AGAINST chroot mid-rewrite. The window is microseconds
+		 * and there's no realistic workload that issues chroot from
+		 * one thread while another execs (pacman 6.x's chroot is
+		 * single-threaded, post-startup). shm by contrast is mutated
+		 * by the guest at runtime (shm_open / shm_unlink
+		 * interception), so its snapshot needs the export lock.
+		 *
+		 * Inactive binds (deactivated by chroot when they fell
+		 * outside the new view) are SKIPPED here. Their src_fd
+		 * stays reserved in the parent, but their dst was cleared
+		 * to ""; passing them to --exec-child would trip
+		 * tawcroot_path_add_bind's empty-dst -EINVAL. */
+		uint32_t nb = 0;
+		for (size_t i = 0; i < tawcroot_n_binds &&
+				   nb < TAWCROOT_EXEC_STATE_MAX_BINDS; i++) {
+			if (!tawcroot_binds[i].active) continue;
+			bind_src_arr[nb] = tawcroot_binds[i].src;
+			bind_dst_arr[nb] = tawcroot_binds[i].dst;
+			nb++;
 		}
+		extras.n_binds  = nb;
 		extras.bind_src = bind_src_arr;
 		extras.bind_dst = bind_dst_arr;
 

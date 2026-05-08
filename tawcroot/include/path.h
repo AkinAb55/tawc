@@ -15,8 +15,15 @@
 
 #include <stddef.h>
 
-/* The rootfs fd kept O_PATH | O_DIRECTORY by init. Phase-0.5 will move
- * this into the reserved internal-fd range; for now it's just a global. */
+/* The CURRENT-ROOT fd kept O_PATH | O_DIRECTORY by init. Initially
+ * the rootfs the supervisor opened; replaced by `tawcroot_chroot` on a
+ * successful guest `chroot(2)`. Reserved into the high-fd range so the
+ * guest can't close it.
+ *
+ * Every other piece of state in this header (rootfs_host_path, binds[],
+ * the well-known-symlink memo) is co-named "current root view" and
+ * updates atomically (well, in straight-line order) when chroot swaps
+ * the root. See notes/tawcroot.md §"chroot emulation". */
 extern int tawcroot_rootfs_fd;
 
 /* Result of translating a guest path:
@@ -103,11 +110,18 @@ extern size_t tawcroot_rootfs_host_path_len;
 
 struct tawcroot_bind {
 	int    src_fd;               /* O_PATH | O_DIRECTORY of the host src */
+	int    active;               /* 0 → ignored by every iterator; the
+	                              * bind has been re-anchored out of the
+	                              * current root view by chroot. The
+	                              * src_fd stays reserved (un-closeable
+	                              * by guest) but routes nothing.         */
 	size_t dst_len;              /* length of `dst`, excluding NUL        */
-	char   dst[256];             /* rootfs-relative dst (NO leading '/'). */
+	char   dst[256];             /* current-root-relative dst (NO leading
+	                              * '/'). Re-anchored on chroot.          */
 	char   src[256];             /* host src path, ferried through to
 	                              * --exec-child so the new tawcroot
-	                              * incarnation can re-open it.            */
+	                              * incarnation can re-open it. Stable
+	                              * across chroot — host fs doesn't move. */
 };
 
 extern struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];
@@ -116,8 +130,34 @@ extern size_t               tawcroot_n_binds;
 /* Add a bind. `dst` may have a leading '/'; we strip it. Returns 0 on
  * success, -errno on failure (no slot left, src open failed, dst too
  * long). Must be called BEFORE the seccomp filter is installed; the
- * call opens the src dir via raw `openat`. */
+ * call opens the src dir via raw `openat`. The new bind is added with
+ * `active = 1`. */
 long tawcroot_path_add_bind(const char *src_host, const char *dst_guest);
+
+/* Re-anchor every bind in `binds[0..n_binds]` for a chroot to
+ * `new_root_host`.
+ *
+ * For each currently-active bind, compute its host path as
+ * `<cur_root_host>/<dst>`. After the chroot:
+ *   - host path equals `new_root_host` (component-boundary check)
+ *     — the bind WAS the new root. Mark inactive (the rootfs_fd
+ *     swap covers the path; the bind is now redundant).
+ *   - host path starts with `new_root_host + "/"` — strip the
+ *     prefix; remainder is the new dst. Stays active.
+ *   - otherwise — bind sits outside the new view. Mark inactive.
+ *
+ * Pure on bind state — no syscalls, no globals. Caller passes the
+ * array (production hands `tawcroot_binds`, tests build their own).
+ *
+ * `cur_root_host` and `new_root_host` are NUL-terminated absolute
+ * paths. Returns 0 on success, -ENAMETOOLONG if any surviving bind's
+ * stripped dst would overflow the dst buffer (in which case that
+ * bind is marked inactive too — other binds keep being processed,
+ * one bad bind doesn't fail the whole call; the return value just
+ * surfaces the worst case for caller-side visibility). */
+long tawcroot_path_binds_reanchor(struct tawcroot_bind *binds, size_t n_binds,
+                                  const char *cur_root_host, size_t cur_root_host_len,
+                                  const char *new_root_host, size_t new_root_host_len);
 
 /* Initialize the well-known-symlink memoization cache. Reads symlinks
  * for `lib`, `lib64`, `bin`, `sbin`, `var/run`, etc. from the rootfs

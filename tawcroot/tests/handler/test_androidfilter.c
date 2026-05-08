@@ -124,6 +124,8 @@ static bool build_fake_rootfs(const char *root)
 	SYMLINK("etc/probe",   "chain3");
 	SYMLINK("loop",        "loop");
 	SYMLINK("utime-target", "utime-link");
+	/* Visible AFTER chroot("/usr") for the chroot-symlink-follow test. */
+	SYMLINK("lib",         "usr/sublink");
 #undef SYMLINK
 
 	return true;
@@ -186,6 +188,7 @@ register_dynamic_tests
 	const char *args[] = {
 		"-r", FAKE_ROOTFS,
 		"-b", FAKE_BINDSRC ":lib64",
+		"-b", FAKE_BINDSRC ":usr/test-bind",
 		NULL
 	};
 	steps_register_from_testhost_prefixed(c_sv("androidfilter"),

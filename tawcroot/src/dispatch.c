@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 
+#include "chroot.h"
 #include "dispatch.h"
 #include "fdtab.h"
 #include "identity.h"
@@ -59,6 +60,7 @@ void tawcroot_dispatch_init(void)
 	tawcroot_control_register();
 	tawcroot_exec_register();
 	tawcroot_socket_register();
+	tawcroot_chroot_register();
 }
 
 size_t tawcroot_dispatch_trap_list(int *out, size_t out_cap)
