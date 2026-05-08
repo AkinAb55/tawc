@@ -72,10 +72,10 @@ internal object VoidCommon {
      * package that's a hard dep of something installed; we only list
      * leaves of the dep graph plus their leaf-only deps.
      *
-     * Anything pulled in transitively by `base-devel` / `gtk+3` /
-     * `weston` (the packages in [DEFAULT_BASE_PACKAGES]) is left
-     * alone — removing those would just see them reinstalled on the
-     * next `xbps-install` of the base set.
+     * Anything pulled in transitively by `weston` (the package in
+     * [DEFAULT_BASE_PACKAGES]) is left alone — removing it would
+     * just see it reinstalled on the next `xbps-install` of the base
+     * set.
      */
     private val CRUFT_PACKAGES: List<String> = listOf(
         // init system — there's no PID 1 in a chroot
@@ -294,10 +294,7 @@ internal object VoidCommon {
         }
     }
 
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf(
-        "base-devel", "git", "wayland", "wayland-protocols",
-        "weston", "gtk+3", "gtk+3-demo",
-    )
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("weston")
 
     /**
      * Wrap [log] to drop xbps's per-package noise. xbps writes

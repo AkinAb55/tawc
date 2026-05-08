@@ -555,11 +555,9 @@ PACMAN_EOF
 
     /**
      * Common base package set for every Arch flavour. Kept minimal —
-     * specific subsystems (debug app, integration tests) install their
-     * own deps via `scripts/install-test-deps.sh` etc.
+     * just `weston` for `weston-terminal` as a sanity-check launcher.
+     * Test/dev subsystems install their own deps via
+     * `scripts/install-test-deps.sh`.
      */
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf(
-        "git", "wayland",
-        "weston", "gtk3", "gtk3-demos",
-    )
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("weston")
 }
