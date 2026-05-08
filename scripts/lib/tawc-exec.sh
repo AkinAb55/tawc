@@ -26,7 +26,17 @@ _TAWC_EXEC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _TAWC_EXEC_REPO_ROOT="$(cd "$_TAWC_EXEC_LIB_DIR/../.." && pwd)"
 TAWC_EXEC_BIN="$_TAWC_EXEC_REPO_ROOT/build/tawc-exec/tawc-exec"
 
-# Build on first use. Idempotent — cargo no-ops when nothing changed.
-if [ ! -x "$TAWC_EXEC_BIN" ]; then
+# Build on first use, or when any tracked source file is newer than the
+# cached binary. Without the mtime check, edits to tools/tawc-exec/ would
+# silently use the stale binary — caught when a renamed CLI flag started
+# erroring "unknown flag" against a previous build.
+_tawc_exec_needs_build() {
+    [ ! -x "$TAWC_EXEC_BIN" ] && return 0
+    local src="$_TAWC_EXEC_REPO_ROOT/tools/tawc-exec"
+    [ -n "$(find "$src/src" "$src/Cargo.toml" "$src/Cargo.lock" \
+              -newer "$TAWC_EXEC_BIN" -print -quit 2>/dev/null)" ]
+}
+if _tawc_exec_needs_build; then
     bash "$_TAWC_EXEC_REPO_ROOT/scripts/build-tawc-exec.sh" >&2
 fi
+unset -f _tawc_exec_needs_build
