@@ -40,13 +40,14 @@ import me.phie.tawc.ui.verticalLp
  * Enter launches the top match, tap launches that row. Pinning,
  * frecency, window-list integration are deferred (see plan.md).
  *
- * Launches are fire-and-forget on a per-Activity scope tied to
- * [Dispatchers.IO] — `InstallationMethod.runInside` blocks until the
- * child process exits, which can be the whole user session. We don't
- * track those processes from here; they show up as Wayland clients and
- * the compositor manages their lifecycle. Closing this activity does
- * NOT kill the launched program (the scope outlives it via the
- * application-class JVM lifetime).
+ * Launches are fire-and-forget on the process-scoped [LAUNCH_SCOPE]
+ * (Dispatchers.IO). `InstallationMethod.runInside` blocks until the
+ * launched program exits, so the coroutine pins one IO thread for
+ * the program's lifetime — which is fine, since the program needs
+ * the JVM alive anyway (Wayland socket lives in CompositorService,
+ * proot/tawcroot tracee tree gets torn down on JVM death). Closing
+ * this Activity does NOT kill the program: the scope outlives the
+ * Activity via JVM lifetime.
  */
 class LauncherActivity : AppCompatActivity() {
 
@@ -258,30 +259,32 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     /**
-     * Fire-and-forget launch via [InstallationMethod.runInside]. We finish
-     * the activity right away — the spawned process is owned by
-     * [launchScope] which we never cancel, so the user can keep the
-     * Wayland app alive after the launcher closes.
+     * Fire-and-forget launch via [InstallationMethod.runInside]. We
+     * finish the Activity right away; [LAUNCH_SCOPE] is process-scoped
+     * so the coroutine keeps running.
+     *
+     * Stdio is redirected to /dev/null so a chatty program can't fill
+     * the pipe back to the JVM (which we never read).
+     *
+     * No `setsid -f` detach: under proot's `--kill-on-exit` the
+     * detached child gets SIGKILLed when the launcher bash exits, so
+     * the app dies before it ever opens a Wayland window. Letting
+     * runInside block for the program's whole lifetime is the
+     * correct behaviour anyway — the program needs the JVM alive for
+     * the compositor's Wayland socket, so there's nothing to gain
+     * from detaching.
      */
     private fun launchEntry(entry: LauncherEntry) {
         val inst = installation ?: return
         val method = InstallationMethod.forKey(this, inst.method) ?: return
         val rootfs = store.rootfsDir(inst.id).absolutePath
-        // Run in the background via setsid so closing the parent shell
-        // doesn't take the GUI app with it — runInside's wrapper keeps
-        // the Process alive only as long as the coroutine lives, which
-        // is fine since launchScope is application-lifetime.
-        val cmd = "setsid -f sh -c ${shellSingleQuote(entry.exec)} </dev/null >/dev/null 2>&1"
+        val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
         LAUNCH_SCOPE.launch {
             runCatching { method.runInside(rootfs, cmd) }
                 .onFailure { android.util.Log.w(TAG, "launch ${entry.id}: $it") }
         }
         finish()
     }
-
-    /** POSIX-shell single-quote escape: `'` → `'\''`. */
-    private fun shellSingleQuote(s: String): String =
-        "'" + s.replace("'", "'\\''") + "'"
 
     companion object {
         const val EXTRA_ID = "id"

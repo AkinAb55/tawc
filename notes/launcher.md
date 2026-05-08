@@ -20,10 +20,16 @@ and lets the user search + launch. Reached from the home screen card's
 5. **LauncherActivity** renders rows (icon ImageView + name + comment).
    `IconLoader` async-decodes PNGs with `BitmapFactory.inSampleSize`
    keeping memory bounded.
-6. Tap or Enter → `InstallationMethod.runInside(rootfs, "setsid -f sh -c
-   '<exec>' </dev/null >/dev/null 2>&1")` on the process-wide
-   `LAUNCH_SCOPE`. Activity `finish()`es immediately; the spawned program
-   keeps running because the scope outlives the Activity.
+6. Tap or Enter → `InstallationMethod.runInside(rootfs, "<exec>
+   </dev/null >/dev/null 2>&1")` on the process-wide `LAUNCH_SCOPE`
+   (Dispatchers.IO). Activity `finish()`es immediately; the coroutine
+   keeps blocking in `runInside` for the program's lifetime, which
+   pins one IO thread per running app. We can't `setsid -f` detach:
+   proot's `--kill-on-exit` (kept on for pacman cleanup) SIGKILLs
+   any backgrounded child when the launcher bash exits, so the app
+   would die before it ever opened a Wayland window. Blocking for
+   the program's lifetime is correct anyway — the program needs the
+   JVM alive for the compositor's Wayland socket.
 
 ## Icon resolution
 
