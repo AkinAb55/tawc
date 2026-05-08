@@ -559,7 +559,7 @@ PACMAN_EOF
      * own deps via `scripts/install-test-deps.sh` etc.
      */
     val DEFAULT_BASE_PACKAGES: List<String> = listOf(
-        "base-devel", "git", "wayland",
+        "git", "wayland",
         "weston", "gtk3", "gtk3-demos",
     )
 }

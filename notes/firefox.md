@@ -1,16 +1,18 @@
 # Firefox
 
-Firefox 150 renders via the libhybris Wayland EGL platform against the Adreno
+Firefox renders via the libhybris Wayland EGL platform against the Adreno
 660 vendor driver. Window chrome goes through AHB; fragments of content can
 fall back to SHM (no `zwp_linux_dmabuf_v1` support yet in this compositor).
 
-**Status (2026-05-02):** Works under both chroot and tawcroot. The
-`apps::test_firefox_launches_with_hardware_buffers` integration test passes
-on the OnePlus 9 with no `MOZ_DISABLE_*_SANDBOX` workarounds. The earlier
-"Firefox closed unexpectedly while starting" recovery-dialog symptom and
-the tawcroot-side parent-process SEGV (Mozilla's `shm_open(3)` against an
-unbacked `/dev/shm`) are both fixed; details in
-`issues/tawcroot-firefox-segfault.md` (kept as resolution archaeology).
+**Status (2026-05-08):** Works under tawcroot with **no Firefox-specific
+configuration** — no env vars, no autoconfig `firefox.cfg`, no GPU-process
+prefs. Tested on Manjaro ARM with stock Firefox 141. The
+`apps::test_firefox_launches_with_hardware_buffers` integration test
+passes on the OnePlus 9. The earlier "Firefox closed unexpectedly while
+starting" recovery-dialog symptom and the tawcroot-side parent-process
+SEGV (Mozilla's `shm_open(3)` against an unbacked `/dev/shm`) are both
+fixed; details in `issues/tawcroot-firefox-segfault.md` (kept as
+resolution archaeology).
 
 ## Launching
 
@@ -18,12 +20,17 @@ unbacked `/dev/shm`) are both fixed; details in
 bash scripts/tawc-rootfs-run.sh 'firefox --no-remote'
 ```
 
-No Firefox-specific env vars. `GDK_GL=gles:always` is set globally by
-the chroot's `/etc/profile.d/01-tawc.sh` (see `RootfsProfile.kt` and
-"Why GDK_GL=gles:always" below). Wayland backend and hardware
-acceleration are auto-selected by Firefox 149 when `WAYLAND_DISPLAY` is
-set and no `DISPLAY` socket is reachable; the older `MOZ_ENABLE_WAYLAND=1`
-/ `MOZ_ACCELERATED=1` / `DISPLAY=` opt-ins are no longer required.
+No Firefox-specific env vars or autoconfig prefs. `GDK_GL=gles:always` is
+set globally by the rootfs's `/etc/profile.d/01-tawc.sh` (see
+`RootfsProfile.kt` and "Why GDK_GL=gles:always" below). Wayland backend
+and hardware acceleration are auto-selected when `WAYLAND_DISPLAY` is set
+and no `DISPLAY` socket is reachable; the older `MOZ_ENABLE_WAYLAND=1` /
+`MOZ_ACCELERATED=1` / `DISPLAY=` opt-ins are no longer required, and the
+former `widget.dmabuf.force-enabled` / `gfx.webrender.*` / `layers.gpu-
+process.enabled` autoconfig has been removed — Firefox auto-detects
+WebRender + dmabuf via libhybris's EGL stubs (see "libhybris fixes for
+Firefox" below) and the GPU process spawns cleanly under tawcroot's
+seccomp emulation.
 
 ### Sandbox
 

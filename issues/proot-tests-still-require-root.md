@@ -17,7 +17,6 @@ All unconditional `su -c` — no proot branch:
 - `tests/integration/src/compositor.rs:163` — waits for `wayland-0` socket inside the rootfs via `test -e`
 - `tests/integration/src/chroot.rs:86-89` — `ensure_debug_app` copies sources into the rootfs and `chmod -R a+rwX`
 - `scripts/install-test-deps.sh:55` — installs `fake-bwrap` over `/usr/bin/bwrap` in the rootfs
-- `scripts/install-test-deps.sh:81` — installs `firefox.cfg` autoconfig into the rootfs
 - `scripts/run-integration-tests.sh:81` — `test -x .../enter.sh`
 - `scripts/run-integration-tests.sh:97` — copies `tawc-pidfile-exec` into the rootfs and chmods it
 - `scripts/run-integration-tests.sh:118` — polls for the wayland socket
@@ -46,5 +45,5 @@ Concretely:
 
 ## Notes
 
-- A few files (`fake-bwrap`, `firefox.cfg`, autoconfig) need to land in the rootfs — `run-as` writes are fine since the rootfs is under the app's data dir.
+- A few files (`fake-bwrap`, …) need to land in the rootfs — `run-as` writes are fine since the rootfs is under the app's data dir.
 - This is also a precondition for honestly claiming we test the rootless path in CI on unrooted emulators.

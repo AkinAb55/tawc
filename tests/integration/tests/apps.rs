@@ -94,9 +94,10 @@ fn test_firefox_launches_with_hardware_buffers() {
     assert!(
         state.surfaces_shm == 0,
         "Firefox attached SHM buffers during steady-state rendering — \
-         GPU process / WebRender disabled, chrome falling back to cairo? \
-         Re-check `tests/fixtures/firefox.cfg` autoconfig and the chroot's \
-         `/usr/lib/firefox/defaults/pref/autoconfig.js`. state={state:?}"
+         WebRender disabled, chrome falling back to cairo? Likely a \
+         libhybris EGL probe regression (Firefox auto-detects WebRender \
+         and dmabuf via libhybris stubs — see notes/firefox.md). \
+         state={state:?}"
     );
     assert!(
         state.frames > frames_before,

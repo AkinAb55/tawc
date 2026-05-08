@@ -93,11 +93,11 @@ in mind.
 
 ## Firefox under proot
 
-Three extras are needed to make Firefox start AND render through
-the libhybris/AHB path under the `runas_app` SELinux domain
-(without these the app either crashes during init or paints every
-chrome frame through cairo/SHM, which the compositor magenta-tints
-to make obvious):
+Two extras are needed to make Firefox start AND render through the
+libhybris/AHB path under the `runas_app` SELinux domain (without
+these the app either crashes during init or paints every chrome
+frame through cairo/SHM, which the compositor magenta-tints to
+make obvious):
 
 1. **`/dev/shm` bind**. Android has no `/dev/shm` and `runas_app`
    can't create one in the host `/dev` (which proot bind-passes
@@ -122,34 +122,7 @@ to make obvious):
    in the abstract, but the whole rootfs is already an app-uid
    sandbox, so the marginal exposure is small.
 
-3. **Firefox autoconfig forcing WebRender in-parent + dmabuf**.
-   Dropped at `/usr/lib/firefox/firefox.cfg` +
-   `/usr/lib/firefox/defaults/pref/autoconfig.js` by
-   `scripts/install-test-deps.sh`. Locks four prefs:
-
-   - `gfx.webrender.all = true`
-   - `gfx.webrender.compositor.force-enabled = true`
-   - `widget.dmabuf.force-enabled = true`
-   - `layers.gpu-process.enabled = false`
-
-   With Firefox 150's defaults, Mozilla tries to spawn a separate
-   GPU process for WebRender. Under proot the fork-server can't
-   actually launch one — it forks but the child never registers,
-   `gfxPlatformGtk::Init` retries once, gives up, and disables
-   hardware acceleration for the whole session. Chrome then falls
-   back to the GTK cairo software renderer and the compositor
-   sees `wl_shm` commits everywhere (magenta everywhere). Forcing
-   WebRender on AND keeping it in the parent process avoids the
-   GPU-process hand-off; `widget.dmabuf.force-enabled` then routes
-   WebRender's output through `zwp_linux_dmabuf_v1`, which
-   libhybris's `android_wlegl` imports as an AHB.
-
-   The settings are also harmless on chroot installs (where the
-   GPU process can spawn cleanly), so the autoconfig is dropped
-   unconditionally. Source files: `tests/fixtures/firefox.cfg` and
-   `tests/fixtures/firefox-autoconfig.js`.
-
-The fourth Firefox-specific hazard documented in earlier revisions
+The third Firefox-specific hazard documented in earlier revisions
 of this doc — bionic `__cfi_slowpath` patching faulting under
 `runas_app:s0`'s missing `system_file:execmod` — is gone now that
 libhybris hooks `__cfi_slowpath{,_diag}` at symbol-resolution
