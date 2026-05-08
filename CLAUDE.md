@@ -52,7 +52,7 @@ Keep notes up to date with new choices, discoveries and project state. This is a
 ## Cache proxy
 The dev-time host nginx caching reverse proxy lives at `build/cache-proxy/` (started by `bash scripts/cache-proxy.sh run`; see [notes/cache-proxy.md](notes/cache-proxy.md))
 - **Always use the cache proxy for installs during development and testing.** Pass `mirrorProxy=http://127.0.0.1:8080/proxy/` on every `bash scripts/install-distro.sh …` invocation, and on every test path that exercises an install.
-- **Never start the cache proxy yourself.** If a test fails because `127.0.0.1:8080` is refused, the right response is "ask the user to run the proxy with `bash scripts/cache-proxy.sh run`", not "start it for them".
+- **Never start the cache proxy yourself.** If a test fails because `127.0.0.1:8080` is refused (connection refused, not 404), the right response is "ask the user to run the proxy with `bash scripts/cache-proxy.sh run`", not "start it for them". A `404` on bare `http://127.0.0.1:8080/` or `/proxy/` means the proxy IS up — it's a URL-passthrough server that needs the upstream URL appended (e.g. `/proxy/https://geo.mirror.pkgbuild.com/...`). Don't mistake that for "down".
 - **Never wipe `build/cache-proxy/cache/`.** If you suspect something is broken, ask the user to delete stuff manually.
 
 ## Workflow

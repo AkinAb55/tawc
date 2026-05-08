@@ -272,6 +272,17 @@ We can't use `/proc/<pid>/task/<pid>/children`: it requires kernel
 `CONFIG_PROC_CHILDREN`, which Android stock kernels (including the
 emulator's) don't enable.
 
+The BFS catches descendants whose `ppid` still chains back to the
+immediate child. It does **not** catch processes that have been
+deliberately reparented to init (`ppid == 1`) — most commonly the
+gpgme/libgpg-error `posix_spawn` "double-fork-prevent-zombies" dance
+that pacman's signature verify uses on every package. Those are
+caught instead by the **whole-UID kill** that fires when the app
+itself dies (e.g. `am force-stop me.phie.tawc`): Android SIGKILLs
+every process running under the app's uid regardless of parent
+chain. Any cleanup that depends on PPid chains alone is incomplete;
+the UID-wide kill is the actual safety net for orphaned descendants.
+
 ## Host helper
 
 `tawc-exec` is a small Rust binary at `tools/tawc-exec/`. Build it once

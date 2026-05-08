@@ -306,6 +306,16 @@ $(OUT)/programs/static_open_creat_argv1: $(SRC_TS)/integration/programs/static_o
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
 
+# static_sleep_open_creat_argv1: like static_open_creat_argv1 but with a
+# 1 s nanosleep before the open. The PDEATHSIG regression test in
+# test_exec_child.c uses the sleep window to force-fire pdeath_signal
+# on the loaded fixture mid-execution: with the bug the fixture is
+# SIGKILL'd and the marker never appears; with the fix the marker is
+# created at t=~1 s.
+$(OUT)/programs/static_sleep_open_creat_argv1: $(SRC_TS)/integration/programs/static_sleep_open_creat_argv1_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+
 # androidfilter/wrap: host glibc binary that installs a synthesized
 # Android-`untrusted_app`-shape seccomp BPF filter and execs its argv
 # tail. Exists so test_androidfilter.c can run the existing handler

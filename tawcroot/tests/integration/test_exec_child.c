@@ -45,6 +45,9 @@
 #ifndef TAWCROOT_STATIC_OPEN_CREAT_ARGV1_BIN
 # error "TAWCROOT_STATIC_OPEN_CREAT_ARGV1_BIN must be defined"
 #endif
+#ifndef TAWCROOT_STATIC_SLEEP_OPEN_CREAT_ARGV1_BIN
+# error "TAWCROOT_STATIC_SLEEP_OPEN_CREAT_ARGV1_BIN must be defined"
+#endif
 #ifndef TAWCROOT_TEST_TMPDIR
 # define TAWCROOT_TEST_TMPDIR "/tmp"
 #endif
@@ -371,6 +374,132 @@ test(exec_child_runs_guest_when_orphaned_to_init)
 		ssize_t n = read(diag[0], tags, sizeof tags - 1);
 		fprintf(stderr,
 		        "exec_child orphan marker missing; diag tags=\"%.*s\"\n",
+		        (int)(n > 0 ? n : 0), tags);
+	}
+	test_true(found);
+
+	unlink(marker);
+	close(diag[0]);
+	close(fd);
+}
+
+/* The `--exec-child` re-exec must NOT call prctl(PR_SET_PDEATHSIG,
+ * SIGKILL). This is the *other* half of the gpgme posix_spawn
+ * regression: an earlier fix split bind_to_parent into arm_pdeathsig
+ * + exit_if_orphan and scoped only the latter to top-level entries,
+ * leaving arm_pdeathsig running on every entry. The orphan-to-init
+ * test above (which mirrors the gpgme dance with intermediate exiting
+ * BEFORE grandchild reaches arm_pdeathsig) doesn't catch this — by
+ * the time prctl runs in that ordering, the parent is init, and
+ * pdeath_signal=SIGKILL bound to init is a no-op forever.
+ *
+ * The bug fires under the *opposite* ordering: intermediate stays
+ * alive until grandchild has already armed pdeath_signal, then exits.
+ * The kernel's `forget_original_parent` walk during intermediate's
+ * `do_exit` (kernel/exit.c) checks each child's pdeath_signal and
+ * sends the signal — so the grandchild gets SIGKILL'd mid-execution.
+ * In production this fires during a 150-pkg pacman -Sw on roughly
+ * 1 % of gpg verifies, surfacing as "missing required signature";
+ * see issues/tawcroot-arch-pacman-intermittent-sig-fail.md.
+ *
+ * Test sequence:
+ *   1. parent forks intermediate
+ *   2. intermediate forks grandchild
+ *   3. grandchild execve's tawcroot --exec-child of the
+ *      static_sleep_open_creat_argv1 fixture (immediately — no sync
+ *      with intermediate's exit)
+ *   4. fixture starts: hits its 1 s nanosleep
+ *   5. intermediate sleeps 100 ms (gives grandchild time to bootstrap
+ *      through tawcroot --exec-child and reach the fixture's sleep —
+ *      the post-execveat path is microseconds; 100 ms is generous),
+ *      then _exit(0)
+ *   6. intermediate's do_exit walks its children: grandchild's
+ *      pdeath_signal is SIGKILL with the bug, 0 with the fix
+ *      - bug: grandchild SIGKILL'd mid-nanosleep; never reaches
+ *        the open(); marker absent
+ *      - fix: pdeath_signal stays 0; nanosleep returns; open creates
+ *        the marker
+ *   7. parent reaps intermediate, polls for marker with 5 s budget
+ *
+ * This is timing-dependent in the *bug* case (we need intermediate to
+ * exit AFTER grandchild armed its pdeath_signal). 100 ms is many
+ * orders of magnitude longer than the post-execveat → tawcroot_main
+ * → arm_pdeathsig path takes (microseconds), so the ordering is
+ * reliable. With the fix, the test is deterministic — pdeath_signal
+ * is never armed regardless of timing. */
+static int run_pdeathsig_intermediate(int state_fd, int diag_fd)
+{
+	pid_t intermediate = fork();
+	if (intermediate < 0) return -1;
+	if (intermediate == 0) {
+		pid_t gc = fork();
+		if (gc < 0) {
+			orphan_tag_write(diag_fd, ORPHAN_TAG_FORK_ERR);
+			_exit(127);
+		}
+		if (gc == 0) {
+			/* Grandchild: immediately execve tawcroot --exec-child
+			 * (no waiting on intermediate). The fixture's nanosleep
+			 * is what holds us alive while intermediate exits. */
+			char fdstr[32];
+			snprintf(fdstr, sizeof fdstr, "%d", state_fd);
+			execl(TAWCROOT_PROD_BIN, "tawcroot",
+			      "--exec-child", fdstr, (char *)NULL);
+			orphan_tag_write(diag_fd, ORPHAN_TAG_EXEC_ERR);
+			_exit(127);
+		}
+		/* Intermediate: sleep enough for grandchild to be deep
+		 * inside the fixture's nanosleep, then exit. 100 ms covers
+		 * the supervisor bring-up + loader_jump + start of sleep. */
+		struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000000 };
+		nanosleep(&ts, NULL);
+		_exit(0);
+	}
+	int wstatus = 0;
+	pid_t reaped = waitpid(intermediate, &wstatus, 0);
+	if (reaped != intermediate) return -2;
+	if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) return -3;
+	return 0;
+}
+
+test(exec_child_survives_pdeathsig_after_intermediate_exit)
+{
+	char marker[256];
+	snprintf(marker, sizeof marker,
+	         TAWCROOT_TEST_TMPDIR "/tawc-test-pdeathsig-marker-%d-%ld",
+	         (int)getpid(), (long)time(NULL));
+	unlink(marker);
+
+	const char *argv[] = { TAWCROOT_STATIC_SLEEP_OPEN_CREAT_ARGV1_BIN,
+	                       marker, NULL };
+	const char *envp[] = { "PATH=/bin", NULL };
+
+	int fd = build_state_memfd(TAWCROOT_STATIC_SLEEP_OPEN_CREAT_ARGV1_BIN,
+	                           2, argv, envp);
+	test_true(fd >= 0);
+
+	/* Diagnostic pipe — same plumbing as the orphan test. */
+	int diag[2];
+	test_int_eq(pipe2(diag, 0 /* not CLOEXEC */), 0);
+
+	test_int_eq(run_pdeathsig_intermediate(fd, diag[1]), 0);
+	close(diag[1]);
+
+	/* Marker appears at t=~1 s after grandchild's loader_jump under the
+	 * fix. Budget 5 s for slow Android cores + startup overhead. With
+	 * the bug, the fixture is SIGKILL'd at t=~100 ms (when intermediate
+	 * exits) and the marker never appears. */
+	int found = 0;
+	for (int i = 0; i < 100; i++) { /* 100 × 50 ms = 5 s */
+		if (access(marker, F_OK) == 0) { found = 1; break; }
+		struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000000 };
+		nanosleep(&ts, NULL);
+	}
+	if (!found) {
+		char tags[64] = {0};
+		ssize_t n = read(diag[0], tags, sizeof tags - 1);
+		fprintf(stderr,
+		        "exec_child pdeathsig marker missing; diag tags=\"%.*s\"\n",
 		        (int)(n > 0 ? n : 0), tags);
 	}
 	test_true(found);

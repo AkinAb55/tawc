@@ -56,46 +56,69 @@ static int streq(const char *a, const char *b)
 	return *a == 0 && *b == 0;
 }
 
-/* Bind every tawcroot incarnation's lifetime to its parent: when the
- * parent dies, the kernel SIGKILLs us. Without this, fork-then-
- * execveat re-spawns get reparented to init when the wrapping shell
- * dies (e.g. SIGPIPE through `adb shell`), leaving stray `tawcroot
- * --exec-child <fd>` workers pinned in the rootfs. PDEATHSIG is
- * cleared on execve, so this MUST be re-armed on every entry —
- * including the same-process `--exec-child` re-execs.
+/* Bind a freshly-forked top-level tawcroot to its launcher: SIGKILL
+ * us when the launcher dies, exit cleanly if we're already orphaned
+ * to init (catches the fork→prctl race where the launcher died
+ * BEFORE we could install PDEATHSIG, so no signal got queued).
  *
- * Production launches go through the in-app exec broker (see
- * notes/exec-broker.md): the broker and the tawcroot it spawns are
- * both `untrusted_app:s0`, so PDEATHSIG fires reliably; the broker
- * also walks /proc to SIGKILL any descendants that escape past
- * destroyForcibly. No cross-SELinux-domain quirks to work around. */
-static void arm_pdeathsig(void)
+ * **Only correct for top-level entries** — NOT for the `--exec-child`
+ * re-exec spawned by our SIGSYS execve handler. The `--exec-child`
+ * path runs in the middle of gpgme's posix_spawn flow:
+ *
+ *   pacman ─fork→ intermediate ─fork→ grand-child ─execve→ gpg
+ *                                     ↑ SIGSYS → tawcroot --exec-child
+ *
+ * where `intermediate` does `_exit(0)` immediately to reparent the
+ * grand-child to init (gpgme's standard double-fork-prevent-zombies
+ * trick). Two failure modes if we run the top-level binding here:
+ *
+ *  1. `getppid() == 1`-then-exit: gpgme's reparent makes this state
+ *     deliberate, not an orphan-leak. Killing the worker means every
+ *     gpgconf/gpg invocation dies during pacman keyring init →
+ *     "GPGME error: Invalid crypto engine" → "missing required
+ *     signature" on every Arch package. (Surfaced in commit d48faf8.)
+ *
+ *  2. PDEATHSIG=SIGKILL: PDEATHSIG fires from `forget_original_parent`
+ *     during the parent's own `do_exit` (kernel/exit.c), not at the
+ *     later waitpid-reap. So the race is between *intermediate's*
+ *     `_exit(0)` (the trigger) and the *grand-child's* prctl (the
+ *     arm). If TRIGGER wins (usual case — intermediate exits much
+ *     faster than the grand-child's exec_handler→memfd→execveat→
+ *     supervisor→loader bootstrap), pdeath_signal is still 0 at the
+ *     moment forget_original_parent walks, no signal queued, the
+ *     later prctl is bound to init (which never exits) and is a
+ *     harmless no-op. If ARM wins (rare — the bootstrap raced ahead
+ *     of the kernel's exit-side work for `intermediate`), SIGKILL
+ *     gets queued and the grand-child dies mid-startup. gpg dies
+ *     before writing GOODSIG to its status pipe; gpgme reports
+ *     `verify_result->signatures == NULL`; libalpm reports "missing
+ *     required signature". The 10 ms nanosleep workaround attempted
+ *     in the issue file widened the bootstrap delay so TRIGGER won
+ *     more reliably — symptom mitigation, not root-cause fix. The
+ *     actual fix is to not arm PDEATHSIG on this entry shape. (See
+ *     issues/tawcroot-arch-pacman-intermittent-sig-fail.md history.)
+ *
+ * Cleanup story for `--exec-child` workers without their own
+ * PDEATHSIG: the production caller is the in-app exec broker (see
+ * notes/exec-broker.md). When the broker disconnects, the broker's
+ * `/proc` BFS walks descendants by `PPid` and SIGKILLs them — but
+ * that only catches workers whose ppid still chains back to the
+ * broker. Workers reparented to init via the gpgme dance escape that
+ * BFS. The actual whole-tree safety net is Android's `am force-stop`
+ * (or app death), which SIGKILLs every process under the app's UID
+ * regardless of parent. Both the broker's BFS and the per-process
+ * PDEATHSIG were always supplementary to that UID-wide kill; the
+ * old PDEATHSIG-on-`--exec-child` was already a no-op for the gpgme
+ * case (parent was init by the time prctl ran), so dropping it here
+ * doesn't regress any path the broker BFS was actually catching.
+ *
+ * Top-level (ENTRY_PROD) keeps both halves: broker is a stable
+ * launcher that doesn't intentionally exit mid-spawn, so PDEATHSIG
+ * fires only on real broker death/disconnect — which is what we
+ * want. */
+static void bind_top_level_to_parent(void)
 {
 	(void)tawc_prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
-}
-
-/* Companion to [arm_pdeathsig]: catch the fork→prctl race where the
- * parent died BEFORE we could install PDEATHSIG (so no signal queued).
- * If we observe `getppid() == 1` we must have been reparented to init
- * — in a freshly-forked top-level invocation that means our launcher
- * died, and we should exit cleanly rather than leak.
- *
- * **Only safe to call on the top-level entry path** — NOT in
- * `--exec-child` re-execs. The re-exec is a same-process `execveat`
- * (no fork happened) so the race window the check guards against
- * doesn't exist; meanwhile gpgme / libgpg-error's `posix_spawn`
- * legitimately reparents its workers to init via a fork-then-
- * immediate-exit-of-intermediate dance, so by the time the worker's
- * exec hits our SIGSYS handler and re-execs into `--exec-child`,
- * `getppid()` is genuinely 1 — but as a deliberate state, not an
- * orphan-leak. Killing those would surface as "GPGME error: Invalid
- * crypto engine" → "missing required signature" on every Arch
- * package the install pipeline touches.
- *
- * Caller in `tawcroot_main` runs this on every entry shape EXCEPT
- * `--exec-child <fd>`. */
-static void exit_if_orphan(void)
-{
 	if (tawc_getppid() == 1) tawc_exit_group(0);
 }
 
@@ -409,17 +432,12 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 
 void tawcroot_main(int argc, char **argv)
 {
-	/* Re-arm PDEATHSIG on every entry — execve clears it. The
-	 * orphan-detect (which catches the parent-died-before-prctl race)
-	 * runs only on freshly-forked top-level entries; the same-process
-	 * --exec-child re-exec has no race window AND has a legitimate
-	 * gpgme posix_spawn reason to land with ppid==1, so we skip it
-	 * there. See the docstrings on arm_pdeathsig / exit_if_orphan. */
-	arm_pdeathsig();
-
 	enum tawcroot_entry entry = classify_entry(argc, argv);
 
-	if (entry != ENTRY_EXEC_CHILD) exit_if_orphan();
+	/* Top-level binding (PDEATHSIG + orphan-detect) is unsafe on the
+	 * --exec-child re-exec; see bind_top_level_to_parent's docstring
+	 * for the gpgme posix_spawn rationale. */
+	if (entry != ENTRY_EXEC_CHILD) bind_top_level_to_parent();
 
 	switch (entry) {
 		case ENTRY_USAGE_ERROR:
