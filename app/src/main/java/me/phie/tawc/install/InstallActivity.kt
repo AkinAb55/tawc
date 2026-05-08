@@ -148,13 +148,6 @@ class InstallActivity : AppCompatActivity() {
             selectedMethod = EnabledMethods.keys.single()
         }
 
-        // Dev-only "Use cache proxy" checkbox. Hidden in release builds
-        // — production must never even ask the user about a localhost
-        // proxy URL, since it'd never be reachable from a packaged APK.
-        if (me.phie.tawc.BuildConfig.DEBUG) {
-            s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
-        }
-
         if (!EnabledMethods.onlyOne) {
             // "What's the difference?" link to the install method info
             // page. Borderless text button so it reads as a help affordance,
@@ -169,6 +162,13 @@ class InstallActivity : AppCompatActivity() {
                 },
                 verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
             )
+        }
+
+        // Dev-only "Use cache proxy" checkbox. Hidden in release builds
+        // — production must never even ask the user about a localhost
+        // proxy URL, since it'd never be reachable from a packaged APK.
+        if (me.phie.tawc.BuildConfig.DEBUG) {
+            s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
         }
 
         installButton = primaryButton("Install") { beginInstall() }
