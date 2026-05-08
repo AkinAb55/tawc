@@ -37,16 +37,14 @@
 #include <sys/prctl.h>
 
 #include "tawcroot.h"
+#include "dispatch.h"
 #include "exec_handler.h"
-#include "fdtab.h"
 #include "filter.h"
-#include "handler.h"
 #include "io.h"
 #include "loader_exec.h"
 #include "path.h"
 #include "raw_sys.h"
-#include "dispatch.h"
-#include "usercopy.h"
+#include "supervisor.h"
 
 #ifdef TAWCROOT_TESTHOST
 int tawcroot_testhost_main(int argc, char **argv);
@@ -59,15 +57,17 @@ static int streq(const char *a, const char *b)
 }
 
 /* Bind every tawcroot incarnation's lifetime to its parent: when the
- * parent thread dies, the kernel SIGKILLs us. Without this, fork-then-
- * execveat re-spawns from inside the SIGSYS handler get reparented to
- * init when the wrapping shell dies (e.g. SIGPIPE through `adb shell`),
- * leaving stray `tawcroot --exec-child <fd>` workers pinned in the rootfs.
+ * parent dies, the kernel SIGKILLs us. Without this, fork-then-
+ * execveat re-spawns get reparented to init when the wrapping shell
+ * dies (e.g. SIGPIPE through `adb shell`), leaving stray `tawcroot
+ * --exec-child <fd>` workers pinned in the rootfs. PDEATHSIG is
+ * cleared on execve, so this MUST be re-armed on every entry —
+ * including the same-process `--exec-child` re-execs.
  *
  * Production launches go through the in-app exec broker (see
- * notes/exec-broker.md): the broker process and the tawcroot it spawns
- * are both `untrusted_app:s0`, so PDEATHSIG fires reliably and the
- * broker also walks /proc to SIGKILL any descendants that escape past
+ * notes/exec-broker.md): the broker and the tawcroot it spawns are
+ * both `untrusted_app:s0`, so PDEATHSIG fires reliably; the broker
+ * also walks /proc to SIGKILL any descendants that escape past
  * destroyForcibly. No cross-SELinux-domain quirks to work around. */
 static void arm_pdeathsig(void)
 {
@@ -92,8 +92,8 @@ static void arm_pdeathsig(void)
  * crypto engine" → "missing required signature" on every Arch
  * package the install pipeline touches.
  *
- * Caller in `tawcroot_main` skips this for `--exec-child argv[1]`
- * and runs it for every other path. */
+ * Caller in `tawcroot_main` runs this on every entry shape EXCEPT
+ * `--exec-child <fd>`. */
 static void exit_if_orphan(void)
 {
 	if (tawc_getppid() == 1) tawc_exit_group(0);
@@ -209,13 +209,18 @@ static long parse_bind_spec(const char *spec, char *src_buf, size_t cap,
 /* Set up rootfs/binds/handler/filter for production "real" mode.
  *
  * Init must complete BEFORE the loader runs because the guest will
- * issue path-bearing syscalls that need our handler installed. Every
- * step here either uses raw_sys helpers (stub-allowlisted, traverse
- * the filter once it's up) or runs before the filter is up.
+ * issue path-bearing syscalls that need our handler installed.
+ * Most of the bootstrap (rootfs view, binds, handler, signal-mask
+ * reset, openat2 probe, /proc/self/exe stash) is shared with the
+ * --exec-child re-entry and lives in tawcroot_supervisor_init. The
+ * pieces still owned by the production path are:
+ *   - validating and parsing the CLI (-r, -b)
+ *   - PR_SET_NO_NEW_PRIVS (sticky; child inherits via execve)
+ *   - the seccomp filter install (one-shot; child inherits)
  *
- * Exit codes 80-99 are reserved for init self-failures so callers can
- * distinguish init-broken from "guest exited with rc". (60..79 are
- * loader self-failures from loader_exec.h.) */
+ * Exit codes for prod-only failures: 80 (path), 84 (bind parse),
+ * 86 (no_new_privs), 88 (filter install), 89 (too many traps).
+ * Supervisor-internal failures use 90..95 (see supervisor.h). */
 static void prod_rootfs_init(const char *rootfs,
                              const char *const *bind_specs, size_t n_binds)
 {
@@ -224,137 +229,43 @@ static void prod_rootfs_init(const char *rootfs,
 		tawc_exit_group(80);
 	}
 
-	long rfd = tawc_openat(AT_FDCWD, rootfs,
-	                       O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
-	if (rfd < 0) {
-		tawc_io_str("tawcroot: open rootfs failed: ");
-		tawc_io_str(rootfs);
-		tawc_io_str("\n");
-		tawc_exit_group(81);
-	}
-
-	long resv = tawcroot_fd_reserve((int)rfd);
-	if (resv < 0) tawc_exit_group(82);
-	tawcroot_rootfs_fd = (int)resv;
-
-	{
-		/* Canonicalize the rootfs path via /proc/self/fd/<fd>. The `-r`
-		 * argument is whatever the caller passed; the kernel may report
-		 * a different canonical path in getcwd / /proc/self/cwd
-		 * (e.g. on Android, app dirs accessed via /data/user/0/<pkg>
-		 * resolve to /data/data/<pkg> in the underlying mount, and
-		 * getcwd reports the mount-side path, not the requested one).
-		 * Without canonicalization, the prefix-match in handle_getcwd
-		 * fails inside the chroot, glibc's getcwd returns ENOENT, and
-		 * everything that depends on cwd (mkdir -p, bash's PWD, the
-		 * relative-path resolver) misbehaves. */
-		char canon[sizeof tawcroot_rootfs_host_path];
-		char fdlink[64];
-		size_t fi = 0;
-		const char *p = "/proc/self/fd/";
-		while (*p) fdlink[fi++] = *p++;
-		long fd = tawcroot_rootfs_fd;
-		char tmp[24]; int tn = 0;
-		unsigned long u = fd > 0 ? (unsigned long)fd : 0;
-		if (u == 0) tmp[tn++] = '0';
-		while (u && tn < 24) { tmp[tn++] = (char)('0' + (u % 10)); u /= 10; }
-		while (tn > 0) fdlink[fi++] = tmp[--tn];
-		fdlink[fi] = 0;
-
-		long rl = tawc_readlinkat(AT_FDCWD, fdlink, canon, sizeof canon - 1);
-		const char *src;
-		size_t srclen;
-		if (rl > 0 && canon[0] == '/') {
-			canon[rl] = 0;
-			src = canon;
-			srclen = (size_t)rl;
-		} else {
-			/* Fall back to the user-supplied path if the readlink
-			 * failed (eg /proc not mounted yet, exotic kernels). The
-			 * canonicalization-mismatch bug is then visible but the
-			 * legacy behaviour is preserved. */
-			src = rootfs;
-			srclen = 0;
-			while (src[srclen]) srclen++;
-		}
-		size_t k = 0;
-		while (k < srclen && k + 1 < sizeof tawcroot_rootfs_host_path) {
-			tawcroot_rootfs_host_path[k] = src[k];
-			k++;
-		}
-		/* Strip trailing slashes so the prefix-match in path.c stays
-		 * unambiguous (review B4). */
-		while (k > 1 && tawcroot_rootfs_host_path[k - 1] == '/') k--;
-		tawcroot_rootfs_host_path[k] = 0;
-		tawcroot_rootfs_host_path_len = k;
-	}
-
-	long up = tawc_usercopy_init();
-	if (up < 0) {
-		tawc_io_str("tawcroot: usercopy probe failed\n");
-		tawc_exit_group(83);
-	}
-
+	/* Parse CLI bind specs into parallel src/dst arrays before
+	 * handing off to supervisor_init. The buffers live for the rest
+	 * of tawcroot_main, which outlives every consumer of the bind
+	 * table. */
+	static char         bind_src_buf[TAWCROOT_MAX_BINDS][1024];
+	static const char  *bind_src[TAWCROOT_MAX_BINDS];
+	static const char  *bind_dst[TAWCROOT_MAX_BINDS];
 	for (size_t i = 0; i < n_binds; i++) {
-		char src[1024];
 		const char *dst = 0;
-		if (parse_bind_spec(bind_specs[i], src, sizeof src, &dst) < 0) {
+		if (parse_bind_spec(bind_specs[i], bind_src_buf[i],
+		                    sizeof bind_src_buf[i], &dst) < 0) {
 			tawc_io_str("tawcroot: malformed -b spec: ");
 			tawc_io_str(bind_specs[i]);
 			tawc_io_str("\n");
 			tawc_exit_group(84);
 		}
-		long br = tawcroot_path_add_bind(src, dst);
-		if (br < 0) {
-			tawc_io_str("tawcroot: bind add failed for ");
-			tawc_io_str(bind_specs[i]);
-			tawc_io_str("\n");
-			tawc_exit_group(85);
-		}
+		bind_src[i] = bind_src_buf[i];
+		bind_dst[i] = dst;
 	}
 
-	tawcroot_path_memoize_well_known();
-	tawcroot_dispatch_init();
+	struct tawcroot_supervisor_args sa = {
+		.rootfs_host_path = rootfs,
+		.bind_src         = bind_src,
+		.bind_dst         = bind_dst,
+		.n_binds          = n_binds,
+		/* No inherited shm at top-level entry. */
+		.shm_names        = 0,
+		.shm_fds          = 0,
+		.n_shm            = 0,
+	};
+	tawcroot_supervisor_init(&sa);
 
+	/* PR_SET_NO_NEW_PRIVS is sticky: set once, inherited by every
+	 * fork+execve descendant including the --exec-child re-exec.
+	 * Filter install needs it. */
 	long nnp = tawcroot_set_no_new_privs();
 	if (nnp != 0) tawc_exit_group(86);
-	long inst = tawcroot_install_handler();
-	if (inst != 0) tawc_exit_group(87);
-
-	/* Reset the inherited signal mask to empty before we hand control
-	 * to the guest binary. The JVM that spawned `/system/bin/sh` (which
-	 * then exec'd us via ProcessBuilder) routinely blocks SIGCHLD /
-	 * SIGPIPE / SIGUSR1 / SIGSYS / etc., and that mask persists through
-	 * fork+execve into us. Two failure modes:
-	 *
-	 *   1. SIGSYS blocked → trapped syscalls can't reach our handler;
-	 *      the kernel kills the process with default action (exit 159).
-	 *   2. Other signals blocked → daemons spawned later (gpg-agent
-	 *      from pacman-key, anything that select()'s on SIGCHLD) hang
-	 *      because their main loop never receives the wake-ups it
-	 *      expects.
-	 *
-	 * Clearing the whole mask here is the cheap fix: a fresh login
-	 * starts with an empty mask, the guest binary deserves the same.
-	 * Must run BEFORE probe_openat2 since that trips Android's stacked
-	 * filter and needs the SIGSYS handler invocable. The runtime
-	 * sigprocmask shadow in syscalls_control.c tracks any subsequent
-	 * guest manipulation. */
-	{
-		uint64_t empty = 0;
-		(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 2 /*SIG_SETMASK*/,
-		               (long)&empty, 0, 8, 0, 0);
-	}
-
-	/* openat2 probe must run AFTER install_handler AND after the
-	 * SIGSYS unblock. Android's `untrusted_app` seccomp filter TRAPs
-	 * openat2 (syscall 437) on recent platform versions; with our
-	 * handler installed AND SIGSYS deliverable, the trap dispatches to
-	 * "no slot → -ENOSYS", which the probe treats as "openat2
-	 * unavailable, fall back to manual canonicalization". If SIGSYS is
-	 * blocked here, the kernel can't deliver to our handler and the
-	 * process dies with default action. */
-	tawcroot_path_probe_openat2();
 
 	/* Feed the filter generator from the dispatch table — single
 	 * source of truth for the trap set. */
@@ -384,91 +295,66 @@ static void prod_rootfs_init(const char *rootfs,
 # error "unsupported host arch"
 #endif
 
-void tawcroot_main(int argc, char **argv)
+/* Entry-point classification.
+ *
+ * tawcroot has several distinct entry shapes that share `_start`. Each
+ * has different requirements for setup (e.g. orphan-detect, auxv
+ * capture) and different dispatch destinations. We classify once up
+ * front so the policy table is in one place — adding a new entry
+ * shape means adding one enum value and one switch arm, not auditing
+ * every check scattered through main. */
+enum tawcroot_entry {
+	ENTRY_PROD,             /* production: -r ROOTFS [-b ...] -- CMD     */
+	ENTRY_EXEC_CHILD,       /* --exec-child <fd> (same-process re-exec)  */
+#ifdef TAWCROOT_TESTHOST
+	ENTRY_EXEC,             /* --exec PATH ARGS (loader-only diagnostic) */
+	ENTRY_EXEC_VIA_HANDLER, /* --exec-via-handler PATH ARGS (handler dx) */
+	ENTRY_TESTHOST,         /* smoke driver / phase suites               */
+#endif
+	ENTRY_USAGE_ERROR,      /* malformed CLI                             */
+};
+
+static enum tawcroot_entry classify_entry(int argc, char **argv)
 {
-	arm_pdeathsig();
-	/* Skip the orphan-exit on --exec-child re-execs: see
-	 * exit_if_orphan's docstring for why this matters (gpgme spawn
-	 * pattern legitimately reparents to init). All other entry shapes
-	 * are top-level invocations where the fork→prctl race the orphan
-	 * check guards against is real. */
-	if (argc < 2 || !streq(argv[1], "--exec-child")) {
-		exit_if_orphan();
+	if (argc < 2) {
+#ifdef TAWCROOT_TESTHOST
+		return ENTRY_TESTHOST;       /* smoke parent — no argv flags */
+#else
+		return ENTRY_USAGE_ERROR;
+#endif
+	}
+
+	if (streq(argv[1], "--exec-child")) {
+		/* --exec-child has two flavors. Production has only one
+		 * (loader re-exec target, bare-integer fd); testhost adds a
+		 * smoke-child variant (--state-fd=<n> companion arg). The
+		 * disambiguator is: parse argv[2] as a bare integer; if it
+		 * parses, this is the loader path; if not (or argc < 3),
+		 * fall through. parse_fd rejects leading `-`/`+` so
+		 * `--state-fd=...` never accidentally parses. */
+		if (argc >= 3 && parse_fd(argv[2]) >= 0) return ENTRY_EXEC_CHILD;
+#ifdef TAWCROOT_TESTHOST
+		return ENTRY_TESTHOST;
+#else
+		return ENTRY_USAGE_ERROR;
+#endif
 	}
 
 #ifdef TAWCROOT_TESTHOST
-	/* Testhost dispatch. argc==1 (smoke parent) skips capture_host_auxv
-	 * since the smoke doesn't go through the loader. The loader-bearing
-	 * branches all need auxv populated (HWCAP / SYSINFO_EHDR / etc). */
-	if (argc >= 2) {
-		capture_host_auxv(argc, argv);
-
-		if (streq(argv[1], "--exec")) {
-			if (argc < 3) usage(2);
-			struct tawc_loader_exec_args ea = {
-				.guest_path = argv[2],
-				.argc       = argc - 2,
-				.argv       = (const char *const *)(argv + 2),
-				.envp       = (const char *const *)derive_envp(argc, argv),
-				.platform   = HOST_PLATFORM,
-			};
-			tawcroot_loader_exec(&ea);
-		}
-
-		if (streq(argv[1], "--exec-via-handler")) {
-			if (argc < 3) usage(2);
-			const char *path = argv[2];
-			long rc = tawcroot_exec_handler_perform(
-				path,
-				argc - 2,
-				(const char *const *)(argv + 2),
-				(const char *const *)derive_envp(argc, argv));
-			tawc_io_str("tawcroot: --exec-via-handler: handler returned ");
-			tawc_io_dec(rc);
-			tawc_io_str("\n");
-			tawc_exit_group(50);
-		}
-
-		/* --exec-child has two flavors in testhost: the loader re-exec
-		 * target (bare-integer fd, used by --exec-via-handler's
-		 * /proc/self/exe re-exec) and the foundation-smoke child
-		 * (--state-fd=<n> companion arg). Disambiguate on whether
-		 * argv[2] parses as a bare integer; if not, fall through to
-		 * the testhost smoke dispatch below. */
-		if (streq(argv[1], "--exec-child") && argc >= 3) {
-			long fd = parse_fd(argv[2]);
-			if (fd >= 0) {
-				tawcroot_loader_exec_child((int)fd, HOST_PLATFORM);
-			}
-		}
-	}
-
-	int rc = tawcroot_testhost_main(argc, argv);
-	tawc_exit_group(rc);
+	if (streq(argv[1], "--exec"))             return ENTRY_EXEC;
+	if (streq(argv[1], "--exec-via-handler")) return ENTRY_EXEC_VIA_HANDLER;
+	return ENTRY_TESTHOST;
 #else
-	if (argc < 2) usage(2);
+	/* Anything else is taken as the start of -r/-b/-- parsing.
+	 * prod_main handles malformed flag combinations and emits
+	 * usage(2); we don't pre-validate here. */
+	return ENTRY_PROD;
+#endif
+}
 
-	/* Capture before any --exec-child dispatch so the loader path has
-	 * the host's HWCAP / SYSINFO_EHDR / etc. ready to forward. The
-	 * --exec-child path runs this on its own re-exec, so the values
-	 * are fresh per tawcroot incarnation. */
-	capture_host_auxv(argc, argv);
-
-	if (streq(argv[1], "--exec-child")) {
-		if (argc < 3) usage(2);
-		long fd = parse_fd(argv[2]);
-		if (fd < 0) {
-			tawc_io_str("tawcroot: --exec-child: bad fd argument\n");
-			tawc_exit_group(2);
-		}
-		tawcroot_loader_exec_child((int)fd, HOST_PLATFORM);
-	}
-
-	/* Production "real" mode: -r ROOTFS [-b SRC:DST]... -- CMD ARGS...
-	 *
-	 * Init the rootfs+handler+filter, translate the guest cmd, then
-	 * hand off to the loader. The loader detects the rootfs-fd-set
-	 * state and routes opens through translation. */
+#ifndef TAWCROOT_TESTHOST
+__attribute__((noreturn)) static void prod_main(int argc, char **argv)
+{
 	const char *rootfs = 0;
 	const char *bind_specs[TAWCROOT_MAX_BINDS];
 	size_t      n_binds   = 0;
@@ -500,16 +386,10 @@ void tawcroot_main(int argc, char **argv)
 
 	prod_rootfs_init(rootfs, bind_specs, n_binds);
 
-	/* Stash /proc/self/exe before the guest takes over. Used by the
-	 * readlink handler to recognise libtawcroot's host path coming back
-	 * out of `readlinkat(O_PATH-fd, "")` (the bypass glibc's realpath
-	 * uses for /proc/self/exe) and substitute the guest exe path. */
-	tawcroot_init_self_host_path();
-
 	/* Phase 2e: stash the guest exe path so /proc/self/exe synthesis
 	 * returns it instead of the kernel's libtawcroot view. Set BEFORE
 	 * the loader jumps; the readlinkat handler reads it from the SIGSYS
-	 * dispatch path. */
+	 * dispatch path. (init_self_host_path runs inside supervisor_init.) */
 	tawcroot_set_guest_exe_path(argv[cmd_start]);
 
 	/* Hand off. The loader internally calls tawcroot_path_translate
@@ -524,5 +404,85 @@ void tawcroot_main(int argc, char **argv)
 		.platform   = HOST_PLATFORM,
 	};
 	tawcroot_loader_exec(&ea);
+}
 #endif
+
+void tawcroot_main(int argc, char **argv)
+{
+	/* Re-arm PDEATHSIG on every entry — execve clears it. The
+	 * orphan-detect (which catches the parent-died-before-prctl race)
+	 * runs only on freshly-forked top-level entries; the same-process
+	 * --exec-child re-exec has no race window AND has a legitimate
+	 * gpgme posix_spawn reason to land with ppid==1, so we skip it
+	 * there. See the docstrings on arm_pdeathsig / exit_if_orphan. */
+	arm_pdeathsig();
+
+	enum tawcroot_entry entry = classify_entry(argc, argv);
+
+	if (entry != ENTRY_EXEC_CHILD) exit_if_orphan();
+
+	switch (entry) {
+		case ENTRY_USAGE_ERROR:
+			usage(2);
+
+		case ENTRY_EXEC_CHILD:
+			/* --exec-child runs capture_host_auxv on its own re-exec
+			 * path so values are fresh per tawcroot incarnation. */
+			capture_host_auxv(argc, argv);
+			tawcroot_loader_exec_child((int)parse_fd(argv[2]),
+			                           HOST_PLATFORM);
+
+#ifdef TAWCROOT_TESTHOST
+		case ENTRY_EXEC: {
+			if (argc < 3) usage(2);
+			capture_host_auxv(argc, argv);
+			struct tawc_loader_exec_args ea = {
+				.guest_path = argv[2],
+				.argc       = argc - 2,
+				.argv       = (const char *const *)(argv + 2),
+				.envp       = (const char *const *)derive_envp(argc, argv),
+				.platform   = HOST_PLATFORM,
+			};
+			tawcroot_loader_exec(&ea);
+		}
+
+		case ENTRY_EXEC_VIA_HANDLER: {
+			if (argc < 3) usage(2);
+			capture_host_auxv(argc, argv);
+			long rc = tawcroot_exec_handler_perform(
+				argv[2],
+				argc - 2,
+				(const char *const *)(argv + 2),
+				(const char *const *)derive_envp(argc, argv));
+			tawc_io_str("tawcroot: --exec-via-handler: handler returned ");
+			tawc_io_dec(rc);
+			tawc_io_str("\n");
+			tawc_exit_group(50);
+		}
+
+		case ENTRY_TESTHOST: {
+			/* argc==1 (smoke parent) skips capture_host_auxv since the
+			 * smoke driver doesn't go through the loader. argc>=2 means
+			 * we landed here from a fall-through (e.g. --exec-child
+			 * with --state-fd=<n>) and the loader-bearing smoke phases
+			 * may need auxv. */
+			if (argc >= 2) capture_host_auxv(argc, argv);
+			int rc = tawcroot_testhost_main(argc, argv);
+			tawc_exit_group(rc);
+		}
+#endif
+
+		case ENTRY_PROD:
+#ifdef TAWCROOT_TESTHOST
+			/* Unreachable in testhost — classify_entry never returns
+			 * this branch. The switch arm exists only because the
+			 * enum value is shared. */
+			tawc_exit_group(2);
+#else
+			capture_host_auxv(argc, argv);
+			prod_main(argc, argv);
+#endif
+	}
+	/* All cases above are noreturn-equivalent. */
+	__builtin_unreachable();
 }

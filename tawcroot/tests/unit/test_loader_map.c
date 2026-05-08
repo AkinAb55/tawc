@@ -91,29 +91,39 @@ static int open_and_parse(const char *path, struct tawc_loader_image *img)
 	return fd;
 }
 
-/* Walk /proc/self/maps and check that an [addr,end) range exists with
- * the given r/w/x perms. Returns 1 on found, 0 on not-found. */
+/* Walk /proc/self/maps and check that the [addr,end) range is fully
+ * covered by mapping(s) with the given r/w/x perms. Returns 1 on
+ * fully-covered, 0 otherwise.
+ *
+ * Tolerates splits across multiple adjacent entries: bionic on
+ * aarch64 maps a PT_LOAD with filesz < memsz as TWO entries (a
+ * file-backed prefix and an anon BSS suffix), which is fine as long
+ * as both halves have the same perms and they're contiguous. Glibc
+ * usually coalesces these into one — that's why the test was happy
+ * on host but split on device. */
 static int maps_check_range(uintptr_t addr, uintptr_t end, int want_r,
                             int want_w, int want_x)
 {
 	FILE *f = fopen("/proc/self/maps", "r");
 	if (!f) return 0;
 	char line[1024];
-	int hit = 0;
-	while (fgets(line, sizeof line, f)) {
+	uintptr_t covered_to = addr;
+	while (covered_to < end && fgets(line, sizeof line, f)) {
 		uintptr_t a, b;
 		char r, w, x, p;
 		if (sscanf(line, "%lx-%lx %c%c%c%c",
 		           &a, &b, &r, &w, &x, &p) != 6) continue;
-		if (a > addr || b < end) continue;
+		/* Need an entry that starts at-or-before our cursor, ends
+		 * after it, and matches perms. Adjacent same-perms entries
+		 * extend the cursor; gaps or perms mismatches break out. */
+		if (a > covered_to) break;          /* gap → not contiguous */
+		if (b <= covered_to) continue;      /* entry ends before cursor */
 		int gr = (r == 'r'), gw = (w == 'w'), gx = (x == 'x');
-		if (gr == want_r && gw == want_w && gx == want_x) {
-			hit = 1;
-			break;
-		}
+		if (gr != want_r || gw != want_w || gx != want_x) break;
+		covered_to = b;
 	}
 	fclose(f);
-	return hit;
+	return covered_to >= end;
 }
 
 /* ------------- tests ------------- */

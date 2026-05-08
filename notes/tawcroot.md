@@ -2213,15 +2213,19 @@ coverage.
      re-sets it from the carried `exec_state.guest_exe` (or the
      new exec path if absent). Validated in `phase1.c`.
    - **2f — Handler reinstall in `--exec-child`**: ✓ DONE.
-     `tawcroot_loader_exec_child` re-runs the production init
-     sequence when `exec_state.rootfs_host` is present: open
-     rootfs, reserve, set host path, usercopy probe, add binds,
-     memoize symlinks, probe `openat2`, dispatch_init, install
-     SIGSYS handler. The seccomp filter is NOT re-installed (it's
-     inherited as kernel state — see "Why non-PIE"). Without this
-     the post-exec guest's first path-bearing syscall would either
-     route to host paths (no rootfs view) or kill the process (no
-     handler).
+     `tawcroot_loader_exec_child` calls `tawcroot_supervisor_init`
+     (in `src/supervisor.c`) when `exec_state.rootfs_host` is present.
+     supervisor_init does: open rootfs O_PATH, reserve, set host
+     path, usercopy probe, add binds, re-register inherited shm
+     name table, memoize symlinks, dispatch_init, install SIGSYS
+     handler, reset signal mask, probe `openat2`, stash
+     `/proc/self/exe`. The seccomp filter is NOT re-installed (it's
+     inherited as kernel state — see "Why non-PIE"). The same
+     supervisor_init is called from `prod_rootfs_init` for the
+     top-level entry, so the bootstrap stays in one place. Without
+     this the post-exec guest's first path-bearing syscall would
+     either route to host paths (no rootfs view) or kill the
+     process (no handler).
    - **2g — Multi-process correctness**: ✓ DONE for static execve.
      `prod_rootfs_guest_does_execve` validates the full chain:
      filter trap → handler dispatch → memfd write with extras →

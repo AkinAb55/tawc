@@ -108,7 +108,16 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		 * /proc/self/fd/<src_fd>, which broke once gpgme's fork-child
 		 * closefrom() raced against the recovery readlink — keeping
 		 * the strings around makes the dependency on a live src_fd
-		 * disappear. */
+		 * disappear.
+		 *
+		 * No lock needed (compare with the shm snapshot below): the
+		 * bind table is append-only and populated exactly once per
+		 * tawcroot incarnation, inside supervisor_init, BEFORE the
+		 * loader jumps to the guest. By the time a guest thread can
+		 * trigger a SIGSYS execve trap and reach this snapshot, the
+		 * table is frozen. shm by contrast is mutated by the guest
+		 * at runtime (shm_open / shm_unlink interception), so its
+		 * snapshot needs the export lock. */
 		for (uint32_t i = 0; i < nb; i++) {
 			bind_src_arr[i] = tawcroot_binds[i].src;
 			bind_dst_arr[i] = tawcroot_binds[i].dst;

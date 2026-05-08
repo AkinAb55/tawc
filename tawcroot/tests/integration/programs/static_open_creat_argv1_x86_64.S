@@ -19,6 +19,13 @@
  *   0   — open succeeded, file created (success)
  *   200 — argc < 2 (argv plumbing broken)
  *   201 — open(2) returned an error
+ *
+ * Note on AT&T literals: `mov $0600, %rdx` would be DECIMAL 600 (the
+ * leading 0 isn't an octal prefix in `as`). Composite expressions
+ * like `(1 | 0100 | 01000)` go through cpp first and ARE C-style, so
+ * those octals are honoured. We use 0x180 = octal 0600 = rw------- so
+ * the mode literal matches what the comment claims. The test only
+ * cares that the file is created; mode is cosmetic.
  */
 
 	.text
@@ -34,11 +41,11 @@ _start:
 	 * argv[1] = *(rsp + 16). */
 	mov     16(%rsp), %rdi            /* path                          */
 	mov     $(1 | 0100 | 01000), %rsi /* O_WRONLY|O_CREAT|O_TRUNC      */
-	mov     $0600, %rdx               /* mode                          */
+	mov     $0x180, %rdx              /* mode 0600 (rw-------)         */
 	mov     $2, %rax                  /* SYS_open                      */
 	syscall
-	cmp     $0, %rax
-	jl      .Lfail_open
+	test    %rax, %rax
+	js      .Lfail_open
 
 	xor     %rdi, %rdi                /* exit_group(0)                 */
 	mov     $231, %rax

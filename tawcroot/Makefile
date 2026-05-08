@@ -56,6 +56,25 @@ TAWC_LDFLAGS := \
 
 TESTHOST_EXTRA_CFLAGS := -DTAWCROOT_TESTHOST=1 -I$(SRC_TH)/include
 
+# --- test-fixture list (single source of truth) ---
+#
+# Names live in tests/integration/programs/programs.list, one per
+# line; comments (#) and blank lines are ignored. We derive both:
+#   PROGRAMS_NAMES   — for the `fixtures` target dependency list
+#   PROGRAMS_DEFINES — -DTAWCROOT_<UPPER>_BIN="<path>" for the cleat
+#                      orchestrator. tawcroot/build reads the same
+#                      list with its own on-device prefix.
+#
+# Per-fixture build rules and the build-fixtures cross-build script
+# stay manual because each fixture has different flags / source
+# extension; only the name list is shared.
+PROGRAMS_LIST    := $(SRC_TS)/integration/programs/programs.list
+PROGRAMS_NAMES   := $(shell awk '!/^[[:space:]]*(#|$$)/' $(PROGRAMS_LIST))
+PROGRAMS_DEFINES := $(shell awk -v out='$(OUT)' \
+    '!/^[[:space:]]*(#|$$)/ { printf "-DTAWCROOT_%s_BIN=\\\"%s/programs/%s\\\" ", \
+                              toupper($$1), out, $$1 }' \
+    $(PROGRAMS_LIST))
+
 # cleat orchestrator: hosted glibc, C23 (cleat headers use nullptr /
 # [[maybe_unused]]). Warning set mirrors deps/cleat/meson.build's cleat_c_args so
 # the test build stays clean against cleat + STC's intentional unused-* /
@@ -75,13 +94,7 @@ TESTS_CFLAGS := \
     -DTAWCROOT_TESTHOST_BIN=\"$(OUT)/tawcroot-testhost\" \
     -DTAWCROOT_PROD_BIN=\"$(OUT)/tawcroot\" \
     -DTAWCROOT_PROD_OBJ_DIR=\"$(OBJ)/prod/tawcroot/src\" \
-    -DTAWCROOT_STATIC_EXIT42_BIN=\"$(OUT)/programs/static_exit42\" \
-    -DTAWCROOT_STATIC_ARGC_RANDOM_BIN=\"$(OUT)/programs/static_argc_random\" \
-    -DTAWCROOT_DYNAMIC_EXIT42_BIN=\"$(OUT)/programs/dynamic_exit42\" \
-    -DTAWCROOT_DYNAMIC_ARGV_CHECK_BIN=\"$(OUT)/programs/dynamic_argv_check\" \
-    -DTAWCROOT_STATIC_EXECVE_EXIT42_BIN=\"$(OUT)/programs/static_execve_exit42\" \
-    -DTAWCROOT_STATIC_OPEN_CREAT_ARGV1_BIN=\"$(OUT)/programs/static_open_creat_argv1\" \
-    -DTAWCROOT_DYNAMIC_BIG_STACK_BIN=\"$(OUT)/programs/dynamic_big_stack\" \
+    $(PROGRAMS_DEFINES) \
     -DTAWCROOT_ANDROID_FILTER_WRAP=\"$(OUT)/androidfilter/wrap\" \
     -DTAWCROOT_TEST_TMPDIR=\"/tmp\" \
     -MMD -MP
@@ -119,7 +132,8 @@ PROD_C := \
     $(SRC_T)/src/loader_exec.c \
     $(SRC_T)/src/exec_state.c \
     $(SRC_T)/src/exec_handler.c \
-    $(SRC_T)/src/syscalls_exec.c
+    $(SRC_T)/src/syscalls_exec.c \
+    $(SRC_T)/src/supervisor.c
 
 # Pure tawcroot sources also compiled into the cleat test orchestrator under
 # hosted glibc, so unit tests can call them directly without re-execing the
@@ -233,13 +247,7 @@ all: tawcroot tawcroot-testhost tests fixtures
 tawcroot:           $(OUT)/tawcroot
 tawcroot-testhost:  $(OUT)/tawcroot-testhost
 tests:              $(OUT)/tests
-fixtures:           $(OUT)/programs/static_exit42 \
-                    $(OUT)/programs/static_argc_random \
-                    $(OUT)/programs/dynamic_exit42 \
-                    $(OUT)/programs/dynamic_argv_check \
-                    $(OUT)/programs/static_execve_exit42 \
-                    $(OUT)/programs/static_open_creat_argv1 \
-                    $(OUT)/programs/dynamic_big_stack \
+fixtures:           $(addprefix $(OUT)/programs/,$(PROGRAMS_NAMES)) \
                     $(OUT)/androidfilter/wrap
 
 clean:

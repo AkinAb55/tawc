@@ -21,8 +21,12 @@ extern long tawcroot_raw_syscall(long nr, long a, long b, long c,
 static inline long tawc_write(int fd, const void *buf, size_t n)
 { return TAWC_RAW(TAWC_SYS_write, fd, (long)buf, (long)n, 0, 0, 0); }
 
-static inline long tawc_exit_group(int status)
-{ return TAWC_RAW(TAWC_SYS_exit_group, status, 0, 0, 0, 0, 0); }
+__attribute__((noreturn))
+static inline void tawc_exit_group(int status)
+{
+	(void)TAWC_RAW(TAWC_SYS_exit_group, status, 0, 0, 0, 0, 0);
+	__builtin_unreachable();
+}
 
 static inline long tawc_getpid(void)
 { return TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0); }

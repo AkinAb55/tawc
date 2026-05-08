@@ -8,12 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "dispatch.h"
 #include "errno_neg.h"
 #include "exec_state.h"
-#include "fdtab.h"
-#include "filter.h"
-#include "handler.h"
 #include "io.h"
 #include "loader_elf.h"
 #include "loader_exec.h"
@@ -22,9 +18,8 @@
 #include "loader_stack.h"
 #include "path.h"
 #include "raw_sys.h"
-#include "shm.h"
+#include "supervisor.h"
 #include "tawc_uapi.h"
-#include "usercopy.h"
 
 /* Linux uapi mmap flags / prot. Matches loader_map.h's TAWC_MM_* but
  * we re-use those values directly. */
@@ -447,114 +442,27 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 
 	/* Phase 2g: re-establish tawcroot's per-process state in the new
 	 * incarnation. The seccomp filter is inherited (kernel state) but
-	 * the SIGSYS handler is reset to SIG_DFL by execve; the rootfs fd
-	 * and bind table live in our data segment and were wiped by the
-	 * exec. Without re-init, the post-jump guest's first path-bearing
-	 * syscall would either kill the process (no handler, default SIGSYS
-	 * action is termination) or route to the host filesystem
-	 * (no rootfs view).
+	 * the SIGSYS handler is reset to SIG_DFL by execve; the rootfs
+	 * fd and bind table live in our data segment and were wiped by
+	 * the exec. Without re-init, the post-jump guest's first path-
+	 * bearing syscall would either kill the process (no handler) or
+	 * route to the host filesystem (no rootfs view).
 	 *
-	 * Bootstrap order (must use only stub-allowlisted raw syscalls
-	 * until the handler is reinstalled):
-	 *   1. open rootfs O_PATH | O_DIRECTORY, reserve into high range
-	 *   2. set rootfs_host_path (for getcwd reverse-translation)
-	 *   3. usercopy_init (probes process_vm_readv via stub)
-	 *   4. add binds (raw_sys-only)
-	 *   5. memoize well-known + probe openat2
-	 *   6. dispatch_init
-	 *   7. install SIGSYS handler (stub-rt_sigaction)
-	 *   8. (filter is already inherited; do NOT install a new one —
-	 *      see notes/tawcroot.md "Why non-PIE")
-	 *   9. stash guest_exe_path
-	 */
+	 * tawcroot_supervisor_init does the bootstrap shared with
+	 * prod_rootfs_init; on top of that we just stash the guest exe
+	 * path. The seccomp filter and PR_SET_NO_NEW_PRIVS are inherited
+	 * via execve from the supervising tawcroot. */
 	if (st.rootfs_host) {
-		long rfd = tawc_openat(AT_FDCWD, st.rootfs_host,
-		                       O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
-		if (rfd < 0) LOADER_FAIL(83);
-		long resv = tawcroot_fd_reserve((int)rfd);
-		if (resv < 0) LOADER_FAIL(84);
-		tawcroot_rootfs_fd = (int)resv;
-
-		size_t k = 0;
-		while (st.rootfs_host[k] &&
-		       k + 1 < sizeof tawcroot_rootfs_host_path) {
-			tawcroot_rootfs_host_path[k] = st.rootfs_host[k];
-			k++;
-		}
-		while (k > 1 && tawcroot_rootfs_host_path[k - 1] == '/') k--;
-		tawcroot_rootfs_host_path[k] = 0;
-		tawcroot_rootfs_host_path_len = k;
-
-		long up = tawc_usercopy_init();
-		if (up < 0) LOADER_FAIL(85);
-
-		for (uint32_t i = 0; i < st.n_binds; i++) {
-			if (!st.bind_src[i] || !st.bind_dst[i]) continue;
-			long br = tawcroot_path_add_bind(st.bind_src[i],
-			                                 st.bind_dst[i]);
-			if (br < 0) LOADER_FAIL(86);
-		}
-
-		/* Re-register the /dev/shm name table. The internal memfds
-		 * are non-CLOEXEC and inherited verbatim across the
-		 * execveat — fd numbers stay valid, we just rebuild the
-		 * (name → fd) map and re-add fds to the reserved list so
-		 * close-trapping protects them. */
-		tawcroot_shm_reset();
-		for (uint32_t i = 0; i < st.n_shm; i++) {
-			if (!st.shm_name[i]) continue;
-			long sr = tawcroot_shm_register(st.shm_name[i],
-							st.shm_fd[i]);
-			if (sr < 0) LOADER_FAIL(89);
-		}
-
-		tawcroot_path_memoize_well_known();
-		tawcroot_dispatch_init();
-
-		/* Install handler BEFORE probe_openat2: Android's untrusted_app
-		 * stacked filter RET_TRAPs openat2 (NR 437) on recent platform
-		 * versions. Without our handler in place, that trap falls
-		 * through to default disposition and kills the post-re-exec
-		 * tawcroot before the guest even loads. With the handler
-		 * installed, the unknown-trap path returns -ENOSYS and the
-		 * probe correctly concludes "openat2 unavailable, fall back
-		 * to manual canonicalization". Mirror of the same ordering
-		 * fix in prod_rootfs_init (main.c). */
-		long inst = tawcroot_install_handler();
-		if (inst != 0) LOADER_FAIL(87);
-
-		/* Reset the inherited signal mask to empty. Same rationale as
-		 * the SIG_SETMASK in main.c (start the guest with a fresh mask
-		 * regardless of caller state), with one extra wrinkle here:
-		 * the SIGSYS handler that just re-exec'd us was running with
-		 * SIGSYS auto-masked, and the execveat from the handler
-		 * inherits that bit into the new incarnation. Bash and other
-		 * shells additionally block SIGSYS before fork+execve. With
-		 * SIGSYS blocked, the kernel kills the process by default
-		 * instead of invoking our handler. Diagnosed empirically: bash
-		 * exec dance left mask=0xc0000000 (bit 30 = SIGSYS) in the new
-		 * --exec-child process.
-		 *
-		 * Must run BEFORE probe_openat2 since that probe trips
-		 * Android's stacked filter and needs the SIGSYS handler
-		 * invocable. The runtime guest-mask shadow in
-		 * syscalls_control.c tracks subsequent guest manipulation. */
-		{
-			uint64_t empty = 0;
-			(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 2 /*SIG_SETMASK*/,
-			               (long)&empty, 0, 8, 0, 0);
-		}
-
-		tawcroot_path_probe_openat2();
-
-		/* Re-stash /proc/self/exe (libtawcroot's host path) so the
-		 * readlink handler can recognise it bouncing back through
-		 * `readlinkat(O_PATH-fd, "")` — same purpose as the call in
-		 * main.c, just for the post-execveat incarnation. The
-		 * libtawcroot.so location is pinned to the APK install for the
-		 * life of the process tree so the value stays valid even if
-		 * subsequent execveats keep fanning out. */
-		tawcroot_init_self_host_path();
+		struct tawcroot_supervisor_args sa = {
+			.rootfs_host_path = st.rootfs_host,
+			.bind_src         = st.bind_src,
+			.bind_dst         = st.bind_dst,
+			.n_binds          = st.n_binds,
+			.shm_names        = st.shm_name,
+			.shm_fds          = st.shm_fd,
+			.n_shm            = st.n_shm,
+		};
+		tawcroot_supervisor_init(&sa);
 
 		if (st.guest_exe) tawcroot_set_guest_exe_path(st.guest_exe);
 		else              tawcroot_set_guest_exe_path(st.path);
