@@ -336,8 +336,13 @@ if ("arm64-v8a" in tawcAbis) {
     }
 
     // Cross-compile Xwayland (and its bionic-ported X11 / font / pixman
-    // dep tree) and pack as `assets/xwayland/<abi>.tar`. Extracted at
-    // runtime by `CompositorService.ensureXwaylandExtracted` into
+    // dep tree) and stage the result for the APK. Binaries + DT_NEEDED
+    // libs ride in `jniLibs/<abi>/lib*.so` (so they land in
+    // `nativeLibraryDir`, the only on-disk place untrusted_app may
+    // exec on Android 10+); the XKB data tree is tarred into
+    // `assets/xwayland/share.tar` because Xwayland reads it via fopen
+    // at the baked-in `-Dxkb_dir` path. Extracted/symlinked at runtime
+    // by `CompositorService.ensureXwaylandExtracted` into
     // `<filesDir>/xwayland/`, which the compositor then exec()s as the
     // X server child for any X11 client. The cross-compile lives in
     // `scripts/build-xwayland.sh`; see notes/xwayland.md for the
@@ -346,7 +351,6 @@ if ("arm64-v8a" in tawcAbis) {
     // but there's no point shipping it without GPU acceleration).
     val xwaylandAbi = "arm64-v8a"
     val xwaylandInstallDir = "$tawcRoot/build/xwayland-aarch64/install"
-    val xwaylandAssetFile = "src/main/assets/xwayland/$xwaylandAbi.tar"
 
     val buildXwaylandTask = tasks.register<Exec>("buildXwayland") {
         workingDir = tawcRoot
@@ -362,39 +366,49 @@ if ("arm64-v8a" in tawcAbis) {
         outputs.dir(xwaylandInstallDir)
     }
 
-    val packXwaylandTask = tasks.register<Exec>("packXwayland") {
+    // Stage Xwayland's exec'ables and runtime libs as `lib*.so` files
+    // under `jniLibs/<abi>/`. Files in nativeLibraryDir get the
+    // `apk_data_file` SELinux type, which untrusted_app *can* exec —
+    // unlike `app_data_file` (the type assigned to anything we extract
+    // into filesDir), where `execute_no_trans` is denied on Android 10+
+    // and would otherwise force us to ship a `magiskpolicy --live` rule
+    // via su. Same trick proot already uses (libproot.so).
+    //
+    // Naming: jniLibs entries must match `lib*.so`, so `Xwayland` →
+    // `libxwayland.so` and `xkbcomp` → `libxkbcomp.so`. The Kotlin side
+    // creates `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks
+    // pointing at these so the compositor's existing PATH lookup is
+    // unaffected.
+    //
+    // The build's `lib/` already ships flat `lib*.so` files (no
+    // version-suffix symlinks — see scripts/build-xwayland.sh), so they
+    // can be copied straight into jniLibs without flattening.
+    val stageXwaylandJniLibsTask = tasks.register<Copy>("stageXwaylandJniLibs") {
         dependsOn(buildXwaylandTask)
-        // Pack only what Xwayland needs at runtime: the binary, the
-        // xkbcomp helper it spawns to compile keymaps, the .so deps,
-        // and the X11 keyboard data dir (a symlink to
-        // xkeyboard-config-2, both included). `--format=ustar` for
-        // portability; symlinks are preserved by default. Headers,
-        // .a / .la / pkg-config / share/man / share/aclocal etc. are
-        // build-only artefacts that we don't need on-device.
-        doFirst { mkdir(file(xwaylandAssetFile).parentFile) }
+        into("${project.projectDir}/src/main/jniLibs/$xwaylandAbi")
+        from("$xwaylandInstallDir/bin/Xwayland") { rename { "libxwayland.so" } }
+        from("$xwaylandInstallDir/bin/xkbcomp") { rename { "libxkbcomp.so" } }
+        from("$xwaylandInstallDir/lib") { include("*.so") }
+    }
+
+    // The XKB data files (`share/X11`, `share/xkeyboard-config-2`)
+    // can't be flattened into jniLibs — Xwayland reads them via fopen
+    // and the files reference each other by relative paths inside the
+    // tree. Ship them as a tar asset and extract at runtime as before.
+    val xwaylandShareAssetFile = "src/main/assets/xwayland/share.tar"
+    val packXwaylandShareTask = tasks.register<Exec>("packXwaylandShare") {
+        dependsOn(buildXwaylandTask)
+        doFirst { mkdir(file(xwaylandShareAssetFile).parentFile) }
         workingDir = file(xwaylandInstallDir)
-        // Excludes:
-        //   *.la, *.a — libtool / static archive files; build-only.
-        //   pkgconfig — .pc files for downstream cross-compiles only.
-        //   python3.14 — xcb-proto's Python module; only needed when
-        //                running libxcb-codegen at build time.
-        //   cmake — meson-generated CMake module files.
         commandLine("tar", "--format=ustar",
-            "--exclude=*.la", "--exclude=*.a",
-            "--exclude=pkgconfig", "--exclude=cmake",
-            "--exclude=python3.*",
-            "-cf", "${project.projectDir}/$xwaylandAssetFile",
-            "bin/Xwayland", "bin/xkbcomp",
-            "lib",
+            "-cf", "${project.projectDir}/$xwaylandShareAssetFile",
             "share/X11", "share/xkeyboard-config-2")
-        inputs.file("$xwaylandInstallDir/bin/Xwayland")
-        inputs.file("$xwaylandInstallDir/bin/xkbcomp")
-        inputs.dir("$xwaylandInstallDir/lib")
+        inputs.dir("$xwaylandInstallDir/share/X11")
         inputs.dir("$xwaylandInstallDir/share/xkeyboard-config-2")
-        outputs.file(xwaylandAssetFile)
+        outputs.file(xwaylandShareAssetFile)
     }
 
     tasks.named("preBuild") {
-        dependsOn(packXwaylandTask)
+        dependsOn(stageXwaylandJniLibsTask, packXwaylandShareTask)
     }
 }

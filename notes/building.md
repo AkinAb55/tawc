@@ -216,10 +216,14 @@ bash scripts/build-xwayland.sh --clean   # wipe install + builddirs
 bash scripts/build-xwayland.sh --only=libx11   # rebuild one stage
 ```
 
-Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`,
-packed into `assets/xwayland/arm64-v8a.tar` by Gradle's `packXwayland`
-task and extracted on-device by
-`CompositorService.ensureXwaylandExtracted`. ~12 MB asset.
+Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`.
+Gradle's `stageXwaylandJniLibs` task copies the binaries + `.so` deps
+into `app/src/main/jniLibs/arm64-v8a/lib*.so` (so untrusted_app can
+exec them out of `nativeLibraryDir`), and `packXwaylandShare` tars
+the XKB data tree into `assets/xwayland/share.tar`.
+`CompositorService.ensureXwaylandExtracted` extracts the share tar
+and lays down `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks
+into `nativeLibraryDir`.
 
 Host packages (in addition to the always-required set above): `perl`
 (needed by xorgproto/libxcb/font-util autotools macros). Everything
@@ -282,8 +286,9 @@ Invokes the Rust compositor build, copies its output into
 `jniLibs/<abi>/`; cross-builds proot and tawcroot and stages the
 result alongside; runs `scripts/build-libhybris.sh` and packs the
 result into `assets/libhybris/arm64-v8a.tar`; runs
-`scripts/build-xwayland.sh` and packs the result into
-`assets/xwayland/arm64-v8a.tar`; produces
+`scripts/build-xwayland.sh`, stages binaries + `.so` deps as
+`jniLibs/arm64-v8a/lib*.so` and the XKB data tree as
+`assets/xwayland/share.tar`; produces
 `app/build/outputs/apk/debug/app-debug.apk`. Everything libhybris,
 proot, tawcroot, and Xwayland need ships inside this APK.
 

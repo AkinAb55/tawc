@@ -18,7 +18,6 @@ import android.util.Log
 import android.view.WindowManager
 import java.io.File
 import java.lang.ref.WeakReference
-import me.phie.tawc.install.Su
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 /**
@@ -87,25 +86,25 @@ class CompositorService : Service() {
         // land on a complete tree. Idempotent on the same versionCode.
         ensureLibhybrisExtracted(this)
 
-        // Xwayland is bionic-built and packed in the APK as
-        // `assets/xwayland/<abi>.tar`. Extracted into
-        // `<filesDir>/xwayland/{bin,lib,share}/` so the compositor can
-        // exec it as a child process; PATH + LD_LIBRARY_PATH are set
-        // by the Rust side in `compositor::xwayland::start_xwayland`.
+        // Xwayland's exec'ables and runtime libs ride in the APK as
+        // `jniLibs/<abi>/lib{xwayland,xkbcomp,*}.so`, where the OS
+        // extracts them into `applicationInfo.nativeLibraryDir`. That
+        // dir has the `apk_data_file` SELinux type, which
+        // `untrusted_app` is allowed to exec — unlike `app_data_file`
+        // (the type assigned to anything we extract into `filesDir`),
+        // where `execute_no_trans` is denied on Android 10+ and used
+        // to force us to ship a `magiskpolicy --live` rule via su.
+        // The compositor PATH-resolves `Xwayland` against
+        // `<filesDir>/xwayland/bin/`, where this call lays down
+        // symlinks pointing at the real binaries in nativeLibraryDir.
+        // Only the XKB share tree (read by fopen via baked-in absolute
+        // path) still needs runtime extraction.
         ensureXwaylandExtracted(this)
 
-        // Modern Android (10+) denies `execute_no_trans` from
-        // `untrusted_app` onto `app_data_file`, which means the compositor
-        // can extract a binary into its own files dir but cannot exec it
-        // — `Command::new("Xwayland")` returns EACCES with a SELinux AVC
-        // denial. Apply a `magiskpolicy --live` rule via su to lift that
-        // single restriction. Best-effort: on devices without Magisk we
-        // silently fail and the Xwayland spawn will return EACCES, which
-        // the Rust side already logs and tolerates (Wayland clients keep
-        // working). The rule is not persistent across SELinux policy
-        // reloads (Magisk reapplies its own policy on boot), so we
-        // re-issue it on every compositor cold-start.
-        applyXwaylandExecPolicy()
+        // The Rust side adds nativeLibraryDir to LD_LIBRARY_PATH so
+        // Xwayland's bionic linker finds its DT_NEEDED libs (libX11.so,
+        // libxcb.so, …) alongside the binary in apk_data_file context.
+        Os.setenv("TAWC_NATIVE_LIB_DIR", applicationInfo.nativeLibraryDir, true)
 
         // Hand the application context + service to NativeBridge so its
         // reverse-JNI spawnActivity/finishActivity entry points work even
@@ -203,34 +202,6 @@ class CompositorService : Service() {
         atomicReplaceDir(stagingDir, destDir)
         File(destDir, ".version").writeText(currentStamp)
         Log.d(TAG, "Extracted xkb data to $destDir")
-    }
-
-    /**
-     * Grant the `execute_no_trans` SELinux permission needed for the
-     * compositor (running as `untrusted_app`) to fork+exec the Xwayland
-     * binary in our own filesDir. Without this, modern Android refuses
-     * the exec with EACCES even though the file is mode 0755 owned by
-     * the calling uid.
-     *
-     * Applied via `magiskpolicy --live`, which is an in-kernel patch
-     * that doesn't persist across reboots or Magisk policy reloads —
-     * so we re-apply on every compositor cold-start. On devices
-     * without Magisk we silently fail and the Xwayland spawn will hit
-     * EACCES; Wayland clients keep working, only X11 clients are
-     * affected.
-     */
-    private fun applyXwaylandExecPolicy() {
-        if (!Su.rootAvailable()) {
-            Log.i(TAG, "magiskpolicy: skipping Xwayland exec rule (no root)")
-            return
-        }
-        val rule = "allow untrusted_app app_data_file file execute_no_trans"
-        val r = Su.run("magiskpolicy --live \"$rule\"", timeoutSeconds = 5)
-        if (r.ok) {
-            Log.i(TAG, "magiskpolicy: applied Xwayland exec rule")
-        } else {
-            Log.w(TAG, "magiskpolicy: failed to apply Xwayland exec rule: ${r.output}")
-        }
     }
 
     private fun ensureNotificationChannel() {
@@ -427,26 +398,26 @@ class CompositorService : Service() {
         }
 
         /**
-         * Extract `assets/xwayland/<abi>.tar` into `filesDir/xwayland/`,
-         * preserving symlinks. Same versioned-stamp + staging-dir-then-
-         * rename pattern as [ensureLibhybrisExtracted].
+         * Lay down the runtime layout Xwayland expects under
+         * `<filesDir>/xwayland/`:
+         *  - `bin/Xwayland`, `bin/xkbcomp` — symlinks into
+         *    `nativeLibraryDir/lib{xwayland,xkbcomp}.so`. The exec'ables
+         *    live in `apk_data_file` context (where untrusted_app may
+         *    exec), unlike anything we'd extract into filesDir.
+         *  - `share/X11`, `share/xkeyboard-config-2` — extracted from
+         *    `assets/xwayland/share.tar`. Xwayland reads these via
+         *    fopen at the baked-in `-Dxkb_dir` path and the files
+         *    cross-reference each other by relative path inside the
+         *    tree, so we can't flatten them into jniLibs.
          *
-         * The tar contains `bin/Xwayland`, `bin/xkbcomp`, `lib/` (the
-         * bionic-built shared libs Xwayland's DT_NEEDED references),
-         * `share/X11/xkb` (a relative symlink to `share/xkeyboard-config-2`
-         * — the build script rewrites the install-time absolute symlink
-         * for portability), and `share/xkeyboard-config-2/` (the actual
-         * XKB rules / symbols / geometry data files).
-         *
-         * Returns true on success or if no asset is shipped for this
-         * ABI. The compositor handles the latter gracefully — Xwayland
-         * just won't spawn (X11 clients that try `:0` get
-         * connection-refused), and Wayland clients keep working.
+         * Same versioned-stamp + staging-dir-then-rename pattern as
+         * [ensureLibhybrisExtracted]. Returns true on success or if no
+         * asset is shipped (eg. emulator x86_64 build) — Xwayland just
+         * won't spawn (X11 clients see :0 connection-refused) and
+         * Wayland clients keep working.
          */
         fun ensureXwaylandExtracted(context: Context): Boolean = synchronized(XWAYLAND_EXTRACT_LOCK) {
-            val abi = Build.SUPPORTED_ABIS.firstOrNull()
-                ?: return false
-            val assetPath = "xwayland/$abi.tar"
+            val assetPath = "xwayland/share.tar"
             val available = try {
                 context.assets.open(assetPath).close()
                 true
@@ -454,7 +425,7 @@ class CompositorService : Service() {
                 false
             }
             if (!available) {
-                Log.i(TAG, "No Xwayland asset shipped for ABI $abi; X11 clients will fail to connect")
+                Log.i(TAG, "No Xwayland asset shipped; X11 clients will fail to connect")
                 return false
             }
 
@@ -488,18 +459,24 @@ class CompositorService : Service() {
                             else -> {
                                 outFile.parentFile?.mkdirs()
                                 outFile.outputStream().use { out -> tar.copyTo(out) }
-                                if ((entry.mode and 0b001_001_001) != 0) {
-                                    outFile.setExecutable(true, false)
-                                }
                             }
                         }
                     }
                 }
             }
 
+            // Symlink bin/{Xwayland,xkbcomp} → nativeLibraryDir/lib*.so.
+            // PATH lookup in the compositor finds the symlink, execve(2)
+            // follows to the real file, SELinux checks the *target's*
+            // domain (apk_data_file) — allowed.
+            val nativeLibDir = context.applicationInfo.nativeLibraryDir
+            val binDir = File(stagingDir, "bin").apply { mkdirs() }
+            Os.symlink("$nativeLibDir/libxwayland.so", File(binDir, "Xwayland").absolutePath)
+            Os.symlink("$nativeLibDir/libxkbcomp.so", File(binDir, "xkbcomp").absolutePath)
+
             atomicReplaceDir(stagingDir, destDir)
             File(destDir, ".version").writeText(currentStamp)
-            Log.i(TAG, "Extracted Xwayland ($abi) to $destDir")
+            Log.i(TAG, "Staged Xwayland under $destDir (binaries -> $nativeLibDir)")
             return true
         }
     }

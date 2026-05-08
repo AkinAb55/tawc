@@ -2,13 +2,18 @@
 //! routing X11 surfaces through tawc's host/toplevel model, and feeding
 //! the X11 window manager loop.
 //!
-//! The Xwayland binary and its DT_NEEDED libs are extracted from the
-//! APK to `/data/data/me.phie.tawc/files/xwayland/` by
-//! `CompositorService.ensureXwaylandExtracted` (Kotlin). It's a plain
-//! aarch64-linux-android binary, so it loads under the system bionic
-//! linker — we just have to put `<install>/bin` on `PATH` for
-//! `Command::new("Xwayland")`, and set `LD_LIBRARY_PATH` so the linker
-//! finds `<install>/lib/*.so.*`.
+//! The Xwayland binary, xkbcomp, and their DT_NEEDED libs are shipped
+//! as `jniLibs/<abi>/lib*.so` so they end up in `nativeLibraryDir`,
+//! which has the `apk_data_file` SELinux type — the only on-disk place
+//! `untrusted_app` is allowed to exec from on Android 10+.
+//! `CompositorService.ensureXwaylandExtracted` (Kotlin) lays down
+//! symlinks at `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` pointing at
+//! those real files, exports the dir to us via `TAWC_NATIVE_LIB_DIR`,
+//! and extracts the XKB data tree (read by fopen via Xwayland's
+//! baked-in `-Dxkb_dir`) into `<filesDir>/xwayland/share/`. We just
+//! have to put `<install>/bin` on `PATH` for
+//! `Command::new("Xwayland")` and point `LD_LIBRARY_PATH` at
+//! nativeLibraryDir so the linker finds the bionic-built `.so` deps.
 //!
 //! The X11 socket lives at `/data/data/me.phie.tawc/xtmp/.X11-unix/X{N}`
 //! and the lockfile at `/data/data/me.phie.tawc/xtmp/.X{N}-lock`. Smithay
@@ -83,10 +88,17 @@ pub fn start_xwayland(
     // stub then fails to resolve glibc's libc.so.6 and the dlopen
     // collapses. Server-side AHB allocation needs only the bionic
     // libnativewindow.so already resident in /system/lib64.
-    let mut envs: Vec<(String, String)> = vec![(
-        "LD_LIBRARY_PATH".to_string(),
-        format!("{xwl}/lib", xwl = XWL_INSTALL_DIR),
-    )];
+    //
+    // The DT_NEEDED .sos (libX11, libxcb, libpixman-1, …) live next to
+    // the binaries in nativeLibraryDir, exported by Kotlin as
+    // `TAWC_NATIVE_LIB_DIR`. If unset we'll fall back to the legacy
+    // filesDir layout — Xwayland just won't find its libs and exec
+    // will fail; logged here so the cause is obvious.
+    let lib_dir = std::env::var("TAWC_NATIVE_LIB_DIR").unwrap_or_else(|_| {
+        warn!("xwayland: TAWC_NATIVE_LIB_DIR not set; Xwayland will likely fail to load its .so deps");
+        format!("{xwl}/lib", xwl = XWL_INSTALL_DIR)
+    });
+    let mut envs: Vec<(String, String)> = vec![("LD_LIBRARY_PATH".to_string(), lib_dir)];
 
     // Phase-2 step-2 verification harness: opt-in via the Android system
     // property `debug.tawc.xwl_test_pattern` (or env var fallback for

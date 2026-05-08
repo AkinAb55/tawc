@@ -211,11 +211,12 @@ glibc X server inside the APK.
 
 We **cross-compile Xwayland and its X11/font/render dependencies for
 aarch64 bionic** (NDK `aarch64-linux-android29-clang`) and ship them
-in the APK as assets, extracted to
-`/data/data/me.phie.tawc/files/xwayland/` on first run. The
-compositor process exec's `Xwayland` from that directory — so the
-binary is a direct child of the Android app process, with no
-su / chroot crossing required.
+in the APK as `jniLibs/<abi>/lib*.so` (binaries + DT_NEEDED libs) plus
+the XKB data tree as a tarball asset. On first run the compositor
+PATH-resolves `Xwayland` against `<filesDir>/xwayland/bin/`, where
+Kotlin lays down symlinks pointing at the real binaries in
+`applicationInfo.nativeLibraryDir`. The binary is then a direct child
+of the Android app process, with no su / chroot crossing required.
 
 Rejected alternative: launching glibc-Xwayland from inside the chroot
 via `su -c chroot rootfs Xwayland`. Rejected because smithay's
@@ -332,8 +333,11 @@ other for correctness, and a third we may never do.
 
 - NDK `aarch64-linux-android29-clang` toolchain.
 - Bionic compat patches above.
-- Asset packaging + Kotlin extractor: tarball ships in the APK,
-  extracts to `<filesDir>/xwayland/`.
+- Asset packaging + Kotlin extractor: binaries + .so deps ride in
+  the APK as `jniLibs/<abi>/lib*.so`, the XKB data tree extracts
+  from `assets/xwayland/share.tar` into `<filesDir>/xwayland/share/`,
+  and `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` are symlinks into
+  `nativeLibraryDir` (see "In-app packaging" below).
 - **No further Xwayland source patches required for SHM clients.**
   Server-rendered pixmaps flow through `xwayland-shm.c` → `wl_shm`
   → compositor → magenta tint. xclock, xeyes, xterm, xwd, GIMP-2D,
@@ -659,7 +663,7 @@ binding.
 Modern Android (10+) denies `execute_no_trans` from `untrusted_app`
 onto `app_data_file` — i.e. an app can extract a binary into its own
 files dir and chmod it 0755, but `Command::new("Xwayland")` returns
-EACCES when fork+exec actually fires. The denial appears in dmesg as:
+EACCES when fork+exec actually fires:
 
 ```
 avc: denied { execute_no_trans }
@@ -668,27 +672,22 @@ avc: denied { execute_no_trans }
   tclass=file permissive=0
 ```
 
-Fix: apply a `magiskpolicy --live` rule before `nativeStartCompositor`:
+Fix: ship the binaries (and their `.so` deps) as `jniLibs/<abi>/lib*.so`
+so the OS extracts them into `applicationInfo.nativeLibraryDir`. That
+dir gets the **`apk_data_file`** SELinux type, which untrusted_app *is*
+allowed to exec. Same trick `libproot.so` already uses. `Xwayland` →
+`libxwayland.so`, `xkbcomp` → `libxkbcomp.so`, the `lib/lib*.so` deps
+copy across as-is (the build emits flat versionless `.so` filenames,
+no symlink chains to flatten).
 
-```sh
-magiskpolicy --live "allow untrusted_app app_data_file file execute_no_trans"
-```
-
-`CompositorService.applyXwaylandExecPolicy()` runs this via Magisk's
-`su` on every compositor cold-start. The `--live` flag patches the
-in-kernel policy; the rule does not persist across reboots or Magisk
-policy reloads, so re-applying on each start is correct. Devices
-without Magisk silently fail the call and X11 clients won't work
-(Wayland clients are unaffected).
-
-The rule grants the permission to *any* `untrusted_app`, not just
-ours — narrower targeting (`allow me.phie.tawc app_data_file …`)
-isn't directly expressible because all third-party apps share the
-`untrusted_app` SELinux domain. The marginal additional risk is "any
-app on the device can now exec a binary it dropped in its own data
-dir" — already true on most pre-Android-10 devices, and Magisk's
-own bash + busybox bundling rests on the same loophole at the
-`magisk` domain.
+`CompositorService.ensureXwaylandExtracted` lays down symlinks at
+`<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` pointing at the real
+binaries in `nativeLibraryDir`; the compositor's PATH lookup hits
+the symlink and `execve(2)` follows it to the apk_data_file target,
+where SELinux is happy. `LD_LIBRARY_PATH` is set to
+`nativeLibraryDir` directly via the `TAWC_NATIVE_LIB_DIR` env var
+that Kotlin exports before `nativeStartCompositor`. No `su`, no
+`magiskpolicy --live`, works on rootless devices.
 
 ## Compositor-side wiring (done; on-disk in this branch)
 
@@ -717,11 +716,11 @@ own bash + busybox bundling rests on the same loophole at the
   die in `createWindow`. Wayland-first with X11 fallback keeps SDL
   apps on the libhybris/EGL path while leaving X11 reachable for
   the X-only clients that genuinely need it.
-- `start_xwayland` sets `LD_LIBRARY_PATH=<xwl>/lib` for the Xwayland
-  process — **not** `<xwl>/lib:<libhybris>/lib`. libhybris's
-  `lib/libui.so.1.0.0` is a glibc-built stub for chroot-side use,
-  and putting it ahead of `/system/lib64` makes the bionic linker
-  pick it up when resolving `libnativewindow.so`'s
+- `start_xwayland` sets `LD_LIBRARY_PATH=$TAWC_NATIVE_LIB_DIR` for the
+  Xwayland process — **not** `$TAWC_NATIVE_LIB_DIR:<libhybris>/lib`.
+  libhybris's `lib/libui.so.1.0.0` is a glibc-built stub for
+  chroot-side use, and putting it ahead of `/system/lib64` makes the
+  bionic linker pick it up when resolving `libnativewindow.so`'s
   `DT_NEEDED libui.so` (Phase 2 step 2 dlopens libnativewindow for
   AHB allocation). The libhybris stub then fails to find glibc's
   `libc.so.6` and the load collapses. Server-side AHB allocation
@@ -746,16 +745,29 @@ TAWC compositor` (separate commit from the older Android support one):
    clients can reach the abstract socket and the filesystem socket
    lives in the app's private data dir.
 
-## In-app extraction
+## In-app packaging
 
-Gradle's `packXwayland` task tars the cross-compiled
-`build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share/X11,share/xkeyboard-config-2}`
-into `assets/xwayland/arm64-v8a.tar`. On first
-`CompositorService.onCreate` after install / app upgrade,
-`ensureXwaylandExtracted` extracts that tarball into
-`<filesDir>/xwayland/` preserving symlinks (matching the existing
-`ensureLibhybrisExtracted` pattern: stage to `xwayland.new`, rename,
-write `.version` stamp keyed on `longVersionCode`). The compositor's
+Gradle splits Xwayland's tree across two output paths:
+
+1. `stageXwaylandJniLibs` copies
+   `build/xwayland-aarch64/install/bin/{Xwayland,xkbcomp}` into
+   `app/src/main/jniLibs/arm64-v8a/lib{xwayland,xkbcomp}.so`, plus
+   each `lib/*.so` next to them. The OS extracts these to
+   `applicationInfo.nativeLibraryDir` at install time, where they
+   get the `apk_data_file` SELinux type that untrusted_app may
+   exec — see "SELinux: app exec of bundled binaries" above.
+2. `packXwaylandShare` tars the XKB data tree
+   (`share/X11`, `share/xkeyboard-config-2`) into
+   `app/src/main/assets/xwayland/share.tar`. We can't flatten this
+   into jniLibs because Xwayland reads it via fopen at the baked-in
+   `-Dxkb_dir` path and the files cross-reference each other by
+   relative path inside the tree.
+
+On first `CompositorService.onCreate` after install / app upgrade,
+`ensureXwaylandExtracted` extracts `share.tar` into
+`<filesDir>/xwayland/share/` and creates the
+`<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks pointing at
+the real binaries in `nativeLibraryDir`. The compositor's
 `xwayland::start_xwayland` then sets `PATH` and `LD_LIBRARY_PATH` so
 the smithay `Command::new("Xwayland")` lookup picks up our copy.
 
