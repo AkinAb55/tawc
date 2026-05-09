@@ -25,7 +25,7 @@ There is exactly one place that knows how to enter a rootfs:
 |---|---|
 | In-app installer (Installer pipeline) | `method.runInside` → `MethodRunHelper.runInside` → `method.startInside` |
 | In-app launcher (LauncherActivity) | same |
-| Host scripts (`tawc-rootfs-run.sh`, `install-test-deps.sh`) | broker `RUNINSIDE` request → `method.startInside` |
+| Host scripts (`rootfs-run.sh`, `install-test-deps.sh`) | broker `RUNINSIDE` request → `method.startInside` |
 | Integration tests (`rootfs_run`, `rootfs_spawn`) | same broker path |
 
 `startInside` upholds the session invariant — `setsid` is built into

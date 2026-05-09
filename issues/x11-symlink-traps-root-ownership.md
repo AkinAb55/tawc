@@ -40,7 +40,7 @@ adb shell su -c 'rm -f /data/data/me.phie.tawc/distros/void/rootfs/tmp/.X11-unix
 
 Workaround for now: never invoke `enter.sh` directly via `su -c`
 against a tawcroot install — always go through
-`scripts/tawc-rootfs-run.sh`, which dispatches by method and uses
+`scripts/rootfs-run.sh`, which dispatches by method and uses
 `run-as` for tawcroot.
 
 ## Fix directions

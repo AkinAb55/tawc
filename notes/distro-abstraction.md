@@ -188,7 +188,7 @@ returns null, before any disk state is written.
 ## Out of scope (deliberately, in this pass)
 
 - Multi-install / multiple ids on one device. Still implicit "id =
-  arch" in `scripts/tawc-rootfs-run.sh` (env-overridable),
+  arch" in `scripts/rootfs-run.sh` (env-overridable),
   `tests/integration/src/{adb,rootfs,rootfs_process}.rs`, and
   `scripts/build-debug-app.sh` / `scripts/run-integration-tests.sh`
   preflight paths. The on-disk layout, [Installation],

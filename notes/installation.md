@@ -8,7 +8,7 @@ install/run/destroy logic that previously lived only in the
 - store the chroot inside its private data dir, so uninstalling the app
   reclaims everything
 - offer the same operations to adb / integration tests via the
-  `scripts/tawc-rootfs-run.sh` host script (no broadcast surface)
+  `scripts/rootfs-run.sh` host script (no broadcast surface)
 
 This is the *only* chroot system in the project. The earlier
 `client/arch-chroot-*` scripts (which targeted `/data/local/arch-chroot/`)
@@ -896,7 +896,7 @@ key on.
 
 ## Host-side bridge
 
-`scripts/tawc-rootfs-run.sh` is the host-driven counterpart to in-app
+`scripts/rootfs-run.sh` is the host-driven counterpart to in-app
 `ChrootRunner.run`. Both invoke the same `<installation-dir>/enter.sh`
 written by `ChrootMounter.enterScript`, so the mount + chroot logic is
 defined exactly once (in Kotlin) and rendered to a script that adb

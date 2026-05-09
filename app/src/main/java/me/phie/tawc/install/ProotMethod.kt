@@ -213,7 +213,7 @@ class ProotMethod(context: Context) : InstallationMethod {
     /**
      * Recursive delete with one wrinkle: tracees that ran under a
      * proot-via-su entry (e.g. integration tests that go through
-     * `scripts/tawc-rootfs-run.sh`'s `su -c '<enter.sh>'` path on rooted
+     * `scripts/rootfs-run.sh`'s `su -c '<enter.sh>'` path on rooted
      * devices) leave on-disk files with `uid=0` ownership, even though
      * the install was originally proot/app-uid. Plain `chmod -R` from
      * app uid then can't make those files writable, and the

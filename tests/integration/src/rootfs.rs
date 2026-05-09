@@ -89,7 +89,7 @@ fn ensure_rootfs_app(name: &str) -> io::Result<String> {
 
     // Build inside the build install. When TAWC_BUILD_INSTALL_ID
     // overrides the test install, run inside the build install via
-    // `scripts/tawc-rootfs-run.sh` rather than reusing
+    // `scripts/rootfs-run.sh` rather than reusing
     // `adb::rootfs_run` (which is bound to the test install's id).
     let output = if build_install == test_install {
         adb::rootfs_run(&format!("/bin/bash {}/build.sh", rootfs_build))?
@@ -100,7 +100,7 @@ fn ensure_rootfs_app(name: &str) -> io::Result<String> {
             .parent()
             .unwrap()
             .join("scripts")
-            .join("tawc-rootfs-run.sh");
+            .join("rootfs-run.sh");
         Command::new("bash")
             .arg(&script)
             .arg(format!("/bin/bash {}/build.sh", rootfs_build))

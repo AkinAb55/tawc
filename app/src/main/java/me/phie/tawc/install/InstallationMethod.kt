@@ -92,7 +92,7 @@ interface InstallationMethod {
      * (notes/rootfs-sessions.md) is upheld in here, in one place.
      *
      * `command == null` means interactive `bash -l` — drops into a
-     * login shell with no command. Useful for `tawc-rootfs-run.sh`
+     * login shell with no command. Useful for `rootfs-run.sh`
      * with no args.
      *
      * Method-specific notes:

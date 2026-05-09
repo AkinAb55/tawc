@@ -105,7 +105,7 @@ ARG mirrorProxy=http://127.0.0.1:8080/proxy/
 broker reads the install's recorded method from `metadata.json` and
 calls `InstallationMethod.startInside`, the single Kotlin entry point
 for "enter the chroot" (notes/rootfs-sessions.md). Used by
-`tawc-rootfs-run.sh`, `install-test-deps.sh`, and the integration
+`rootfs-run.sh`, `install-test-deps.sh`, and the integration
 test crate. Omit `CMD` for interactive `bash -l`. `OP_TITLE` is
 optional and behaves the same as on ARGV form.
 
@@ -317,7 +317,7 @@ tawc-exec --in-rootfs ID [--op-title TITLE] [-- CMD ...]
 
 `--op-title TITLE` opts into the in-app log-screen mirror — the broker
 posts an Operation, opens `LogScreenActivity`, and streams stdout /
-stderr lines into it as they come in. `tawc-rootfs-run.sh` sets a
+stderr lines into it as they come in. `rootfs-run.sh` sets a
 sensible default title for non-interactive command invocations
 (scriptable callers can override via `TAWC_OP_TITLE=<title>` or set
 `TAWC_OP_TITLE=` to suppress); integration tests don't set it (they'd
@@ -357,7 +357,7 @@ for the one connection.
 After the broker rollout, the only remaining privileged paths in dev
 workflows are:
 
-- **`chroot` install method** (`scripts/tawc-rootfs-run.sh`,
+- **`chroot` install method** (`scripts/rootfs-run.sh`,
   `tests/integration/src/adb.rs`). `chroot(2)` requires
   `CAP_SYS_CHROOT` — fundamental, not a workaround. tawcroot and proot
   installs all go through the broker.

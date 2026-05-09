@@ -60,7 +60,7 @@ seccomp on tracees that ask to install their own filter." Concretely:
 - **Option C: detect Firefox at runtime and inject env in our
   process spawner.** When the in-app launcher (future
   per-app spawner) detects an executable named `firefox`, set the
-  env vars there. Doesn't help command-line `tawc-rootfs-run firefox`
+  env vars there. Doesn't help command-line `rootfs-run firefox`
   though.
 
 ## Why we didn't fix it inline

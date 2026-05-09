@@ -18,9 +18,9 @@
 #     broker forks `su` itself; nothing outside the JVM needs it.
 #
 # Usage:
-#   scripts/tawc-rootfs-run.sh                       # interactive shell
-#   scripts/tawc-rootfs-run.sh "<command>"           # run a command and exit
-#   TAWC_INSTALL_ID=<id> scripts/tawc-rootfs-run.sh  # pin a specific install
+#   scripts/rootfs-run.sh                       # interactive shell
+#   scripts/rootfs-run.sh "<command>"           # run a command and exit
+#   TAWC_INSTALL_ID=<id> scripts/rootfs-run.sh  # pin a specific install
 #                                                  (otherwise auto-detected
 #                                                  if exactly one is present)
 set -euo pipefail
@@ -37,12 +37,12 @@ _script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 INSTALL_ID="$TAWC_INSTALL_ID"
 
-# Non-interactive `tawc-rootfs-run.sh "<cmd>"` mirrors stdio into the
+# Non-interactive `rootfs-run.sh "<cmd>"` mirrors stdio into the
 # in-app log screen by default — the user's mental model is "I asked the
 # phone to run this; show me what's happening on the phone too." Skip
 # the panel for interactive shells (panel can't usefully render them)
 # and when TAWC_OP_TITLE= is set to empty (escape hatch for callers
-# that want pure stdio relay, e.g. nested tawc-rootfs-run inside a
+# that want pure stdio relay, e.g. nested rootfs-run inside a
 # script that already shows its own panel). Default title trims long
 # command lines so the toolbar stays readable.
 default_title() {

@@ -150,6 +150,6 @@ echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 # substring glycin doesn't recognise) so the autodetect actually fires.
 # See syscalls_fs.c:open_proc_overflow_id_shadow + notes/tawcroot.md.
 TAWC_OP_TITLE="install test deps ($DISTRO_KEY)" \
-    "$ROOT_DIR/scripts/tawc-rootfs-run.sh" "$INSTALL_CMD"
+    "$ROOT_DIR/scripts/rootfs-run.sh" "$INSTALL_CMD"
 
 echo "=== Done ==="

@@ -17,7 +17,7 @@ resolution archaeology).
 ## Launching
 
 ```bash
-bash scripts/tawc-rootfs-run.sh 'firefox --no-remote'
+bash scripts/rootfs-run.sh 'firefox --no-remote'
 ```
 
 No Firefox-specific env vars or autoconfig prefs. `GDK_GL=gles:always` is
