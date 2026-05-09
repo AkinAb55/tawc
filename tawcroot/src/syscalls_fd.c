@@ -23,6 +23,7 @@
 #include "raw_sys.h"
 #include "sysnr.h"
 #include "tawc_uapi.h"
+#include "usercopy.h"
 
 int    tawcroot_reserved_fds[TAWCROOT_MAX_RESERVED_FDS];
 size_t tawcroot_n_reserved_fds;
@@ -256,6 +257,89 @@ static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 #endif
 
+/* ioctl translation, primarily for the {TC,GET,SET}S2 family.
+ *
+ * Android's untrusted_app sepolicy whitelists tty ioctls via an
+ * `allowxperm` set called `unpriv_tty_ioctls`. That set covers the
+ * legacy variants (TCGETS / TCSETS / TCSETSW / TCSETSF, TIOCG/SWINSZ,
+ * TIOCS/GPGRP, FIONREAD, FIONBIO, FIOCLEX/NCLEX) but does NOT include
+ * the newer "termios2" variants (TCGETS2 / TCSETS2 / TCSETSW2 /
+ * TCSETSF2) introduced for arbitrary-baud support. The kernel's
+ * SELinux check rejects them with -EACCES before the devpts driver
+ * even runs.
+ *
+ * Modern glibc's tcgetattr/tcsetattr issue TCGETS2 first and only
+ * fall back to TCGETS on -EINVAL, NOT on -EACCES. Result: bash
+ * (and every other glibc tty consumer) sees -EACCES from
+ * tcgetattr(stdin), concludes stdin isn't a tty, and skips both
+ * the prompt and readline — which is exactly what "lxterminal /
+ * wezterm render but show no prompt or accept input" looks like.
+ *
+ * Translate the four termios2 ioctls back to their legacy
+ * counterparts. The kernel-ABI structs are identical for the first
+ * 36 bytes (4*tcflag_t + c_line + c_cc[19]); termios2 adds a
+ * trailing speed_t c_ispeed and speed_t c_ospeed (8 bytes total).
+ * For TCGETS2 we zero the speed slots — apps that care about
+ * arbitrary baud are not relevant inside our pty-only environment,
+ * and CBAUD bits in c_cflag carry the symbolic baud (B38400 etc.)
+ * unchanged. For TCSETS2/W2/F2 we drop the speed fields, again
+ * safe because the kernel reads CBAUD from c_cflag.
+ *
+ * All other ioctl numbers pass through unmodified. */
+
+/* asm-generic/ioctl.h numbers (same layout for x86_64 and aarch64). */
+#define TAWC_TCGETS    0x5401U
+#define TAWC_TCSETS    0x5402U
+#define TAWC_TCSETSW   0x5403U
+#define TAWC_TCSETSF   0x5404U
+#define TAWC_TCGETS2   0x802C542AU  /* _IOR('T', 0x2A, struct termios2) */
+#define TAWC_TCSETS2   0x402C542BU  /* _IOW('T', 0x2B, struct termios2) */
+#define TAWC_TCSETSW2  0x402C542CU  /* _IOW('T', 0x2C, struct termios2) */
+#define TAWC_TCSETSF2  0x402C542DU  /* _IOW('T', 0x2D, struct termios2) */
+
+#define TAWC_KERN_TERMIOS_SIZE   36  /* asm/termbits.h: 4*4 + 1 + 19 */
+#define TAWC_KERN_TERMIOS2_TAIL   8  /* speed_t c_ispeed + speed_t c_ospeed */
+
+static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	long fd  = args->a;
+	unsigned int cmd = (unsigned int)args->b;
+	long arg = args->c;
+
+	if (cmd == TAWC_TCGETS2) {
+		if (!arg) return TAWC_EFAULT;
+		unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
+		long rv = TAWC_RAW(TAWC_SYS_ioctl, fd,
+		                   (long)TAWC_TCGETS, (long)buf, 0, 0, 0);
+		if (rv < 0) return rv;
+		long e = tawc_copy_to_guest((void *)(uintptr_t)arg,
+		                            buf, sizeof buf);
+		if (e < 0) return TAWC_EFAULT;
+		unsigned char zero[TAWC_KERN_TERMIOS2_TAIL] = {0};
+		e = tawc_copy_to_guest((void *)(uintptr_t)
+		                       (arg + TAWC_KERN_TERMIOS_SIZE),
+		                       zero, sizeof zero);
+		if (e < 0) return TAWC_EFAULT;
+		return rv;
+	}
+	if (cmd == TAWC_TCSETS2 || cmd == TAWC_TCSETSW2 ||
+	    cmd == TAWC_TCSETSF2) {
+		if (!arg) return TAWC_EFAULT;
+		unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
+		long e = tawc_copy_from_guest(buf, sizeof buf,
+		                              (const void *)(uintptr_t)arg);
+		if (e < 0) return TAWC_EFAULT;
+		unsigned int legacy =
+			(cmd == TAWC_TCSETS2)  ? TAWC_TCSETS  :
+			(cmd == TAWC_TCSETSW2) ? TAWC_TCSETSW : TAWC_TCSETSF;
+		return TAWC_RAW(TAWC_SYS_ioctl, fd,
+		                (long)legacy, (long)buf, 0, 0, 0);
+	}
+	return TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
+	                args->d, args->e, args->f);
+}
+
 void tawcroot_fd_register(void)
 {
 	tawcroot_dispatch_install(TAWC_SYS_close,       handle_close);
@@ -264,6 +348,7 @@ void tawcroot_fd_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_dup3,        handle_dup3);
 	tawcroot_dispatch_install(TAWC_SYS_fcntl,       handle_fcntl);
 	tawcroot_dispatch_install(TAWC_SYS_getdents64,  handle_getdents64);
+	tawcroot_dispatch_install(TAWC_SYS_ioctl,       handle_ioctl);
 #if defined(__x86_64__)
 	tawcroot_dispatch_install(TAWC_SYS_dup2,        handle_dup2);
 	tawcroot_dispatch_install(TAWC_SYS_poll,        handle_poll);

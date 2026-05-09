@@ -1560,6 +1560,91 @@ static int test_legacy_epoll_wait(void)
 }
 #endif
 
+/* ioctl trap + TCGETS2 → TCGETS translation (both arches).
+ *
+ * Bug: Android's untrusted_app_all_devpts ioctl xperm whitelist
+ * includes the legacy TCGETS family but not the termios2 variants.
+ * Glibc's tcgetattr issues TCGETS2 first and only falls back on
+ * -EINVAL, NOT on -EACCES. Bash sees -EACCES from tcgetattr(stdin),
+ * decides stdin isn't a tty, and never prints a prompt or starts
+ * readline. Same root cause for lxterminal and wezterm rendering an
+ * empty pane on the emulator.
+ *
+ * The handler can't be exercised via the actual EACCES path on a
+ * vanilla host kernel (no SELinux gate), so this test instead pins
+ * the behaviour we depend on:
+ *
+ *   - Unknown ioctl numbers pass through unchanged. We use
+ *     ioctl(regfile, FIONBIO, &one) to flip O_NONBLOCK and check it
+ *     via fcntl(F_GETFL). Pure pass-through; no termios2 in play.
+ *   - TCGETS / TCGETS2 / TCSETS2 on a non-tty fd all return -ENOTTY.
+ *     This proves the four-cmd termios2 dispatch reaches the kernel
+ *     via the legacy ioctl number rather than getting stuck in our
+ *     handler.
+ *   - TCGETS2 with a NULL arg returns -EFAULT before issuing the
+ *     underlying ioctl (defends the user-pointer check). */
+static int test_ioctl_translation(void)
+{
+	int fails = 0;
+	long rv;
+
+	long fd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step("open /etc/probe (regular file) for ioctl test",
+			      fd >= 0);
+	if (fd < 0) {
+		tawc_io_kv_dec("    open errno (-rv)", -fd);
+		return fails;
+	}
+
+	/* FIONBIO = 0x5421: unknown to our handler, must pass through. */
+	int nb = 1;
+	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x5421L, (long)&nb, 0, 0, 0, rv);
+	fails += tawc_io_step("ioctl(fd, FIONBIO, &1) -> 0 (passthrough)",
+			      rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	/* Confirm O_NONBLOCK actually got set (not just that ioctl returned 0). */
+	long flags;
+	INLINE_SYS6(TAWC_SYS_fcntl, fd, 3 /*F_GETFL*/, 0, 0, 0, 0, flags);
+	fails += tawc_io_step("FIONBIO actually set O_NONBLOCK (fcntl F_GETFL)",
+			      flags >= 0 && (flags & 04000 /*O_NONBLOCK*/));
+	tawc_io_kv_dec("    flags", flags);
+
+	/* TCGETS / TCGETS2 on a regular file: kernel returns -ENOTTY (-25).
+	 * The TCGETS2 path goes through our translator and forwards as
+	 * TCGETS — same kernel response, proving the dispatch reaches the
+	 * kernel via the legacy number. */
+	unsigned char tbuf[44]; /* sizeof(struct termios2) */
+	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x5401L /*TCGETS*/,
+		    (long)tbuf, 0, 0, 0, rv);
+	fails += tawc_io_step("ioctl(regfile, TCGETS) -> -ENOTTY", rv == -25);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x802C542AL /*TCGETS2*/,
+		    (long)tbuf, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"ioctl(regfile, TCGETS2) -> -ENOTTY (translated to TCGETS)",
+		rv == -25);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x402C542BL /*TCSETS2*/,
+		    (long)tbuf, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"ioctl(regfile, TCSETS2) -> -ENOTTY (translated to TCSETS)",
+		rv == -25);
+	tawc_io_kv_dec("    rv", rv);
+
+	/* NULL arg short-circuits in our handler before the kernel call. */
+	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x802C542AL /*TCGETS2*/,
+		    0L, 0, 0, 0, rv);
+	fails += tawc_io_step("ioctl(fd, TCGETS2, NULL) -> -EFAULT",
+			      rv == -14);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_close, fd, 0, 0, 0, 0, 0, rv);
+	return fails;
+}
+
 /* Internal-fd protection (Phase 0.5). The reserved range starts at
  * TAWCROOT_RESERVED_FD_BASE (1000); rootfs_fd is reserved at init.
  * From the guest's POV, every fd at/above the base does not exist:
@@ -3431,6 +3516,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_legacy_x86_64_wrappers();
 	fails += test_legacy_epoll_wait();
 #endif
+	fails += test_ioctl_translation();
 	fails += test_internal_fd_protection();
 	fails += test_guest_seccomp_prctl_handling();
 	fails += test_sigsys_virtualization();
