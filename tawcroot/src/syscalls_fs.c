@@ -93,16 +93,18 @@ static tawcroot_path_mode openat_mode(int flags)
 
 /* Forward decls — bodies live below, near the other /proc/self
  * helpers (is_proc_self_exe etc.). */
-static int  is_proc_self_maps(const char *path);
-static int  is_proc_self_exe(const char *path);
-static long open_proc_maps_shadow(void);
-static long compose_fd_relative(int dirfd, const char *gpath_str,
-				char *out, size_t cap);
+static int         is_proc_self_maps(const char *path);
+static int         is_proc_self_exe(const char *path);
+static const char *match_proc_sys_overflow_id(const char *path);
+static long        open_proc_maps_shadow(void);
+static long        open_proc_overflow_id_shadow(const char *memfd_name);
+static long        compose_fd_relative(int dirfd, const char *gpath_str,
+				       char *out, size_t cap);
 
 /* Fast-out: does this guest-relative leaf even have a chance of
- * composing into a /proc/self/<x> target? Legitimate first chars are
- * {s,t,m,e,digit} — covering "self/", "task/", "maps", "exe", and
- * numeric "<tid>/" forms. Anything else (the vast majority of fd-
+ * composing into a /proc/<x> path that we shadow? Legitimate first chars
+ * are {s,t,m,e,digit} — covering "self/", "sys/", "task/", "maps", "exe",
+ * and numeric "<tid>/" forms. Anything else (the vast majority of fd-
  * relative opens — config files, dotfiles, library names, etc.) skips
  * the readlinkat. */
 static int could_be_proc_relative(const char *p)
@@ -127,14 +129,26 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * $ORIGIN resolvers, crash handlers) see host paths the guest's
 	 * world view doesn't contain.
 	 *
+	 * /proc/sys/kernel/overflow{uid,gid}: synthesize a memfd holding
+	 * the Linux-conventional "65534\n". Android's SELinux denies the
+	 * untrusted_app domain any read under /proc/sys/kernel, so bwrap
+	 * (which reads both sysctls before unshare(CLONE_NEWUSER) to set up
+	 * its uid/gid maps) bails with a stderr message that doesn't match
+	 * glycin's "namespace setup failed" autodetect substrings.
+	 * Synthesizing here lets bwrap proceed to the unshare, fail with
+	 * the substring glycin recognizes, and trigger its NotSandboxed
+	 * fallback. See notes/tawcroot.md "More /proc reverse-translation
+	 * paths" for the wider context.
+	 *
 	 * Only intercept O_RDONLY (no O_DIRECTORY, no O_PATH). Other flag
 	 * combos fall through to normal translation so the kernel produces
 	 * the conventional -ENOTDIR / O_PATH-fd behavior. The 64-byte peek
-	 * is wide enough for "/proc/<10-digit-pid>/task/<10-digit-tid>/maps";
-	 * longer paths can't match anyway.
+	 * is wide enough for "/proc/<10-digit-pid>/task/<10-digit-tid>/maps"
+	 * and for "/proc/sys/kernel/overflowuid"; longer paths can't match.
 	 *
-	 * Fd-relative form: openat(proc_dir_fd, "self/maps", ...) etc. We
-	 * resolve dirfd via /proc/self/fd/<n>, join with the guest path, and
+	 * Fd-relative form: openat(proc_dir_fd, "self/maps", ...) or
+	 * openat(proc_dir_fd, "sys/kernel/overflowuid", ...). We resolve
+	 * dirfd via /proc/self/fd/<n>, join with the guest path, and
 	 * re-classify. One extra readlinkat per non-AT_FDCWD relative
 	 * O_RDONLY-ish open; only fires when the absolute peek didn't match. */
 	if (gpath &&
@@ -144,16 +158,28 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		char tmp[64];
 		long pn = tawc_copy_string_from_guest(tmp, sizeof tmp, gpath);
 		if (pn >= 0) {
+			const char *overflow_name;
 			if (is_proc_self_maps(tmp))
 				return open_proc_maps_shadow();
+			overflow_name = match_proc_sys_overflow_id(tmp);
+			if (overflow_name)
+				return open_proc_overflow_id_shadow(
+					overflow_name);
 			if (dirfd != AT_FDCWD && tmp[0] != '/' &&
 			    could_be_proc_relative(tmp)) {
 				char composed[TAWC_PATH_MAX];
 				if (compose_fd_relative(dirfd, tmp,
 							composed,
-							sizeof composed) > 0
-				    && is_proc_self_maps(composed))
-					return open_proc_maps_shadow();
+							sizeof composed) > 0) {
+					if (is_proc_self_maps(composed))
+						return open_proc_maps_shadow();
+					overflow_name =
+						match_proc_sys_overflow_id(
+							composed);
+					if (overflow_name)
+						return open_proc_overflow_id_shadow(
+							overflow_name);
+				}
 			}
 		}
 	}
@@ -660,6 +686,21 @@ static int is_proc_self_maps(const char *path)
 	return tail && tawc_streq(tail, "maps");
 }
 
+/* Match the /proc/sys/kernel/overflow{uid,gid} pair. Returns the memfd
+ * label on a hit (the suffix is the only thing that varies between the
+ * two), NULL otherwise. The label is what shows up under
+ * /proc/self/fd/<fd> as "/memfd:tawcroot-overflow{uid,gid} (deleted)" —
+ * useful when reading the diagnostic output of a guest that strerror()s
+ * its way through bwrap. */
+static const char *match_proc_sys_overflow_id(const char *path)
+{
+	if (tawc_streq(path, "/proc/sys/kernel/overflowuid"))
+		return "tawcroot-overflowuid";
+	if (tawc_streq(path, "/proc/sys/kernel/overflowgid"))
+		return "tawcroot-overflowgid";
+	return NULL;
+}
+
 /* /proc/self/maps shadow fd. Read the kernel's maps file in full,
  * reverse-translate each path field via the rootfs/bind tables, and
  * write the result into a memfd that we hand back to the guest.
@@ -742,6 +783,40 @@ static long open_proc_maps_shadow(void)
 	}
 
 	(void)tawc_munmap((void *)(uintptr_t)region, 2 * MAPS_BUF_SIZE);
+
+	long sk = tawc_lseek((int)memfd, 0, 0 /*SEEK_SET*/);
+	if (sk < 0) {
+		tawc_close((int)memfd);
+		return sk;
+	}
+	return memfd;
+}
+
+/* /proc/sys/kernel/overflow{uid,gid} shadow fd. Returns a memfd preloaded
+ * with the Linux-conventional "65534\n" (documented in
+ * Documentation/admin-guide/sysctl/kernel.rst). Stays in lockstep with
+ * the kernel default; the value hasn't changed since the sysctl landed,
+ * and uid/gid have always shared it. The `memfd_name` distinguishes
+ * the two in /proc/self/fd/<fd> readlinks for diagnostic clarity. */
+static long open_proc_overflow_id_shadow(const char *memfd_name)
+{
+	static const char bytes[] = "65534\n";
+	const size_t      len     = sizeof bytes - 1;
+
+	long memfd = tawc_memfd_create(memfd_name, 1U /*MFD_CLOEXEC*/);
+	if (memfd < 0) return memfd;
+
+	size_t written = 0;
+	while (written < len) {
+		long w = tawc_write((int)memfd,
+				    &bytes[written],
+				    len - written);
+		if (w < 0) {
+			tawc_close((int)memfd);
+			return w;
+		}
+		written += (size_t)w;
+	}
 
 	long sk = tawc_lseek((int)memfd, 0, 0 /*SEEK_SET*/);
 	if (sk < 0) {

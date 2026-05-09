@@ -2548,6 +2548,182 @@ static int test_proc_self_synthesis_extensions(void)
 	return fails;
 }
 
+/* /proc/sys/kernel/overflow{uid,gid} synthesis. Android's SELinux
+ * denies untrusted_app any read under /proc/sys/kernel, which kicks
+ * bwrap out before it gets to the unshare(CLONE_NEWUSER) failure that
+ * glycin's autodetect knows how to read. The handler returns a memfd
+ * preloaded with the Linux-conventional "65534\n" so bwrap proceeds.
+ *
+ * On the testhost the host kernel happily returns the same value, so
+ * we can't tell synthesis from kernel-passthrough by content alone.
+ * Each positive case readlinks /proc/self/fd/<fd> and asserts the link
+ * target starts with "/memfd:tawcroot-overflowXid" — which only
+ * memfd_create can produce. Negative cases check both the readlink
+ * (must NOT be a memfd) and, where applicable, the errno path.
+ *
+ * The two probes are duplicated rather than table-driven because the
+ * test labels and INLINE_SYS6 macro want compile-time strings, and the
+ * extra repetition is cheaper than the harness needed to stitch labels
+ * dynamically. */
+static const char  OFL_BYTES[] = "65534\n";
+static const char  OFL_LINK_UID[] = "/memfd:tawcroot-overflowuid";
+static const char  OFL_LINK_GID[] = "/memfd:tawcroot-overflowgid";
+
+static int ofl_check_fd(int fd, const char *expected_link)
+{
+	char fdpath[64];
+	size_t i = 0;
+	const char *pre = "/proc/self/fd/";
+	while (pre[i]) { fdpath[i] = pre[i]; i++; }
+	i += (size_t)tawc_int_to_str(fdpath + i, sizeof fdpath - i,
+				     (int)fd);
+	fdpath[i] = 0;
+	char link[128];
+	long ln = tawc_readlinkat(AT_FDCWD, fdpath, link, sizeof link - 1);
+	int  is_memfd = (ln >= (long)tawc_strlen(expected_link)) &&
+		tawc_starts_with(link, expected_link);
+	if (!is_memfd && ln > 0) {
+		link[ln < (long)sizeof link ? ln : (long)sizeof link - 1] = 0;
+		tawc_io_str("    link = '");
+		tawc_io_str(link);
+		tawc_io_str("'\n");
+	}
+	return is_memfd;
+}
+
+static int ofl_content_ok(int fd)
+{
+	char buf[16];
+	long n = tawc_read(fd, buf, sizeof buf);
+	if (n != (long)(sizeof OFL_BYTES - 1)) return 0;
+	for (long i = 0; i < n; i++)
+		if (buf[i] != OFL_BYTES[i]) return 0;
+	return 1;
+}
+
+static int test_proc_sys_overflow_id_synthesis(void)
+{
+	int fails = 0;
+
+	/* (A) Absolute path — overflowuid. */
+	{
+		long mfd = inline_openat(AT_FDCWD,
+			"/proc/sys/kernel/overflowuid", O_RDONLY, 0);
+		fails += tawc_io_step(
+			"openat(\"/proc/sys/kernel/overflowuid\") -> fd",
+			mfd >= 0);
+		if (mfd >= 0) {
+			fails += tawc_io_step(
+				"absolute overflowuid -> memfd-backed fd",
+				ofl_check_fd((int)mfd, OFL_LINK_UID));
+			fails += tawc_io_step(
+				"absolute overflowuid contents == \"65534\\n\"",
+				ofl_content_ok((int)mfd));
+			tawc_close((int)mfd);
+		}
+	}
+
+	/* (B) Absolute path — overflowgid (same code path, separate label
+	 * so a regression in just one classifier branch is visible). */
+	{
+		long mfd = inline_openat(AT_FDCWD,
+			"/proc/sys/kernel/overflowgid", O_RDONLY, 0);
+		fails += tawc_io_step(
+			"openat(\"/proc/sys/kernel/overflowgid\") -> fd",
+			mfd >= 0);
+		if (mfd >= 0) {
+			fails += tawc_io_step(
+				"absolute overflowgid -> memfd-backed fd",
+				ofl_check_fd((int)mfd, OFL_LINK_GID));
+			fails += tawc_io_step(
+				"absolute overflowgid contents == \"65534\\n\"",
+				ofl_content_ok((int)mfd));
+			tawc_close((int)mfd);
+		}
+	}
+
+	/* (C) Fd-relative against the kernel's /proc — mirrors a sandbox
+	 * that opens /proc once and reuses the dirfd for both reads. */
+	{
+		long proc_fd = tawc_openat(AT_FDCWD, "/proc",
+			O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+		if (proc_fd >= 0) {
+			long mfd;
+			INLINE_SYS6(TAWC_SYS_openat, (int)proc_fd,
+				    "sys/kernel/overflowuid",
+				    O_RDONLY, 0, 0, 0, mfd);
+			fails += tawc_io_step(
+				"openat(proc_fd, \"sys/kernel/overflowuid\") -> fd",
+				mfd >= 0);
+			if (mfd >= 0) {
+				fails += tawc_io_step(
+					"fd-relative overflowuid -> memfd-backed fd",
+					ofl_check_fd((int)mfd, OFL_LINK_UID));
+				fails += tawc_io_step(
+					"fd-relative overflowuid contents == \"65534\\n\"",
+					ofl_content_ok((int)mfd));
+				tawc_close((int)mfd);
+			}
+			INLINE_SYS6(TAWC_SYS_openat, (int)proc_fd,
+				    "sys/kernel/overflowgid",
+				    O_RDONLY, 0, 0, 0, mfd);
+			fails += tawc_io_step(
+				"openat(proc_fd, \"sys/kernel/overflowgid\") -> fd",
+				mfd >= 0);
+			if (mfd >= 0) {
+				fails += tawc_io_step(
+					"fd-relative overflowgid -> memfd-backed fd",
+					ofl_check_fd((int)mfd, OFL_LINK_GID));
+				fails += tawc_io_step(
+					"fd-relative overflowgid contents == \"65534\\n\"",
+					ofl_content_ok((int)mfd));
+				tawc_close((int)mfd);
+			}
+			tawc_close((int)proc_fd);
+		} else {
+			tawc_io_kv_dec(
+				"    /proc open via raw stub failed",
+				-proc_fd);
+		}
+	}
+
+	/* (D) Sibling that shares the prefix bytes must NOT match. A
+	 * buggy classifier that prefix-matched would synthesize anyway. */
+	{
+		long mfd = inline_openat(AT_FDCWD,
+			"/proc/sys/kernel/overflowuid-evil",
+			O_RDONLY, 0);
+		fails += tawc_io_step(
+			"sibling-prefix path is not synthesized (errno path)",
+			mfd < 0);
+		if (mfd >= 0) tawc_close((int)mfd);
+	}
+
+	/* (E) O_PATH must NOT route through synthesis — the peek skips
+	 * O_PATH so the open falls through to normal translation. The
+	 * outcome is environment-dependent (kernel returns a real O_PATH
+	 * fd on a Linux host where /proc is readable; tawcroot's
+	 * translator may reject the path on a strict rootfs). The
+	 * regression we guard against is "synthesis fired despite
+	 * O_PATH" — i.e. fd >= 0 AND /proc/self/fd/<fd> resolves to a
+	 * /memfd:tawcroot-overflowuid memfd. Either branch (negative fd,
+	 * or positive fd that is NOT a memfd) means synthesis was
+	 * correctly skipped. */
+	{
+		long fd = inline_openat(AT_FDCWD,
+			"/proc/sys/kernel/overflowuid",
+			O_PATH | O_CLOEXEC, 0);
+		int synthesised = (fd >= 0) &&
+			ofl_check_fd((int)fd, OFL_LINK_UID);
+		fails += tawc_io_step(
+			"O_PATH does not route through synthesis",
+			!synthesised);
+		if (fd >= 0) tawc_close((int)fd);
+	}
+
+	return fails;
+}
+
 /* /dev/shm in-handler emulation: create + reuse + unlink + stat. */
 static int test_dev_shm_emulation(void)
 {
@@ -3140,6 +3316,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_b5_bind_over_symlink_memo();
 	fails += test_proc_self_maps_reverse_translation();
 	fails += test_proc_self_synthesis_extensions();
+	fails += test_proc_sys_overflow_id_synthesis();
 	fails += test_dev_shm_emulation();
 
 	/* chroot tests. The non-mutating cases run first (NULL, ENOTDIR,

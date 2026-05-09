@@ -29,8 +29,6 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=../scripts/lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
-# shellcheck source=../scripts/lib/tawc-scratch.sh
-source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
 # shellcheck source=../scripts/lib/tawc-exec.sh
 source "$ROOT_DIR/scripts/lib/tawc-exec.sh"
 # shellcheck source=../scripts/lib/tawc-install-id.sh
@@ -54,8 +52,7 @@ echo "=== Detected distro: $DISTRO_KEY ==="
 case "$DISTRO_KEY" in
     arch|manjaro)
         # Pacman package set. Comments name the test cases each item
-        # exists for; matches the fake-bwrap + Firefox-prefs install
-        # below.
+        # exists for.
         PKGS=(
             # gtk4-debug-app build (compiled in chroot by ensure_debug_app)
             gcc gtk4 pkg-config
@@ -145,26 +142,15 @@ esac
 
 echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 
-# Install the packages first so /usr/bin/bwrap exists as a real file
-# before we drop our override on top — otherwise the package install
-# would clobber the fake-bwrap we just dropped.
+# Glycin (pulled in by GTK/Adwaita to sandbox image loaders) execs
+# bwrap; on Android without CONFIG_USER_NS bwrap fails fast with
+# "Creating new namespace failed: Operation not permitted", which
+# glycin's autodetect (≥ 2.0.1) recognises and falls back to
+# NotSandboxed. tawcroot synthesises /proc/sys/kernel/overflow{uid,gid}
+# (otherwise SELinux-blocked, which would knock bwrap out earlier with a
+# substring glycin doesn't recognise) so the autodetect actually fires.
+# See syscalls_fs.c:open_proc_overflow_id_shadow + notes/tawcroot.md.
 TAWC_OP_TITLE="install test deps ($DISTRO_KEY)" \
     "$ROOT_DIR/scripts/tawc-rootfs-run.sh" "$INSTALL_CMD"
-
-# Drop in `tests/apps/fake-bwrap` over the chroot's `/usr/bin/bwrap`. The
-# stock kernel on the test devices ships without `CONFIG_USER_NS`, so
-# bubblewrap's `clone(NEWUSER)` always fails — and modern Arch GTK +
-# Firefox both pull glycin, which in turn execs bwrap to sandbox each
-# image loader. Without the replacement, every gtk-app integration
-# test crashes on the first SVG icon. The replacement script walks
-# bwrap's argv, skips the sandbox flags, and execs the COMMAND
-# directly — fine on a private test rootfs, not safe in production.
-HOST_BWRAP="$ROOT_DIR/tests/apps/fake-bwrap"
-GUEST_BWRAP="$TAWC_DISTROS_DIR/rootfs/usr/bin/bwrap"
-echo "=== Installing fake bwrap (no CONFIG_USER_NS workaround) ==="
-adb push "$HOST_BWRAP" "$TAWC_SCRATCH/fake-bwrap"
-# `install -m 0755` via the broker — runs as the app uid, which owns
-# the rootfs tree, so no su needed.
-"$TAWC_EXEC_BIN" /system/bin/sh -c "install -m 0755 $TAWC_SCRATCH/fake-bwrap $GUEST_BWRAP"
 
 echo "=== Done ==="

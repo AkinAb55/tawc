@@ -4,8 +4,8 @@
 #
 # TAWC_SCRATCH is the ONLY on-device location anything in this repo
 # writes outside the app's private data dir. Test artefacts, adb-push
-# staging, screenshots, fake-bwrap, firefox configs, tawcroot test
-# binaries — all go here.
+# staging, screenshots, firefox configs, tawcroot test binaries — all
+# go here.
 #
 # This is for tests and debugging ONLY. Production (the APK at runtime)
 # must never read or write here. Everything production needs ships in

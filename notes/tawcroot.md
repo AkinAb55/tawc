@@ -3151,7 +3151,15 @@ here so we don't ship MVP and discover them at runtime.
    `/proc/<our-pid>/maps` are done — `handle_openat` detects the path
    and returns a memfd with each line reverse-translated via the
    rootfs/bind tables (`proc_rewrite.c`, pure, in PROD_C_FOR_TESTS).
-   Same shape would extend to `/proc/<pid>/cmdline`, `/proc/<pid>/auxv`,
+   `/proc/sys/kernel/overflow{uid,gid}` is done — same memfd-shadow
+   shape, contents are the constant `"65534\n"` because Android's
+   SELinux denies `untrusted_app` any read under `/proc/sys/kernel/`
+   (`open_proc_overflow_id_shadow` in `syscalls_fs.c`). Without this,
+   bwrap stops with a stderr substring glycin's bwrap-blocked
+   autodetect doesn't recognise; with it, bwrap proceeds to
+   `unshare(CLONE_NEWUSER)`, fails with the substring glycin matches,
+   and falls back to `SandboxMechanism::NotSandboxed`. Same shape would
+   extend to `/proc/<pid>/cmdline`, `/proc/<pid>/auxv`,
    `/proc/<pid>/task/<tid>/maps`, and the fd-relative form
    (`openat(proc_dir_fd, "self/maps", ...)`) when a workload needs
    them. The fd-relative gap also affects `/proc/self/exe` synthesis
