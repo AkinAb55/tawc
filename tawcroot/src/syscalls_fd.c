@@ -262,11 +262,11 @@ static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
  * Android's untrusted_app sepolicy whitelists tty ioctls via an
  * `allowxperm` set called `unpriv_tty_ioctls`. That set covers the
  * legacy variants (TCGETS / TCSETS / TCSETSW / TCSETSF, TIOCG/SWINSZ,
- * TIOCS/GPGRP, FIONREAD, FIONBIO, FIOCLEX/NCLEX) but does NOT include
- * the newer "termios2" variants (TCGETS2 / TCSETS2 / TCSETSW2 /
- * TCSETSF2) introduced for arbitrary-baud support. The kernel's
- * SELinux check rejects them with -EACCES before the devpts driver
- * even runs.
+ * TIOCS/GPGRP, FIONREAD, FIONBIO, FIOCLEX/NCLEX) but on at least the
+ * Android 15 emulator does NOT include the newer "termios2" variants
+ * (TCGETS2 / TCSETS2 / TCSETSW2 / TCSETSF2) introduced for arbitrary-
+ * baud support. The kernel's SELinux check rejects them with -EACCES
+ * before the devpts driver even runs.
  *
  * Modern glibc's tcgetattr/tcsetattr issue TCGETS2 first and only
  * fall back to TCGETS on -EINVAL, NOT on -EACCES. Result: bash
@@ -275,9 +275,17 @@ static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
  * the prompt and readline — which is exactly what "lxterminal /
  * wezterm render but show no prompt or accept input" looks like.
  *
- * Translate the four termios2 ioctls back to their legacy
- * counterparts. The kernel-ABI structs are identical for the first
- * 36 bytes (4*tcflag_t + c_line + c_cc[19]); termios2 adds a
+ * Strategy: try the native termios2 ioctl FIRST. The xperm gap is
+ * Android-version- and vendor-specific — the OnePlus 9 honours
+ * TCGETS2 fine — and on policies that allow it we want the kernel's
+ * full struct termios2 (with the real c_ispeed/c_ospeed) rather than
+ * a synthetic legacy view. Only on -EACCES (the SELinux xperm-deny
+ * signature) do we fall back to the legacy ioctl. Other errors
+ * (-ENOTTY, -EFAULT, -EINVAL, …) pass through unmodified — they're
+ * legitimate kernel responses, not policy denials.
+ *
+ * Fallback details: the kernel-ABI structs are identical for the
+ * first 36 bytes (4*tcflag_t + c_line + c_cc[19]); termios2 adds a
  * trailing speed_t c_ispeed and speed_t c_ospeed (8 bytes total).
  * For TCGETS2 we zero the speed slots — apps that care about
  * arbitrary baud are not relevant inside our pty-only environment,
@@ -300,6 +308,41 @@ static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
 #define TAWC_KERN_TERMIOS_SIZE   36  /* asm/termbits.h: 4*4 + 1 + 19 */
 #define TAWC_KERN_TERMIOS2_TAIL   8  /* speed_t c_ispeed + speed_t c_ospeed */
 
+/* TCGETS2 fallback: kernel writes 36 bytes via TCGETS, then we zero
+ * the trailing 8 speed bytes the guest expects from a termios2. */
+static long handle_tcgets2_fallback(long fd, long arg)
+{
+	unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
+	long rv = TAWC_RAW(TAWC_SYS_ioctl, fd,
+	                   (long)TAWC_TCGETS, (long)buf, 0, 0, 0);
+	if (rv < 0) return rv;
+	long e = tawc_copy_to_guest((void *)(uintptr_t)arg,
+	                            buf, sizeof buf);
+	if (e < 0) return TAWC_EFAULT;
+	unsigned char zero[TAWC_KERN_TERMIOS2_TAIL] = {0};
+	e = tawc_copy_to_guest((void *)(uintptr_t)
+	                       (arg + TAWC_KERN_TERMIOS_SIZE),
+	                       zero, sizeof zero);
+	if (e < 0) return TAWC_EFAULT;
+	return rv;
+}
+
+/* TCSETS{,W,F}2 fallback: pull the first 36 bytes from the guest's
+ * termios2 (drop the speed_t tail) and feed them to the legacy
+ * setter. */
+static long handle_tcsets2_fallback(long fd, unsigned int cmd, long arg)
+{
+	unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
+	long e = tawc_copy_from_guest(buf, sizeof buf,
+	                              (const void *)(uintptr_t)arg);
+	if (e < 0) return TAWC_EFAULT;
+	unsigned int legacy =
+		(cmd == TAWC_TCSETS2)  ? TAWC_TCSETS  :
+		(cmd == TAWC_TCSETSW2) ? TAWC_TCSETSW : TAWC_TCSETSF;
+	return TAWC_RAW(TAWC_SYS_ioctl, fd,
+	                (long)legacy, (long)buf, 0, 0, 0);
+}
+
 static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -307,34 +350,19 @@ static long handle_ioctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 	unsigned int cmd = (unsigned int)args->b;
 	long arg = args->c;
 
-	if (cmd == TAWC_TCGETS2) {
+	if (cmd == TAWC_TCGETS2 || cmd == TAWC_TCSETS2 ||
+	    cmd == TAWC_TCSETSW2 || cmd == TAWC_TCSETSF2) {
+		long rv = TAWC_RAW(TAWC_SYS_ioctl, fd, (long)cmd, arg,
+		                   args->d, args->e, args->f);
+		if (rv != TAWC_EACCES) return rv;
+		/* SELinux xperm denial — fall back to the legacy ioctl
+		 * the policy allowlists. NULL arg can't reach this path
+		 * because the kernel would have returned -EFAULT, not
+		 * -EACCES; defensive check anyway. */
 		if (!arg) return TAWC_EFAULT;
-		unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
-		long rv = TAWC_RAW(TAWC_SYS_ioctl, fd,
-		                   (long)TAWC_TCGETS, (long)buf, 0, 0, 0);
-		if (rv < 0) return rv;
-		long e = tawc_copy_to_guest((void *)(uintptr_t)arg,
-		                            buf, sizeof buf);
-		if (e < 0) return TAWC_EFAULT;
-		unsigned char zero[TAWC_KERN_TERMIOS2_TAIL] = {0};
-		e = tawc_copy_to_guest((void *)(uintptr_t)
-		                       (arg + TAWC_KERN_TERMIOS_SIZE),
-		                       zero, sizeof zero);
-		if (e < 0) return TAWC_EFAULT;
-		return rv;
-	}
-	if (cmd == TAWC_TCSETS2 || cmd == TAWC_TCSETSW2 ||
-	    cmd == TAWC_TCSETSF2) {
-		if (!arg) return TAWC_EFAULT;
-		unsigned char buf[TAWC_KERN_TERMIOS_SIZE];
-		long e = tawc_copy_from_guest(buf, sizeof buf,
-		                              (const void *)(uintptr_t)arg);
-		if (e < 0) return TAWC_EFAULT;
-		unsigned int legacy =
-			(cmd == TAWC_TCSETS2)  ? TAWC_TCSETS  :
-			(cmd == TAWC_TCSETSW2) ? TAWC_TCSETSW : TAWC_TCSETSF;
-		return TAWC_RAW(TAWC_SYS_ioctl, fd,
-		                (long)legacy, (long)buf, 0, 0, 0);
+		if (cmd == TAWC_TCGETS2)
+			return handle_tcgets2_fallback(fd, arg);
+		return handle_tcsets2_fallback(fd, cmd, arg);
 	}
 	return TAWC_RAW(TAWC_SYS_ioctl, fd, args->b, arg,
 	                args->d, args->e, args->f);

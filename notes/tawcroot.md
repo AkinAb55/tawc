@@ -2226,25 +2226,33 @@ coverage.
        the `epoll_wait` shim, mio's epoll backend (used by wezterm,
        and probably others) sees -ENOSYS from the empty dispatch slot
        and aborts with "polling for events: ENOSYS; terminating".
-     • `ioctl` `TCGETS2`/`TCSETS{,W,F}2` rewritten to the legacy
-       `TCGETS`/`TCSETS{,W,F}` family. Android's `untrusted_app_all`
-       sepolicy `allowxperm` set `unpriv_tty_ioctls` whitelists the
-       legacy four but not the termios2 variants, so the kernel
-       SELinux gate returns -EACCES on every TCGETS2. Glibc's
-       `tcgetattr` issues TCGETS2 first and only falls back on
-       -EINVAL, NOT -EACCES — so `bash`, `lxterminal`, `wezterm` all
-       see the EACCES, conclude stdin isn't a tty, and skip both the
-       prompt and readline (the "renders but no prompt or input"
-       symptom). Translating to the legacy ioctl number sidesteps
-       the xperm gate; the kernel-ABI structs share the first 36
-       bytes (4*tcflag_t + c_line + c_cc[19]), and the speed_t tail
-       is irrelevant for the pty workloads we care about (CBAUD bits
-       in c_cflag carry the symbolic baud unchanged). All other
-       ioctl numbers pass through to the kernel via TAWC_RAW; the
-       trap is unconditional on `ioctl(2)` because BPF-arg matching
-       on the cmd is more involved than today's filter generator
-       supports — perf-wise terminal apps issue O(1) ioctls per
-       frame so the SIGSYS round-trip cost is invisible.
+     • `ioctl` `TCGETS2`/`TCSETS{,W,F}2`: try-native-first, fall
+       back to the legacy `TCGETS`/`TCSETS{,W,F}` family on -EACCES.
+       Android's `untrusted_app_all` sepolicy `allowxperm` set
+       `unpriv_tty_ioctls` whitelists the legacy four but on at
+       least the Android-15 emulator does NOT include the termios2
+       variants, so the kernel SELinux gate returns -EACCES on
+       every TCGETS2. Glibc's `tcgetattr` issues TCGETS2 first and
+       only falls back on -EINVAL, NOT -EACCES — so `bash`,
+       `lxterminal`, `wezterm` all see the EACCES, conclude stdin
+       isn't a tty, and skip both the prompt and readline (the
+       "renders but no prompt or input" symptom). The fallback
+       sidesteps the xperm gate; the kernel-ABI structs share the
+       first 36 bytes (4*tcflag_t + c_line + c_cc[19]), and the
+       speed_t tail is zeroed (irrelevant for pty workloads — CBAUD
+       bits in c_cflag carry the symbolic baud unchanged).
+       Try-native-first rather than always-translate because the
+       xperm gap is Android-version- and vendor-specific (the
+       OnePlus 9 honours TCGETS2 fine); on permissive policies we
+       want the kernel's full struct termios2 with the real
+       c_ispeed/c_ospeed, not a synthetic legacy view. Other errors
+       (-ENOTTY, -EFAULT, -EINVAL, …) pass through unmodified.
+       All other ioctl numbers pass through to the kernel via
+       TAWC_RAW; the trap is unconditional on `ioctl(2)` because
+       BPF-arg matching on the cmd is more involved than today's
+       filter generator supports — perf-wise terminal apps issue
+       O(1) ioctls per frame so the SIGSYS round-trip cost is
+       invisible.
      • EFAULT-safe guest-pointer copies via `process_vm_readv`
        (probed at init with `tawc_usercopy_init`); `openat(NULL)`
        and `openat(<unmapped>)` cleanly return -EFAULT, no handler

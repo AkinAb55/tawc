@@ -1645,12 +1645,13 @@ static int test_ioctl_translation(void)
 		rv == -25);
 	tawc_io_kv_dec("    rv", rv);
 
-	/* NULL arg short-circuits in our handler before the kernel call. */
-	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x802C542AL /*TCGETS2*/,
-		    0L, 0, 0, 0, rv);
-	fails += tawc_io_step("ioctl(fd, TCGETS2, NULL) -> -EFAULT",
-			      rv == -14);
-	tawc_io_kv_dec("    rv", rv);
+	/* (NULL-arg behaviour is pinned in test_ioctl_pty_translation —
+	 * on a regfile the response diverges between the native and
+	 * fallback paths, since the regfile's ioctl handler returns
+	 * -ENOTTY before any pointer access while the fallback path's
+	 * copy_to_guest faults on NULL. Both are correct for what they
+	 * are; testing them here would just couple the assertion to
+	 * which path the OS happened to take.) */
 
 	INLINE_SYS6(TAWC_SYS_close, fd, 0, 0, 0, 0, 0, rv);
 	return fails;
@@ -1714,6 +1715,20 @@ static int test_ioctl_pty_translation(void)
 	}
 	long slave = rv;
 
+	/* Probe whether the underlying OS (or simulated outer filter)
+	 * actually allows TCGETS2. TAWC_RAW issues from the stub IP,
+	 * which our own seccomp filter unconditionally ALLOWs — so the
+	 * result reflects ONLY any outer (Android-shape) filter, not our
+	 * handler. Lets us assert the right post-condition for whichever
+	 * environment we're running in. */
+	unsigned char raw_probe[44];
+	for (size_t i = 0; i < sizeof raw_probe; i++) raw_probe[i] = 0xCC;
+	long raw_rv = TAWC_RAW(TAWC_SYS_ioctl, slave,
+			       0x802C542AL /*TCGETS2*/, (long)raw_probe,
+			       0, 0, 0);
+	int xperm_blocks_tcgets2 = (raw_rv == -13 /*EACCES*/);
+	tawc_io_kv_dec("    raw TCGETS2 rv (no handler in path)", raw_rv);
+
 	/* Baseline via legacy TCGETS (36 bytes). */
 	unsigned char t1[36];
 	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x5401L /*TCGETS*/,
@@ -1727,11 +1742,14 @@ static int test_ioctl_pty_translation(void)
 	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x802C542AL /*TCGETS2*/,
 		    (long)t2, 0, 0, 0, rv);
 	fails += tawc_io_step(
-		"TCGETS2(slave) -> 0 (translated to TCGETS)",
+		"TCGETS2(slave) -> 0 (handler returns success in both paths)",
 		rv == 0);
 
-	/* Bytes 0..35 must be identical to the legacy view; this is what
-	 * the entire translation depends on. */
+	/* Bytes 0..35 must be identical to the legacy view regardless
+	 * of which path the handler took (native TCGETS2 fills the same
+	 * 36-byte prefix as TCGETS; the fallback explicitly copies the
+	 * TCGETS result). This is what the entire translation depends
+	 * on. */
 	int prefix_match = 1;
 	for (size_t i = 0; i < sizeof t1; i++) {
 		if (t1[i] != t2[i]) { prefix_match = 0; break; }
@@ -1740,15 +1758,38 @@ static int test_ioctl_pty_translation(void)
 		"TCGETS2 first 36 bytes byte-equal to TCGETS",
 		prefix_match);
 
-	/* Bytes 36..43 are the c_ispeed/c_ospeed pair; handler design
-	 * is to zero them. Native TCGETS2 would write 38400 here. */
-	int tail_zero = 1;
-	for (size_t i = 36; i < 44; i++) {
-		if (t2[i] != 0) { tail_zero = 0; break; }
+	/* Speed tail (bytes 36..43) is the contract that distinguishes
+	 * the two paths:
+	 *   - OS allows TCGETS2: handler took the native path; speed
+	 *     fields hold the kernel's view (38400 default for ptys).
+	 *   - OS blocks with EACCES: handler fell back to TCGETS; speed
+	 *     fields are zeroed by handle_tcgets2_fallback().
+	 * Either way they must NOT be the 0xAA initialisation sentinel —
+	 * that would mean nothing was written.
+	 *
+	 * Pinning both branches catches "always fall back even when
+	 * native works" regressions (would zero the speed fields on
+	 * permissive kernels) AND "forgot to fall back at all"
+	 * regressions (would leave the EACCES through to the guest). */
+	unsigned int ispeed = (unsigned int)t2[36] |
+			      ((unsigned int)t2[37] << 8)  |
+			      ((unsigned int)t2[38] << 16) |
+			      ((unsigned int)t2[39] << 24);
+	unsigned int ospeed = (unsigned int)t2[40] |
+			      ((unsigned int)t2[41] << 8)  |
+			      ((unsigned int)t2[42] << 16) |
+			      ((unsigned int)t2[43] << 24);
+	tawc_io_kv_dec("    ispeed", (long)ispeed);
+	tawc_io_kv_dec("    ospeed", (long)ospeed);
+	if (xperm_blocks_tcgets2) {
+		fails += tawc_io_step(
+			"OS blocks TCGETS2: speed tail zeroed by fallback",
+			ispeed == 0 && ospeed == 0);
+	} else {
+		fails += tawc_io_step(
+			"OS allows TCGETS2: speed tail is the kernel's view (non-zero)",
+			ispeed > 0 && ispeed == ospeed);
 	}
-	fails += tawc_io_step(
-		"TCGETS2 speed tail (bytes 36..43) zeroed by handler",
-		tail_zero);
 
 	/* TCSETS2 round-trip. ECHO is in c_lflag (offset 12, bit 0o010=8).
 	 * Capture original, flip, write via TCSETS2, read back via TCGETS,
@@ -1777,6 +1818,21 @@ static int test_ioctl_pty_translation(void)
 	*(unsigned int *)(t2 + 12) = orig_lflag;
 	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x402C542BL /*TCSETS2*/,
 		    (long)t2, 0, 0, 0, rv);
+
+	/* TCGETS2 with NULL arg on a real pty: the kernel's pty driver
+	 * runs copy_to_user(arg, &kterm, ...) and faults on the bogus
+	 * pointer, returning -EFAULT. Both paths must surface that:
+	 *   - Native: kernel returns -EFAULT directly.
+	 *   - Fallback (xperm-blocked): kernel returns -EACCES first;
+	 *     handler falls back to TCGETS, which is also a write-direction
+	 *     ioctl and also faults to -EFAULT.
+	 * No defensive pre-check in handle_ioctl(); we trust the kernel
+	 * to validate user pointers consistently. */
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x802C542AL /*TCGETS2*/,
+		    0L, 0, 0, 0, rv);
+	fails += tawc_io_step("TCGETS2(pty, NULL) -> -EFAULT (kernel-validated)",
+			      rv == -14);
+	tawc_io_kv_dec("    rv", rv);
 
 	/* FIONREAD on master with no slave-side input → 0 bytes available.
 	 * Pure passthrough; no termios2 interaction. */
