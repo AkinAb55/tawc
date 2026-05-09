@@ -415,11 +415,22 @@ static int test_bind_mount_routing(void)
 {
 	int fails = 0;
 	for (size_t i = 0; i < tawcroot_n_binds; i++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[i];
+		/* Skip binds whose src isn't part of the test fixture
+		 * (FAKE_BINDSRC). The "/dev" bind exists for
+		 * test_ioctl_pty_translation to allocate a real pty and
+		 * has no probe.txt by design — skipping by dst name keeps
+		 * the routing assertion focused on convention-following
+		 * binds without baking in the bindsrc layout here. */
+		if (b->dst_len == 3 &&
+		    b->dst[0] == 'd' && b->dst[1] == 'e' && b->dst[2] == 'v')
+			continue;
+
 		char p[512];
 		size_t n = 0;
 		p[n++] = '/';
-		for (size_t j = 0; j < tawcroot_binds[i].dst_len; j++)
-			p[n++] = tawcroot_binds[i].dst[j];
+		for (size_t j = 0; j < b->dst_len; j++)
+			p[n++] = b->dst[j];
 		const char *suffix = "/probe.txt";
 		for (size_t j = 0; suffix[j] && n + 1 < sizeof p; j++)
 			p[n++] = suffix[j];
@@ -1642,6 +1653,142 @@ static int test_ioctl_translation(void)
 	tawc_io_kv_dec("    rv", rv);
 
 	INLINE_SYS6(TAWC_SYS_close, fd, 0, 0, 0, 0, 0, rv);
+	return fails;
+}
+
+/* TCGETS2 / TCSETS2 round-trip on a real pty.
+ *
+ * Companion to test_ioctl_translation(): that one verifies the
+ * dispatch + EFAULT + passthrough paths against a regfile (where
+ * everything ends in -ENOTTY), this one verifies the actual
+ * data-bearing paths against a real pty allocated through the
+ * `/dev` bind set up in test_phase1.c.
+ *
+ * Coverage:
+ *   - TCGETS2 on a pty returns success and a populated termios2 whose
+ *     first 36 bytes match the legacy TCGETS view byte-for-byte.
+ *     This pins the "translator preserves the kernel-ABI prefix"
+ *     contract — a regression that, e.g., dropped c_cc[] or shifted
+ *     a tcflag_t would land here.
+ *   - The trailing 8 speed bytes are zeroed (handler design — see
+ *     handle_ioctl in src/syscalls_fd.c). Native TCGETS2 fills these
+ *     with the kernel's idea of the baud (38400 for ptys); our
+ *     translation drops them because pty workloads ignore the
+ *     speed_t fields and BOTHER is never set.
+ *   - TCSETS2 round-trips: flip an obvious bit (ECHO off in c_lflag),
+ *     set, get back, confirm the bit changed. This proves the
+ *     reverse translation copies the user's first 36 bytes through
+ *     to TCSETS rather than dropping or scrambling them.
+ *   - FIONREAD passes through unchanged on the master fd. */
+static int test_ioctl_pty_translation(void)
+{
+	int fails = 0;
+	long rv;
+
+	/* O_RDWR=2, O_NOCTTY=0o400=0x100 (so the pty doesn't become our
+	 * controlling tty in the testhost process). */
+	long master = inline_openat(AT_FDCWD, "/dev/ptmx",
+				    2 /*O_RDWR*/ | 0x100 /*O_NOCTTY*/, 0);
+	fails += tawc_io_step("open /dev/ptmx (via /dev bind)", master >= 0);
+	if (master < 0) {
+		tawc_io_kv_dec("    open errno (-rv)", -master);
+		return fails;
+	}
+
+	/* TIOCSPTLCK = _IOW('T', 0x31, int): unlock the slave. */
+	int unlock = 0;
+	INLINE_SYS6(TAWC_SYS_ioctl, master, 0x40045431L /*TIOCSPTLCK*/,
+		    (long)&unlock, 0, 0, 0, rv);
+	fails += tawc_io_step("TIOCSPTLCK(master, 0) -> 0", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	/* TIOCGPTPEER = _IO('T', 0x41): allocate slave fd directly. Linux
+	 * 4.13+; the host runs newer kernels in CI so safe to depend on. */
+	INLINE_SYS6(TAWC_SYS_ioctl, master, 0x5441L /*TIOCGPTPEER*/,
+		    (2 /*O_RDWR*/ | 0x100 /*O_NOCTTY*/), 0, 0, 0, rv);
+	fails += tawc_io_step("TIOCGPTPEER(master) -> slave fd", rv >= 0);
+	if (rv < 0) {
+		tawc_io_kv_dec("    errno (-rv)", -rv);
+		INLINE_SYS6(TAWC_SYS_close, master, 0, 0, 0, 0, 0, rv);
+		return fails;
+	}
+	long slave = rv;
+
+	/* Baseline via legacy TCGETS (36 bytes). */
+	unsigned char t1[36];
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x5401L /*TCGETS*/,
+		    (long)t1, 0, 0, 0, rv);
+	fails += tawc_io_step("TCGETS(slave) -> 0", rv == 0);
+
+	/* Translated TCGETS2 (44 bytes). Initialise the buffer so we
+	 * notice if the handler forgets to write any prefix bytes. */
+	unsigned char t2[44];
+	for (size_t i = 0; i < sizeof t2; i++) t2[i] = 0xAA;
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x802C542AL /*TCGETS2*/,
+		    (long)t2, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"TCGETS2(slave) -> 0 (translated to TCGETS)",
+		rv == 0);
+
+	/* Bytes 0..35 must be identical to the legacy view; this is what
+	 * the entire translation depends on. */
+	int prefix_match = 1;
+	for (size_t i = 0; i < sizeof t1; i++) {
+		if (t1[i] != t2[i]) { prefix_match = 0; break; }
+	}
+	fails += tawc_io_step(
+		"TCGETS2 first 36 bytes byte-equal to TCGETS",
+		prefix_match);
+
+	/* Bytes 36..43 are the c_ispeed/c_ospeed pair; handler design
+	 * is to zero them. Native TCGETS2 would write 38400 here. */
+	int tail_zero = 1;
+	for (size_t i = 36; i < 44; i++) {
+		if (t2[i] != 0) { tail_zero = 0; break; }
+	}
+	fails += tawc_io_step(
+		"TCGETS2 speed tail (bytes 36..43) zeroed by handler",
+		tail_zero);
+
+	/* TCSETS2 round-trip. ECHO is in c_lflag (offset 12, bit 0o010=8).
+	 * Capture original, flip, write via TCSETS2, read back via TCGETS,
+	 * verify the bit changed in the kernel's view (proves TCSETS2
+	 * actually reached TCSETS, not just returned 0 spuriously). */
+	unsigned int orig_lflag = *(unsigned int *)(t2 + 12);
+	*(unsigned int *)(t2 + 12) = orig_lflag & ~0x8U;
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x402C542BL /*TCSETS2*/,
+		    (long)t2, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"TCSETS2(slave, ECHO cleared) -> 0 (translated to TCSETS)",
+		rv == 0);
+
+	unsigned char t3[36];
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x5401L /*TCGETS*/,
+		    (long)t3, 0, 0, 0, rv);
+	unsigned int new_lflag = *(unsigned int *)(t3 + 12);
+	fails += tawc_io_step(
+		"TCSETS2 actually cleared ECHO (verified via TCGETS)",
+		(new_lflag & 0x8U) == 0);
+	tawc_io_kv_dec("    orig_lflag", (long)orig_lflag);
+	tawc_io_kv_dec("    new_lflag",  (long)new_lflag);
+
+	/* Restore so we leave the pty as we found it (tear-down would
+	 * cover this anyway since we close both fds, but be tidy). */
+	*(unsigned int *)(t2 + 12) = orig_lflag;
+	INLINE_SYS6(TAWC_SYS_ioctl, slave, 0x402C542BL /*TCSETS2*/,
+		    (long)t2, 0, 0, 0, rv);
+
+	/* FIONREAD on master with no slave-side input → 0 bytes available.
+	 * Pure passthrough; no termios2 interaction. */
+	int avail = -1;
+	INLINE_SYS6(TAWC_SYS_ioctl, master, 0x541BL /*FIONREAD*/,
+		    (long)&avail, 0, 0, 0, rv);
+	fails += tawc_io_step("FIONREAD(master) -> 0 with empty pty",
+			      rv == 0 && avail == 0);
+	tawc_io_kv_dec("    avail", (long)avail);
+
+	INLINE_SYS6(TAWC_SYS_close, slave,  0, 0, 0, 0, 0, rv);
+	INLINE_SYS6(TAWC_SYS_close, master, 0, 0, 0, 0, 0, rv);
 	return fails;
 }
 
@@ -3517,6 +3664,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_legacy_epoll_wait();
 #endif
 	fails += test_ioctl_translation();
+	fails += test_ioctl_pty_translation();
 	fails += test_internal_fd_protection();
 	fails += test_guest_seccomp_prctl_handling();
 	fails += test_sigsys_virtualization();

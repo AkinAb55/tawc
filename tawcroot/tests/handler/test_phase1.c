@@ -204,6 +204,11 @@ register_dynamic_tests
 		 * each open their own O_PATH fd. */
 		"-b", FAKE_BINDSRC ":lib64",
 		"-b", FAKE_BINDSRC ":usr/test-bind",
+		/* Host /dev so test_ioctl_pty_translation can open
+		 * /dev/ptmx and exercise TCGETS2/TCSETS2 on a real pty.
+		 * On Linux this is the kernel's devpts; the test
+		 * allocates its own pty pair and tears it down. */
+		"-b", "/dev:dev",
 		NULL
 	};
 	steps_register_from_testhost(c_sv("phase1"), args);

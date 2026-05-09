@@ -189,6 +189,9 @@ register_dynamic_tests
 		"-r", FAKE_ROOTFS,
 		"-b", FAKE_BINDSRC ":lib64",
 		"-b", FAKE_BINDSRC ":usr/test-bind",
+		/* Mirror test_phase1.c: expose host /dev so
+		 * test_ioctl_pty_translation can allocate a real pty. */
+		"-b", "/dev:dev",
 		NULL
 	};
 	steps_register_from_testhost_prefixed(c_sv("androidfilter"),
@@ -207,6 +210,24 @@ register_dynamic_tests
 	steps_register_from_testhost_prefixed(c_sv("androidfilter_legacy"),
 	                                      prefix_legacy, args);
 #endif
+
+	/* Same shape, but with Android's TCGETS2 xperm-EACCES gap
+	 * simulated. test_ioctl_pty_translation only meaningfully
+	 * exercises the bypass under this wrapper — without it, the
+	 * host kernel happily fulfils TCGETS2 and the translator's
+	 * effort is invisible. The other phase-1 tests must still pass
+	 * untouched: they don't touch termios2 cmds.
+	 *
+	 * Both arches: the xperm-EACCES rule is keyed on the (arch-
+	 * independent) ioctl cmd number, not the syscall number. */
+	const char *prefix_xperm[] = {
+		TAWCROOT_ANDROID_FILTER_WRAP,
+		"--xperm-tcgets2",
+		"--",
+		NULL,
+	};
+	steps_register_from_testhost_prefixed(c_sv("androidfilter_xperm"),
+	                                      prefix_xperm, args);
 
 	rmrf(FAKE_ROOTFS);
 	rmrf(FAKE_ROOTFS_SIBLING);
