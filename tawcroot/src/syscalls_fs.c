@@ -31,6 +31,7 @@
 
 #include "dispatch.h"
 #include "errno_neg.h"
+#include "fdtab.h"
 #include "io.h"
 #include "path.h"
 #include "proc_rewrite.h"
@@ -986,6 +987,17 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 					&base_fd, &use_empty,
 					TAWCROOT_PATH_NOFOLLOW);
 	if (e) return e;
+	/* When the guest path resolves exactly to a bind dst (or rootfs root),
+	 * fetch_and_translate gives us (reserved_dir_fd, ""). The kernel
+	 * answers `readlinkat(dir_fd, "", ...)` with ENOENT, but the
+	 * semantically correct error is EINVAL — those paths are directories,
+	 * not symlinks. Without this, glibc realpath aborts canonicalisation
+	 * the moment it hits /proc/self (it readlinkats "/proc" first to
+	 * check, gets ENOENT instead of EINVAL, and gives up before reaching
+	 * the /proc/self/exe synthesis). The guest-supplied dirfd case
+	 * (empty path on a guest O_PATH symlink fd) keeps the kernel call —
+	 * those fds are not in our reserved range. */
+	if (use_empty && tawcroot_fd_is_reserved(base_fd)) return TAWC_EINVAL;
 	const char *p = use_empty ? "" : suffix;
 
 	/* Read into a kernel-side scratch so we can post-process the result
@@ -1684,6 +1696,8 @@ static long handle_readlink(const tawcroot_syscall_args *args, ucontext_t *uc)
 				     &base_fd, &use_empty,
 				     TAWCROOT_PATH_NOFOLLOW);
 	if (e) return e;
+	/* See handle_readlinkat for the EINVAL-vs-ENOENT rationale. */
+	if (use_empty && tawcroot_fd_is_reserved(base_fd)) return TAWC_EINVAL;
 	const char *p = use_empty ? "" : suffix;
 	return tawc_readlinkat(base_fd, p, buf, (size_t)size);
 }

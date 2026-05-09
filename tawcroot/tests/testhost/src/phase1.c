@@ -786,6 +786,44 @@ static int test_readlinkat_dispatch(void)
 	return fails;
 }
 
+/* Readlink on a path that resolves exactly to a bind dst (or the rootfs
+ * root) must report EINVAL — those are directories, not symlinks. The
+ * naive translation gives the kernel `(reserved_dir_fd, "")` which it
+ * answers with ENOENT; glibc realpath then aborts canonicalisation on
+ * the very first /proc component and never reaches /proc/self/exe.
+ * Repro: kitty (and any other glibc binary calling
+ * `realpath("/proc/self/exe")`) bailed with "Failed to read
+ * /proc/self/exe" before this was fixed. */
+static int test_readlink_on_bind_dst_returns_einval(void)
+{
+	int fails = 0;
+	char buf[64];
+	long rv;
+
+	INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD, "/lib64",
+		    buf, sizeof buf - 1, 0, 0, rv);
+	fails += tawc_io_step(
+		"readlinkat(\"/lib64\") -> -EINVAL (bind dst is a directory)",
+		rv == -22 /*EINVAL*/);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD, "/dev",
+		    buf, sizeof buf - 1, 0, 0, rv);
+	fails += tawc_io_step(
+		"readlinkat(\"/dev\") -> -EINVAL (bind dst is a directory)",
+		rv == -22 /*EINVAL*/);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD, "/",
+		    buf, sizeof buf - 1, 0, 0, rv);
+	fails += tawc_io_step(
+		"readlinkat(\"/\") -> -EINVAL (rootfs root is a directory)",
+		rv == -22 /*EINVAL*/);
+	tawc_io_kv_dec("    rv", rv);
+
+	return fails;
+}
+
 /* faccessat2: probe a known-good path.
  * faccessat2 was added in kernel 5.8; on older kernels (e.g. OnePlus 9
  * on 5.4) the handler's raw syscall returns -ENOSYS. We treat that as
@@ -3795,6 +3833,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_escape_attempt_clamps();
 	fails += test_relative_path_after_chdir();
 	fails += test_readlinkat_dispatch();
+	fails += test_readlink_on_bind_dst_returns_einval();
 	fails += test_faccessat2_known_good();
 	fails += test_getcwd_returns_root();
 	fails += test_mkdirat_unlinkat();
