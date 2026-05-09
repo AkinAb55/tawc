@@ -383,6 +383,38 @@ PACMAN_EOF
 
             appendLine(
                 """
+                # tawc-clear-cache hook: wipe /var/cache/pacman/pkg
+                # after every Install/Upgrade transaction so the cache
+                # never accumulates. None of the typical follow-up
+                # operations consult cached tarballs (upgrades pull
+                # new versions, installs fetch fresh; only same-version
+                # reinstalls hit the cache, which we don't do), so
+                # keeping them is pure NAND weight. Replaces the
+                # earlier per-call `rm -rf` / `find -delete` scattered
+                # across the install + test-deps scripts.
+                #
+                # Triggering on Install + Upgrade only: a Remove-only
+                # transaction (e.g. the bootstrap-cruft `pacman -Rdd`)
+                # runs before the cache dir exists, and `find` on a
+                # missing dir is a hook failure.
+                mkdir -p "${'$'}ROOTFS/etc/pacman.d/hooks"
+                cat > "${'$'}ROOTFS/etc/pacman.d/hooks/tawc-clear-cache.hook" <<'HOOK_EOF'
+                [Trigger]
+                Operation = Install
+                Operation = Upgrade
+                Type = Package
+                Target = *
+
+                [Action]
+                Description = tawc: clearing package cache
+                When = PostTransaction
+                Exec = /usr/bin/find /var/cache/pacman/pkg -mindepth 1 -delete
+                HOOK_EOF
+                """.trimIndent()
+            )
+
+            appendLine(
+                """
                 # profile.d/00-path.sh — the chroot bash inherits PATH
                 # from the host (Android) which leaks /system/bin and
                 # breaks everything; force a sane PATH/TMPDIR/HOME here.
@@ -487,8 +519,7 @@ PACMAN_EOF
     }
 
     /**
-     * `pacman -Syu --needed --noconfirm <packages>`, then clear the
-     * package cache.
+     * `pacman -Syu --needed --noconfirm <packages>`.
      *
      * Combining `-Syyu` with the explicit package list (instead of two
      * separate `pacman -Syu` then `pacman -S --needed` calls)
@@ -510,23 +541,11 @@ PACMAN_EOF
      * `-Syy` short-circuits the conditional GET and downloads the
      * current DB unconditionally.
      *
-     * Wiping `/var/cache/pacman/pkg/` afterwards drops every cached
-     * `.pkg.tar.xz` (uninstalled and currently-installed alike). The
-     * install-time cache holds the exact tarballs we just unpacked,
-     * ~hundreds of MB on a fresh install. None of the typical follow-
-     * up operations actually consult them: a system upgrade pulls
-     * *new* versions (so the cached old versions aren't read), and
-     * installing a new package fetches a fresh tarball. The only
-     * operation that would hit the cache is a same-version reinstall,
-     * which is rare and not worth the NAND.
-     *
-     * (pacman's own `-Scc --noconfirm` is intentionally a no-op for
-     * safety — `--noconfirm` forces the "remove also currently-
-     * installed versions?" prompt to default-no, leaving everything
-     * cached. Plain `rm` is the only path that actually clears it.
-     * `find -mindepth 1 -delete` rather than an `rm -rf` shell glob
-     * over `pkg/`, because the wildcard expansion of hundreds of files
-     * blows past ARG_MAX on shells that pre-expand.)
+     * The package cache (`/var/cache/pacman/pkg/`) is wiped
+     * automatically by the `tawc-clear-cache.hook` installed by
+     * [configure] — it fires PostTransaction on every Install/Upgrade
+     * so the cache never accumulates. No explicit `rm` here, and no
+     * `pacman -Scc` (which is a no-op under `--noconfirm`).
      */
     fun installBasePackages(
         method: InstallationMethod,
@@ -540,11 +559,6 @@ PACMAN_EOF
             export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             set -e
             pacman -Syyu --needed --noconfirm ${packages.joinToString(" ")}
-            # Clear the cache via find -delete (not `rm -rf .../pkg/*`)
-            # because the glob expands to hundreds of package files and
-            # blows past ARG_MAX on shells that pre-expand. -mindepth 1
-            # keeps the dir itself for future pacman calls.
-            find /var/cache/pacman/pkg -mindepth 1 -delete
             """.trimIndent(),
             onLine = { log("pacman: $it") },
         )

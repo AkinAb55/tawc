@@ -71,11 +71,10 @@ case "$DISTRO_KEY" in
         )
         # `-Syu` (instead of plain `-S`): refresh local DB in the same
         # transaction we install in, so we never reference a `pkg.tar.xz`
-        # the mirror has already rolled forward of. `rm -rf
-        # /var/cache/pacman/pkg/*` afterwards drops the package cache —
-        # we never reinstall in place. (pacman's own `-Scc --noconfirm`
-        # is a no-op for safety, see ArchPacmanCommon.)
-        INSTALL_CMD="pacman -Syu --noconfirm --needed ${PKGS[*]} && rm -rf /var/cache/pacman/pkg/*"
+        # the mirror has already rolled forward of. The package cache
+        # is wiped automatically by the `tawc-clear-cache.hook`
+        # installed at chroot-configure time (see ArchPacmanCommon).
+        INSTALL_CMD="pacman -Syu --noconfirm --needed ${PKGS[*]}"
         ;;
     void)
         # Void package set. Logical match for the pacman list:
