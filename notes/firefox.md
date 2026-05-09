@@ -6,9 +6,10 @@ fall back to SHM (no `zwp_linux_dmabuf_v1` support yet in this compositor).
 
 **Status (2026-05-08):** Works under tawcroot with **no Firefox-specific
 configuration** — no env vars, no autoconfig `firefox.cfg`, no GPU-process
-prefs. Tested on Manjaro ARM with stock Firefox 141. The
+prefs. Tested on Arch Linux ARM (Firefox 150.0.1), Void Linux (150.0.2),
+and Manjaro ARM (141.0.3). The
 `apps::test_firefox_launches_with_hardware_buffers` integration test
-passes on the OnePlus 9. The earlier "Firefox closed unexpectedly while
+passes on the OnePlus 9 against all three distros. The earlier "Firefox closed unexpectedly while
 starting" recovery-dialog symptom and the tawcroot-side parent-process
 SEGV (Mozilla's `shm_open(3)` against an unbacked `/dev/shm`) are both
 fixed; details in `issues/tawcroot-firefox-segfault.md` (kept as
@@ -138,6 +139,37 @@ These live as patches in our libhybris fork (see `libhybris/TAWC_FORK.md`):
    old scrolled states for ~10 frames after a tap burst. Returning `0`
    ("content undefined") disables partial-present on the client and
    fixes it. See `notes/wsi-layer.md`.
+
+## libpci probe (tawcroot-side fix)
+
+Mozilla's `glxtest` probe `dlopen`s `libpci.so.3` and calls `pci_init()`
+to enumerate PCI devices for vendor/driver identification. Android
+exposes `/proc/bus/pci/devices` as an unreadable placeholder
+(`-?????????`); libpci's procfs back-end calls its default error
+handler — `exit(1)` — when the open fails, killing the entire
+`glxtest` subprocess with no output. Mozilla treats `glxtest`'s
+non-zero exit as "GPU probe failed" and force-disables
+`HW_COMPOSITING`; Firefox then falls back to software WebRender +
+`WaylandBufferSHM` (cairo upload into wl_shm), and you see the chrome
++ content rendering through the SHM path with the magenta tint.
+
+Distro-distinguishing detail: **the failure is gated on whether the
+distro ships `libpci.so.3` at all**, not on the Firefox version. Arch
+and Void's mesa/vulkan/gtk dep graph pulls in `pciutils`; Manjaro
+ARM's doesn't. Without `libpci.so.3` on the loader path Mozilla's
+`dlopen` returns NULL and `glxtest` takes the harmless
+"WARNING / libpci missing" branch, which is why Manjaro worked and
+Arch/Void didn't until this fix.
+
+The fix lives in tawcroot, not libhybris: `handle_openat` in
+`tawcroot/src/syscalls_fs.c` matches `/proc/bus/pci/devices` (both
+absolute and fd-relative) and returns an empty memfd via
+`open_proc_bus_pci_devices_shadow()`. libpci handles "zero devices
+visible" as the legitimate empty-list state — it returns an empty list,
+Mozilla's PCI probe completes silently, and `glxtest` continues to
+the EGL probe (Adreno 660 → not blocklisted → WebRender enabled).
+Same shape as the existing `/proc/sys/kernel/overflow{uid,gid}`
+shadow. Covered by `phase1::test_proc_bus_pci_devices_synthesis`.
 
 ## Killing and Restarting
 

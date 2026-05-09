@@ -96,21 +96,24 @@ static tawcroot_path_mode openat_mode(int flags)
 static int         is_proc_self_maps(const char *path);
 static int         is_proc_self_exe(const char *path);
 static const char *match_proc_sys_overflow_id(const char *path);
+static int         is_proc_bus_pci_devices(const char *path);
 static long        open_proc_maps_shadow(void);
 static long        open_proc_overflow_id_shadow(const char *memfd_name);
+static long        open_proc_bus_pci_devices_shadow(void);
+static int         try_proc_shadow(const char *path, long *out);
 static long        compose_fd_relative(int dirfd, const char *gpath_str,
 				       char *out, size_t cap);
 
 /* Fast-out: does this guest-relative leaf even have a chance of
  * composing into a /proc/<x> path that we shadow? Legitimate first chars
- * are {s,t,m,e,digit} — covering "self/", "sys/", "task/", "maps", "exe",
- * and numeric "<tid>/" forms. Anything else (the vast majority of fd-
- * relative opens — config files, dotfiles, library names, etc.) skips
- * the readlinkat. */
+ * are {b,s,t,m,e,digit} — covering "bus/" (pci/devices), "self/", "sys/",
+ * "task/", "maps", "exe", and numeric "<tid>/" forms. Anything else (the
+ * vast majority of fd-relative opens — config files, dotfiles, library
+ * names, etc.) skips the readlinkat. */
 static int could_be_proc_relative(const char *p)
 {
 	char c = p[0];
-	return c == 's' || c == 't' || c == 'm' || c == 'e' ||
+	return c == 'b' || c == 's' || c == 't' || c == 'm' || c == 'e' ||
 	       (c >= '0' && c <= '9');
 }
 
@@ -140,6 +143,19 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * fallback. See notes/tawcroot.md "More /proc reverse-translation
 	 * paths" for the wider context.
 	 *
+	 * /proc/bus/pci/devices: synthesize an empty memfd. Android exposes
+	 * the file as an unreadable placeholder (`-?????????`); opening it
+	 * returns EACCES. libpci's procfs back-end calls its default
+	 * error handler — `exit(1)` — on that, killing whatever dlopen'd
+	 * libpci.so.3. Mozilla's `glxtest` probe is the proximate consumer
+	 * (called once per Firefox start to sniff the GPU); its non-zero
+	 * exit force-disables HW_COMPOSITING and Firefox falls back to
+	 * software WebRender + SHM. An empty file is the legitimate
+	 * "no PCI devices visible" state libpci handles cleanly: callers
+	 * see an empty device list, log "no GPU found via PCI", and
+	 * continue to whatever non-PCI probe they have (eglQueryString
+	 * for Mozilla). See notes/firefox.md "libpci probe".
+	 *
 	 * Only intercept O_RDONLY (no O_DIRECTORY, no O_PATH). Other flag
 	 * combos fall through to normal translation so the kernel produces
 	 * the conventional -ENOTDIR / O_PATH-fd behavior. The 64-byte peek
@@ -158,28 +174,17 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		char tmp[64];
 		long pn = tawc_copy_string_from_guest(tmp, sizeof tmp, gpath);
 		if (pn >= 0) {
-			const char *overflow_name;
-			if (is_proc_self_maps(tmp))
-				return open_proc_maps_shadow();
-			overflow_name = match_proc_sys_overflow_id(tmp);
-			if (overflow_name)
-				return open_proc_overflow_id_shadow(
-					overflow_name);
+			long shadow;
+			if (try_proc_shadow(tmp, &shadow))
+				return shadow;
 			if (dirfd != AT_FDCWD && tmp[0] != '/' &&
 			    could_be_proc_relative(tmp)) {
 				char composed[TAWC_PATH_MAX];
 				if (compose_fd_relative(dirfd, tmp,
 							composed,
-							sizeof composed) > 0) {
-					if (is_proc_self_maps(composed))
-						return open_proc_maps_shadow();
-					overflow_name =
-						match_proc_sys_overflow_id(
-							composed);
-					if (overflow_name)
-						return open_proc_overflow_id_shadow(
-							overflow_name);
-				}
+							sizeof composed) > 0 &&
+				    try_proc_shadow(composed, &shadow))
+					return shadow;
 			}
 		}
 	}
@@ -762,6 +767,15 @@ static const char *match_proc_sys_overflow_id(const char *path)
 	return NULL;
 }
 
+/* Match the single file libpci's procfs back-end opens to enumerate
+ * PCI devices. The directory itself (`/proc/bus/pci`) and per-bus
+ * subdirs are not matched — guests that want to walk them get the
+ * kernel's normal -EACCES, same as today. */
+static int is_proc_bus_pci_devices(const char *path)
+{
+	return tawc_streq(path, "/proc/bus/pci/devices");
+}
+
 /* /proc/self/maps shadow fd. Read the kernel's maps file in full,
  * reverse-translate each path field via the rootfs/bind tables, and
  * write the result into a memfd that we hand back to the guest.
@@ -885,6 +899,44 @@ static long open_proc_overflow_id_shadow(const char *memfd_name)
 		return sk;
 	}
 	return memfd;
+}
+
+/* /proc/bus/pci/devices shadow fd. Returns an empty memfd — that's the
+ * legitimate "no PCI devices visible" state that libpci's procfs back-
+ * end is designed to handle. See the head-of-handle_openat comment for
+ * why this matters (Mozilla glxtest -> WebRender disable cascade). The
+ * memfd starts at offset 0 with size 0, so no write loop or lseek is
+ * needed; -errno from memfd_create flows back to the guest verbatim,
+ * same as the other two shadows. */
+static long open_proc_bus_pci_devices_shadow(void)
+{
+	return tawc_memfd_create("tawcroot-pci-devices",
+				 1U /*MFD_CLOEXEC*/);
+}
+
+/* Classify `path` against the three /proc shadows and synthesize the
+ * matching fd. Returns 1 on a hit (with *out set to the new fd or the
+ * synthesizer's -errno) and 0 on no match. Centralising the dispatch
+ * keeps the absolute-path and fd-relative branches in handle_openat
+ * automatically in lockstep — a future fourth shadow only needs one
+ * line added here. */
+static int try_proc_shadow(const char *path, long *out)
+{
+	const char *overflow_name;
+	if (is_proc_self_maps(path)) {
+		*out = open_proc_maps_shadow();
+		return 1;
+	}
+	overflow_name = match_proc_sys_overflow_id(path);
+	if (overflow_name) {
+		*out = open_proc_overflow_id_shadow(overflow_name);
+		return 1;
+	}
+	if (is_proc_bus_pci_devices(path)) {
+		*out = open_proc_bus_pci_devices_shadow();
+		return 1;
+	}
+	return 0;
 }
 
 static long handle_readlinkat(const tawcroot_syscall_args *args,

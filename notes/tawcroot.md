@@ -3190,8 +3190,14 @@ here so we don't ship MVP and discover them at runtime.
    bwrap stops with a stderr substring glycin's bwrap-blocked
    autodetect doesn't recognise; with it, bwrap proceeds to
    `unshare(CLONE_NEWUSER)`, fails with the substring glycin matches,
-   and falls back to `SandboxMechanism::NotSandboxed`. Same shape would
-   extend to `/proc/<pid>/cmdline`, `/proc/<pid>/auxv`,
+   and falls back to `SandboxMechanism::NotSandboxed`.
+   `/proc/bus/pci/devices` is done — same shape, but the synthesized
+   memfd is empty (legitimate "no PCI bus visible" state). Android
+   exposes the file as an unreadable placeholder; libpci's procfs
+   back-end `exit(1)`s on the open failure, taking down anything that
+   `dlopen`'d libpci.so.3 (Mozilla's `glxtest` probe → WebRender
+   disable cascade — see `notes/firefox.md` "libpci probe").
+   Same shape would extend to `/proc/<pid>/cmdline`, `/proc/<pid>/auxv`,
    `/proc/<pid>/task/<tid>/maps`, and the fd-relative form
    (`openat(proc_dir_fd, "self/maps", ...)`) when a workload needs
    them. The fd-relative gap also affects `/proc/self/exe` synthesis

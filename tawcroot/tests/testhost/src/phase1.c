@@ -2959,28 +2959,13 @@ static int test_proc_self_synthesis_extensions(void)
 	return fails;
 }
 
-/* /proc/sys/kernel/overflow{uid,gid} synthesis. Android's SELinux
- * denies untrusted_app any read under /proc/sys/kernel, which kicks
- * bwrap out before it gets to the unshare(CLONE_NEWUSER) failure that
- * glycin's autodetect knows how to read. The handler returns a memfd
- * preloaded with the Linux-conventional "65534\n" so bwrap proceeds.
- *
- * On the testhost the host kernel happily returns the same value, so
- * we can't tell synthesis from kernel-passthrough by content alone.
- * Each positive case readlinks /proc/self/fd/<fd> and asserts the link
- * target starts with "/memfd:tawcroot-overflowXid" — which only
- * memfd_create can produce. Negative cases check both the readlink
- * (must NOT be a memfd) and, where applicable, the errno path.
- *
- * The two probes are duplicated rather than table-driven because the
- * test labels and INLINE_SYS6 macro want compile-time strings, and the
- * extra repetition is cheaper than the harness needed to stitch labels
- * dynamically. */
-static const char  OFL_BYTES[] = "65534\n";
-static const char  OFL_LINK_UID[] = "/memfd:tawcroot-overflowuid";
-static const char  OFL_LINK_GID[] = "/memfd:tawcroot-overflowgid";
-
-static int ofl_check_fd(int fd, const char *expected_link)
+/* Readlink /proc/self/fd/<fd> and assert the target starts with
+ * `expected_link` — which only memfd_create can produce, so this
+ * proves a tawcroot synthesizer fired (vs the kernel returning a
+ * real fd). On mismatch the actual link target is logged for
+ * diagnostics. Shared between the overflow_id, pci/devices and any
+ * future memfd-shadow tests. */
+static int check_memfd_link(int fd, const char *expected_link)
 {
 	char fdpath[64];
 	size_t i = 0;
@@ -3001,6 +2986,26 @@ static int ofl_check_fd(int fd, const char *expected_link)
 	}
 	return is_memfd;
 }
+
+/* /proc/sys/kernel/overflow{uid,gid} synthesis. Android's SELinux
+ * denies untrusted_app any read under /proc/sys/kernel, which kicks
+ * bwrap out before it gets to the unshare(CLONE_NEWUSER) failure that
+ * glycin's autodetect knows how to read. The handler returns a memfd
+ * preloaded with the Linux-conventional "65534\n" so bwrap proceeds.
+ *
+ * On the testhost the host kernel happily returns the same value, so
+ * we can't tell synthesis from kernel-passthrough by content alone.
+ * Each positive case asserts via check_memfd_link that the fd is
+ * memfd-backed. Negative cases check both the readlink (must NOT
+ * be a memfd) and, where applicable, the errno path.
+ *
+ * The two probes are duplicated rather than table-driven because the
+ * test labels and INLINE_SYS6 macro want compile-time strings, and the
+ * extra repetition is cheaper than the harness needed to stitch labels
+ * dynamically. */
+static const char  OFL_BYTES[] = "65534\n";
+static const char  OFL_LINK_UID[] = "/memfd:tawcroot-overflowuid";
+static const char  OFL_LINK_GID[] = "/memfd:tawcroot-overflowgid";
 
 static int ofl_content_ok(int fd)
 {
@@ -3026,7 +3031,7 @@ static int test_proc_sys_overflow_id_synthesis(void)
 		if (mfd >= 0) {
 			fails += tawc_io_step(
 				"absolute overflowuid -> memfd-backed fd",
-				ofl_check_fd((int)mfd, OFL_LINK_UID));
+				check_memfd_link((int)mfd, OFL_LINK_UID));
 			fails += tawc_io_step(
 				"absolute overflowuid contents == \"65534\\n\"",
 				ofl_content_ok((int)mfd));
@@ -3045,7 +3050,7 @@ static int test_proc_sys_overflow_id_synthesis(void)
 		if (mfd >= 0) {
 			fails += tawc_io_step(
 				"absolute overflowgid -> memfd-backed fd",
-				ofl_check_fd((int)mfd, OFL_LINK_GID));
+				check_memfd_link((int)mfd, OFL_LINK_GID));
 			fails += tawc_io_step(
 				"absolute overflowgid contents == \"65534\\n\"",
 				ofl_content_ok((int)mfd));
@@ -3069,7 +3074,7 @@ static int test_proc_sys_overflow_id_synthesis(void)
 			if (mfd >= 0) {
 				fails += tawc_io_step(
 					"fd-relative overflowuid -> memfd-backed fd",
-					ofl_check_fd((int)mfd, OFL_LINK_UID));
+					check_memfd_link((int)mfd, OFL_LINK_UID));
 				fails += tawc_io_step(
 					"fd-relative overflowuid contents == \"65534\\n\"",
 					ofl_content_ok((int)mfd));
@@ -3084,7 +3089,7 @@ static int test_proc_sys_overflow_id_synthesis(void)
 			if (mfd >= 0) {
 				fails += tawc_io_step(
 					"fd-relative overflowgid -> memfd-backed fd",
-					ofl_check_fd((int)mfd, OFL_LINK_GID));
+					check_memfd_link((int)mfd, OFL_LINK_GID));
 				fails += tawc_io_step(
 					"fd-relative overflowgid contents == \"65534\\n\"",
 					ofl_content_ok((int)mfd));
@@ -3125,9 +3130,111 @@ static int test_proc_sys_overflow_id_synthesis(void)
 			"/proc/sys/kernel/overflowuid",
 			O_PATH | O_CLOEXEC, 0);
 		int synthesised = (fd >= 0) &&
-			ofl_check_fd((int)fd, OFL_LINK_UID);
+			check_memfd_link((int)fd, OFL_LINK_UID);
 		fails += tawc_io_step(
 			"O_PATH does not route through synthesis",
+			!synthesised);
+		if (fd >= 0) tawc_close((int)fd);
+	}
+
+	return fails;
+}
+
+/* /proc/bus/pci/devices synthesis. Android exposes the file as an
+ * unreadable placeholder (`-?????????`); libpci's procfs back-end
+ * exits(1) on that, taking down anything that dlopen'd libpci.so.3
+ * (Mozilla glxtest -> WebRender disable cascade). The handler returns
+ * an empty memfd, which libpci treats as "no PCI devices visible" and
+ * proceeds normally.
+ *
+ * As with the overflow_id pair, on the testhost the host kernel may
+ * happily return the real /proc/bus/pci/devices, so we can't tell
+ * synthesis from passthrough by content alone — check_memfd_link
+ * (above) is what proves the synthesizer fired. The empty-content
+ * assertion is a redundant cross-check (and would false-pass if the
+ * host's real file happened to be empty), but the link check is
+ * load-bearing. */
+static const char PCI_LINK[] = "/memfd:tawcroot-pci-devices";
+
+static int pci_content_empty(int fd)
+{
+	char buf[4];
+	long n = tawc_read(fd, buf, sizeof buf);
+	return n == 0;
+}
+
+static int test_proc_bus_pci_devices_synthesis(void)
+{
+	int fails = 0;
+
+	/* (A) Absolute path. */
+	{
+		long mfd = inline_openat(AT_FDCWD,
+			"/proc/bus/pci/devices", O_RDONLY, 0);
+		fails += tawc_io_step(
+			"openat(\"/proc/bus/pci/devices\") -> fd",
+			mfd >= 0);
+		if (mfd >= 0) {
+			fails += tawc_io_step(
+				"absolute pci/devices -> memfd-backed fd",
+				check_memfd_link((int)mfd, PCI_LINK));
+			fails += tawc_io_step(
+				"absolute pci/devices is empty",
+				pci_content_empty((int)mfd));
+			tawc_close((int)mfd);
+		}
+	}
+
+	/* (B) Fd-relative against the kernel's /proc — same access pattern
+	 * libpci uses internally if a sandboxed caller pre-opens /proc. */
+	{
+		long proc_fd = tawc_openat(AT_FDCWD, "/proc",
+			O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+		if (proc_fd >= 0) {
+			long mfd;
+			INLINE_SYS6(TAWC_SYS_openat, (int)proc_fd,
+				    "bus/pci/devices",
+				    O_RDONLY, 0, 0, 0, mfd);
+			fails += tawc_io_step(
+				"openat(proc_fd, \"bus/pci/devices\") -> fd",
+				mfd >= 0);
+			if (mfd >= 0) {
+				fails += tawc_io_step(
+					"fd-relative pci/devices -> memfd-backed fd",
+					check_memfd_link((int)mfd, PCI_LINK));
+				fails += tawc_io_step(
+					"fd-relative pci/devices is empty",
+					pci_content_empty((int)mfd));
+				tawc_close((int)mfd);
+			}
+			tawc_close((int)proc_fd);
+		} else {
+			tawc_io_kv_dec(
+				"    /proc open via raw stub failed",
+				-proc_fd);
+		}
+	}
+
+	/* (C) Sibling path that shares the prefix bytes must NOT match.
+	 * Guards against a buggy classifier that prefix-matched. */
+	{
+		long mfd = inline_openat(AT_FDCWD,
+			"/proc/bus/pci/devices-evil",
+			O_RDONLY, 0);
+		fails += tawc_io_step(
+			"sibling-prefix path is not synthesized (errno path)",
+			mfd < 0);
+		if (mfd >= 0) tawc_close((int)mfd);
+	}
+
+	/* (D) The directory itself — `/proc/bus/pci` — must NOT route
+	 * through synthesis. Only the single `devices` file does. */
+	{
+		long fd = inline_openat(AT_FDCWD, "/proc/bus/pci",
+			O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+		int synthesised = (fd >= 0) && check_memfd_link((int)fd, PCI_LINK);
+		fails += tawc_io_step(
+			"directory /proc/bus/pci is not synthesized",
 			!synthesised);
 		if (fd >= 0) tawc_close((int)fd);
 	}
@@ -3732,6 +3839,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_proc_self_maps_reverse_translation();
 	fails += test_proc_self_synthesis_extensions();
 	fails += test_proc_sys_overflow_id_synthesis();
+	fails += test_proc_bus_pci_devices_synthesis();
 	fails += test_dev_shm_emulation();
 
 	/* chroot tests. The non-mutating cases run first (NULL, ENOTDIR,
