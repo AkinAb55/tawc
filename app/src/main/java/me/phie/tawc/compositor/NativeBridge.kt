@@ -8,6 +8,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import java.lang.ref.WeakReference
 
@@ -32,6 +33,19 @@ object NativeBridge {
     var activeInputConnection: TawcInputConnection?
         get() = activeICRef?.get()
         set(value) { activeICRef = value?.let { WeakReference(it) } }
+
+    /** `(EditorInfo.inputType, extraImeOptionsFlags)` for the focused
+     *  Wayland text-input field. Driven by the Wayland client via
+     *  text-input-v3's `set_content_type`, pushed up by
+     *  [onContentTypeChanged], read by `onCreateInputConnection` on the
+     *  next IC build. Stored as a single `@Volatile` reference so concurrent
+     *  reads always see a consistent pair — `restartInput` makes the typical
+     *  read happen-after the write, but other paths (system focus changes,
+     *  configuration changes) also rebuild the IC and don't share that
+     *  ordering. */
+    @Volatile var imeEditorInfo: Pair<Int, Int> =
+        EditorInfo.TYPE_CLASS_TEXT to 0
+        private set
 
     /** Application context, captured by CompositorService.onCreate so the
      *  reverse-JNI `spawnActivity` callback can `startActivity(...)` even
@@ -219,6 +233,26 @@ object NativeBridge {
             val view = inputView ?: return@post
             val imm = view.context.getSystemService(InputMethodManager::class.java)
             imm?.updateSelection(view, selStart, selEnd, composingStart, composingEnd)
+        }
+    }
+
+    /**
+     * Called from native when the focused Wayland text-input instance's
+     * `(content_hint, content_purpose)` resolves to a new Android
+     * `(EditorInfo.inputType, imeOptions-flags)`. Caches the values and
+     * asks the IME to rebuild its connection so the next
+     * `onCreateInputConnection` carries the new EditorInfo (URL bar →
+     * URL keyboard, etc.). Compositor dedupes; we don't repeat the dedupe
+     * here.
+     */
+    @JvmStatic
+    fun onContentTypeChanged(inputType: Int, imeFlags: Int) {
+        Log.d(TAG, "onContentTypeChanged inputType=0x${Integer.toHexString(inputType)} imeFlags=0x${Integer.toHexString(imeFlags)}")
+        imeEditorInfo = inputType to imeFlags
+        mainHandler.post {
+            val view = inputView ?: return@post
+            val imm = view.context.getSystemService(InputMethodManager::class.java)
+            imm?.restartInput(view)
         }
     }
 

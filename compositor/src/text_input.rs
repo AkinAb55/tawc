@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use log::info;
+use log::{debug, info};
 use smithay::reexports::calloop::channel;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -123,6 +123,25 @@ fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
     crate::update_editable_text(text, sel_start, sel_end);
 }
 
+/// Push a new `EditorInfo.inputType` (and a small set of `imeOptions`
+/// flags the compositor wants OR'd in) to Android. The Android side
+/// caches the values and calls `InputMethodManager.restartInput` so the
+/// next `onCreateInputConnection` builds an `EditorInfo` carrying them.
+fn push_input_type_to_android(input_type: i32, ime_flags: i32) {
+    debug!(
+        "text_input: pushing inputType=0x{:x} imeFlags=0x{:x}",
+        input_type, ime_flags
+    );
+    crate::call_native_bridge_void(
+        "onContentTypeChanged",
+        "(II)V",
+        &[
+            jni::objects::JValue::Int(input_type),
+            jni::objects::JValue::Int(ime_flags),
+        ],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // State types
 // ---------------------------------------------------------------------------
@@ -160,10 +179,16 @@ struct InstanceState {
     pending_disable: bool,
     pending_surrounding: Option<SurroundingText>,
     pending_change_cause: ChangeCause,
+    pending_content_hint: u32,
+    pending_content_purpose: u32,
 
     // Current (committed) state
     enabled: bool,
     surrounding: Option<SurroundingText>,
+    /// Most recently committed (hint, purpose). Defaults are (0, normal).
+    /// Reset on enable per the protocol.
+    content_hint: u32,
+    content_purpose: u32,
 
     /// Last preedit text we sent to this client. Needed so finishComposingText
     /// can commit the composing text rather than discarding it.
@@ -181,6 +206,10 @@ pub struct TextInputState {
     /// Whether the Android keyboard is currently shown.
     /// Tracked to avoid redundant show/hide calls and handle rapid toggling.
     keyboard_visible: bool,
+    /// Last `(input_type, ime_flags)` pushed to Android via
+    /// `onContentTypeChanged`. Used to dedupe — `restartInput` tears the
+    /// IME's IC down and rebuilds it, so we only call it on real changes.
+    last_pushed_input_type: Option<(i32, i32)>,
 }
 
 impl TextInputState {
@@ -190,6 +219,7 @@ impl TextInputState {
             instance_state: HashMap::new(),
             focused_surface: None,
             keyboard_visible: false,
+            last_pushed_input_type: None,
         }
     }
 
@@ -235,6 +265,13 @@ impl TextInputState {
         }
     }
 
+    pub fn set_pending_content_type(&mut self, id: &ObjectId, hint: u32, purpose: u32) {
+        if let Some(state) = self.instance_state.get_mut(id) {
+            state.pending_content_hint = hint;
+            state.pending_content_purpose = purpose;
+        }
+    }
+
     pub fn set_pending_change_cause(&mut self, id: &ObjectId, cause: u32) {
         if let Some(state) = self.instance_state.get_mut(id) {
             // Protocol enum: 0 = input_method, 1 = other
@@ -268,14 +305,24 @@ impl TextInputState {
             state.enabled = false;
             state.surrounding = None;
             state.current_preedit = None;
+            state.pending_content_hint = 0;
+            state.pending_content_purpose = 0;
         } else if state.pending_enable {
             info!("text_input: commit enable");
             state.enabled = true;
             // Per spec: enable resets all associated state.
             state.surrounding = None;
             state.current_preedit = None;
+            state.content_hint = 0;
+            state.content_purpose = 0;
             just_enabled = true;
         }
+
+        // Apply pending content type (defaults to (0, normal) if the
+        // client didn't set it this cycle — exactly what enable's reset
+        // above produced).
+        state.content_hint = state.pending_content_hint;
+        state.content_purpose = state.pending_content_purpose;
 
         // Apply pending surrounding text.
         let change_cause = state.pending_change_cause;
@@ -317,6 +364,8 @@ impl TextInputState {
         state.pending_enable = false;
         state.pending_disable = false;
         state.pending_change_cause = ChangeCause::default();
+        state.pending_content_hint = 0;
+        state.pending_content_purpose = 0;
         let enabled_now = state.enabled;
         let commit_count = state.commit_count;
 
@@ -334,6 +383,10 @@ impl TextInputState {
             }
         }
 
+        // Push EditorInfo to Android (deduped). Drives the IME's keyboard
+        // layout — URL bars get the URL keyboard, etc.
+        self.push_focused_input_type_if_changed();
+
         // Tell the client to drop its preedit if the cursor moved
         // out-of-band while we had one tracked. Done order means the
         // existing preedit is replaced by the cursor on the next done
@@ -347,6 +400,33 @@ impl TextInputState {
 
         // Update keyboard visibility based on whether any instance is enabled.
         self.sync_keyboard_visibility();
+    }
+
+    /// Compute the Android EditorInfo for whichever instance is focused
+    /// and enabled, and push it (deduped). No-op when no focused instance
+    /// is enabled — we leave the last value cached so the next time the
+    /// IME comes up it sees something sensible.
+    fn push_focused_input_type_if_changed(&mut self) {
+        let focused_client = match &self.focused_surface {
+            Some(s) => s.id(),
+            None => return,
+        };
+        let resolved = self.instances.iter().find_map(|ti| {
+            if !ti.id().same_client_as(&focused_client) {
+                return None;
+            }
+            let inst = self.instance_state.get(&ti.id())?;
+            if !inst.enabled {
+                return None;
+            }
+            Some(wayland_content_to_android_input_type(inst.content_hint, inst.content_purpose))
+        });
+        if let Some(t) = resolved {
+            if self.last_pushed_input_type != Some(t) {
+                push_input_type_to_android(t.0, t.1);
+                self.last_pushed_input_type = Some(t);
+            }
+        }
     }
 
     /// Show/hide Android keyboard to match the current enabled state.
@@ -372,6 +452,10 @@ impl TextInputState {
                 ti.enter(surface);
             }
         }
+        // No content-type push here: the protocol requires the client to
+        // re-enable + re-set state after enter, so any push at this point
+        // would race the client's still-pending requests. The next commit
+        // on the freshly-enabled instance does the push.
     }
 
     fn leave(&mut self, surface: &WlSurface) {
@@ -384,8 +468,27 @@ impl TextInputState {
         self.handle_android_event(TextInputEvent::FinishComposingText);
 
         for ti in &self.instances {
-            if ti.id().same_client_as(&surface.id()) {
-                ti.leave(surface);
+            if !ti.id().same_client_as(&surface.id()) {
+                continue;
+            }
+            ti.leave(surface);
+            // Spec: leave invalidates per-instance state. Mirror that
+            // server-side so a re-enter doesn't see stale `enabled` /
+            // surrounding / content_type from before the focus change.
+            // Preserve `commit_count` — it's the protocol's monotonic
+            // `done(serial)` source, not per-cycle state.
+            if let Some(inst) = self.instance_state.get_mut(&ti.id()) {
+                inst.enabled = false;
+                inst.surrounding = None;
+                inst.content_hint = 0;
+                inst.content_purpose = 0;
+                inst.current_preedit = None;
+                inst.pending_enable = false;
+                inst.pending_disable = false;
+                inst.pending_surrounding = None;
+                inst.pending_change_cause = ChangeCause::default();
+                inst.pending_content_hint = 0;
+                inst.pending_content_purpose = 0;
             }
         }
         if self.focused_surface.as_ref() == Some(surface) {
@@ -550,6 +653,141 @@ impl TextInputState {
 // Utilities
 // ---------------------------------------------------------------------------
 
+/// Map a text-input-v3 `(content_hint, content_purpose)` pair to an
+/// Android `(EditorInfo.inputType, imeOptions-flags)` pair.
+///
+/// `inputType` follows Android's class+variation+flags layout (see
+/// `android.text.InputType` constants). `ime_flags` is just the subset of
+/// `imeOptions` flags the compositor wants forced on; the activity OR's
+/// them with its base options (`IME_FLAG_NO_FULLSCREEN | IME_ACTION_NONE`).
+fn wayland_content_to_android_input_type(hint: u32, purpose: u32) -> (i32, i32) {
+    use android_input_type::*;
+    use wayland_content::*;
+
+    let mut input_type = match purpose {
+        P_DIGITS => TYPE_CLASS_NUMBER,
+        P_NUMBER => TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_SIGNED | TYPE_NUMBER_FLAG_DECIMAL,
+        P_PIN    => TYPE_CLASS_NUMBER | TYPE_NUMBER_VARIATION_PASSWORD,
+        P_PHONE  => TYPE_CLASS_PHONE,
+        P_DATE   => TYPE_CLASS_DATETIME | TYPE_DATETIME_VARIATION_DATE,
+        P_TIME   => TYPE_CLASS_DATETIME | TYPE_DATETIME_VARIATION_TIME,
+        P_DATETIME => TYPE_CLASS_DATETIME,
+        P_URL    => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_URI,
+        P_EMAIL  => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+        P_NAME   => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_PERSON_NAME,
+        // Spec says "combine with sensitive_data hint" but most clients
+        // won't bother; mask unconditionally — leaking the chars onscreen
+        // is the worse default. Use VISIBLE_PASSWORD only for non-password
+        // purposes that explicitly request hidden display below.
+        P_PASSWORD => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_PASSWORD,
+        // Terminal: kill suggestions/autocorrect; commands aren't English.
+        P_TERMINAL => TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+        // normal, alpha (Android doesn't have an alpha-only text class —
+        // best we can do is plain text and let the IME's language layout
+        // sort it out), and anything we don't recognise.
+        _ => TYPE_CLASS_TEXT,
+    };
+
+    let hidden = (hint & HINT_HIDDEN_TEXT) != 0;
+
+    // Hint-derived flags only meaningful for TEXT-class fields.
+    if (input_type & TYPE_MASK_CLASS) == TYPE_CLASS_TEXT {
+        if (hint & HINT_AUTO_CAPITALIZATION) != 0 {
+            input_type |= TYPE_TEXT_FLAG_CAP_SENTENCES;
+        }
+        if (hint & HINT_UPPERCASE) != 0 {
+            input_type |= TYPE_TEXT_FLAG_CAP_CHARACTERS;
+        }
+        if (hint & HINT_TITLECASE) != 0 {
+            input_type |= TYPE_TEXT_FLAG_CAP_WORDS;
+        }
+        if (hint & HINT_SPELLCHECK) != 0 {
+            input_type |= TYPE_TEXT_FLAG_AUTO_CORRECT;
+        }
+        if (hint & HINT_COMPLETION) != 0 {
+            input_type |= TYPE_TEXT_FLAG_AUTO_COMPLETE;
+        }
+        if (hint & HINT_MULTILINE) != 0 {
+            input_type |= TYPE_TEXT_FLAG_MULTI_LINE;
+        }
+        // hidden_text on a non-password field still wants suggestions off
+        // (the IME would otherwise leak the hidden chars to its dictionary).
+        if hidden && purpose != P_PASSWORD && purpose != P_PIN {
+            input_type |= TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        }
+    }
+
+    let mut ime_flags = 0;
+    // Stop the IME from learning typed text into its dictionary for any
+    // password/PIN field, even when the client forgot the spec-mandated
+    // `sensitive_data` companion hint.
+    if (hint & HINT_SENSITIVE_DATA) != 0 || purpose == P_PASSWORD || purpose == P_PIN {
+        ime_flags |= IME_FLAG_NO_PERSONALIZED_LEARNING;
+    }
+
+    (input_type, ime_flags)
+}
+
+/// Android `android.text.InputType` + `EditorInfo` constants used by the
+/// content-type mapping. Names match the Java symbols verbatim so a grep
+/// for the Android constant lands here.
+#[allow(dead_code, non_upper_case_globals)]
+mod android_input_type {
+    pub const TYPE_MASK_CLASS: i32                  = 0x0000_000f;
+    pub const TYPE_CLASS_TEXT: i32                  = 0x0000_0001;
+    pub const TYPE_CLASS_NUMBER: i32                = 0x0000_0002;
+    pub const TYPE_CLASS_PHONE: i32                 = 0x0000_0003;
+    pub const TYPE_CLASS_DATETIME: i32              = 0x0000_0004;
+
+    pub const TYPE_TEXT_VARIATION_URI: i32          = 0x0000_0010;
+    pub const TYPE_TEXT_VARIATION_EMAIL_ADDRESS: i32 = 0x0000_0020;
+    pub const TYPE_TEXT_VARIATION_PERSON_NAME: i32  = 0x0000_0060;
+    pub const TYPE_TEXT_VARIATION_PASSWORD: i32     = 0x0000_0080;
+
+    pub const TYPE_TEXT_FLAG_CAP_CHARACTERS: i32    = 0x0000_1000;
+    pub const TYPE_TEXT_FLAG_CAP_WORDS: i32         = 0x0000_2000;
+    pub const TYPE_TEXT_FLAG_CAP_SENTENCES: i32     = 0x0000_4000;
+    pub const TYPE_TEXT_FLAG_AUTO_CORRECT: i32      = 0x0000_8000;
+    pub const TYPE_TEXT_FLAG_AUTO_COMPLETE: i32     = 0x0001_0000;
+    pub const TYPE_TEXT_FLAG_MULTI_LINE: i32        = 0x0002_0000;
+    pub const TYPE_TEXT_FLAG_NO_SUGGESTIONS: i32    = 0x0008_0000;
+
+    pub const TYPE_NUMBER_VARIATION_PASSWORD: i32   = 0x0000_0010;
+    pub const TYPE_NUMBER_FLAG_SIGNED: i32          = 0x0000_1000;
+    pub const TYPE_NUMBER_FLAG_DECIMAL: i32         = 0x0000_2000;
+
+    pub const TYPE_DATETIME_VARIATION_DATE: i32     = 0x0000_0010;
+    pub const TYPE_DATETIME_VARIATION_TIME: i32     = 0x0000_0020;
+
+    pub const IME_FLAG_NO_PERSONALIZED_LEARNING: i32 = 0x0100_0000;
+}
+
+/// `text-input-v3` `content_hint` bitfield + `content_purpose` enum.
+#[allow(dead_code)]
+mod wayland_content {
+    pub const HINT_COMPLETION: u32          = 0x001;
+    pub const HINT_SPELLCHECK: u32          = 0x002;
+    pub const HINT_AUTO_CAPITALIZATION: u32 = 0x004;
+    pub const HINT_UPPERCASE: u32           = 0x010;
+    pub const HINT_TITLECASE: u32           = 0x020;
+    pub const HINT_HIDDEN_TEXT: u32         = 0x040;
+    pub const HINT_SENSITIVE_DATA: u32      = 0x080;
+    pub const HINT_MULTILINE: u32           = 0x200;
+
+    pub const P_DIGITS: u32   = 2;
+    pub const P_NUMBER: u32   = 3;
+    pub const P_PHONE: u32    = 4;
+    pub const P_URL: u32      = 5;
+    pub const P_EMAIL: u32    = 6;
+    pub const P_NAME: u32     = 7;
+    pub const P_PASSWORD: u32 = 8;
+    pub const P_PIN: u32      = 9;
+    pub const P_DATE: u32     = 10;
+    pub const P_TIME: u32     = 11;
+    pub const P_DATETIME: u32 = 12;
+    pub const P_TERMINAL: u32 = 13;
+}
+
 /// Convert a UTF-8 byte offset within `text` to a UTF-16 code-unit count
 /// (the unit Android uses for cursor and selection offsets). Clamps to text
 /// length if offset is out of bounds.
@@ -682,7 +920,9 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for TawcState {
             zwp_text_input_v3::Request::SetTextChangeCause { cause } => {
                 state.text_input_state.set_pending_change_cause(&id, cause.into());
             }
-            zwp_text_input_v3::Request::SetContentType { .. } => {}
+            zwp_text_input_v3::Request::SetContentType { hint, purpose } => {
+                state.text_input_state.set_pending_content_type(&id, hint.into(), purpose.into());
+            }
             zwp_text_input_v3::Request::SetCursorRectangle { .. } => {}
             zwp_text_input_v3::Request::Commit => {
                 state.text_input_state.commit(&id);

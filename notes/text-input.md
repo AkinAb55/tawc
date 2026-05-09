@@ -231,13 +231,33 @@ Backspace and forward-delete are sent as real `wl_keyboard` key events instead o
 
 `sync_keyboard_visibility()` checks the final enabled state of all instances and only shows/hides the keyboard when the state actually changes. This prevents rapid disable+enable cycles (common during cursor movement within a text field) from causing keyboard flicker or failed re-show.
 
+### Content type → EditorInfo
+
+`set_content_type(hint, purpose)` is double-buffered like the rest of the per-cycle state: pending values are stored in `InstanceState` and applied on `commit`. After commit, if the committing instance is on the focused client and the resolved Android EditorInfo differs from what we last pushed, the compositor calls reverse-JNI `onContentTypeChanged(inputType, imeFlags)`. `NativeBridge` caches the values and triggers `InputMethodManager.restartInput`, which makes `TawcSurfaceView.onCreateInputConnection` rebuild its `EditorInfo` with the new fields. The same push runs on `enter` so a focus move to a client that doesn't re-enable still gets the right keyboard.
+
+Translation lives in `compositor/src/text_input.rs::wayland_content_to_android_input_type`. Highlights:
+
+| `content_purpose` | `EditorInfo.inputType` |
+|---|---|
+| normal/alpha | `TYPE_CLASS_TEXT` |
+| digits | `TYPE_CLASS_NUMBER` |
+| number | `TYPE_CLASS_NUMBER \| FLAG_SIGNED \| FLAG_DECIMAL` |
+| pin | `TYPE_CLASS_NUMBER \| NUMBER_VARIATION_PASSWORD` |
+| phone | `TYPE_CLASS_PHONE` |
+| url | `TYPE_CLASS_TEXT \| TEXT_VARIATION_URI` |
+| email | `TYPE_CLASS_TEXT \| TEXT_VARIATION_EMAIL_ADDRESS` |
+| name | `TYPE_CLASS_TEXT \| TEXT_VARIATION_PERSON_NAME` |
+| password | `TYPE_CLASS_TEXT \| TEXT_VARIATION_(VISIBLE_)PASSWORD` (chosen by `hidden_text`) |
+| date / time / datetime | `TYPE_CLASS_DATETIME` (+ DATE / TIME variation) |
+| terminal | `TYPE_CLASS_TEXT \| FLAG_NO_SUGGESTIONS` |
+
+Hints add flags on TEXT-class fields: `auto_capitalization` → `FLAG_CAP_SENTENCES`, `uppercase` → `FLAG_CAP_CHARACTERS`, `titlecase` → `FLAG_CAP_WORDS`, `spellcheck` → `FLAG_AUTO_CORRECT`, `completion` → `FLAG_AUTO_COMPLETE`, `multiline` → `FLAG_MULTI_LINE`, `hidden_text` (without password purpose) → `FLAG_NO_SUGGESTIONS`. `sensitive_data` adds `IME_FLAG_NO_PERSONALIZED_LEARNING` so the IME doesn't store typed text in its dictionary.
+
 ## Open Questions
 
-1. **Content type forwarding**: `set_content_type` from clients is received but not forwarded to Android's EditorInfo. Would improve keyboard layout (URL keyboard for URL bars, etc.).
+1. **Batch editing**: Android groups IME operations between `beginBatchEdit()` / `endBatchEdit()`. Currently each operation gets its own `done` event. Batching into a single `done` would be more correct but functionally the current approach works for simple cases.
 
-2. **Batch editing**: Android groups IME operations between `beginBatchEdit()` / `endBatchEdit()`. Currently each operation gets its own `done` event. Batching into a single `done` would be more correct but functionally the current approach works for simple cases.
-
-3. **Composing region replacement when cursor outside region**: `pendingComposingRegionReplacement` only emits a delete when the cursor sits inside the composing region. Outside that case the new preedit lands at the cursor without removing the old region; the next `set_surrounding_text` from the client reconciles the Editable but Wayland transiently shows the original word AND the new preedit. Real IMEs almost always pick regions containing the cursor, so this is acceptable in practice.
+2. **Composing region replacement when cursor outside region**: `pendingComposingRegionReplacement` only emits a delete when the cursor sits inside the composing region. Outside that case the new preedit lands at the cursor without removing the old region; the next `set_surrounding_text` from the client reconciles the Editable but Wayland transiently shows the original word AND the new preedit. Real IMEs almost always pick regions containing the cursor, so this is acceptable in practice.
 
 ## Test infrastructure note
 

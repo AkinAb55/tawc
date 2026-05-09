@@ -293,8 +293,10 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         override fun onCheckIsTextEditor(): Boolean = true
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
-            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
+            val (inputType, extraFlags) = NativeBridge.imeEditorInfo
+            outAttrs.inputType = inputType
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
+                EditorInfo.IME_ACTION_NONE or extraFlags
             return TawcInputConnection(this)
         }
     }
