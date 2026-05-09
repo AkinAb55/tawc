@@ -26,11 +26,13 @@
  *   - With --include-legacy-x86_64 (only meaningful on x86_64): also TRAP
  *     access (21), open (2), chmod (90), chown (92), mkdir (83),
  *     rmdir (84), unlink (87), symlink (88), link (86), rename (82),
- *     readlink (89), stat (4), lstat (6). These are the lp64 legacy
- *     syscalls Android RET_TRAPs because bionic's allowlist only grants
- *     them to lp32 — see notes/proot.md "Why upstream proot doesn't work
- *     on Android x86_64". tawcroot routes them all through *at variants
- *     in the handler. (No-op on aarch64; those NRs aren't allocated.)
+ *     readlink (89), stat (4), lstat (6), epoll_wait (232). These are
+ *     the lp64 legacy syscalls Android RET_TRAPs because bionic's
+ *     allowlist only grants them to lp32 — see notes/proot.md "Why
+ *     upstream proot doesn't work on Android x86_64". tawcroot routes
+ *     them all through *at variants (or for epoll_wait, through
+ *     epoll_pwait) in the handler. (No-op on aarch64; those NRs aren't
+ *     allocated.)
  *
  * Deliberately NOT trapped:
  *
@@ -91,6 +93,7 @@
 # define WRAP_NR_readlink     89
 # define WRAP_NR_stat         4
 # define WRAP_NR_lstat        6
+# define WRAP_NR_epoll_wait   232
 #else
 # error "unsupported arch"
 #endif
@@ -142,6 +145,7 @@ static bool install_filter(bool include_legacy_x86_64)
 		WRAP_PUSH(WRAP_NR_readlink);
 		WRAP_PUSH(WRAP_NR_stat);
 		WRAP_PUSH(WRAP_NR_lstat);
+		WRAP_PUSH(WRAP_NR_epoll_wait);
 	}
 #else
 	(void)include_legacy_x86_64;

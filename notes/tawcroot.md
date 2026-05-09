@@ -2220,7 +2220,12 @@ coverage.
        `chmod`/`chown`/`lchown`/`mkdir`/`rmdir`/`unlink`) routed
        through *at variants — the kludge that closes Android's
        lp64-`access`-on-x86_64 gap as a side-effect of path
-       translation
+       translation. Also `poll`→`ppoll` and `epoll_wait`→`epoll_pwait`
+       on x86_64 for the same reason: Android's untrusted_app filter
+       RET_TRAPs the legacy variants so we just forward them. Without
+       the `epoll_wait` shim, mio's epoll backend (used by wezterm,
+       and probably others) sees -ENOSYS from the empty dispatch slot
+       and aborts with "polling for events: ENOSYS; terminating".
      • EFAULT-safe guest-pointer copies via `process_vm_readv`
        (probed at init with `tawc_usercopy_init`); `openat(NULL)`
        and `openat(<unmapped>)` cleanly return -EFAULT, no handler

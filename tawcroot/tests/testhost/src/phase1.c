@@ -1505,6 +1505,59 @@ static int test_legacy_x86_64_wrappers(void)
 		    0, 0, 0, 0, 0, rv);
 	return fails;
 }
+
+/* Legacy epoll_wait → epoll_pwait translation (x86_64-only).
+ *
+ * Bug pre-fix (wezterm reproducer): Android's untrusted_app filter
+ * RET_TRAPs epoll_wait (NR 232) on x86_64; tawcroot had no dispatch
+ * entry; empty-slot fallback returned -ENOSYS to the guest. mio's epoll
+ * backend treats that as fatal ("polling for events: ENOSYS;
+ * terminating") so wezterm exits before drawing a frame.
+ *
+ * The synthesized Android filter (--include-legacy-x86_64 in the
+ * androidfilter wrapper) traps NR 232. With the handler installed,
+ * epoll_wait must succeed via internal redirect to epoll_pwait. Without
+ * the redirect this would all return -ENOSYS. */
+static int test_legacy_epoll_wait(void)
+{
+	int fails = 0;
+	long rv;
+
+	/* epoll_create1(EPOLL_CLOEXEC=0x80000) — kernel call, not trapped. */
+	INLINE_SYS6(291 /*epoll_create1*/, 0x80000, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("epoll_create1(EPOLL_CLOEXEC) -> fd >= 0",
+			      rv >= 0);
+	if (rv < 0) {
+		tawc_io_kv_dec("    errno (-rv)", -rv);
+		return fails;
+	}
+	int epfd = (int)rv;
+
+	/* No fds registered + timeout=0 must return 0 events. The kernel
+	 * doesn't touch `events` (nevents=0) so the buffer's contents and
+	 * exact size don't matter; pass enough room for one struct
+	 * epoll_event (12 bytes packed on x86_64) just to be defensive
+	 * against future maxevents>0 extensions of this test. */
+	char events[64];
+	INLINE_SYS6(TAWC_SYS_epoll_wait, (long)epfd, (long)events, 1, 0, 0, 0,
+		    rv);
+	fails += tawc_io_step(
+		"legacy epoll_wait(empty, timeout=0) -> 0 (translated to epoll_pwait)",
+		rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	/* Bad fd: must surface kernel's -EBADF, NOT a stale -ENOSYS from
+	 * an empty dispatch slot. Distinguishes "translation happened" from
+	 * "translation silently dropped". */
+	INLINE_SYS6(TAWC_SYS_epoll_wait, -1L, (long)events, 1, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"legacy epoll_wait(bad fd) -> -EBADF (not -ENOSYS)",
+		rv == -9 /*EBADF*/);
+	tawc_io_kv_dec("    rv", rv);
+
+	INLINE_SYS6(TAWC_SYS_close, (long)epfd, 0, 0, 0, 0, 0, rv);
+	return fails;
+}
 #endif
 
 /* Internal-fd protection (Phase 0.5). The reserved range starts at
@@ -3376,6 +3429,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_mode_aware_memoization();
 #if defined(__x86_64__)
 	fails += test_legacy_x86_64_wrappers();
+	fails += test_legacy_epoll_wait();
 #endif
 	fails += test_internal_fd_protection();
 	fails += test_guest_seccomp_prctl_handling();

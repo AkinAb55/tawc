@@ -238,6 +238,22 @@ static long handle_poll(const tawcroot_syscall_args *args, ucontext_t *uc)
 	};
 	return TAWC_RAW(TAWC_SYS_ppoll, fds_p, nfds, (long)&ts, 0, 8, 0);
 }
+
+/* epoll_wait(epfd, events, maxevents, timeout) →
+ *     epoll_pwait(epfd, events, maxevents, timeout, NULL, 8).
+ * Same shape and rationale as handle_poll above: Android's app-sandbox
+ * seccomp filter RET_TRAPs the legacy epoll_wait(2) on x86_64. mio's
+ * epoll backend issues epoll_wait directly and treats -ENOSYS as fatal
+ * (wezterm: "polling for events: ENOSYS; terminating"). The first four
+ * args are identical between the two; sigsetsize is irrelevant when
+ * sigmask is NULL but the kernel ABI requires the slot — pass 8 for
+ * symmetry with handle_poll. */
+static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	return TAWC_RAW(TAWC_SYS_epoll_pwait,
+	                args->a, args->b, args->c, args->d, 0, 8);
+}
 #endif
 
 void tawcroot_fd_register(void)
@@ -251,5 +267,6 @@ void tawcroot_fd_register(void)
 #if defined(__x86_64__)
 	tawcroot_dispatch_install(TAWC_SYS_dup2,        handle_dup2);
 	tawcroot_dispatch_install(TAWC_SYS_poll,        handle_poll);
+	tawcroot_dispatch_install(TAWC_SYS_epoll_wait,  handle_epoll_wait);
 #endif
 }
