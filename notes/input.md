@@ -19,7 +19,12 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
 - Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
 - The seat advertises pointer, keyboard, and touch capabilities. Keyboard capability
   is required for Firefox to enable text input (see text-input.md).
-- Keyboard focus is set on touch-down and when new toplevels are created.
+- Touch-down moves both keyboard focus AND text-input-v3 focus to the target
+  surface via `TawcState::set_input_focus` — they are conceptually one focus and
+  splitting them invites drift. The focus update happens *before* delivering
+  `touch.down` to the client, so a cross-toplevel tap's preedit-finalize (via
+  `leave`'s automatic FinishComposingText) lands on the OLD surface — exactly
+  where the typed-but-not-committed word should appear.
 
 **GTK3 touch handling note:** GTK3 handles `wl_touch` events natively — GtkGestureMultiPress
 processes `GDK_TOUCH_BEGIN` directly, and GDK's Wayland backend sets `emulating_pointer=TRUE`

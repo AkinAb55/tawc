@@ -95,25 +95,14 @@ fn hide_keyboard() {
     crate::call_native_bridge_void("onHideKeyboard", "()V", &[]);
 }
 
-/// Notify Android IME (via InputMethodManager.updateSelection) that the
-/// editor's selection/cursor has changed. Critical after non-IME cursor
-/// movement so Gboard can reset its internal model.
-fn update_selection(sel_start: i32, sel_end: i32) {
-    crate::call_native_bridge_void(
-        "onUpdateSelection",
-        "(IIII)V",
-        &[
-            jni::objects::JValue::Int(sel_start),
-            jni::objects::JValue::Int(sel_end),
-            jni::objects::JValue::Int(-1), // no composing span
-            jni::objects::JValue::Int(-1),
-        ],
-    );
-}
-
 /// Push the Wayland client's text + selection up to the Android side so
 /// the active TawcInputConnection's Editable matches the editor's truth.
 /// `sel_start`/`sel_end` are UTF-16 code-unit offsets within `text`.
+///
+/// `updateFromCompositor` on the Kotlin side replaces the Editable AND
+/// pokes `InputMethodManager.updateSelection`, so this single call
+/// covers both jobs — the IME sees the new text via Editable queries
+/// and the new selection via IMM in one round-trip.
 fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
     crate::update_editable_text(text, sel_start, sel_end);
 }
@@ -321,7 +310,7 @@ impl TextInputState {
 
         // Apply pending surrounding text.
         let change_cause = state.pending_change_cause;
-        let mut sync_to_android: Option<(String, i32, i32, bool)> = None;
+        let mut sync_to_android: Option<(String, i32, i32)> = None;
         // Whether to send a preedit-clearing done event to the client
         // after we drop the borrow on `state`. Set when the client moved
         // the cursor outside IME control while we had an active preedit:
@@ -333,7 +322,6 @@ impl TextInputState {
         if let Some(surrounding) = state.pending_surrounding.take() {
             let sel_start = byte_offset_to_utf16_count(&surrounding.text, surrounding.cursor) as i32;
             let sel_end = byte_offset_to_utf16_count(&surrounding.text, surrounding.anchor) as i32;
-            let need_imm_update = change_cause == ChangeCause::Other && state.enabled;
 
             if change_cause == ChangeCause::Other {
                 // Drop our compositor-side preedit tracking so a defensive
@@ -347,12 +335,12 @@ impl TextInputState {
                 }
             }
 
-            sync_to_android = Some((surrounding.text.clone(), sel_start, sel_end, need_imm_update));
+            sync_to_android = Some((surrounding.text.clone(), sel_start, sel_end));
             state.surrounding = Some(surrounding);
         } else if just_enabled {
             // Client enabled without first reporting surrounding text; treat
             // the editor as empty for Android-side mirroring purposes.
-            sync_to_android = Some((String::new(), 0, 0, false));
+            sync_to_android = Some((String::new(), 0, 0));
         }
 
         // Reset pending state.
@@ -366,15 +354,14 @@ impl TextInputState {
 
         // End of borrow on `state`; do JNI calls outside the &mut.
         if enabled_now {
-            if let Some((text, sel_start, sel_end, need_imm_update)) = sync_to_android {
-                // Always mirror the Wayland client's text into the Android
-                // Editable so Gboard's queries match the editor's truth.
+            if let Some((text, sel_start, sel_end)) = sync_to_android {
+                // Mirror the Wayland client's text into the Android Editable
+                // so Gboard's queries match the editor's truth, and (inside
+                // updateFromCompositor) poke IMM so the IME drops any
+                // composing region and refreshes its cached selection. One
+                // round-trip handles both for every cause — `cause=other`
+                // just means the IME also needs to drop its prediction model.
                 update_editable_text(&text, sel_start, sel_end);
-                if need_imm_update {
-                    // Cursor moved by user touch / arrow keys / etc. — also
-                    // poke IMM so Gboard resets its internal composing model.
-                    update_selection(sel_start, sel_end);
-                }
             }
         }
 

@@ -126,18 +126,19 @@ pub fn run(
                 // Firefox) reset their IM on cursor-move and the IM commits
                 // its pending text first; we are the IM, so we do that here.
                 //
-                // Same calloop callback, same compositor thread, same client
-                // socket — the commit_string + done is on the wire before
+                // Order: focus first (so a cross-toplevel touch's `leave` on
+                // the old surface emits the FinishComposingText for *that*
+                // surface, not the new one); then a same-surface explicit
+                // FinishComposingText (no-op if focus actually moved or no
+                // preedit was active); then touch.down. Same calloop tick
+                // and client socket — the commit + done go out before
                 // touch.down's events, so the client commits at the old
-                // cursor and only afterwards processes the touch. No-op
-                // when there's no active preedit.
+                // cursor and only afterwards processes the touch.
+                let target = focus.as_ref().map(|(s, _)| s.clone());
+                data.set_input_focus(target.as_ref());
                 data.text_input_state.handle_android_event(
                     crate::text_input::TextInputEvent::FinishComposingText,
                 );
-                // Set keyboard focus on touch to the target surface
-                if let (Some((ref surface, _)), Some(keyboard)) = (&focus, data.seat.get_keyboard()) {
-                    keyboard.set_focus(data, Some(surface.clone()), serial);
-                }
                 touch.down(
                     data,
                     focus,
@@ -406,12 +407,15 @@ pub fn run(
         data.popup_manager.cleanup();
         data.text_input_state.cleanup();
 
-        // Update keyboard and text input focus only when toplevels changed
+        // Update keyboard and text input focus only when toplevels changed.
+        // Both focuses move together: a dead focused surface would otherwise
+        // leave the keyboard pointed at it (events go nowhere) until the
+        // next FocusChanged event arrives.
         if toplevels_changed {
             let new_focus = data.toplevels.iter()
                 .find(|t| t.alive())
                 .map(|t| t.wl_surface().clone());
-            data.text_input_state.update_focus(new_focus.as_ref());
+            data.set_input_focus(new_focus.as_ref());
         }
 
         // 5. Flush (after focus updates so enter/leave events are sent immediately)
@@ -576,19 +580,11 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             if has_focus {
                 data.foreground_host = Some(activity_id.clone());
                 let target = first_alive_toplevel_of_host(data, &activity_id);
-                if let Some(keyboard) = data.seat.get_keyboard() {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    keyboard.set_focus(data, target.clone(), serial);
-                }
-                data.text_input_state.update_focus(target.as_ref());
+                data.set_input_focus(target.as_ref());
                 data.needs_render = true;
             } else if data.foreground_host.as_ref() == Some(&activity_id) {
                 data.foreground_host = None;
-                if let Some(keyboard) = data.seat.get_keyboard() {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    keyboard.set_focus(data, None, serial);
-                }
-                data.text_input_state.update_focus(None);
+                data.set_input_focus(None);
             }
         }
     }

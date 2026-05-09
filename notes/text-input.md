@@ -114,7 +114,11 @@ With `fullEditor=true`, `mFallbackMode=false`, so `sendCurrentText()` is a no-op
 
 ### Cursor change notification
 
-When the Wayland client reports cursor/selection changes caused by non-IME actions (change_cause=other), the compositor calls `InputMethodManager.updateSelection()`. This is critical — without it, Gboard's internal state (composing region, cursor position, text model) becomes stale after cursor movement, causing broken behavior on subsequent typing.
+`updateFromCompositor` (the inbound channel above) **always** calls `InputMethodManager.updateSelection(view, sel, sel, -1, -1)` immediately after replacing the Editable. The IMM call carries `composingStart=composingEnd=-1`, which tells the bound IME there's no preedit annotation on the editor side — exactly what's true post-replace. This single call covers both jobs:
+- For `change_cause=input_method` it just keeps Gboard's IMM-cached selection in step with our predictions (rare desync, but cheap to keep clean).
+- For `change_cause=other` it makes Gboard drop its in-flight composing region and re-query the editor — without this, autocorrect, predictions, and word boundaries silently land at the wrong position after a tap.
+
+There is no separate compositor → Android `onUpdateSelection` reverse-JNI call: `updateFromCompositor` is the only path, and it's always the right one because the IMM update only makes sense when the Editable was just replaced anyway.
 
 ## Architecture
 
@@ -162,7 +166,8 @@ Client sends back: set_surrounding_text + set_text_change_cause + commit
      ↓
 Compositor processes commit:
   - Stores surrounding text (double-buffered)
-  - If change_cause=other: calls updateSelection → Android
+  - Pushes Editable + IMM update via updateFromCompositor (single round-trip)
+  - If change_cause=other AND we had a tracked preedit: emit preedit_string(None) + done
   - Updates keyboard visibility
 ```
 
@@ -172,12 +177,14 @@ Compositor processes commit:
 |---|---|
 | Any instance enabled (via sync_keyboard_visibility) | `InputMethodManager.showSoftInput()` |
 | No instances enabled | `InputMethodManager.hideSoftInputFromWindow()` |
-| Client commits a `set_surrounding_text` (any cause) | `TawcInputConnection.updateFromCompositor(text, selStart, selEnd)` — replaces Editable contents and selection |
-| Client commits with change_cause=other | Additionally `InputMethodManager.updateSelection()` so the IME drops its composing region |
+| Client commits a `set_surrounding_text` (any cause) | `TawcInputConnection.updateFromCompositor(text, selStart, selEnd)` — replaces Editable contents and selection AND pokes `IMM.updateSelection` so the IME drops any composing region |
+| Resolved EditorInfo for the focused instance changes | `onContentTypeChanged(inputType, imeFlags)` → `restartInput`, so the next `onCreateInputConnection` carries the new fields |
 
-### Text Input Focus
+### Input Focus
 
-Text input focus follows keyboard focus (the first alive toplevel's wl_surface). Focus updates happen in the frame timer, after cleanup and before flush.
+Keyboard focus and text-input-v3 focus are conceptually one thing — "the surface receiving input from the user". Both move together through the single `TawcState::set_input_focus(target)` helper. Every place that previously updated only one of them was a latent drift bug; the helper is now the only entry point.
+
+Call sites: `FocusChanged` (Android Activity gains/loses focus), the frame-timer cleanup (focused toplevel died), `new_toplevel` (a fresh toplevel landed on the foreground host), and `TouchEvent::Down` (user tapped — moves focus to the target surface *before* delivering the touch, so a cross-toplevel tap's preedit-finalize lands on the *old* surface via `leave`'s automatic FinishComposingText).
 
 ## Implementation Notes
 

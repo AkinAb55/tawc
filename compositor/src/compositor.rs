@@ -320,6 +320,24 @@ impl TawcState {
         }
     }
 
+    /// Move the seat's keyboard focus and the text-input v3 focus to the
+    /// same surface, atomically. These two are conceptually one thing —
+    /// "the surface receiving input from the user" — and historically each
+    /// of the four call sites that touched focus updated only one of them,
+    /// letting them drift apart. Always go through this helper.
+    ///
+    /// Idempotent: a redundant update with the same surface fans out to
+    /// `KeyboardHandle::set_focus` (Smithay deduplicates) and to
+    /// `TextInputState::update_focus` (early-return on equal focus).
+    pub fn set_input_focus(&mut self, target: Option<&WlSurface>) {
+        let target_owned = target.cloned();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, target_owned, serial);
+        }
+        self.text_input_state.update_focus(target);
+    }
+
     /// Outcome of a host assignment: the host the toplevel ends up on,
     /// and whether the policy decided a fresh Activity needs to be
     /// spawned for it. Phase 5+ uses `spawn_activity` to fire the
@@ -528,7 +546,7 @@ impl XdgShellHandler for TawcState {
         });
         surface.send_configure();
 
-        // Move keyboard focus to the new toplevel only if its host is
+        // Move input focus to the new toplevel only if its host is
         // currently in the foreground. Otherwise the FocusChanged event
         // will set focus when the host's Activity gains focus.
         //
@@ -541,14 +559,12 @@ impl XdgShellHandler for TawcState {
             Some(fg) => *fg == assignment.host,
             None => self.hosts.keys().next() == Some(&assignment.host),
         };
-        if host_is_foreground {
-            if let Some(keyboard) = self.seat.get_keyboard() {
-                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
-            }
-        }
+        let new_focus = host_is_foreground.then(|| surface.wl_surface().clone());
         self.toplevels.push(surface);
         self.toplevels_changed = true;
+        if let Some(focus) = new_focus.as_ref() {
+            self.set_input_focus(Some(focus));
+        }
 
         // Reverse-JNI side effects after the &mut self borrow is released.
         if assignment.spawn_activity {
