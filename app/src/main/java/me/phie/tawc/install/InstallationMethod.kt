@@ -103,8 +103,9 @@ interface InstallationMethod {
      *   - [TawcrootMethod] / [ProotMethod] run as the app uid via
      *     `ProcessBuilder.start()` with `setsid` prepended.
      *
-     * Pre-setup (mkdirs for bind targets, refresh of
-     * `/etc/profile.d/01-tawc.sh`) happens in Kotlin here; nothing
+     * Pre-setup (mkdirs for bind targets) happens in Kotlin here.
+     * The in-rootfs bash starts under `/usr/bin/env -i KEY=VAL …` so
+     * env comes entirely from [RootfsEnv]; nothing about the env
      * needs to be on disk between calls.
      */
     fun startInside(rootfs: String, command: String?): Process
@@ -116,8 +117,10 @@ interface InstallationMethod {
      * stdout/stderr line-by-line through [onLine] and waits for the
      * process to exit.
      *
-     * `bash -lc` so the profile.d entries run and the chroot's PATH,
-     * `LD_LIBRARY_PATH`, `WAYLAND_DISPLAY` env get set.
+     * `bash -lc` so the distro's /etc/profile + profile.d entries fire
+     * (locale, package PATH additions). The Wayland/GL/X11 env comes
+     * from [RootfsEnv] via the `env -i` wrapper [startInside] puts on
+     * the bash invocation.
      */
     fun runInside(
         rootfs: String,

@@ -278,12 +278,12 @@ internal object ArchPacmanCommon {
     )
 
     /**
-     * Write `/etc/resolv.conf`, the pacman.conf tweaks, the mirrorlist
-     * and `profile.d/00-path.sh`, then strip the bootstrap of the
-     * trees in [POST_EXTRACT_PURGE_PATHS]. The Wayland env in
-     * `profile.d/01-tawc.sh` is *not* written here — `ChrootMounter`
-     * regenerates it on every chroot entry so env changes don't need
-     * a reinstall (see notes/installation.md).
+     * Write `/etc/resolv.conf`, the pacman.conf tweaks, and the
+     * mirrorlist, then strip the bootstrap of the trees in
+     * [POST_EXTRACT_PURGE_PATHS]. The in-rootfs env (PATH, Wayland,
+     * GL, X11) comes from [RootfsEnv] via `env -i KEY=VAL` on every
+     * spawn — nothing is written under `/etc/profile.d/` (see
+     * notes/installation.md).
      *
      * @param rootfs absolute path to the chroot rootfs.
      * @param mirrorListBody contents of `/etc/pacman.d/mirrorlist`
@@ -415,21 +415,6 @@ PACMAN_EOF
 
             appendLine(
                 """
-                # profile.d/00-path.sh — the chroot bash inherits PATH
-                # from the host (Android) which leaks /system/bin and
-                # breaks everything; force a sane PATH/TMPDIR/HOME here.
-                # 01-tawc.sh (Wayland env) is rewritten on every chroot
-                # entry by ChrootMounter so env changes pick up without
-                # a reinstall — see notes/installation.md.
-                mkdir -p "${'$'}ROOTFS/etc/profile.d"
-                cat > "${'$'}ROOTFS/etc/profile.d/00-path.sh" <<'PROF1_EOF'
-                # tawc: fix Android-leaked environment for the chroot
-                export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-                export TMPDIR=/tmp
-                export HOME=/root
-                PROF1_EOF
-                chmod 644 "${'$'}ROOTFS/etc/profile.d/00-path.sh"
-
                 # Bulk-delete bootstrap cruft. The matching pacman -Rdd
                 # for the database side runs in initPackageManager.
                 # `find -delete` (toybox) doesn't take patterns, so we

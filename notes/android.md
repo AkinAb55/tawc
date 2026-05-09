@@ -33,12 +33,13 @@ bash scripts/rootfs-run.sh '<command>'        # run a command and exit
 `rootfs-run` routes through the dev exec broker's `RUNINSIDE` request
 (`tawc-exec --in-rootfs <id>`). The broker reads the install's
 recorded method from `metadata.json` and dispatches to the matching
-[InstallationMethod.startInside], which builds the bind table /
-profile.d refresh / chroot exec fresh in Kotlin on every call. There
-is no on-disk wrapper script and no `adb shell su` in this path —
-chroot installs fork `su` from inside the JVM. Generic tawc Wayland
-env vars are set by `/etc/profile.d/01-tawc.sh` (rewritten on every
-entry).
+[InstallationMethod.startInside], which builds the bind table and
+chroot exec fresh in Kotlin on every call. There is no on-disk
+wrapper script and no `adb shell su` in this path — chroot installs
+fork `su` from inside the JVM. Generic tawc Wayland env vars come
+from `RootfsEnv.kt` via a `/usr/bin/env -i KEY=VAL …` wrapper around
+the in-rootfs `bash -lc`, so nothing inside the rootfs needs to be
+on disk between calls.
 
 ### Shell quoting
 

@@ -11,8 +11,8 @@ distro libraries to prevent incompatible code paths:
 
 ## Chroot environment
 
-Built by `RootfsProfile.kt` and rewritten on every chroot entry by
-each install method into `/etc/profile.d/01-tawc.sh`:
+Set by `RootfsEnv.kt` via a `/usr/bin/env -i KEY=VAL …` wrapper around
+the in-rootfs `bash -lc` on every entry — no on-disk profile.d state:
 
 ```
 WAYLAND_DISPLAY=/data/data/me.phie.tawc/wayland-0

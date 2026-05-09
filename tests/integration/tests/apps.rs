@@ -191,7 +191,7 @@ fn test_gtk3_app_uses_shm_buffers() {
 }
 
 /// GTK3 with the chroot's default `GDK_GL=gles:always` (set by the
-/// shared profile.d snippet — see `RootfsProfile.kt`) renders through
+/// shared `env -i` wrapper — see `RootfsEnv.kt`) renders through
 /// android_wlegl and presents via AHB hardware buffers.
 #[test]
 fn test_gtk3_app_uses_hardware_buffers() {
@@ -319,7 +319,7 @@ fn test_xwayland_xclock_renders_via_shm() {
     // `-update 1` forces a redraw every second so the client keeps
     // pushing buffers — without it xclock draws once and goes silent,
     // and the test would race the very first SHM import. DISPLAY=:0 is
-    // already exported by 01-tawc.sh on chroot entry, but be explicit
+    // already exported by RootfsEnv on rootfs entry, but be explicit
     // so the test doesn't depend on env order.
     let mut app =
         RootfsProcess::spawn("DISPLAY=:0 xclock -update 1").expect("spawn xclock");

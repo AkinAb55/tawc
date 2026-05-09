@@ -1,7 +1,7 @@
-# Firefox-specific `MOZ_DISABLE_*_SANDBOX` env vars baked into the universal proot profile
+# Firefox-specific `MOZ_DISABLE_*_SANDBOX` env vars baked into the universal proot env
 
-`RootfsProfile.build(PROOT)` writes seven Firefox-specific env vars
-into `/etc/profile.d/01-tawc.sh` for every proot install:
+`RootfsEnv.build(PROOT)` injects seven Firefox-specific env vars into
+the in-rootfs bash on every proot entry:
 
 ```
 export MOZ_DISABLE_CONTENT_SANDBOX=1
@@ -25,7 +25,7 @@ The hack works for Firefox, but:
    Firefox or not) gets these vars set. A user installing Chromium /
    Thunderbird / Electron-based apps next will need a similar set of
    env knobs (Chromium has `--no-sandbox`, Electron `--no-sandbox`).
-   We'll either keep growing the universal profile.d for every
+   We'll either keep growing the universal env map for every
    sandboxed app we encounter, or we never make those apps work.
 
 2. **Disabling Firefox's sandbox really does reduce isolation** even
@@ -34,9 +34,9 @@ The hack works for Firefox, but:
    it directly.
 
 3. **Discoverability is poor** — a user inspecting why their Firefox
-   has different security posture under tawc would have to find the
-   compositor-rendered profile.d/01-tawc.sh and reason about why
-   tawc's authors decided to disable mutually-exclusive sandboxes.
+   has different security posture under tawc would have to find
+   `RootfsEnv.kt` and reason about why tawc's authors decided to
+   disable mutually-exclusive sandboxes.
 
 ## What a universal fix looks like
 
@@ -52,11 +52,11 @@ seccomp on tracees that ask to install their own filter." Concretely:
   renderer) might still hit the underlying Android filter and need
   separate handling, but this gets us out of the universal disable.
 - **Option B: per-app launcher wrappers.** Move the `MOZ_DISABLE_*`
-  env vars out of profile.d/01-tawc.sh and into a Firefox-specific
-  wrapper script (e.g. `/usr/local/bin/firefox-tawc-wrapper`) that
-  the user invokes when they want Firefox under proot. The system
-  profile stays generic. Costs: launcher discoverability, the user
-  has to know to run the wrapper.
+  env vars out of `RootfsEnv` and into a Firefox-specific wrapper
+  script (e.g. `/usr/local/bin/firefox-tawc-wrapper`) that the user
+  invokes when they want Firefox under proot. The system env stays
+  generic. Costs: launcher discoverability, the user has to know to
+  run the wrapper.
 - **Option C: detect Firefox at runtime and inject env in our
   process spawner.** When the in-app launcher (future
   per-app spawner) detects an executable named `firefox`, set the
@@ -79,6 +79,6 @@ needs proot fork changes.
 
 ## References
 
-- `app/src/main/java/me/phie/tawc/install/RootfsProfile.kt`
-  (the `MOZ_DISABLE_*` exports gated on `Method.PROOT`)
+- `app/src/main/java/me/phie/tawc/install/RootfsEnv.kt`
+  (the `MOZ_DISABLE_*` entries gated on `Method.PROOT`)
 - `notes/proot.md` "Firefox under proot" — documents the why.

@@ -33,8 +33,10 @@ the spawn for tawcroot/proot; chroot's `su` provides one implicitly.
 There is no other path that enters a rootfs.
 
 There is no on-disk `enter.sh` for any method. All bind-table /
-profile.d / mount / chroot logic lives in Kotlin (`TawcrootMethod`,
-`ProotMethod`, `ChrootMethod` + `ChrootMounter.mountScript`).
+mount / env injection / chroot logic lives in Kotlin
+(`TawcrootMethod`, `ProotMethod`, `ChrootMethod` +
+`ChrootMounter.mountScript`, plus `RootfsEnv` for the in-rootfs env
+applied via `/usr/bin/env -i`).
 
 ## Wire protocol
 

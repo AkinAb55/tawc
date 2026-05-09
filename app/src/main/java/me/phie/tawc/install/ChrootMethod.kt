@@ -54,13 +54,19 @@ object ChrootMethod : InstallationMethod {
             appendLine(ChrootMounter.mountScript(rootfs))
             // Quote rootfs and (if present) the user command into the
             // script. Both go through shellQuote so paths with quotes
-            // can't break out.
-            val rootfsQ = "'" + rootfs.replace("'", "'\\''") + "'"
+            // can't break out. The in-rootfs bash starts under
+            // `/usr/bin/env -i KEY=VAL …` so nothing the host (or
+            // Magisk's su) leaks through — the bash sees exactly
+            // [RootfsEnv]'s map, with PATH/locale further refined by
+            // the distro's /etc/profile.
+            val rootfsQ = shellQuote(rootfs)
+            val envArgvQ = RootfsEnv.envArgv(RootfsEnv.Method.CHROOT)
+                .joinToString(" ") { shellQuote(it) }
             if (command != null) {
-                val cmdQ = "'" + command.replace("'", "'\\''") + "'"
-                appendLine("exec setsid chroot $rootfsQ /bin/bash -lc $cmdQ")
+                val cmdQ = shellQuote(command)
+                appendLine("exec setsid chroot $rootfsQ $envArgvQ /bin/bash -lc $cmdQ")
             } else {
-                appendLine("exec setsid chroot $rootfsQ /bin/bash -l")
+                appendLine("exec setsid chroot $rootfsQ $envArgvQ /bin/bash -l")
             }
         }
         // Write+flush; intentionally don't close (exec replaces the
@@ -69,6 +75,10 @@ object ChrootMethod : InstallationMethod {
         w.write(script); w.write("\n"); w.flush()
         return proc
     }
+
+    /** Quote [s] for inclusion as a single-quoted shell arg. */
+    private fun shellQuote(s: String): String =
+        "'" + s.replace("'", "'\\''") + "'"
 
     /** Delegates to [Archive.extractAsRoot] (the historical path). */
     override fun extractBootstrap(

@@ -22,8 +22,8 @@ bash scripts/rootfs-run.sh 'firefox --no-remote'
 ```
 
 No Firefox-specific env vars or autoconfig prefs. `GDK_GL=gles:always` is
-set globally by the rootfs's `/etc/profile.d/01-tawc.sh` (see
-`RootfsProfile.kt` and "Why GDK_GL=gles:always" below). Wayland backend
+set on every spawn by the in-rootfs `env -i` wrapper (see
+`RootfsEnv.kt` and "Why GDK_GL=gles:always" below). Wayland backend
 and hardware acceleration are auto-selected when `WAYLAND_DISPLAY` is set
 and no `DISPLAY` socket is reachable; the older `MOZ_ENABLE_WAYLAND=1` /
 `MOZ_ACCELERATED=1` / `DISPLAY=` opt-ins are no longer required, and the
@@ -70,7 +70,7 @@ the `exec_state` ferry rebuilding the (name → fd) map in the child.
 
 ### Why GDK_GL=gles:always
 
-Set chroot-wide by `RootfsProfile.kt`. With `gles:always`, GTK uses
+Set chroot-wide by `RootfsEnv.kt`. With `gles:always`, GTK uses
 GLES via libhybris's vendor EGL, producing AHB buffers for the window
 chrome. Default GTK behaviour probes for desktop GL/GLX, fails through
 our shim's NULL stubs, and falls back to its software/cairo path —

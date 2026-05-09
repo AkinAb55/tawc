@@ -107,8 +107,10 @@ class ProotMethod(context: Context) : InstallationMethod {
      *     filesystems through; proot doesn't fake these.
      *   - `-b <appData>:<appData>` — same path inside and outside so
      *     `WAYLAND_DISPLAY` (a unix socket at
-     *     `/data/data/me.phie.tawc/wayland-0`) is reachable. The chroot
-     *     profile.d symlinks `/tmp/wayland-0` → that path.
+     *     `/data/data/me.phie.tawc/wayland-0`) is reachable.
+     *   - `-b <appData>/xtmp/.X11-unix:/tmp/.X11-unix` — surfaces
+     *     Xwayland's listening socket at the canonical X11 path. Fake
+     *     bind, no in-rootfs symlink needed.
      *   - `--link2symlink`      — turn hardlink calls into symlink
      *     calls. Pacman occasionally hardlinks across mounts; proot
      *     can't always satisfy that on Android.
@@ -117,12 +119,12 @@ class ProotMethod(context: Context) : InstallationMethod {
      *     leave `gpg-agent` running (same problem chroot had — see
      *     RootfsCleaner).
      *
-     * Command goes via `bash -lc` so the profile.d entries fire
-     * (`PATH`, `LD_LIBRARY_PATH`, Wayland env from `01-tawc.sh`).
-     *
-     * Refreshes `/etc/profile.d/01-tawc.sh` on every call so any
-     * changes to [RootfsProfile] take effect without reinstalling —
-     * same contract as [ChrootMethod.startInside].
+     * The in-rootfs bash starts under `/usr/bin/env -i KEY=VAL …` so
+     * nothing the host JVM, Android, or proot itself
+     * (`PROOT_LOADER`/`PROOT_TMP_DIR`) leaks through — the bash sees
+     * exactly [RootfsEnv]'s map. `bash -lc` still runs the distro's
+     * /etc/profile + profile.d so locale and package PATH additions
+     * still apply.
      */
     override fun startInside(rootfs: String, command: String?): Process {
         // Pre-create the bind targets and proot's scratch dir. proot
@@ -136,11 +138,11 @@ class ProotMethod(context: Context) : InstallationMethod {
         for (dir in LIBHYBRIS_BIND_DIRS) {
             File(rootfs, dir.removePrefix("/")).mkdirs()
         }
-        // Refresh /etc/profile.d/01-tawc.sh on every entry so changes
-        // here pick up without reinstalling.
-        File(rootfs, "etc/profile.d").mkdirs()
-        File(rootfs, "etc/profile.d/01-tawc.sh")
-            .writeText(RootfsProfile.build(RootfsProfile.Method.PROOT))
+        // Source for the X11-socket fake bind. Compositor mkdirs this
+        // before launching Xwayland too; recreating here lets pre-
+        // compositor entries (install steps, tests) bind it without
+        // relying on launch order.
+        File("$TAWC_DATA/xtmp/.X11-unix").mkdirs()
 
         // We invoke proot through `/system/bin/sh -c …` rather than as
         // direct ProcessBuilder argv. Direct exec of the proot binary
@@ -155,24 +157,28 @@ class ProotMethod(context: Context) : InstallationMethod {
         // The user command is passed as positional arg `$1` to dodge
         // shell-layer quoting — sh -c "<script>" $0 $1 makes $1 = the
         // user command verbatim.
-        val prootArgvShell = prootArgv(rootfs).joinToString(" ") { shellQuote(it) }
+        val invokeArgv =
+            prootArgv(rootfs) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT)
+        val invokeShell = invokeArgv.joinToString(" ") { shellQuote(it) }
         val script = if (command != null) {
-            "exec /system/bin/setsid $prootArgvShell /bin/bash -lc \"\$1\""
+            "exec /system/bin/setsid $invokeShell /bin/bash -lc \"\$1\""
         } else {
-            "exec /system/bin/setsid $prootArgvShell /bin/bash -l"
+            "exec /system/bin/setsid $invokeShell /bin/bash -l"
         }
         val argv = listOf(
             "/system/bin/sh", "-c", script,
             "tawc-proot",                  // $0
             command ?: "",                 // $1 (ignored if no command)
         )
-        // PROOT_TMP_DIR & PROOT_LOADER via env (cleaner than `export`
-        // in the shell). PROOT_TMP_DIR avoids /tmp (not app-writable
-        // on Android); PROOT_LOADER points at our vendored loader
-        // stub so proot skips the extract-to-tmp+execve dance that
-        // API 29+ blocks for app data dirs.
+        // PROOT_TMP_DIR & PROOT_LOADER via env on the host-side proot
+        // process — cleared at the env -i barrier so they don't leak
+        // into the in-rootfs bash. PROOT_TMP_DIR avoids /tmp (not app-
+        // writable on Android); PROOT_LOADER points at our vendored
+        // loader stub so proot skips the extract-to-tmp+execve dance
+        // that API 29+ blocks for app data dirs.
         return ProcessBuilder(argv)
             .also {
+                it.environment().clear()
                 it.environment()["PROOT_TMP_DIR"] = prootTmpDir
                 it.environment()["PROOT_LOADER"] = prootLoader
             }
@@ -363,10 +369,13 @@ class ProotMethod(context: Context) : InstallationMethod {
         // Compositor's data dir is at the same absolute path inside
         // the rootfs view so the wayland-0 socket path is valid in
         // both worlds. (See ChrootMounter.mountScript for the chroot
-        // counterpart.) Both paths share `/data/data/me.phie.tawc`
-        // and the `01-tawc.sh` profile inside the rootfs symlinks
-        // `/tmp/wayland-0` to that location.
+        // counterpart.) WAYLAND_DISPLAY is set to the absolute path
+        // by RootfsEnv — no /tmp/wayland-0 symlink is needed.
         addAll(listOf("-b", "$TAWC_DATA:$TAWC_DATA"))
+        // Surface Xwayland's listening socket at the canonical X11
+        // path. Asymmetric bind, no in-rootfs symlink. Pre-created in
+        // [startInside] so proot accepts the source.
+        addAll(listOf("-b", "$TAWC_DATA/xtmp/.X11-unix:/tmp/.X11-unix"))
     }
 
     /**

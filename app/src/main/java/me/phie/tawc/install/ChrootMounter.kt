@@ -111,8 +111,8 @@ object ChrootMounter {
             """
             # Mount the compositor's app data dir at the same path inside
             # the chroot so /data/data/me.phie.tawc/wayland-0 (the Wayland
-            # socket) is reachable. The chroot's profile.d/01-tawc.sh
-            # symlinks it to /tmp/wayland-0.
+            # socket) is reachable. RootfsEnv exports WAYLAND_DISPLAY as
+            # the absolute path — no /tmp/wayland-0 symlink needed.
             #
             # Yes, this creates a recursion (the rootfs contains itself
             # via .../distros/<id>/rootfs/data/data/...). It's
@@ -129,28 +129,13 @@ object ChrootMounter {
             # opens its X11 listening socket at /data/data/me.phie.tawc/xtmp/.X11-unix/X<n>
             # (because Android has no /tmp). Bind that into the chroot so X
             # clients see it at the standard /tmp/.X11-unix path. mkdir
-            # before binding because /tmp inside the chroot is just a normal
-            # tmpfs / overlay directory; the bind only attaches if both ends
-            # exist.
-            if [ -d "$tawcData/xtmp/.X11-unix" ]; then
-                mkdir -p "${'$'}ROOTFS/tmp/.X11-unix"
-                mount_if_needed "$tawcData/xtmp/.X11-unix" "${'$'}ROOTFS/tmp/.X11-unix"
-            fi
+            # the source before binding so the mount succeeds even before
+            # the compositor has launched Xwayland (install steps, tests).
+            mkdir -p "$tawcData/xtmp/.X11-unix"
+            mkdir -p "${'$'}ROOTFS/tmp/.X11-unix"
+            mount_if_needed "$tawcData/xtmp/.X11-unix" "${'$'}ROOTFS/tmp/.X11-unix"
             """.trimIndent()
         )
-        // Refresh profile.d/01-tawc.sh on every chroot entry so changes to
-        // the Wayland env (LD_LIBRARY_PATH, HYBRIS_EGLPLATFORM, …) take
-        // effect without reinstalling. Cheap (<1ms). 00-path.sh is
-        // install-time-only because it's identical for every install.
-        sb.appendLine(
-            """
-            mkdir -p "${'$'}ROOTFS/etc/profile.d"
-            cat > "${'$'}ROOTFS/etc/profile.d/01-tawc.sh" <<'TAWC_PROF_EOF'
-            """.trimIndent()
-        )
-        sb.append(RootfsProfile.build(RootfsProfile.Method.CHROOT))
-        sb.appendLine("TAWC_PROF_EOF")
-        sb.appendLine("""chmod 644 "${'$'}ROOTFS/etc/profile.d/01-tawc.sh"""")
         return sb.toString()
     }
 

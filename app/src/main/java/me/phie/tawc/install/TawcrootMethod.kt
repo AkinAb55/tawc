@@ -85,9 +85,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * signal mask) and the integration test framework's PGID-based
      * cleanup; the underlying contract is general.
      *
-     * `bash -lc` so the chroot's `/etc/profile.d/01-tawc.sh` runs
-     * (PATH, LD_LIBRARY_PATH, WAYLAND_DISPLAY). The profile is
-     * refreshed below before the spawn.
+     * The in-rootfs bash starts under `/usr/bin/env -i KEY=VAL …` so
+     * nothing the host JVM (or Android's launcher chain) inherited
+     * leaks through — the bash sees exactly [RootfsEnv]'s map. `bash
+     * -lc` still runs the distro-shipped /etc/profile + profile.d so
+     * locale and package PATH additions still apply.
      */
     override fun startInside(rootfs: String, command: String?): Process {
         // Pre-create bind targets. tawcroot's `tawcroot_path_add_bind`
@@ -99,11 +101,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         for (dir in LIBHYBRIS_BIND_DIRS) {
             File(rootfs, dir.removePrefix("/")).mkdirs()
         }
-        // Refresh /etc/profile.d/01-tawc.sh so changes to the Wayland
-        // env take effect without reinstalling.
-        File(rootfs, "etc/profile.d").mkdirs()
-        File(rootfs, "etc/profile.d/01-tawc.sh")
-            .writeText(RootfsProfile.build(RootfsProfile.Method.TAWCROOT))
+        // Source for the X11-socket fake bind. Compositor mkdirs this
+        // before launching Xwayland too; recreating here is harmless
+        // and lets pre-compositor entries (install steps, tests) bind
+        // it without relying on launch order.
+        File("$TAWC_DATA/xtmp/.X11-unix").mkdirs()
 
         val argv = buildList {
             add("/system/bin/setsid")
@@ -111,6 +113,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             addAll(listOf("-r", rootfs))
             for ((src, dst) in bindSpecs()) addAll(listOf("-b", "$src:$dst"))
             add("--")
+            addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT))
             add("/bin/bash")
             if (command != null) {
                 add("-lc"); add(command)
@@ -120,12 +123,17 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         }
         // TMPDIR points inside the rootfs so getcwd reverse-translation
         // works cleanly and daemons pacman-key spawns (gpg-agent) get
-        // a sane writable tmp.
+        // a sane writable tmp. Set on the host-side tawcroot process —
+        // not propagated into the rootfs (env -i drops it; the bash
+        // shell gets TMPDIR=/tmp from RootfsEnv instead).
         val tmpdir = "$rootfs/tmp"
         File(tmpdir).mkdirs()
         return ProcessBuilder(argv)
             .directory(File(tmpdir))
-            .also { it.environment()["TMPDIR"] = tmpdir }
+            .also {
+                it.environment().clear()
+                it.environment()["TMPDIR"] = tmpdir
+            }
             .start()
     }
 
@@ -235,15 +243,21 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     /** The full bind list, in declared order, as `(src, dst)` pairs.
      *
-     * Order: /dev → /proc → /sys → libhybris dirs → TAWC_DATA.
+     * Order: /dev → /proc → /sys → libhybris dirs → TAWC_DATA → X11.
      * No `/dev/shm` bind: tawcroot's SIGSYS handler emulates POSIX
-     * shm in-process via memfd_create (`tawcroot/src/shm.c`). */
+     * shm in-process via memfd_create (`tawcroot/src/shm.c`).
+     *
+     * The X11 bind surfaces Xwayland's listening socket
+     * (`<TAWC_DATA>/xtmp/.X11-unix/X<n>`) at the canonical
+     * `/tmp/.X11-unix` path. Asymmetric (src ≠ dst) — tawcroot's
+     * path-rewriting bind handles that natively. */
     private fun bindSpecs(): List<Pair<String, String>> = buildList {
         add("/dev" to "/dev")
         add("/proc" to "/proc")
         add("/sys" to "/sys")
         for (dir in LIBHYBRIS_BIND_DIRS) add(dir to dir)
         add(TAWC_DATA to TAWC_DATA)
+        add("$TAWC_DATA/xtmp/.X11-unix" to "/tmp/.X11-unix")
     }
 
     companion object {

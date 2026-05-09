@@ -185,7 +185,7 @@ The package is split into three layers:
 | `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → distro.initPackageManager → distro.installBasePackages → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
 | `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix/verification), `cacheKey`, `basePackages`, the three policy hooks (`configure`, `initPackageManager`, `installBasePackages`), and `resolveBootstrap()` for distros with install-time URL/digest lookup (Manjaro). Also defines `DistroBootstrap`. |
 | `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro], `Build.SUPPORTED_ABIS` → installable [Distro] list, and the install activity's distro radio key → [Distro]. `availableForHost()` / `defaultForHost()` / `forKey()`. |
-| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch / Manjaro flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, profile.d/00-path.sh, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
+| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch / Manjaro flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
 | `distro/arch/ArchLinuxX86_64.kt` | Arch Linux x86_64 (`pkgbuild.com` zstd bootstrap, `archlinux` keyring, geo-redirector mirrorlist). |
 | `distro/arch/ArchLinuxArm.kt`  | Arch Linux ARM aarch64 (`archlinuxarm.org` gzip bootstrap, `archlinuxarm` keyring, curated multi-mirror list — see *ALARM mirror failover* below). |
 | `distro/manjaro/GitHubReleaseResolver.kt` | Tiny `api.github.com /releases/latest` client. Returns `(browser_download_url, sha256)` for a named asset by reading the API response's `digest` field. |
@@ -257,12 +257,12 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
      plus a `tawc-no-extract` block of `NoExtract` patterns — see *Slimming policy*
      below; **upstream `SigLevel` is left intact** — see *Bootstrap integrity* below)
    - `/etc/pacman.d/mirrorlist` (x86_64: geo-routed `geo.mirror.pkgbuild.com`; aarch64: HTTPS-first curated multi-mirror list — see *ALARM mirror failover* below)
-   - `/etc/profile.d/00-path.sh` (PATH/TMPDIR/HOME)
-   - `/etc/profile.d/01-tawc.sh` is *not* written here — each install
-     method (`ChrootMounter`, `ProotMethod`, `TawcrootMethod`) rewrites
-     it on every entry from `RootfsProfile.kt` (Wayland/GL env, X11
-     symlinks, `wayland-0` symlink) so env changes pick up without a
-     reinstall.
+   - **Nothing under `/etc/profile.d/`.** PATH/TMPDIR/HOME and the
+     Wayland/GL/X11 env all come from [RootfsEnv.kt] via `/usr/bin/env
+     -i KEY=VAL …` on every spawn ([ChrootMethod], [ProotMethod],
+     [TawcrootMethod]). No on-disk env state inside the rootfs that
+     the app version would have to keep rewriting; env changes pick
+     up next entry without a reinstall.
    - `LibhybrisLinker.link` symlinks the APK-bundled libhybris tree
      into `<rootfs>/usr/local/lib/`. The source tree at
      `/data/data/me.phie.tawc/files/libhybris/lib/` is extracted from
@@ -272,7 +272,7 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
      entry under `lib/` becomes a symlink in `/usr/local/lib/`,
      including the `libhybris/` plugin subdir (EGL/Vulkan platform
      plugins + bionic-linker plugin) and the `gl-shims/` subdir.
-     `LD_LIBRARY_PATH` (in `01-tawc.sh`) is
+     `LD_LIBRARY_PATH` (set by [RootfsEnv]) is
      `/usr/local/lib/gl-shims:/usr/local/lib`.
    - `rm -rf` of bootstrap cruft: `/boot`, `/usr/lib/firmware`,
      `/usr/lib/modules`, `/var/cache/pacman/pkg`, and the docs/locale
@@ -423,9 +423,11 @@ with `r"/"`) so paths containing `.` don't over-match other mounts.
 The compositor still puts its Wayland socket at
 `/data/data/me.phie.tawc/wayland-0`. The mount snippet bind-mounts the
 entire `/data/data/me.phie.tawc` directory at the matching path inside
-the chroot, and `01-tawc.sh` symlinks it to `/tmp/wayland-0`. This
-causes a benign path recursion (the rootfs lives inside the very dir we
-mount), but no tool actually walks into it.
+the chroot, and [RootfsEnv] exports `WAYLAND_DISPLAY` as that absolute
+path — wayland clients honour absolute values directly, so no
+`/tmp/wayland-0` symlink is needed. The data-dir bind-mount is a benign
+path recursion (the rootfs lives inside the very dir we mount), but no
+tool actually walks into it.
 
 ## CLI command interface
 
@@ -821,8 +823,8 @@ Why this is the right default:
   without them.
 - **Anything truly critical to keeping a chroot working is rebuilt on
   every entry** by the install method's `startInside` (mount layout
-  via `ChrootMounter`, env vars + X11/`wayland-0` symlinks via
-  `RootfsProfile`). Those *do* pick up app updates without a reinstall.
+  via `ChrootMounter`, env vars via `RootfsEnv`'s `env -i` wrapper).
+  Those *do* pick up app updates without a reinstall.
 - **Users who want the new config can uninstall + reinstall**, which
   is the only path the install gate allows for switching to a fresh
   rootfs anyway. They keep their old install until they decide.
@@ -899,7 +901,8 @@ key on.
 in-app launcher. Both route through the dev exec broker's
 `RUNINSIDE` request type, which dispatches to
 [InstallationMethod.startInside] — the single Kotlin entry point
-where mount setup, profile.d refresh, and chroot exec live (see
+where mount setup, env injection (via [RootfsEnv]'s `env -i` wrapper),
+and chroot exec live (see
 [rootfs-sessions.md](rootfs-sessions.md) and
 [exec-broker.md](exec-broker.md)). Used by the integration tests
 (`tests/integration/src/adb.rs`), `scripts/install-test-deps.sh`,

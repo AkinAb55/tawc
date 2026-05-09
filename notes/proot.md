@@ -109,9 +109,9 @@ make obvious):
    binds it at `/dev/shm` (must come *after* `-b /dev` so proot's
    later-bind-wins rule applies).
 
-2. **`MOZ_DISABLE_*_SANDBOX=1`** in the proot-only `01-tawc.sh`
-   profile.d snippet (content / GPU / RDD / utility / GMP /
-   socket / VR). Firefox's per-subprocess sandboxes set up their
+2. **`MOZ_DISABLE_*_SANDBOX=1`** as a proot-only branch in
+   [RootfsEnv] (content / GPU / RDD / utility / GMP / socket / VR).
+   Firefox's per-subprocess sandboxes set up their
    own seccomp filters and PID/user namespaces during startup.
    Under proot every process is already a ptrace tracee with
    proot's own seccomp filter active, and Firefox's sandbox setup

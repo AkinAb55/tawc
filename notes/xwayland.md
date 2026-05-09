@@ -707,15 +707,17 @@ that Kotlin exports before `nativeStartCompositor`. No `su`, no
   `send_frame_callbacks` all walk `state.x11_surfaces` alongside
   `state.toplevels` so X11 windows render and tick alongside Wayland
   ones. AHB path doesn't touch them — Xwayland is software-only here.
-- `ChrootMounter` bind-mounts `<tawc-data>/xtmp/.X11-unix` into the
-  chroot at `/tmp/.X11-unix` so X clients inside the chroot find `:0`
-  at the standard path. `01-tawc.sh` now also exports `DISPLAY=:0`
-  and `SDL_VIDEODRIVER=wayland,x11` — without the SDL hint, SDL2
-  apps (supertuxkart, anything Irrlicht-based) silently pick X11
-  whenever `DISPLAY` is set, hit the GLAMOR-disabled X server, and
-  die in `createWindow`. Wayland-first with X11 fallback keeps SDL
-  apps on the libhybris/EGL path while leaving X11 reachable for
-  the X-only clients that genuinely need it.
+- All three install methods surface `<tawc-data>/xtmp/.X11-unix` at
+  `/tmp/.X11-unix` inside the rootfs so X clients find `:0` at the
+  standard path: `ChrootMounter` does a real bind-mount; tawcroot and
+  proot use an asymmetric fake-bindmount via their respective `-b
+  src:dst` flag. `RootfsEnv` exports `DISPLAY=:0` and
+  `SDL_VIDEODRIVER=wayland,x11` — without the SDL hint, SDL2 apps
+  (supertuxkart, anything Irrlicht-based) silently pick X11 whenever
+  `DISPLAY` is set, hit the GLAMOR-disabled X server, and die in
+  `createWindow`. Wayland-first with X11 fallback keeps SDL apps on
+  the libhybris/EGL path while leaving X11 reachable for the X-only
+  clients that genuinely need it.
 - `start_xwayland` sets `LD_LIBRARY_PATH=$TAWC_NATIVE_LIB_DIR` for the
   Xwayland process — **not** `$TAWC_NATIVE_LIB_DIR:<libhybris>/lib`.
   libhybris's `lib/libui.so.1.0.0` is a glibc-built stub for

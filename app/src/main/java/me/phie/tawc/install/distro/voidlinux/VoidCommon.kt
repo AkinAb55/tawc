@@ -138,12 +138,12 @@ internal object VoidCommon {
     /**
      * Configure the freshly-extracted rootfs:
      *   - DNS via /etc/resolv.conf
-     *   - profile.d/00-path.sh so the chroot bash gets a sane PATH
      *   - xbps repo configuration
      *   - `noextract=` and `ignorepkg=` directives
      *
-     * 01-tawc.sh (Wayland env) is regenerated on every chroot entry by
-     * the install method, so it isn't written here.
+     * The in-rootfs env (PATH, Wayland, GL, X11) comes from [RootfsEnv]
+     * via `env -i KEY=VAL` on every spawn — nothing is written under
+     * `/etc/profile.d/` (see notes/installation.md).
      */
     fun configure(
         method: InstallationMethod,
@@ -163,14 +163,7 @@ internal object VoidCommon {
             appendLine("ROOTFS='$rootfs'")
             appendLine("rm -f \"\$ROOTFS/etc/resolv.conf\"")
             appendLine("echo nameserver 8.8.8.8 > \"\$ROOTFS/etc/resolv.conf\"")
-            appendLine("mkdir -p \"\$ROOTFS/etc/profile.d\" \"\$ROOTFS/etc/xbps.d\"")
-
-            appendLine("cat > \"\$ROOTFS/etc/profile.d/00-path.sh\" <<'PROF_EOF'")
-            appendLine("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-            appendLine("export TMPDIR=/tmp")
-            appendLine("export HOME=/root")
-            appendLine("PROF_EOF")
-            appendLine("chmod 644 \"\$ROOTFS/etc/profile.d/00-path.sh\"")
+            appendLine("mkdir -p \"\$ROOTFS/etc/xbps.d\"")
 
             appendLine("cat > \"\$ROOTFS/etc/xbps.d/00-repository-main.conf\" <<'REPO_EOF'")
             appendLine("repository=$mirror")
