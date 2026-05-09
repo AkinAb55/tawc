@@ -12,8 +12,10 @@ install/run/destroy logic that previously lived only in the
 
 This is the *only* chroot system in the project. The earlier
 `client/arch-chroot-*` scripts (which targeted `/data/local/arch-chroot/`)
-have been deleted; their logic now lives in this package and the
-auto-generated `enter.sh`.
+have been deleted; their logic now lives entirely in this Kotlin package.
+Rootfs entry goes through [InstallationMethod.startInside] (see
+[rootfs-sessions.md](rootfs-sessions.md)); there is no on-disk wrapper
+script.
 
 ## Install methods
 
@@ -55,7 +57,6 @@ Everything lives under the app's private data dir:
         <id>/
           metadata.json              # JSON: schemaVersion, id, label?, distro, arch, method, installedAtMillis, installedAtAppVersionCode, sourceUrl, state, failure?
           rootfs/                    # the chroot itself (what `arch-chroot` would chroot into)
-          enter.sh                   # mount + chroot wrapper, regenerated on every chroot entry
 
 The on-disk layout, the [Installation] data class, and
 [InstallationStore] already handle multiple installs side-by-side; the
@@ -180,9 +181,8 @@ The package is split into three layers:
 | `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempFifoFor(arch)` for [Archive]'s zstd→tar streaming FIFO so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<cacheKey>.tar.{zst,gz}`; unconditional deletion of `*.fifo`, legacy `*.tmp`, and `*.part` (transients are never valid across processes). Also defines the `BootstrapFormat` enum. |
 | `Archive.kt`                   | Tar extraction. Plain `.tar` / `.tar.gz` get handed to `toybox tar` directly; `.tar.zst` is streamed in-process through a named pipe (`bootstrap-<cacheKey>.tar.fifo`) so the ~700 MB plaintext never lands on disk. Never wipes — install only runs against an empty slot. |
 | `RootfsCleaner.kt`             | The one and only delete path: kill chroot processes → unmount strictly → `find -xdev -depth -delete`. Used by uninstall; never by install. |
-| `ChrootMounter.kt`             | Builds the bind-mount shell snippet, renders the canonical `enter.sh` (mount + chroot wrapper), and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
-| `ChrootRunner.kt`              | Concatenates `ChrootMounter.mountScript(rootfs)` with the chroot exec into one `su -c` shell so the mounts and the command share that shell's mount namespace. Base64-encodes the command into the wrapper script to dodge quoting hell. |
-| `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → writeEnterScript → distro.initPackageManager → distro.installBasePackages → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
+| `ChrootMounter.kt`             | Builds the bind-mount shell snippet (`mountScript`) used by [ChrootMethod.startInside], and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
+| `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → distro.initPackageManager → distro.installBasePackages → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
 | `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix/verification), `cacheKey`, `basePackages`, the three policy hooks (`configure`, `initPackageManager`, `installBasePackages`), and `resolveBootstrap()` for distros with install-time URL/digest lookup (Manjaro). Also defines `DistroBootstrap`. |
 | `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro], `Build.SUPPORTED_ABIS` → installable [Distro] list, and the install activity's distro radio key → [Distro]. `availableForHost()` / `defaultForHost()` / `forKey()`. |
 | `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch / Manjaro flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, profile.d/00-path.sh, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
@@ -373,9 +373,9 @@ sweep fires once at process cold start.
    `-xdev` is the belt-and-braces against that. This is the long
    step (multi-GB tree); a cancel from the UI lands here.
 5. **`find -xdev -depth -delete` (metadata + container)** — pass 2
-   deletes `metadata.json`, `enter.sh`, and the empty `<installDir>/`
-   itself. Split out from pass 1 so a cancel mid-wipe leaves the
-   slot recognisable on the home screen for follow-up. See
+   deletes `metadata.json` and the empty `<installDir>/` itself.
+   Split out from pass 1 so a cancel mid-wipe leaves the slot
+   recognisable on the home screen for follow-up. See
    *Cancellation* under *State machine* above.
 
 On success the directory (including `metadata.json`) is gone and the id
@@ -393,19 +393,18 @@ the smoking gun: it makes `find -xdev` walk back into itself ("loop
 detected") and the uninstall delete fails on a tree it created
 moments earlier. To keep each invocation isolated, [Su.run] wraps the
 non-mount-master path in `unshare -m` so every script gets its own
-private mount namespace that's torn down when the script exits. The
-canonical chroot entry point is `<installation-dir>/enter.sh`, which
-combines mount setup and the chroot exec into one shell — the mounts
-exist for the lifetime of that shell and never leak.
+private mount namespace that's torn down when the script exits.
 
-`ChrootMounter.enterScript(rootfs)` renders the script body;
-`ArchInstaller.install` writes it after extraction and
-`ChrootRunner.run` rewrites it on every call so the mount logic is
-always current. There is no separate `MOUNT` operation because there
-can't be — the mounts only exist for the lifetime of that one shell.
-This avoids polluting the global mount table with stale entries (and
-avoids the zygote-fork crash that follows when `/data/data/<pkg>/...`
-has live bind mounts during package fork).
+The canonical chroot entry point is [ChrootMethod.startInside], which
+pipes [ChrootMounter.mountScript] + the chroot exec to `su` over stdin
+as one shell — the mounts exist for the lifetime of that shell and
+never leak. The mount logic is rebuilt fresh in Kotlin on every entry,
+so changes pick up without reinstalling. There is no separate `MOUNT`
+operation because there can't be — the mounts only exist for the
+lifetime of that one shell. This avoids polluting the global mount
+table with stale entries (and avoids the zygote-fork crash that
+follows when `/data/data/<pkg>/...` has live bind mounts during
+package fork).
 
 The install path **never** touches mounts. It can't possibly delete
 through one because it doesn't delete at all (the gate guarantees an
@@ -896,10 +895,12 @@ key on.
 
 ## Host-side bridge
 
-`scripts/rootfs-run.sh` is the host-driven counterpart to in-app
-`ChrootRunner.run`. Both invoke the same `<installation-dir>/enter.sh`
-written by `ChrootMounter.enterScript`, so the mount + chroot logic is
-defined exactly once (in Kotlin) and rendered to a script that adb
-shell + su can replay. Used by the integration tests
+`scripts/rootfs-run.sh` is the host-driven counterpart to the
+in-app launcher. Both route through the dev exec broker's
+`RUNINSIDE` request type, which dispatches to
+[InstallationMethod.startInside] — the single Kotlin entry point
+where mount setup, profile.d refresh, and chroot exec live (see
+[rootfs-sessions.md](rootfs-sessions.md) and
+[exec-broker.md](exec-broker.md)). Used by the integration tests
 (`tests/integration/src/adb.rs`), `scripts/install-test-deps.sh`,
 and `scripts/build-debug-app.sh`.

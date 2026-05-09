@@ -1,6 +1,6 @@
 # Integration test harness requires root even against a proot install
 
-The proot install + runtime path is genuinely rootless — `adb.rs:90` dispatches `run-as $PKG` for proot installs, and `scripts/rootfs-run.sh` does the same. But the integration test scaffolding ignores the install method and goes straight through `su -c` for any operation that doesn't enter the chroot via `enter.sh`. Result: running `scripts/run-integration-tests.sh` against a proot install still triggers a superuser-permission popup (observed in practice) and silently requires the device to be rooted.
+The proot install + runtime path is genuinely rootless — `adb.rs:90` dispatches `run-as $PKG` for proot installs, and `scripts/rootfs-run.sh` does the same via the dev exec broker. But the integration test scaffolding ignores the install method and goes straight through `su -c` for any device-side filesystem or `/proc` poke that isn't a chroot entry. Result: running `scripts/run-integration-tests.sh` against a proot install still triggers a superuser-permission popup (observed in practice) and silently requires the device to be rooted.
 
 This is a real gap. One of the headline reasons to ship proot at all is to support unrooted devices, and the test suite is what we'd point a contributor at to verify that path actually works.
 
@@ -16,7 +16,6 @@ All unconditional `su -c` — no proot branch:
 - `tests/integration/src/chroot_process.rs:264` — `ps -eo pid,ppid,pgid` for the global process listing
 - `tests/integration/src/compositor.rs:163` — waits for `wayland-0` socket inside the rootfs via `test -e`
 - `tests/integration/src/chroot.rs:86-89` — `ensure_debug_app` copies sources into the rootfs and `chmod -R a+rwX`
-- `scripts/run-integration-tests.sh:81` — `test -x .../enter.sh`
 - `scripts/run-integration-tests.sh:97` — copies `tawc-pidfile-exec` into the rootfs and chmods it
 - `scripts/run-integration-tests.sh:118` — polls for the wayland socket
 - `scripts/build-debug-app.sh:23` — copies `gtk4-debug-app` sources into the rootfs

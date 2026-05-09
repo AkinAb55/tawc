@@ -5,9 +5,9 @@ import java.io.File
 
 /**
  * Real-chroot implementation of [InstallationMethod]: bind mounts plus
- * `chroot(2)`, all under Magisk's `su`. The mount logic and `enter.sh`
- * generator live in [ChrootMounter]; this object just routes interface
- * calls there.
+ * `chroot(2)`, all under Magisk's `su`. The bind-mount script generator
+ * lives in [ChrootMounter]; this object just routes interface calls
+ * there.
  *
  * Sole consumer of [Su.run] in the install package — keeping the
  * `requiresRoot=true` quarantine here makes the rest of the install

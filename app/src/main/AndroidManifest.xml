@@ -46,22 +46,18 @@
              documentLaunchMode="intoExisting", taskAffinity="" and a
              unique tawc://activity/<id> URI per launch makes Android
              treat each activityId as its own "document," giving each
-             window a separate card in recents. Same URI → same task
-             (so MainActivity launches from the launcher reuse the
-             existing primary instance). See notes/multi-activity.md. -->
+             window a separate card in recents. The only launch path is
+             the reverse-JNI spawnActivity callback in NativeBridge.kt,
+             which uses an explicit Intent(ctx, CompositorActivity)
+             with the URI as data — no intent-filter or exported needed.
+             See notes/multi-activity.md. -->
         <activity
             android:name=".compositor.CompositorActivity"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.Tawc.Compositor"
             android:documentLaunchMode="intoExisting"
             android:taskAffinity=""
-            android:configChanges="orientation|screenSize|keyboardHidden">
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="tawc" android:host="activity" />
-            </intent-filter>
-        </activity>
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <service
             android:name=".compositor.CompositorService"
@@ -104,14 +100,11 @@
         <!-- Notification "Cancel" action target. Looks up the named op
              in OperationsRegistry and calls Operation.cancel(). Bypasses
              cancelConfirmation — a notification-action tap is itself the
-             deliberate decision. -->
+             deliberate decision. PendingIntents target this receiver via
+             explicit ComponentName, so no intent-filter is needed. -->
         <receiver
             android:name=".ops.CancelOperationReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="me.phie.tawc.ops.CANCEL_OPERATION" />
-            </intent-filter>
-        </receiver>
+            android:exported="false" />
 
         <activity
             android:name=".launcher.LauncherActivity"

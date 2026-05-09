@@ -1,11 +1,11 @@
 # Chroot install method runs every process inside the chroot as root
 
-The chroot install method's `enter.sh` does `chroot $ROOTFS /bin/bash
--l` after `su` and bind mounts. The chroot syscall itself needs root,
-which is fine — but we never drop privileges before exec'ing bash, so
-**every process running inside the chroot has uid 0**. Bash, weston,
-Firefox, GTK demos, anything launched via `rootfs-run` or any
-future in-app Wayland client launcher.
+`ChrootMethod.startInside` runs `ChrootMounter.mountScript` followed
+by `chroot $ROOTFS /bin/bash -l` under `su`. The chroot syscall
+itself needs root, which is fine — but we never drop privileges before
+exec'ing bash, so **every process running inside the chroot has
+uid 0**. Bash, weston, Firefox, GTK demos, anything launched via
+`rootfs-run` or any future in-app Wayland client launcher.
 
 This is just inertia, not a kernel requirement. The standard Unix
 pattern (sshd, login, systemd-nspawn, lxc, podman) is "privileged
@@ -51,7 +51,7 @@ A single regular user inside the rootfs (`useradd -m user`, uid
 - `InstallationMethod.runInside` grows an `asUser: Boolean`
   parameter (or a separate `runInsideAsUser`). For chroot, as-user
   mode appends `setpriv --reuid=1000 --regid=1000 --clear-groups
-  --` to the chroot exec. enter.sh learns a `--user` flag.
+  --` to the chroot exec inside `ChrootMethod.startInside`.
 - `ProotMethod.runInside` mirrors with `setpriv` inside the proot
   view (or accepts that proot already lies enough that uid doesn't
   matter — TBD).

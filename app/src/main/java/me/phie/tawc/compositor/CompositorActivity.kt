@@ -17,6 +17,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import me.phie.tawc.BuildConfig
 
 /**
  * Hosts the Rust Wayland compositor on a SurfaceView. All interaction
@@ -230,27 +231,38 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
         NativeBridge.inputView = surfaceView
 
-        // Register test input receiver
-        val filter = IntentFilter().apply {
-            addAction("me.phie.tawc.TEXT_INPUT")
-            addAction("me.phie.tawc.SET_COMPOSING_TEXT")
-            addAction("me.phie.tawc.FINISH_COMPOSING_TEXT")
-            addAction("me.phie.tawc.DELETE_SURROUNDING_TEXT")
-            addAction("me.phie.tawc.KEY_EVENT")
-            addAction("me.phie.tawc.IC_COMMIT_TEXT")
-            addAction("me.phie.tawc.IC_SET_COMPOSING_TEXT")
-            addAction("me.phie.tawc.IC_SET_COMPOSING_REGION")
-            addAction("me.phie.tawc.IC_FINISH_COMPOSING")
-            addAction("me.phie.tawc.IC_SET_SELECTION")
+        // Debug-only test input receiver. android.permission.DUMP gates
+        // the sender to UIDs holding it (shell, system, platform-signed)
+        // — adb-issued broadcasts work, other installed apps can't reach
+        // it. Same access model as ExecBroker (SO_PEERCRED), just at the
+        // broadcast layer.
+        if (BuildConfig.DEBUG) {
+            val filter = IntentFilter().apply {
+                addAction("me.phie.tawc.TEXT_INPUT")
+                addAction("me.phie.tawc.SET_COMPOSING_TEXT")
+                addAction("me.phie.tawc.FINISH_COMPOSING_TEXT")
+                addAction("me.phie.tawc.DELETE_SURROUNDING_TEXT")
+                addAction("me.phie.tawc.KEY_EVENT")
+                addAction("me.phie.tawc.IC_COMMIT_TEXT")
+                addAction("me.phie.tawc.IC_SET_COMPOSING_TEXT")
+                addAction("me.phie.tawc.IC_SET_COMPOSING_REGION")
+                addAction("me.phie.tawc.IC_FINISH_COMPOSING")
+                addAction("me.phie.tawc.IC_SET_SELECTION")
+            }
+            registerReceiver(
+                testInputReceiver,
+                filter,
+                "android.permission.DUMP",
+                null,
+                RECEIVER_EXPORTED,
+            )
         }
-        @Suppress("UnspecifiedRegisterReceiverFlag")
-        registerReceiver(testInputReceiver, filter, RECEIVER_EXPORTED)
         initialized = true
     }
 
     override fun onDestroy() {
         if (initialized) {
-            unregisterReceiver(testInputReceiver)
+            if (BuildConfig.DEBUG) unregisterReceiver(testInputReceiver)
             NativeBridge.nativeOnActivityDestroyed(activityId)
             compositorService?.unregisterActivity(activityId)
             try {

@@ -1613,14 +1613,14 @@ These are distinct static globals. Confusing them is an easy bug:
 `our_binary_path` is a host path into `nativeLibraryDir`;
 `guest_exe_path` is a rootfs-relative path like `/usr/bin/bash`.
 
-The Kotlin install side rewrites the wrapper script on every
-chroot entry the same way `enter.sh` is rewritten today
-(`notes/installation.md` §"Mount lifecycle" — same idea).
+The Kotlin install side rebuilds the argv on every entry, the same
+way the bind table is rebuilt for proot/chroot (see
+`notes/rootfs-sessions.md` for the single-entry-point invariant).
 
 ## Bootstrap & entry
 
-`tawcroot` is invoked from a small wrapper script that the
-installer writes (`enter.sh` analogue). Roughly:
+`tawcroot` is invoked from `TawcrootMethod.startInside`, which
+builds an argv of the rough shape:
 
 ```sh
 #!/system/bin/sh
@@ -1885,7 +1885,7 @@ target ABI and any link error surfaces immediately.
 
 A new `TawcrootMethod.kt` next to `ProotMethod.kt`. Same shape:
 
-- Generate the wrapper script (`enter.sh` equivalent).
+- Build the argv (bind table + chroot exec) in `startInside`.
 - Apply the same bootstrap-cache + tar-extract pipeline as
   `ProotMethod`.
 - No `/dev/shm` host bind — the SIGSYS handler emulates POSIX shm

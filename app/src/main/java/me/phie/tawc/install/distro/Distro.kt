@@ -103,9 +103,7 @@ interface Distro {
      * DNS, package-manager config, mirrorlist, profile.d. Runs via
      * [method].runOutside (which is `su` for chroot installs and a
      * plain app-uid shell for proot installs — the latter works
-     * because the rootfs is app-uid-owned in proot mode). The
-     * `enter.sh` wrapper is *not* written here — `Installer` does
-     * that after `configure` because it's generic to every distro.
+     * because the rootfs is app-uid-owned in proot mode).
      *
      * @param mirrorProxy when non-null, every package-mirror URL the
      *   implementation writes into the rootfs (pacman mirrorlist,

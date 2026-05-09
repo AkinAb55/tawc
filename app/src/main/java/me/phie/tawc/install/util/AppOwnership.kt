@@ -11,9 +11,9 @@ import java.io.File
  * just for one place.
  *
  * Used by the installer right after `mkdirs()` of `<distros>/<id>/`,
- * before the in-app code writes `metadata.json` and `enter.sh` into the
- * dir. Without this the dir can end up root-owned (e.g. when an earlier
- * `su` process briefly created it) and subsequent app-uid writes fail.
+ * before the in-app code writes `metadata.json` into the dir. Without
+ * this the dir can end up root-owned (e.g. when an earlier `su`
+ * process briefly created it) and subsequent app-uid writes fail.
  */
 object AppOwnership {
     fun chownAppDirNonRecursive(dir: File) {

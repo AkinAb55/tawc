@@ -150,11 +150,11 @@ interface InstallationMethod {
     )
 
     /**
-     * Wipe [installDir] (rootfs + metadata + enter.sh + anything else
-     * we put there). The chroot impl has the more involved sequence
-     * (kill chroot procs, strict unmount, find -delete via `su`);
-     * proot's wipe is a plain recursive delete since the dir is
-     * app-uid-owned and there are no global mounts to tear down.
+     * Wipe [installDir] (rootfs + metadata + anything else we put
+     * there). The chroot impl has the more involved sequence (kill
+     * chroot procs, strict unmount, find -delete via `su`); proot's
+     * wipe is a plain recursive delete since the dir is app-uid-owned
+     * and there are no global mounts to tear down.
      *
      * Throws on failure — the caller (InstallationService) parks the
      * slot in `FAILED` state if the dir survives.

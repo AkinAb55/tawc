@@ -76,13 +76,13 @@ class InstallationStore(context: Context) {
     }
 
     /**
-     * Total bytes used by [id]'s installation dir (rootfs + metadata +
-     * enter.sh). Only the `chroot` method puts root-owned files on
-     * disk (the rootfs's own uids); `proot` and `tawcroot` are
-     * app-uid-owned end-to-end and `du` runs unprivileged. Returns -1
-     * on failure (e.g. chroot-method install on a device where `su`
-     * was revoked between install and now, or no `su` on PATH at
-     * all — DistroInfoActivity then renders "?" instead of crashing).
+     * Total bytes used by [id]'s installation dir (rootfs + metadata).
+     * Only the `chroot` method puts root-owned files on disk (the
+     * rootfs's own uids); `proot` and `tawcroot` are app-uid-owned
+     * end-to-end and `du` runs unprivileged. Returns -1 on failure
+     * (e.g. chroot-method install on a device where `su` was revoked
+     * between install and now, or no `su` on PATH at all —
+     * DistroInfoActivity then renders "?" instead of crashing).
      *
      * Blocks on the shell; call from a background dispatcher.
      */

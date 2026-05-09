@@ -14,14 +14,12 @@ import kotlin.concurrent.thread
  *  - Sweep stale bootstrap-tarball cache entries — the OS only evicts
  *    `cacheDir` under storage pressure, so a 200 MB tarball can squat
  *    on disk for months without our own TTL ([BootstrapCache.sweepStale]).
- *  - Refresh on-disk `enter.sh` for every installed distro. The
- *    script bakes in `applicationInfo.nativeLibraryDir`, which is a
- *    `/data/app/~~<hash>/...` path that changes on every APK
- *    re-install. If the user/test loop runs `adb install -r` (or
- *    Play Store auto-update), the path stamped at install time
- *    points at the *previous* APK's lib dir, which the OS deletes
- *    when the new APK is in place. Re-rendering on every cold start
- *    keeps host-side `scripts/rootfs-run.sh` working.
+ *  - Start the dev exec broker (debug builds only).
+ *
+ * Per-install `nativeLibraryDir` (which moves between APKs as
+ * `/data/app/~~<hash>/...`) is resolved fresh in
+ * [InstallationMethod.startInside] each entry, so there's nothing
+ * persistent to refresh here.
  */
 class TawcApplication : Application() {
     override fun onCreate() {

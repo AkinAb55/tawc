@@ -294,16 +294,18 @@ class InstallationService : Service() {
             rejectInstall(id, "method '${method.key}' is not available on this device")
             return
         }
-        // mirrorProxyUrl is gated to debug builds: a release APK with a
-        // malformed install intent that nevertheless includes the extra
-        // is treated as if the extra were absent. Belt-and-braces with
-        // the InstallActivity-side gate that omits the form checkbox
-        // outside debug builds.
-        val mirrorProxy = mirrorProxyUrl?.takeIf { me.phie.tawc.BuildConfig.DEBUG }
-            ?.let { MirrorProxy(it) }
-        if (mirrorProxyUrl != null && mirrorProxy == null) {
-            appendLog("[install] ignoring mirrorProxy '$mirrorProxyUrl' (release build)")
-        } else if (mirrorProxy != null) {
+        // mirrorProxyUrl is debug-only. Both legitimate entry points
+        // (InstallActivity's checkbox, the broker's install action) are
+        // gated to BuildConfig.DEBUG, so a non-null value reaching a
+        // release build means something is wired wrong upstream — fail
+        // loudly so the bug gets caught rather than silently dropping
+        // the proxy.
+        if (mirrorProxyUrl != null && !me.phie.tawc.BuildConfig.DEBUG) {
+            rejectInstall(id, "mirrorProxy is debug-build-only (got '$mirrorProxyUrl')")
+            return
+        }
+        val mirrorProxy = mirrorProxyUrl?.let { MirrorProxy(it) }
+        if (mirrorProxy != null) {
             appendLog("[install] using mirror proxy ${mirrorProxy.base}")
         }
         val rootfsPath = store.rootfsDir(id).absolutePath

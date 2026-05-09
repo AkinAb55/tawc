@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.system.Os
 import android.util.Log
+import me.phie.tawc.BuildConfig
 import android.view.WindowManager
 import java.io.File
 import java.lang.ref.WeakReference
@@ -120,12 +121,20 @@ class CompositorService : Service() {
         val (w, h) = currentDisplaySize()
         NativeBridge.nativeStartCompositor(w, h)
 
-        @Suppress("UnspecifiedRegisterReceiverFlag")
-        registerReceiver(
-            queryStateReceiver,
-            IntentFilter("me.phie.tawc.QUERY_STATE"),
-            RECEIVER_EXPORTED,
-        )
+        // Debug-only test broadcast. android.permission.DUMP gates the
+        // sender to UIDs holding it (shell, system, platform-signed) —
+        // adb-issued broadcasts work, other installed apps can't reach
+        // it. Same access model as ExecBroker (SO_PEERCRED), just at the
+        // broadcast layer.
+        if (BuildConfig.DEBUG) {
+            registerReceiver(
+                queryStateReceiver,
+                IntentFilter("me.phie.tawc.QUERY_STATE"),
+                "android.permission.DUMP",
+                null,
+                RECEIVER_EXPORTED,
+            )
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

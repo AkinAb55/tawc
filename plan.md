@@ -238,11 +238,10 @@ for the full design.
   in-app `TawcrootMethod.runInside` skipped writing
   `/etc/profile.d/01-tawc.sh` and never linked
   `/tmp/.X11-unix → /data/data/me.phie.tawc/xtmp/.X11-unix`,
-  so X clients in the chroot couldn't reach Xwayland. Switched
-  to invoking the per-install `enter.sh` (same shape as
-  `scripts/rootfs-run.sh`) and added `DISPLAY=:0` +
-  `SDL_VIDEODRIVER=wayland,x11` + the X-socket symlink to its
-  profile.d body. One workaround still active and tracked
+  so X clients in the chroot couldn't reach Xwayland. Made
+  `runInside` rebuild the profile body each entry (same body as
+  the proot/chroot paths) and added `DISPLAY=:0` +
+  `SDL_VIDEODRIVER=wayland,x11` + the X-socket symlink to it. One workaround still active and tracked
   separately: `pacman-key --init`'s `gpg-agent` spins at 100%
   CPU when started from the in-app installer process (works
   fine via `scripts/rootfs-run.sh` from adb shell), so

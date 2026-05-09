@@ -221,8 +221,8 @@ when:
 ## References
 
 - `app/src/main/java/me/phie/tawc/install/ProotMethod.kt`
-  (lines 53–64: `devShmDir`, lines 337–340: `-b` flag, lines
-  398–399 / 474 / 482: enter.sh emission)
+  (`devShmDir`, the `-b` flag in `prootArgv`, and the proot argv
+  emission in `startInside`)
 - `notes/proot.md` "Firefox under proot" → item 1 (`/dev/shm` bind)
 - `notes/proot.md` "What we ship" → existing `ashmem_memfd`
   extension that this would mirror

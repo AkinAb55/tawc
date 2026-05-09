@@ -147,13 +147,14 @@ The full list of things Android does differently that we paper over:
    apps on Android. Always export it to a path inside the app's
    own `cacheDir` before invoking proot.
 
-3. **mksh's here-doc temp files** — when the host launcher
-   (`scripts/rootfs-run.sh`) shells into `enter.sh` via `run-as
-   me.phie.tawc`, the shell's default cwd is `/data/local` (uid
-   `shell`'s default), where app uid has no write access. mksh's
-   here-doc machinery falls over trying to create a temp file there.
-   The host launcher cd's to and exports `TMPDIR=$cacheDir/proot-tmp`
-   first.
+3. **mksh's here-doc temp files** — historical: when host launchers
+   shelled into a wrapper script via `run-as me.phie.tawc`, the
+   default cwd was `/data/local` (uid `shell`'s default), where app
+   uid has no write access, and mksh's here-doc machinery fell over
+   trying to create a temp file there. The current broker-mediated
+   path runs entirely inside the JVM with `TMPDIR=$cacheDir/proot-tmp`
+   exported by [ProotMethod.startInside], so this is no longer a
+   concern. Documented for archaeology only.
 
 4. **Inherited seccomp filter** — the filter follows fork+exec via
    `PR_SET_NO_NEW_PRIVS` and can't be relaxed from userland. This is
@@ -189,11 +190,12 @@ The full list of things Android does differently that we paper over:
    uses `-Syyu` to short-circuit the conditional GET and download
    the current DB unconditionally.
 
-7. **`enter.sh` re-rendering** — the script bakes in
-   `applicationInfo.nativeLibraryDir`, a `/data/app/~~<hash>/...`
-   path that changes on every APK re-install. `TawcApplication`
-   re-renders `enter.sh` on every cold start so host-side launchers
-   keep working through Play Store auto-updates and `adb install -r`.
+7. **`nativeLibraryDir` freshness across APK upgrades** —
+   `applicationInfo.nativeLibraryDir` is a `/data/app/~~<hash>/...`
+   path that changes on every APK re-install. We don't persist it:
+   [ProotMethod] is constructed per-context and resolves the path
+   fresh each time, so `adb install -r` and Play Store auto-updates
+   work without any cold-start fix-up.
 
 ## Maintenance contract
 

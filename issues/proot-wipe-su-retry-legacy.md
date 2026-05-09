@@ -2,24 +2,23 @@
 # bind-mount safety story for any su-capable wipe needs an audit
 
 `ProotMethod.wipe` falls back to `Su.run("find … -xdev -depth -delete")`
-when the app-uid delete fails. The kdoc rationale (`ProotMethod.kt`
-~lines 236-249) is that integration tests on rooted devices used to
-exercise `scripts/rootfs-run.sh` against a proot install via a
-`su -c '<enter.sh>'` path, leaving pacman/package files root-owned
-on disk. Plain app-uid `chmod -R u+rwX` then couldn't make those
+when the app-uid delete fails. The kdoc rationale is that historical
+proot-via-su entry paths could leave pacman/package files root-owned
+on disk; plain app-uid `chmod -R u+rwX` then couldn't make those
 files writable, and unlink failed with EACCES.
 
-`scripts/rootfs-run.sh` now reads `metadata.json#method` and
-dispatches:
-
-- proot install → `run-as me.phie.tawc <enter.sh>` (no root)
-- chroot install → `su -c <enter.sh>` (root, real bind mounts)
+The current entry path is method-aware: `scripts/rootfs-run.sh` (and
+the integration tests via `adb.rs`) route through the dev exec
+broker's `RUNINSIDE` request, which dispatches to
+[InstallationMethod.startInside]. For proot installs that runs as
+the app uid throughout — no `su` is ever forked.
 
 So a freshly-installed proot rootfs running through the current test
 rig should never accumulate root-owned files. The only remaining
-justification for the su-retry is **stale installs from before that
-dispatch landed** — installs that exist on a device but were created
-when `rootfs-run` always took the `su -c` path.
+justification for the su-retry is **stale installs from before the
+broker dispatch landed** — installs that exist on a device but were
+created when host scripts shelled in via `su -c` against the proot
+rootfs.
 
 ## The action
 

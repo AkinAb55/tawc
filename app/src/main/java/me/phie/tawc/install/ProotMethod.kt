@@ -120,9 +120,9 @@ class ProotMethod(context: Context) : InstallationMethod {
      * Command goes via `bash -lc` so the profile.d entries fire
      * (`PATH`, `LD_LIBRARY_PATH`, Wayland env from `01-tawc.sh`).
      *
-     * Refreshes `enter.sh` on every call so any changes to this
-     * rendering take effect without reinstalling — same contract as
-     * [ChrootMethod.runInside].
+     * Refreshes `/etc/profile.d/01-tawc.sh` on every call so any
+     * changes to [RootfsProfile] take effect without reinstalling —
+     * same contract as [ChrootMethod.startInside].
      */
     override fun startInside(rootfs: String, command: String?): Process {
         // Pre-create the bind targets and proot's scratch dir. proot
@@ -211,13 +211,11 @@ class ProotMethod(context: Context) : InstallationMethod {
     }
 
     /**
-     * Recursive delete with one wrinkle: tracees that ran under a
-     * proot-via-su entry (e.g. integration tests that go through
-     * `scripts/rootfs-run.sh`'s `su -c '<enter.sh>'` path on rooted
-     * devices) leave on-disk files with `uid=0` ownership, even though
-     * the install was originally proot/app-uid. Plain `chmod -R` from
-     * app uid then can't make those files writable, and the
-     * subsequent unlink fails with EACCES.
+     * Recursive delete with one wrinkle: tracees from any historical
+     * proot-via-su entry path can leave on-disk files with `uid=0`
+     * ownership, even though the install was originally proot/app-uid.
+     * Plain `chmod -R` from app uid then can't make those files
+     * writable, and the subsequent unlink fails with EACCES.
      *
      * So: chmod via `su` if it's available, then delete. On
      * properly-rootless installs (no su ever touched the tree) the
@@ -309,11 +307,9 @@ class ProotMethod(context: Context) : InstallationMethod {
         // metadata.json unlink is the second-to-last visible artefact,
         // with only the empty installDir left and `rmdir` finishing
         // things near-atomically. See RootfsCleaner.wipe for the same
-        // reasoning. (Older installs may have a leftover enter.sh on
-        // disk — `rm -f` is fine if it's missing.)
+        // reasoning.
         log("delete: container at $installDir (metadata.json, rmdir)")
         val pass2Script = buildString {
-            appendLine("rm -f $installPathQ/enter.sh")  // legacy artifact
             appendLine("rm -f $installPathQ/metadata.json.tmp")
             appendLine("rm -f $installPathQ/metadata.json")
             appendLine("rmdir $installPathQ")
@@ -322,7 +318,7 @@ class ProotMethod(context: Context) : InstallationMethod {
         if (r.ok && !installDir.exists()) return
 
         // App-uid delete failed — almost certainly a residual
-        // root-owned file from a `su -c '<enter.sh>'` invocation.
+        // root-owned file from a historical su-mediated entry.
         // Retry once via `su`. The same explicit order applies.
         if (Su.rootAvailable()) {
             log("delete: app-uid pass-2 failed, retrying via su")

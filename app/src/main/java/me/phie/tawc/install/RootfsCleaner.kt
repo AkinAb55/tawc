@@ -30,8 +30,8 @@ import java.io.IOException
  *      The delete is split into **two passes** so a cancel mid-wipe
  *      can never strand the slot without `metadata.json`: pass 1
  *      walks the rootfs subtree only, pass 2 tears down `metadata.json`
- *      / `enter.sh` / the parent dir once we know the heavy work is
- *      done. `find -depth` already orders deletion leaf-first within a
+ *      and the parent dir once we know the heavy work is done.
+ *      `find -depth` already orders deletion leaf-first within a
  *      single tree, but the install-dir-level ordering between
  *      `rootfs/` and its sibling `metadata.json` depends on `readdir`,
  *      so we make it explicit. Recovery from a cancelled pass-1: home
@@ -92,19 +92,18 @@ object RootfsCleaner {
             }
         }
 
-        // Pass 2: explicit ordering — `enter.sh` first, then any
-        // half-written `metadata.json.tmp`, then `metadata.json`,
-        // then `rmdir`. `find -depth -delete` would leave readdir-
-        // order between siblings undefined, which means a cancel
-        // between two arbitrary unlinks could orphan the slot
-        // (installDir present, metadata.json gone — invisible on the
-        // home screen). Explicit order makes metadata.json the
+        // Pass 2: explicit ordering — any half-written
+        // `metadata.json.tmp` first, then `metadata.json`, then
+        // `rmdir`. `find -depth -delete` would leave readdir-order
+        // between siblings undefined, which means a cancel between
+        // two arbitrary unlinks could orphan the slot (installDir
+        // present, metadata.json gone — invisible on the home
+        // screen). Explicit order makes metadata.json the
         // second-to-last visible artefact, with only the empty dir
         // remaining and `rmdir` finishing the job near-atomically.
-        log("rm: container at $installPath (enter.sh, metadata.json, rmdir)")
+        log("rm: container at $installPath (metadata.json, rmdir)")
         val finalRes = Su.run(
             buildString {
-                appendLine("rm -f '$installPath/enter.sh'")
                 appendLine("rm -f '$installPath/metadata.json.tmp'")
                 appendLine("rm -f '$installPath/metadata.json'")
                 appendLine("rmdir '$installPath'")
