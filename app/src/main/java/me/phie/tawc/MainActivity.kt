@@ -2,9 +2,11 @@ package me.phie.tawc
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -90,44 +92,59 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(cardPad, cardPad, cardPad, cardPad)
         }
+
+        // Header: title/subtitle on the left, Manage button on the top-right.
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val textCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val (title, subtitle) = displayParts(inst)
-        column.addView(TextView(this).apply {
+        textCol.addView(TextView(this).apply {
             text = title
             textSize = 18f
         })
         if (subtitle.isNotEmpty()) {
-            column.addView(TextView(this).apply {
+            textCol.addView(TextView(this).apply {
                 text = subtitle
                 textSize = 14f
                 alpha = 0.7f
             })
         }
-
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val gap = (8 * resources.displayMetrics.density).toInt()
-        val topMargin = (12 * resources.displayMetrics.density).toInt()
-        actions.addView(
+        header.addView(
+            textCol,
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).also { it.marginEnd = gap },
+        )
+        header.addView(
             tonalButton("Manage") {
                 val i = Intent(this@MainActivity, DistroInfoActivity::class.java)
                     .putExtra(DistroInfoActivity.EXTRA_ID, inst.id)
                 startActivity(i)
             },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).also { it.marginEnd = gap },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).also { it.gravity = Gravity.TOP },
         )
-        val runBtn = primaryButton("Run") {
-            val i = Intent(this@MainActivity, LauncherActivity::class.java)
-                .putExtra(LauncherActivity.EXTRA_ID, inst.id)
-            startActivity(i)
+        column.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // Search-apps stub: looks like a search field but never holds focus
+        // — tapping it forwards into LauncherActivity, which is the real
+        // search UI. Hidden on FAILED (no usable launcher) and disabled
+        // while installing/uninstalling so it returns once ready.
+        val topMargin = (4 * resources.displayMetrics.density).toInt()
+        val searchBox = EditText(this).apply {
+            hint = "Search apps"
+            isSingleLine = true
+            isFocusable = false
+            isClickable = true
+            setOnClickListener {
+                val i = Intent(this@MainActivity, LauncherActivity::class.java)
+                    .putExtra(LauncherActivity.EXTRA_ID, inst.id)
+                startActivity(i)
+                @Suppress("DEPRECATION")
+                overridePendingTransition(R.anim.tawc_fade_in, R.anim.tawc_fade_out)
+            }
         }
-        // Hide Run on FAILED — partial rootfs has no usable launcher
-        // entry point; Manage stays reachable for inspect / retry.
-        // INSTALLING / UNINSTALLING leave Run visible-but-disabled so
-        // it's clear it'll come back once the operation finishes.
-        runBtn.visibility = if (inst.state == Installation.State.FAILED) View.GONE else View.VISIBLE
-        runBtn.isEnabled = inst.state == Installation.State.READY
-        actions.addView(runBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        searchBox.visibility = if (inst.state == Installation.State.FAILED) View.GONE else View.VISIBLE
+        searchBox.isEnabled = inst.state == Installation.State.READY
         column.addView(
-            actions,
+            searchBox,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).also { it.topMargin = topMargin },
         )
 

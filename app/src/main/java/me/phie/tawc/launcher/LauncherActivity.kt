@@ -22,6 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.phie.tawc.R
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationMethod
@@ -140,6 +141,15 @@ class LauncherActivity : AppCompatActivity() {
         uiScope.cancel()
         // LAUNCH_SCOPE intentionally NOT cancelled — backing out of this
         // activity should not tear down a freshly launched application.
+    }
+
+    // Match the fade used by MainActivity's search-box click on the way
+    // in, so the round-trip looks symmetric instead of fading open and
+    // sliding closed.
+    override fun finish() {
+        super.finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.tawc_fade_in, R.anim.tawc_fade_out)
     }
 
     private fun loadApps() {
