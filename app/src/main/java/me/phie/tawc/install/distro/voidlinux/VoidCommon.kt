@@ -72,8 +72,8 @@ internal object VoidCommon {
      * package that's a hard dep of something installed; we only list
      * leaves of the dep graph plus their leaf-only deps.
      *
-     * Anything pulled in transitively by `weston` (the package in
-     * [DEFAULT_BASE_PACKAGES]) is left alone — removing it would
+     * Anything pulled in transitively by `lxterminal` (the package
+     * in [DEFAULT_BASE_PACKAGES]) is left alone — removing it would
      * just see it reinstalled on the next `xbps-install` of the base
      * set.
      */
@@ -287,7 +287,7 @@ internal object VoidCommon {
         }
     }
 
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("weston")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("lxterminal")
 
     /**
      * Wrap [log] to drop xbps's per-package noise. xbps writes

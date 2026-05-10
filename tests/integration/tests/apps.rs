@@ -713,9 +713,9 @@ fn test_eglx11_renders_via_ahb() {
 ///   - Compositor cleans up on a normal client exit (no leftover
 ///     toplevel/client).
 ///
-/// Requires `lxterminal` in the chroot — added by
-/// `scripts/install-test-deps.sh`. Re-run that script if the binary is
-/// missing.
+/// `lxterminal` ships in the distro's [DEFAULT_BASE_PACKAGES], so a
+/// fresh install already has it — no `scripts/install-test-deps.sh`
+/// rerun needed.
 #[test]
 fn test_lxterminal_input_and_exit() {
     let mut term = launch_and_wait_for_ahb(

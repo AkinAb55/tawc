@@ -68,15 +68,25 @@ internal object RootfsEnv {
     }
 
     /**
-     * `/usr/bin/env -i KEY=VAL …` argv prefix. Each entry is one argv
-     * element so callers don't have to worry about quoting values that
-     * contain spaces. Dest is the in-rootfs `/usr/bin/env` (resolved by
-     * tawcroot/proot path translation, or by the kernel after chroot).
+     * `/usr/bin/env -i -C /root KEY=VAL …` argv prefix. Each entry is
+     * one argv element so callers don't have to worry about quoting
+     * values that contain spaces. Dest is the in-rootfs `/usr/bin/env`
+     * (resolved by tawcroot/proot path translation, or by the kernel
+     * after chroot).
+     *
+     * `-C /root` chdir's to root's home before exec'ing the shell, so
+     * an interactive `bash -l` lands in `/root` instead of wherever the
+     * host-side cwd happened to translate to (`/tmp` for tawcroot's
+     * `$rootfs/tmp` cwd; `/` for chroot's post-chroot cwd). Matches
+     * `HOME=/root` set above. Requires GNU env (coreutils ≥ 9.0); both
+     * Arch and Void ship 9.x.
      */
     fun envArgv(method: Method): List<String> {
-        val out = ArrayList<String>(2 + 16)
+        val out = ArrayList<String>(4 + 16)
         out += "/usr/bin/env"
         out += "-i"
+        out += "-C"
+        out += "/root"
         for ((k, v) in build(method)) out += "$k=$v"
         return out
     }

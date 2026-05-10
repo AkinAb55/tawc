@@ -554,9 +554,10 @@ PACMAN_EOF
 
     /**
      * Common base package set for every Arch flavour. Kept minimal —
-     * just `weston` for `weston-terminal` as a sanity-check launcher.
+     * just `lxterminal` as a sanity-check launcher (gives a fresh
+     * install one usable app to open from the launcher).
      * Test/dev subsystems install their own deps via
      * `scripts/install-test-deps.sh`.
      */
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("weston")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("lxterminal")
 }
