@@ -126,85 +126,111 @@ does not catch:
   composing spans in the Editable would mis-classify subsequent
   `commitText` calls.
 
-## Tentative plan
+## Plan
 
-Two pieces, both required, in roughly this order:
+Bundle with `consolidate-test-broadcasts-into-exec-broker.md` — the
+broker actions there are the transport for the IC-driven test path.
 
-### Step 1 — neutralise the system IME for the test runner
+### Step 1 — extract `ImeOutput` interface
 
-Ship a noop `InputMethodService` stub (debug build only) inside the
-tawc app — `me.phie.tawc.test.NoopInputMethodService` or similar — that
-declares itself as an IME, accepts the binding, and does nothing on
-any IC method. Then the integration test runner's bring-up steps add:
+`TawcInputConnection` and the reverse-JNI keyboard-visibility code
+currently call `InputMethodManager` methods directly. Extract an
+interface for all outbound IMM calls:
 
-```bash
-adb shell ime enable me.phie.tawc/.test.NoopInputMethodService
-adb shell ime set    me.phie.tawc/.test.NoopInputMethodService
+```kotlin
+interface ImeOutput {
+    fun updateSelection(selStart: Int, selEnd: Int, composingStart: Int, composingEnd: Int)
+    fun showSoftInput()
+    fun hideSoftInput()
+    fun restartInput()
+}
 ```
 
-…before launching the compositor, and reverts on teardown.
+Production implementation wraps the real `InputMethodManager`.
+Test implementation records every call (so tests can assert on
+outbound behaviour) and never touches the real IMM.
 
-This removes the third-party reactor entirely and makes the bypass
-tests deterministic on every device, regardless of which IME the user
-has installed for daily use. Cross-device flakiness from the
-"updateSelection → IME's defensive finishComposingText" race
-disappears because there is no IME to react.
+This solves the IME race by construction: `showSoftInput()` goes to
+the test recorder, the real keyboard never appears, the real IME
+never receives `updateSelection`, so it never fires defensive
+`finishComposingText` calls. No per-method gates, no markers, no
+suppression flags.
 
-`input-test-flaky-on-emulator.md` (which describes the race on the
-AOSP latin IME) is closed by this step.
+`input-test-flaky-on-emulator.md` (Problem 2 above) is closed by
+this step.
 
-### Step 2 — actually exercise `TawcInputConnection`
+### Step 2 — drive tests through `TawcInputConnection`
 
-The `IC_*` broadcasts (`IC_COMMIT_TEXT`, `IC_SET_COMPOSING_TEXT`,
-`IC_SET_COMPOSING_REGION`, `IC_FINISH_COMPOSING`, `IC_SET_SELECTION`)
-already exist in `CompositorActivity.kt` and call the active
-`TawcInputConnection`'s methods directly. They were marked "may be
-racy with the system IME's reactions" — Step 1 makes them safe.
+After the broker-action migration lands, convert the input test
+suite to call the real IC methods. Broker actions post to the main
+thread and call `ic.commitText(text, 1)`,
+`ic.setComposingText(text, 1)`, `ic.setComposingRegion(start, end)`,
+etc. — the exact same `InputConnection` surface the real IME calls.
+Every line of IC logic (`computeReplaceDeltas`, the Editable mirror,
+`composingRegionIsPreedit` flag tracking, `unitsToKeyCounts`,
+the `commitText` short-circuit) runs on the test path. No owned
+code is skipped.
 
-Convert the bulk of the input test suite to use the `IC_*` broadcasts.
-Asserting both the wayland-side observable (GTK's `TEXT_CHANGED` /
-`PREEDIT` events) AND the IC-side state (`Editable` contents,
-composing span via `BaseInputConnection.getComposingSpanStart/End`,
-selection cursor) so a regression in either layer fails the test.
-Expose the IC state to the test via a debug broadcast that returns
-`Editable.toString()` + composing range + selection range, or via a
-logcat readout the test parses.
+The test observes results from two directions:
 
-Concrete scenes to convert / add:
+- **Wayland side:** the GTK debug app reports what the client
+  received (`TEXT_CHANGED`, `PREEDIT`, `CURSOR_POS`, etc.).
+- **IME side:** the `ImeOutput` test implementation records what
+  outbound IMM calls were made (`updateSelection` args,
+  `showSoftInput`/`hideSoftInput` timing, `restartInput`).
 
-- `scene_compose_lifecycle` → drive via `IC_SET_COMPOSING_TEXT`; assert
-  Editable's composing region matches the preedit at each step.
-- New scene: Gboard-style commit-replace — `IC_SET_COMPOSING_TEXT
-  "teh"` then `IC_COMMIT_TEXT "the "` — assert the wire pairs
-  `delete_before=3` with the commit (currently uncovered).
-- New scene: OpenBoard's per-Enter pattern —
-  `IC_COMMIT_TEXT "hello"`, `IC_SET_COMPOSING_REGION 0..5`,
-  `IC_COMMIT_TEXT "hello"`, `IC_COMMIT_TEXT "\n"` — assert no extra
-  characters get prepended (regression test for `7ad5869`).
-- New scene: setComposingRegion-then-commit replaces committed bytes,
-  not preedit overlay.
+Test structure — two groups:
 
-### Step 3 — keep a small "wayland-protocol-only" test set
+- **`mod ic`** — the workhorse. Every Gboard/OpenBoard-shaped
+  scene drives real IC methods and asserts both the wayland-side
+  observable and the outbound `ImeOutput` calls.
+- **`mod wayland_only`** — the small "compositor's text-input-v3
+  done-ordering is correct given these exact protocol events" set.
+  Keeps the bypass `inject-text` / `set-composing` actions
+  (calling `NativeBridge.native*` directly). Today this is roughly
+  `scene_autocorrect_replaces_preedit` and
+  `test_surroundingless_client_uses_keyboard_for_backspace`.
 
-Keep the bypass broadcasts (`TEXT_INPUT` etc.) and use them
-deliberately for a small set of tests that genuinely want to assert
-"the compositor's text-input-v3 done-ordering is correct given these
-exact protocol events", independently of IC. Label the file / module
-clearly so the distinction stays visible (e.g. move them to
-`tests/wayland_text_input.rs` and rename `input.rs` to
-`tests/input_method.rs` once it actually tests the input method
-layer).
+Convert existing scenes and add the missing-coverage cases:
+Gboard commit-replace, OpenBoard per-Enter, `setComposingRegion`
+then commit, `updateFromCompositor` clearing composing spans.
+
+### Toggling test mode
+
+Two broker actions: `enable-test-input` swaps the `ImeOutput`
+implementation on the active IC to the test recorder;
+`disable-test-input` restores the real IMM implementation.
+Process death resets to production (crash-safe by construction).
+Release builds have no broker, so neither action exists.
+
+### Cross-reference: touch-down preedit finalization
+
+The compositor's touch-down preedit commit
+(`remove-touch-down-preedit-finalization.md`) is a dirty workaround
+that should be removed. It unconditionally commits the preedit on
+every touch whether or not the cursor moves — wrong when the user
+taps the current position, taps a non-text element, or scrolls.
+
+### Cross-reference: hardware keyboard
+
+When hardware-keyboard support lands
+(`no-hardware-keyboard-support.md`), hardware key events arrive via
+`View.dispatchKeyEvent`, not `IC.sendKeyEvent`. The `ImeOutput`
+interface doesn't cover this path — it will need its own test
+injection point.
 
 ## Out of scope for this issue
 
-- Real-IME-reactivity coverage. The point of Step 1 is to *remove* the
-  system IME from the test loop because it's a non-deterministic
-  third-party. A separate, smaller test suite that explicitly drives
-  Gboard-via-instrumentation could come later to cover "the compositor
-  behaves correctly when a real IME pings IMM at the wrong moment",
-  but it should be a focused regression suite, not the workhorse.
-- Multi-window / multi-activity input dispatch. Already a separate
-  problem.
+- Real-IME-reactivity coverage. The point of the `ImeOutput` swap
+  is to remove the system IME from the test loop because it's a
+  non-deterministic third-party. A separate, smaller test suite
+  that explicitly drives Gboard-via-instrumentation could come
+  later, but it should be a focused regression suite, not the
+  workhorse.
+- State machine refactoring (moving state between Kotlin and Rust).
+  The current split works; the `ImeOutput` interface is orthogonal
+  to where state lives.
+- Multi-window / multi-activity input dispatch.
 
 ## References
 

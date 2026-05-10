@@ -6,6 +6,11 @@ dance, gives every host→app channel a single auth model and DEBUG
 gate, and drops one whole namespace from the cross-version external
 API surface.
 
+Bundle with `input-tests-skip-ic-and-race-system-ime.md`: the test
+conversions there ride on these actions, and the `ImeOutput` interface
+swap is toggled via two broker actions (`enable-test-input` /
+`disable-test-input`).
+
 ## What's there today
 
 **Two parallel host→app channels, both debug-only:**
@@ -36,8 +41,11 @@ Add new broker actions under `me.phie.tawc.dev.input` (or similar).
 Each action handler resolves the focused `CompositorActivity` via
 the existing `CompositorService.activities` map (already used for
 reverse-JNI `spawnActivity`/`finishActivity`), posts to
-`Handler(Looper.getMainLooper())`, and runs the same code the
-broadcast receiver runs today:
+`Handler(Looper.getMainLooper())`, and calls the appropriate method.
+
+### Bypass actions (call NativeBridge directly, skip IC)
+
+Used by `mod wayland_only` tests for pure protocol-ordering coverage.
 
 | Action            | Args                              | Calls                                          |
 |-------------------|-----------------------------------|------------------------------------------------|
@@ -46,12 +54,27 @@ broadcast receiver runs today:
 | `finish-composing`| —                                 | `NativeBridge.nativeFinishComposingText`       |
 | `delete-surrounding` | `before`, `after`              | `nativeSendKeyEvent(KEYCODE_DEL/FORWARD_DEL)` xN |
 | `key-event`       | `keycode`                         | `NativeBridge.nativeSendKeyEvent`              |
+
+### IC actions (call real InputConnection methods)
+
+Used by `mod ic` tests — exercises the full IC logic
+(`computeReplaceDeltas`, Editable mirror, flag tracking, etc.).
+
+| Action            | Args                              | Calls                                          |
+|-------------------|-----------------------------------|------------------------------------------------|
 | `ic-commit-text`  | `text`                            | `activeInputConnection.commitText`             |
 | `ic-set-composing-text` | `text`                      | `activeInputConnection.setComposingText`       |
 | `ic-set-composing-region` | `start`, `end`            | `activeInputConnection.setComposingRegion`     |
 | `ic-finish-composing` | —                             | `activeInputConnection.finishComposingText`    |
 | `ic-set-selection` | `start`, `end`                   | `activeInputConnection.setSelection`           |
+
+### Other actions
+
+| Action            | Args                              | Calls                                          |
+|-------------------|-----------------------------------|------------------------------------------------|
 | `query-state`     | —                                 | `NativeBridge.nativeQueryState` (on the service, not an activity) |
+| `enable-test-input` | —                               | swap the active IC's `ImeOutput` to the test recorder (see `input-tests-skip-ic-and-race-system-ime.md`) |
+| `disable-test-input`| —                               | restore production `ImeOutput` (real IMM) |
 
 Drop both `registerReceiver` blocks and the `testInputReceiver` /
 `queryStateReceiver` field declarations entirely. Drop the
@@ -73,32 +96,31 @@ handlers the same way.
   devices) is replaced by a native `tawc-exec` connect to an
   already-running socket (<10ms). Tests that fire many events in
   sequence get measurably faster.
-- The IC_* actions today have a structural smell — they call
-  `InputConnection` methods directly and the broadcast model is
-  fire-and-forget, so any return value is lost. Broker actions can
-  return structured results, opening the door to richer assertions.
+- Broker actions can return structured results (the `ImeOutput`
+  test recorder's contents can be returned on the broker response
+  if needed, though the primary assertion path is observing
+  `ImeOutput` calls as they accumulate).
 - One fewer `me.phie.tawc.*` broadcast namespace to track in the
   cross-version API audit.
 
-## Open questions
+## Decisions
 
-- **Activity resolution.** `CompositorService.activities` is a
-  `Map<String, WeakReference<CompositorActivity>>`. Picking "the
-  focused one" reproduces today's `hasWindowFocus()` filter; if no
-  Activity is focused (e.g. the device is on the lock screen or
-  another app is front), action returns an error rather than
-  silently no-op'ing. Decide whether errors are preferred or whether
-  we keep the silent-skip behaviour.
-- **`query-state` lives on the Service**, not an Activity, so its
-  handler doesn't need the focus dance — straight call to
-  `NativeBridge.nativeQueryState()` from the broker thread (or
-  posted to main if NativeBridge requires it; check before
-  implementing).
-- **Result delivery.** Broker `ACTION` handlers today (install,
-  uninstall) drive long-running operations with progress streams.
-  These input actions are one-shot; they should return a small
-  status (success/error message). Confirm the action protocol
-  cleanly handles "single response, no progress."
+- **Activity resolution.** Activity-bound actions resolve via a new
+  `CompositorService.focusedActivity()` that walks the existing
+  `activities: Map<String, WeakReference<CompositorActivity>>` and
+  returns the first whose `hasWindowFocus()` is true (reached via
+  the existing `NativeBridge.serviceRef`). No focused activity →
+  action returns exit 1 with `err("no focused CompositorActivity")`.
+  Loud beats silent — silent-skip masks setup mistakes that the
+  current broadcast model also masks today, and setting up a
+  reliable focused activity is the test's responsibility.
+- **`query-state` lives on the Service.** Calls
+  `NativeBridge.nativeQueryState()` directly off the broker thread
+  (no main-loop post needed — verify before implementing).
+- **Result delivery.** Single response per action, no progress
+  stream. The broker's existing one-shot ACTION path covers this
+  cleanly — see `InstallActions` for the long-running counterpart
+  if we ever need it here.
 
 ## Migration
 
@@ -123,6 +145,13 @@ handlers the same way.
   — drop `testInputReceiver` field + register/unregister.
 - `app/src/main/java/me/phie/tawc/compositor/CompositorService.kt`
   — drop `queryStateReceiver` field + register/unregister.
+- `app/src/main/java/me/phie/tawc/compositor/TawcInputConnection.kt`
+  — accept `ImeOutput` interface instead of calling IMM directly.
+- `app/src/main/java/me/phie/tawc/compositor/NativeBridge.kt`
+  — reverse-JNI keyboard show/hide/restart calls go through
+  `ImeOutput` instead of IMM directly.
+- `app/src/main/java/me/phie/tawc/compositor/ImeOutput.kt` (new)
+  — interface + production `RealImeOutput` + test `RecordingImeOutput`.
 - `app/src/main/java/me/phie/tawc/dev/` — new `InputActions.kt` (or
   similar) registering the action handlers from
   `TawcApplication.onCreate` next to `InstallActions.registerAll()`.
