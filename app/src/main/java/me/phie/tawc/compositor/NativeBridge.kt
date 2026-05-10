@@ -9,7 +9,6 @@ import android.util.Log
 import android.view.Surface
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
 import java.lang.ref.WeakReference
 
 object NativeBridge {
@@ -26,13 +25,21 @@ object NativeBridge {
 
     /** The currently active TawcInputConnection. Set by TawcInputConnection's
      *  init, cleared by closeConnection. The Wayland-to-Android Editable sync
-     *  pushes through this; broadcast tests also reuse it so multi-step IME
-     *  flows (compose → finish → commit) share Editable state. */
+     *  pushes through this; the dev IC actions (`ic-commit-text`, …) also
+     *  reuse it so multi-step IME flows (compose → finish → commit) share
+     *  Editable state. */
     private var activeICRef: WeakReference<TawcInputConnection>? = null
 
     var activeInputConnection: TawcInputConnection?
         get() = activeICRef?.get()
         set(value) { activeICRef = value?.let { WeakReference(it) } }
+
+    /** Outbound calls to the system IME (showSoftInput, updateSelection,
+     *  …) go through this. Default is the production [RealImeOutput];
+     *  the dev `enable-test-input` broker action swaps in a
+     *  [RecordingImeOutput] so input integration tests don't race the
+     *  system IME's reaction to `updateSelection`. See [ImeOutput] kdoc. */
+    @Volatile var imeOutput: ImeOutput = RealImeOutput
 
     /** `(EditorInfo.inputType, extraImeOptionsFlags)` for the focused
      *  Wayland text-input field. Driven by the Wayland client via
@@ -64,6 +71,14 @@ object NativeBridge {
         appContext = null
         serviceRef = null
     }
+
+    /**
+     * Look up the live [CompositorService], if any. Public-but-internal
+     * for the dev broker action handlers (see
+     * [me.phie.tawc.dev.InputActions]) — no production code should reach
+     * for this; use [attachService]/[detachService] instead.
+     */
+    fun serviceRefForDev(): CompositorService? = serviceRef?.get()
 
     init {
         System.loadLibrary("compositor")
@@ -115,6 +130,14 @@ object NativeBridge {
     external fun nativeOnActivityFocusChanged(activityId: String, hasFocus: Boolean)
 
     // --- Text input: Android InputConnection → Compositor ---
+    //
+    // These are the JNI primitives the production [TawcInputConnection]
+    // calls into the Rust compositor with. Tests never call them
+    // directly — there is intentionally no broker action that reaches
+    // these — because that would bypass the IC's state machine
+    // (`computeReplaceDeltas`, the Editable mirror, the
+    // `composingRegionIsPreedit` short-circuit) and let wayland-side
+    // fallback behaviour hide IC bugs. See [me.phie.tawc.dev.InputActions].
 
     /** commitText from InputConnection. `deleteBefore`/`deleteAfter` are
      *  UTF-16 code-unit counts around the cursor that should be removed
@@ -126,17 +149,22 @@ object NativeBridge {
      *  doesn't fire `set_surrounding_text(cause=other)` between the two
      *  and trip our preedit-clearing logic. (Standalone
      *  deleteSurroundingText goes through [nativeSendKeyEvent] from the
-     *  IC instead — see TawcInputConnection.) */
+     *  IC instead — see TawcInputConnection.)
+     *  Production-only — only called from [TawcInputConnection.commitText]. */
     external fun nativeCommitText(text: String, deleteBefore: Int, deleteAfter: Int)
 
     /** setComposingText from InputConnection. Same delete semantics as
-     *  [nativeCommitText]. */
+     *  [nativeCommitText]. Production-only — only called from
+     *  [TawcInputConnection.setComposingText]. */
     external fun nativeSetComposingText(text: String, deleteBefore: Int, deleteAfter: Int)
 
-    /** finishComposingText from InputConnection */
+    /** finishComposingText from InputConnection. Production-only — only
+     *  called from [TawcInputConnection.finishComposingText]. */
     external fun nativeFinishComposingText()
 
-    /** sendKeyEvent mapped to keycode */
+    /** sendKeyEvent mapped to keycode. Production-only — only called
+     *  from [TawcInputConnection.sendKeyEvent] (and [TawcInputConnection.deleteSurroundingText],
+     *  which translates the delta into Backspace / Forward-Delete key events). */
     external fun nativeSendKeyEvent(keycode: Int)
 
     /** Query compositor state (logs COMPOSITOR_STATE line to logcat). */
@@ -161,8 +189,7 @@ object NativeBridge {
         mainHandler.post {
             val view = inputView ?: return@post
             view.requestFocus()
-            val imm = view.context.getSystemService(InputMethodManager::class.java)
-            imm?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+            imeOutput.showSoftInput(view)
         }
     }
 
@@ -172,8 +199,7 @@ object NativeBridge {
         Log.d(TAG, "onHideKeyboard (from compositor)")
         mainHandler.post {
             val view = inputView ?: return@post
-            val imm = view.context.getSystemService(InputMethodManager::class.java)
-            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+            imeOutput.hideSoftInput(view)
         }
     }
 
@@ -238,8 +264,7 @@ object NativeBridge {
         imeEditorInfo = inputType to imeFlags
         mainHandler.post {
             val view = inputView ?: return@post
-            val imm = view.context.getSystemService(InputMethodManager::class.java)
-            imm?.restartInput(view)
+            imeOutput.restartInput(view)
         }
     }
 

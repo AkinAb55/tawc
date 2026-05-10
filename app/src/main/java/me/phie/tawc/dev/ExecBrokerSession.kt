@@ -446,39 +446,43 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
             val key = if (sp < 0) line else line.substring(0, sp)
             val value = if (sp < 0) "" else line.substring(sp + 1)
             when (key) {
-                "ARGV" -> argv += value
+                "ARGV" -> argv += decodeValue(value)
                 "ENV"  -> {
                     if (env == null) env = mutableListOf()
                     val eq = value.indexOf('=')
                     if (eq < 0) throw IOException("malformed ENV: '$value'")
-                    env += value.substring(0, eq) to value.substring(eq + 1)
+                    // ENV K=V: split first (the `=` separator is never
+                    // part of the encoded form), decode the value half.
+                    env += value.substring(0, eq) to decodeValue(value.substring(eq + 1))
                 }
-                "CWD"  -> cwd = value
+                "CWD"  -> cwd = decodeValue(value)
                 "ACTION" -> {
                     if (actionName != null) throw IOException("duplicate ACTION line")
                     if (value.isEmpty()) throw IOException("ACTION needs a name")
+                    // Action name is a programmatic identifier — no encoding.
                     actionName = value
                 }
                 "ARG" -> {
                     val eq = value.indexOf('=')
                     if (eq < 0) throw IOException("malformed ARG: '$value' (must be key=value)")
-                    actionArgs[value.substring(0, eq)] = value.substring(eq + 1)
+                    actionArgs[value.substring(0, eq)] = decodeValue(value.substring(eq + 1))
                 }
                 "RUNINSIDE" -> {
                     if (runInsideId != null) throw IOException("duplicate RUNINSIDE line")
                     if (value.isEmpty()) throw IOException("RUNINSIDE needs an install id")
+                    // Install id matches `[a-z0-9_-]{1,32}` — no encoding.
                     runInsideId = value
                 }
                 "CMD" -> {
                     // Empty CMD value is allowed (means "no cmd, interactive
                     // shell"), so don't reject "" — just store it.
                     if (runInsideCmd != null) throw IOException("duplicate CMD line")
-                    runInsideCmd = value
+                    runInsideCmd = decodeValue(value)
                 }
                 "OP_TITLE" -> {
                     if (opTitle != null) throw IOException("duplicate OP_TITLE line")
                     if (value.isEmpty()) throw IOException("OP_TITLE needs a non-empty title")
-                    opTitle = value
+                    opTitle = decodeValue(value)
                 }
                 else -> throw IOException("unknown header key: '$key'")
             }
@@ -559,6 +563,41 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
                 null
             }
         } catch (_: Throwable) { null }
+    }
+
+    /**
+     * Decode a header-line value's escape sequences. Mirrors the
+     * encoding in `tools/tawc-exec/src/main.rs::encode_value`. Applied
+     * uniformly to every value-bearing field (ARGV / ENV value / CWD /
+     * ARG / CMD / OP_TITLE) so a literal `\n` anywhere in user-supplied
+     * input doesn't terminate the header line early.
+     *
+     * Decoding: `\\\\` -> `\\`, `\\n` -> `\n`, `\\r` -> `\r`. Unknown
+     * escapes (e.g. `\\x`) are left as-is rather than rejected — the
+     * encoder only ever emits the three sequences above, and tolerating
+     * unknowns keeps room for forward-compatible additions.
+     *
+     * Fast path: returns [s] unchanged when there's no backslash, so
+     * normal text incurs no allocation.
+     */
+    private fun decodeValue(s: String): String {
+        if (!s.contains('\\')) return s
+        val out = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                when (s[i + 1]) {
+                    '\\' -> { out.append('\\'); i += 2; continue }
+                    'n' -> { out.append('\n'); i += 2; continue }
+                    'r' -> { out.append('\r'); i += 2; continue }
+                    else -> { out.append(c); i++ }
+                }
+            } else {
+                out.append(c); i++
+            }
+        }
+        return out.toString()
     }
 
     /**

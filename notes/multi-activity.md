@@ -633,15 +633,19 @@ assigned toplevels, calls `finish_activity_from_native(host_id)`.
 Every `CompositorActivity` exists for exactly one Wayland window — when
 the window goes away the recents card disappears with it.
 
-### Test broadcast deduplication
+### Test action focused-activity gate
 
-The TEXT_INPUT / KEY_EVENT broadcast goes to every alive
-`CompositorActivity`'s `BroadcastReceiver` — N receivers means N
-`commitText` calls and the test sees the text repeated N times. The
-receiver now early-returns when `!hasWindowFocus()`, so only the one
-foreground Activity acts on the broadcast. (QUERY_STATE doesn't need
-this gate; multiple `COMPOSITOR_STATE` log lines are a no-op for the
-test parser.)
+Test input arrives via dev exec broker `ic-*` actions
+(`ic-commit-text`, `ic-set-composing-text`, `ic-send-key-event`, …),
+each of which drives the active `TawcInputConnection` like the system
+IMM would. The handlers in `me.phie.tawc.dev.InputActions` resolve a
+single foreground `CompositorActivity` via
+`CompositorService.focusedActivity()` (walking the
+`activities: Map<String, WeakReference<…>>` with the `hasWindowFocus()`
+predicate). One handler call ⇒ one IC method call ⇒ no per-activity
+duplication regardless of how many windows the test left open.
+`query-state` doesn't need a focused activity (it lives on the service)
+so it works before any client window is up.
 
 ## What this design preserves
 

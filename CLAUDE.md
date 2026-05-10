@@ -152,5 +152,5 @@ has bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 - (`run-integration-tests.sh` sources `scripts/lib/select-device.sh` itself; when both targets are connected, run with `TAWC_TARGET=physical` or `TAWC_TARGET=emulator`.)
 - **Build debug app:** `bash scripts/build-debug-app.sh` (gtk4-debug-app)
 - **Run GTK4 debug app:** `bash scripts/rootfs-run.sh '/tmp/gtk4-debug-app/gtk4-debug-app text-input'`
-- **Inject text (for testing):** `adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"`
-- **Inject keyevent (for testing):** `adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67`
+- **Inject text (for testing):** `"$TAWC_EXEC_BIN" --action ic-commit-text --arg text=hello` (after `. scripts/lib/tawc-exec.sh`). All test input goes through `TawcInputConnection` via broker `ic-*` actions — see `notes/exec-broker.md` for the full set and `notes/text-input.md` "Test infrastructure note" for why no bypass exists.
+- **Inject keyevent (for testing):** `"$TAWC_EXEC_BIN" --action ic-send-key-event --arg keycode=67`

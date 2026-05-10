@@ -54,15 +54,25 @@ pub fn wait_for_keyboard_shown(timeout: Duration) {
 /// `env` is prepended to the launch command (e.g. "GSK_RENDERER=cairo");
 /// pass "" for no extra env. Verifies the compositor sees the toplevel
 /// before returning.
+///
+/// Also swaps the compositor's [me.phie.tawc.compositor.ImeOutput] to a
+/// recording impl via the broker `enable-test-input` action so the
+/// system IME doesn't react to `updateSelection` and race the test
+/// (`issues/input-tests-skip-ic-and-race-system-ime.md`). The recorder
+/// is process-global; tests don't need to reset it between scenes.
 pub fn start_text_input(env: &str) -> DebugApp {
     let binary = ensure_gtk4_debug_app();
     adb::logcat_clear().expect("Failed to clear logcat");
+    // Install the recording ImeOutput before the GTK app comes up so
+    // the very first `onShowKeyboard` lands on the recorder rather than
+    // briefly waking up Gboard / OpenBoard / AOSP-latin.
+    adb::enable_test_input().expect("enable-test-input action");
     let app = DebugApp::start(&binary, "text-input", env).expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
 
     // Wait for the client's IM context to enable text input. Without this,
-    // text injected via broadcast is dropped because the compositor gates
-    // commit_string on the text-input-v3 enabled flag.
+    // text injected via broker action is dropped because the compositor
+    // gates commit_string on the text-input-v3 enabled flag.
     wait_for_keyboard_shown(TIMEOUT);
 
     let state =
@@ -92,6 +102,7 @@ pub fn start_text_input(env: &str) -> DebugApp {
 pub fn start_text_input_no_surrounding(env: &str) -> DebugApp {
     let binary = ensure_gtk4_debug_app();
     adb::logcat_clear().expect("Failed to clear logcat");
+    adb::enable_test_input().expect("enable-test-input action");
     let app = DebugApp::start(&binary, "text-input-no-surrounding", env)
         .expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");

@@ -1,3 +1,25 @@
+//! Host-side helpers for driving the device.
+//!
+//! # Input rule: tests act as keyboards or apps, never inside the compositor
+//!
+//! Every input helper here drives [`TawcInputConnection`] (via the broker
+//! `ic-*` actions) — the same Kotlin entrypoint Gboard / OpenBoard /
+//! AOSP-latin call into. There is intentionally **no helper that pokes
+//! `NativeBridge.native*` directly** and no broker action that does so
+//! either. Tests act as a keyboard (sending IME methods to the IC) or as
+//! a wayland client (assertions go through `gtk4-debug-app`'s observed
+//! events). The IC's full state machine — `computeReplaceDeltas`, the
+//! Editable mirror, the `composingRegionIsPreedit` short-circuit,
+//! `unitsToKeyCounts` — runs in every test the same way it runs in
+//! production. See `notes/text-input.md` ("Test infrastructure note") for
+//! the rationale.
+//!
+//! Tap / cursor events ([`input_tap`]) come from the OS-level
+//! `adb shell input tap` — they're real touch events from the
+//! SurfaceView's perspective, the same as a finger on the screen. They
+//! are not "IC-bypass" — touches don't go through the IC at all in
+//! production either.
+
 use std::io;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -64,78 +86,125 @@ pub fn rootfs_spawn(cmd: &str) -> io::Result<std::process::Child> {
         .spawn()
 }
 
-/// Send text to the compositor via broadcast intent — equivalent to
-/// Gboard calling `commitText(text, 1)`. Goes through:
-/// BroadcastReceiver -> TawcInputConnection.commitText -> nativeCommitText
-/// -> text_input_v3 -> Wayland client.
-///
-/// More reliable than `adb shell input text` which may be intercepted by
-/// the IME before reaching the editor.
-pub fn input_text(text: &str) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.TEXT_INPUT --es text '{}'",
-        text.replace('\'', "'\\''")
-    ))
+/// Run a broker action via tawc-exec. `args` are passed as repeated
+/// `--arg key=value`. Returns the helper's exit status + captured stdio,
+/// same shape as [shell].
+fn broker_action(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
+    let mut cmd = Command::new(tawc_exec_bin());
+    cmd.args(["--action", name]);
+    for (k, v) in args {
+        cmd.args(["--arg", &format!("{k}={v}")]);
+    }
+    cmd.output()
 }
 
-/// Set composing/preedit text — equivalent to Gboard calling
-/// `setComposingText(text, 1)`. The Wayland client should display this as
-/// a preedit (highlighted, not yet committed). Successive calls replace the
-/// previous preedit. Pass an empty string to clear the preedit.
-pub fn input_set_composing(text: &str) -> io::Result<Output> {
-    input_set_composing_with_delete(text, 0, 0)
+// ---- Test-mode setup -----------------------------------------------------
+
+/// Swap the production [me.phie.tawc.compositor.RealImeOutput] for a
+/// recording impl so the system IME (Gboard / OpenBoard / AOSP-latin)
+/// never sees `updateSelection` / `showSoftInput` and never reacts. The
+/// recorder is only on the **outbound** boundary IC ⇒ system-IMM — it
+/// doesn't bypass anything in our state machine, it just stops a
+/// third-party from amplifying events into the IC. Pair with
+/// [disable_test_input]; both are no-ops on release builds (no broker).
+/// Called by [`crate::helpers::start_text_input`] on every test.
+pub fn enable_test_input() -> io::Result<Output> {
+    broker_action("enable-test-input", &[])
 }
 
-/// `setComposingText` with explicit composing-region replacement deltas.
-/// `delete_before` / `delete_after` are UTF-16 code units around the
-/// cursor that should be removed from committed text before the new
-/// preedit is set — i.e. simulating Gboard's `setComposingRegion(s, e)`
-/// followed by `setComposingText(text)` flow without depending on an
-/// actual IME service. (Test broadcasts bypass the system IME to avoid
-/// non-determinism — see CompositorActivity.testInputReceiver.)
-pub fn input_set_composing_with_delete(text: &str, delete_before: u32, delete_after: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.SET_COMPOSING_TEXT --es text '{}' --ei deleteBefore {} --ei deleteAfter {}",
-        text.replace('\'', "'\\''"), delete_before, delete_after
-    ))
+/// Restore the production ImeOutput. Symmetric counterpart to
+/// [enable_test_input]. Process death also resets, so test crashes
+/// can't leave the recorder pinned in place across `cargo test` runs.
+pub fn disable_test_input() -> io::Result<Output> {
+    broker_action("disable-test-input", &[])
 }
 
-/// `commitText` with explicit composing-region replacement deltas.
-/// See [input_set_composing_with_delete] for delta semantics.
-pub fn input_text_with_delete(text: &str, delete_before: u32, delete_after: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.TEXT_INPUT --es text '{}' --ei deleteBefore {} --ei deleteAfter {}",
-        text.replace('\'', "'\\''"), delete_before, delete_after
-    ))
+// ---- IC drivers ----------------------------------------------------------
+//
+// These mirror the [android.view.inputmethod.InputConnection] surface that
+// the system IMM dispatches Gboard events through. The IC's full state
+// machine runs on every call — Editable mirror update, composing-region
+// delta computation, the `composingRegionIsPreedit` short-circuit, key
+// translation in `unitsToKeyCounts`, etc. The wire output is what real
+// Gboard would produce given the same sequence of method calls.
+
+/// Call `TawcInputConnection.commitText(text, 1)` on the active IC.
+/// Equivalent of Gboard's `commitText` — autocorrect commit, finished
+/// word, single-character commit, etc.
+pub fn ic_commit_text(text: &str) -> io::Result<Output> {
+    broker_action("ic-commit-text", &[("text", text)])
 }
 
-/// Finalize the current preedit as committed text — equivalent to Gboard
-/// calling `finishComposingText()`. The active preedit becomes part of the
-/// editor's text and the preedit is cleared.
-pub fn input_finish_composing() -> io::Result<Output> {
-    shell("am broadcast -a me.phie.tawc.FINISH_COMPOSING_TEXT")
+/// Call `TawcInputConnection.setComposingText(text, 1)` on the active
+/// IC. Equivalent of Gboard's `setComposingText` — preedit-as-you-type.
+/// Successive calls replace the previous preedit; pass an empty string
+/// to clear it.
+pub fn ic_set_composing_text(text: &str) -> io::Result<Output> {
+    broker_action("ic-set-composing-text", &[("text", text)])
 }
 
-/// Delete `before` UTF-16 code units before the cursor and `after` after —
-/// equivalent to Gboard calling `deleteSurroundingText(before, after)`.
-pub fn input_delete_surrounding(before: u32, after: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.DELETE_SURROUNDING_TEXT --ei before {} --ei after {}",
-        before, after
-    ))
+/// Call `TawcInputConnection.setComposingRegion(start, end)` on the
+/// active IC. Marks the given Editable range as composing without
+/// changing its content — the bridge between Android's "composing
+/// region annotates committed text" and Wayland's "preedit is overlay
+/// only". The IC's `computeReplaceDeltas` uses this on the next
+/// commit/setComposing to emit a `delete_surrounding_text` covering
+/// the marked range.
+pub fn ic_set_composing_region(start: u32, end: u32) -> io::Result<Output> {
+    let s = start.to_string();
+    let e = end.to_string();
+    broker_action("ic-set-composing-region", &[("start", &s), ("end", &e)])
 }
 
-/// Send a key event to the compositor via broadcast intent.
-/// Goes through: BroadcastReceiver -> nativeSendKeyEvent -> wl_keyboard.
-pub fn input_keyevent(keycode: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode {}",
-        keycode
-    ))
+/// Call `TawcInputConnection.finishComposingText()` on the active IC.
+/// Equivalent of Gboard's `finishComposingText` — clears the composing
+/// flag without changing content. The wayland-side preedit, if any,
+/// gets committed by the compositor's done-ordering.
+pub fn ic_finish_composing() -> io::Result<Output> {
+    broker_action("ic-finish-composing", &[])
 }
 
-/// Send a tap at physical screen coordinates (x, y).
-/// The compositor divides by touch_scale (2) to get logical coordinates.
+/// Call `TawcInputConnection.setSelection(start, end)` on the active
+/// IC. Moves the Editable's cursor without any wayland-side equivalent
+/// — there's no `set_selection` in text-input-v3, so this simulates an
+/// IME that "thinks" the cursor is somewhere different from where the
+/// Wayland client has it. The IC's `lastSyncedCursor` divergence guard
+/// is the production code path that handles this.
+pub fn ic_set_selection(start: u32, end: u32) -> io::Result<Output> {
+    let s = start.to_string();
+    let e = end.to_string();
+    broker_action("ic-set-selection", &[("start", &s), ("end", &e)])
+}
+
+/// Call `TawcInputConnection.deleteSurroundingText(before, after)` on
+/// the active IC. Equivalent of Gboard's `deleteSurroundingText` — the
+/// IC translates this to UTF-16 unit counts via [unitsToKeyCounts] and
+/// emits Backspace × `before` + Forward-Delete × `after` key events on
+/// `wl_keyboard`. Use this for tests that assert wire-side key
+/// translation; for tests that just want a Backspace, prefer
+/// [ic_send_key_event] with `KEYCODE_DEL`.
+pub fn ic_delete_surrounding_text(before: u32, after: u32) -> io::Result<Output> {
+    let b = before.to_string();
+    let a = after.to_string();
+    broker_action("ic-delete-surrounding-text", &[("before", &b), ("after", &a)])
+}
+
+/// Call `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`
+/// on the active IC. The IC drops everything that isn't `ACTION_DOWN`
+/// (production) so we only send down-events. Used for plain wl_keyboard
+/// keys that the IME pokes through directly — Backspace, Tab, Enter when
+/// no composing is in flight, etc.
+pub fn ic_send_key_event(keycode: u32) -> io::Result<Output> {
+    let kc = keycode.to_string();
+    broker_action("ic-send-key-event", &[("keycode", &kc)])
+}
+
+// ---- Touch / observation -------------------------------------------------
+
+/// Send a tap at physical screen coordinates (x, y) via the OS-level
+/// `input tap` command. Real touch event from the SurfaceView's
+/// perspective — same path a finger on the screen takes. The compositor
+/// divides by touch_scale (2) to get logical coordinates.
 pub fn input_tap(x: u32, y: u32) -> io::Result<Output> {
     shell(&format!("input tap {} {}", x, y))
 }
@@ -158,63 +227,16 @@ pub fn logcat_dump(tag: &str) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Trigger the compositor to log its current state.
+/// Trigger the compositor to log its current state via the broker
+/// `query-state` action. Reads as a `COMPOSITOR_STATE …` line under the
+/// `tawc-native` logcat tag. Observational only — doesn't change input
+/// state.
 pub fn broadcast_query_state() -> io::Result<Output> {
-    shell("am broadcast -a me.phie.tawc.QUERY_STATE")
+    broker_action("query-state", &[])
 }
 
-// ---- IC-driven test broadcasts ----
-// These call methods on the active TawcInputConnection so tests can
-// exercise the same code path real Gboard takes (composing-region
-// delta computation, Editable mirror, etc.). Prefer the bypassing
-// `input_*` helpers above for compositor-pipeline tests; use these
-// only when the IC's own behaviour is what's under test.
-
-/// Call `TawcInputConnection.commitText(text, 1)` on the active IC.
-pub fn ic_commit_text(text: &str) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.IC_COMMIT_TEXT --es text '{}'",
-        text.replace('\'', "'\\''")
-    ))
-}
-
-/// Call `TawcInputConnection.setComposingText(text, 1)` on the active IC.
-pub fn ic_set_composing_text(text: &str) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.IC_SET_COMPOSING_TEXT --es text '{}'",
-        text.replace('\'', "'\\''")
-    ))
-}
-
-/// Call `TawcInputConnection.setComposingRegion(start, end)` on the active IC.
-/// Marks the given Editable range as composing without changing its content —
-/// the bridge between Android's "composing region annotates committed text"
-/// and Wayland's "preedit is overlay only".
-pub fn ic_set_composing_region(start: u32, end: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.IC_SET_COMPOSING_REGION --ei start {} --ei end {}",
-        start, end
-    ))
-}
-
-/// Call `TawcInputConnection.finishComposingText()` on the active IC.
-pub fn ic_finish_composing() -> io::Result<Output> {
-    shell("am broadcast -a me.phie.tawc.IC_FINISH_COMPOSING")
-}
-
-/// Call `TawcInputConnection.setSelection(start, end)` on the active IC.
-/// Moves the Editable's cursor without going through any wire protocol —
-/// simulates an IME that "thinks" the cursor is somewhere different from
-/// where the Wayland client has it. Bypasses our delta-propagation logic
-/// because there's no wayland-side equivalent for "move the cursor".
-pub fn ic_set_selection(start: u32, end: u32) -> io::Result<Output> {
-    shell(&format!(
-        "am broadcast -a me.phie.tawc.IC_SET_SELECTION --ei start {} --ei end {}",
-        start, end
-    ))
-}
-
-// Common Android keycodes (used with input_keyevent)
+// Common Android keycodes (used with [ic_send_key_event]).
 pub const KEYCODE_DEL: u32 = 67; // Backspace
+pub const KEYCODE_FORWARD_DEL: u32 = 112; // Delete (forward delete)
 pub const KEYCODE_ENTER: u32 = 66;
 pub const KEYCODE_TAB: u32 = 61;

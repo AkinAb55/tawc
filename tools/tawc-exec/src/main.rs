@@ -123,7 +123,6 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 i += 1;
                 let v = args.get(i).ok_or("--op-title needs argument")?.clone();
                 if v.is_empty() { return Err("--op-title must not be empty".into()); }
-                if v.contains('\n') { return Err("--op-title may not contain LF".into()); }
                 op_title = Some(v);
                 i += 1;
             }
@@ -152,9 +151,6 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         } else {
             String::new()
         };
-        if id.contains('\n') || cmd.contains('\n') {
-            return Err("install id / cmd may not contain LF".into());
-        }
         return Ok(Parsed::RunInside { install_id: id, cmd, op_title });
     }
     if let Some(name) = action_name {
@@ -173,9 +169,6 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         if op_title.is_some() {
             return Err("--op-title is not allowed with --action (the action's own log screen handles this)".into());
         }
-        if name.contains('\n') || action_args.iter().any(|(k, v)| k.contains('\n') || v.contains('\n')) {
-            return Err("--action name / --arg values may not contain LF".into());
-        }
         return Ok(Parsed::Action { name, args: action_args });
     }
     // ARGV form. --action / --arg must not be present.
@@ -185,12 +178,6 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let argv: Vec<String> = args[i..].to_vec();
     if argv.is_empty() {
         return Err("no command (use `-- ARGV0 ...`, `--action NAME`, or `--in-rootfs ID -- CMD`)".to_string());
-    }
-    if argv.iter().any(|a| a.contains('\n')) {
-        return Err("argv may not contain LF".to_string());
-    }
-    if env.iter().any(|a| a.contains('\n')) {
-        return Err("env may not contain LF".to_string());
     }
     Ok(Parsed::Exec { argv, env, cwd, op_title })
 }
@@ -256,12 +243,17 @@ fn run(p: Parsed) -> io::Result<i32> {
 fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
     let mut h = String::new();
     h.push_str("TAWCEXEC 1\n");
+    // Action and install id are programmatic identifiers — registered
+    // names / `[a-z0-9_-]{1,32}` slugs — so no encoding is needed and
+    // no LF can sneak in. Every other value is potentially user-supplied
+    // and goes through [encode_value] so a `\n` doesn't terminate the
+    // header line early. The device side decodes in [decodeValue].
     match p {
         Parsed::Exec { argv, env, cwd, op_title } => {
-            for a in argv { h.push_str("ARGV "); h.push_str(a); h.push('\n'); }
-            for e in env  { h.push_str("ENV ");  h.push_str(e); h.push('\n'); }
-            if let Some(c) = cwd { h.push_str("CWD "); h.push_str(c); h.push('\n'); }
-            if let Some(t) = op_title { h.push_str("OP_TITLE "); h.push_str(t); h.push('\n'); }
+            for a in argv { h.push_str("ARGV "); h.push_str(&encode_value(a)); h.push('\n'); }
+            for e in env  { h.push_str("ENV ");  h.push_str(&encode_value(e));  h.push('\n'); }
+            if let Some(c) = cwd { h.push_str("CWD "); h.push_str(&encode_value(c)); h.push('\n'); }
+            if let Some(t) = op_title { h.push_str("OP_TITLE "); h.push_str(&encode_value(t)); h.push('\n'); }
         }
         Parsed::Action { name, args } => {
             h.push_str("ACTION "); h.push_str(name); h.push('\n');
@@ -269,7 +261,7 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
                 h.push_str("ARG ");
                 h.push_str(k);
                 h.push('=');
-                h.push_str(v);
+                h.push_str(&encode_value(v));
                 h.push('\n');
             }
         }
@@ -277,13 +269,40 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
             h.push_str("RUNINSIDE "); h.push_str(install_id); h.push('\n');
             // Empty cmd means interactive shell — omit the CMD line.
             if !cmd.is_empty() {
-                h.push_str("CMD "); h.push_str(cmd); h.push('\n');
+                h.push_str("CMD "); h.push_str(&encode_value(cmd)); h.push('\n');
             }
-            if let Some(t) = op_title { h.push_str("OP_TITLE "); h.push_str(t); h.push('\n'); }
+            if let Some(t) = op_title { h.push_str("OP_TITLE "); h.push_str(&encode_value(t)); h.push('\n'); }
         }
     }
     h.push('\n');
     s.write_all(h.as_bytes())
+}
+
+/// Encode a header-line value so it survives the LF-terminated header.
+/// Applied uniformly to every value-bearing field (ARGV / ENV / CWD /
+/// ARG / CMD / OP_TITLE) so a literal `\n` in any of them — tests
+/// inject Enter via `inject-text` / `ic-commit-text` with `text="\n"`,
+/// shell glue passes `--env FOO=bar\nbaz`, etc. — doesn't end the line
+/// early. Mirror in `ExecBrokerSession.kt::decodeValue`.
+///
+/// Encoding (small, reversible):
+///   `\\` -> `\\\\`  (escape the escape char first)
+///   `\n` -> `\\n`
+///   `\r` -> `\\r`
+///
+/// No-op for any value that contains none of those three chars, so
+/// normal text passes through unchanged.
+fn encode_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Stream local stdio against the socket, returning the broker's

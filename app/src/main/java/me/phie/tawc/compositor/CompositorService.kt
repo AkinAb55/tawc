@@ -4,10 +4,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
@@ -15,7 +13,6 @@ import android.os.Build
 import android.os.IBinder
 import android.system.Os
 import android.util.Log
-import me.phie.tawc.BuildConfig
 import android.view.WindowManager
 import java.io.File
 import java.lang.ref.WeakReference
@@ -40,15 +37,6 @@ class CompositorService : Service() {
 
     private val binder = LocalBinder()
     private val activities = mutableMapOf<String, WeakReference<CompositorActivity>>()
-
-    /** State-query broadcast lives on the service (always alive) rather
-     *  than on a CompositorActivity (only exists when there's a window).
-     *  Tests poll this before any chroot client has connected. */
-    private val queryStateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            NativeBridge.nativeQueryState()
-        }
-    }
 
     inner class LocalBinder : Binder() {
         fun getService(): CompositorService = this@CompositorService
@@ -121,21 +109,6 @@ class CompositorService : Service() {
         // from that and the cube hangs after committing two buffers.
         val (w, h) = currentDisplaySize()
         NativeBridge.nativeStartCompositor(w, h)
-
-        // Debug-only test broadcast. android.permission.DUMP gates the
-        // sender to UIDs holding it (shell, system, platform-signed) —
-        // adb-issued broadcasts work, other installed apps can't reach
-        // it. Same access model as ExecBroker (SO_PEERCRED), just at the
-        // broadcast layer.
-        if (BuildConfig.DEBUG) {
-            registerReceiver(
-                queryStateReceiver,
-                IntentFilter("me.phie.tawc.QUERY_STATE"),
-                "android.permission.DUMP",
-                null,
-                RECEIVER_EXPORTED,
-            )
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -148,7 +121,6 @@ class CompositorService : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, "CompositorService onDestroy — stopping compositor")
-        try { unregisterReceiver(queryStateReceiver) } catch (_: IllegalArgumentException) {}
         NativeBridge.nativeStopCompositor()
         NativeBridge.detachService()
         activities.clear()
@@ -174,6 +146,30 @@ class CompositorService : Service() {
             activities.remove(activityId)
         }
         return activity
+    }
+
+    /**
+     * Return the foreground [CompositorActivity] (the one whose window
+     * currently has focus), or null if none. Used by the dev input broker
+     * actions to dispatch test events to "the activity tests are driving"
+     * — same model as the previous `testInputReceiver.hasWindowFocus()`
+     * gate, just looked up centrally here.
+     *
+     * Walks the (small) `activities` map; expired weak refs are cleaned
+     * up as a side-effect of the iteration.
+     */
+    fun focusedActivity(): CompositorActivity? {
+        val it = activities.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            val activity = entry.value.get()
+            if (activity == null) {
+                it.remove()
+            } else if (activity.hasWindowFocus()) {
+                return activity
+            }
+        }
+        return null
     }
 
     /** Read the current display size (physical pixels) without needing an

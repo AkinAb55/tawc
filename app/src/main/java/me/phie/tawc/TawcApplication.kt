@@ -62,6 +62,7 @@ class TawcApplication : Application() {
             // the broker thread spawned by start() above accepts asynchronously
             // but won't dispatch ACTION headers to a missing handler.
             me.phie.tawc.install.InstallActions.registerAll()
+            me.phie.tawc.dev.InputActions.registerAll()
         }
     }
 

@@ -718,6 +718,14 @@ fn test_eglx11_renders_via_ahb() {
 /// rerun needed.
 #[test]
 fn test_lxterminal_input_and_exit() {
+    // The IC drivers below need the system IME stubbed out so it doesn't
+    // amplify our `commitText` into the lxterminal IC and produce extra
+    // characters (or no characters, depending on which IME is installed).
+    // [start_text_input] does this for the gtk4-debug-app suite; here we
+    // do it explicitly because `launch_and_wait_for_ahb` is shared with
+    // graphics tests that don't drive input.
+    adb::enable_test_input().expect("enable-test-input action");
+
     let mut term = launch_and_wait_for_ahb(
         "lxterminal",
         "lxterminal",
@@ -735,11 +743,13 @@ fn test_lxterminal_input_and_exit() {
         "lxterminal exited shortly after first frame — shell crash on startup?"
     );
 
-    // Drive the shell: "exit" via text-input-v3 commit_string, newline
-    // via wl_keyboard Enter. Same wire shape as a soft-keyboard user
-    // typing into the terminal.
-    adb::input_text("exit").expect("commit 'exit'");
-    adb::input_keyevent(adb::KEYCODE_ENTER).expect("Enter");
+    // Drive the shell: "exit" via the IC's commitText, newline via
+    // wl_keyboard Enter. Same path a soft-keyboard user typing into
+    // the terminal would take — the IC translates `commitText` into
+    // text-input-v3 `commit_string` and `sendKeyEvent(KEYCODE_ENTER)`
+    // into a `wl_keyboard` Enter.
+    adb::ic_commit_text("exit").expect("commit 'exit'");
+    adb::ic_send_key_event(adb::KEYCODE_ENTER).expect("Enter");
 
     let deadline = std::time::Instant::now() + LXTERMINAL_EXIT_TIMEOUT;
     while std::time::Instant::now() < deadline {

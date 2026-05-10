@@ -115,19 +115,24 @@ module's docstring.
 
 ### Test Input Mechanism
 
-Tests inject input via Android broadcast intents, not `adb shell input text`:
+Tests inject input by acting as a **keyboard**: every input action calls a method on the active `TawcInputConnection` via the broker `ic-*` actions. There is intentionally no test path that pokes `NativeBridge.native*` directly — see `notes/text-input.md` "Test infrastructure note" for the rationale.
 
 ```bash
-# Text input (goes through nativeCommitText -> text_input_v3):
-adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"
+. scripts/lib/tawc-exec.sh
 
-# Key event (goes through nativeSendKeyEvent -> wl_keyboard):
-adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67
+# Stop the system IME from reacting to updateSelection / showSoftInput.
+"$TAWC_EXEC_BIN" --action enable-test-input
+
+# Drive the IC: commit text, set preedit, send a key, etc.
+"$TAWC_EXEC_BIN" --action ic-commit-text --arg text=hello
+"$TAWC_EXEC_BIN" --action ic-set-composing-text --arg text=wor
+"$TAWC_EXEC_BIN" --action ic-finish-composing
+"$TAWC_EXEC_BIN" --action ic-send-key-event --arg keycode=67  # Backspace
 ```
 
-This is more reliable than `adb shell input text` which gets intercepted by
-the IME (Gboard) and may not reach the InputConnection. The broadcast
-approach goes directly through the same JNI path as real IME input.
+Every call goes through the same Kotlin entry points the system IMM uses to dispatch Gboard / OpenBoard / AOSP-latin events, so the IC's full state machine (Editable mirror, `computeReplaceDeltas`, the `composingRegionIsPreedit` short-circuit) runs on every test step.
+
+Broker actions connect to an already-running `LocalServerSocket` and complete in <10ms each, vs. 100–300ms per `am broadcast` JVM cold start (the broadcast channel was retired entirely). More reliable than `adb shell input text` (which gets intercepted by the IME).
 
 ### Architecture
 
@@ -139,10 +144,11 @@ Host (cargo test)                    Phone
   ├─ adb shell (start client) ─────────┤──→ gtk4-debug-app  /  firefox  /  …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
   │                                    │
-  ├─ am broadcast TEXT_INPUT ──────────┤──→ BroadcastReceiver
-  │                                    │     └─ nativeCommitText
-  │                                    │       └─ text_input_v3
-  │                                    │         └─ GTK text view
+  ├─ tawc-exec --action ic-commit-text ┤──→ ExecBroker / InputActions
+  │                                    │     └─ TawcInputConnection.commitText
+  │                                    │       └─ nativeCommitText
+  │                                    │         └─ text_input_v3
+  │                                    │           └─ GTK text view
   │     └─ TAWC_DEBUG:TEXT_CHANGED ←───┤
   │                                    │
   ├─ adb shell input tap X Y ──────────┤──→ SurfaceView.onTouchEvent
@@ -157,7 +163,7 @@ Host (cargo test)                    Phone
 
 ### Key Modules
 
-- **`adb.rs`**: Shell commands, chroot execution, broadcast-based input injection
+- **`adb.rs`**: Shell commands, chroot execution, broker-action-based input injection (`input_text`, `ic_commit_text`, `enable_test_input`, …; all routed through `tawc-exec --action`)
 - **`rootfs.rs`**: `ensure_debug_app` / `ensure_tawc_dri_test` /
   `ensure_eglx11_test` — each one just probes for `/tmp/<name>/<name>`
   inside the rootfs and returns its path, errorring with a pointer at
@@ -166,7 +172,7 @@ Host (cargo test)                    Phone
   Both happen up-front in `scripts/install-test-deps.sh`.
 - **`debug_app.rs`**: Start/stop lifecycle, stdout reader thread, `wait_for()` with timeout
 - **`compositor.rs`**: Check whether the compositor is running (`is_running`,
-  `assert_running`) and query its state via broadcast. The compositor itself
+  `assert_running`) and query its state via the broker `query-state` action. The compositor itself
   is launched by `run-integration-tests.sh` before `cargo test` runs — the
   Rust harness never starts it, only asserts it's there.
 - **`helpers.rs`**: Shared test helpers (`require_compositor`, `start_text_input`,
@@ -192,7 +198,7 @@ If a new compositor protocol is needed, extend `gtk4-debug-app.c`:
 
 **GTK4 gotcha:** `gtk4-debug-app` defers its `READY` emission to the next
 idle so the IM context has time to enable `zwp_text_input_v3` before the
-harness starts broadcasting text. If you add new commands that rely on
+harness starts injecting text. If you add new commands that rely on
 text input, keep the deferred-READY pattern in `on_map()`.
 
 ## Design Decisions

@@ -7,7 +7,6 @@ import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
-import android.view.inputmethod.InputMethodManager
 import android.util.Log
 
 /**
@@ -118,9 +117,10 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
     private var lastSyncedCursor: Int = 0
 
     init {
-        // Cache as the active IC so reverse-JNI updates and broadcast tests
-        // can find it. Also makes broadcasts share Editable state, which is
-        // critical for multi-step IME flows (compose-then-commit, etc.).
+        // Cache as the active IC so reverse-JNI updates and dev IC
+        // actions (`ic-commit-text`, …) can find it. Also makes those
+        // actions share Editable state, which is critical for multi-step
+        // IME flows (compose-then-commit, etc.).
         NativeBridge.activeInputConnection = this
     }
 
@@ -324,8 +324,11 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
      * would mislead a later `super.setComposingText` into replacing the
      * wrong range.
      *
-     * Also calls `InputMethodManager.updateSelection` so the IME (which
-     * keeps its own snapshot) stays in lockstep.
+     * Also calls [ImeOutput.updateSelection] (production wrapper around
+     * `InputMethodManager.updateSelection`) so the IME (which keeps its
+     * own snapshot) stays in lockstep. In tests the recording impl drops
+     * the call so the system IME never sees `composing=-1` and never
+     * fires defensive `finishComposingText` reactions mid-test.
      */
     fun updateFromCompositor(text: String, selStart: Int, selEnd: Int) {
         val ed = editable ?: return
@@ -349,9 +352,8 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
             Selection.setSelection(ed, newSelStart, newSelEnd)
         }
 
-        val imm = targetView.context.getSystemService(InputMethodManager::class.java)
         // Composing region is cleared; -1, -1 tells the IME there's no preedit.
-        imm?.updateSelection(targetView, newSelStart, newSelEnd, -1, -1)
+        NativeBridge.imeOutput.updateSelection(targetView, newSelStart, newSelEnd, -1, -1)
     }
 
     private fun utf16FromCodePoints(ed: Editable, cursor: Int, codePointDelta: Int): Int {

@@ -1,11 +1,9 @@
 package me.phie.tawc.compositor
 
 import android.app.Activity
-import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
@@ -17,7 +15,6 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import me.phie.tawc.BuildConfig
 
 /**
  * Hosts the Rust Wayland compositor on a SurfaceView. All interaction
@@ -51,139 +48,6 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         }
         override fun onServiceDisconnected(name: ComponentName) {
             compositorService = null
-        }
-    }
-
-    /**
-     * BroadcastReceiver for injecting text input from tests.
-     * Usage: adb shell am broadcast -a me.phie.tawc.TEXT_INPUT --es text "hello"
-     * Usage: adb shell am broadcast -a me.phie.tawc.KEY_EVENT --ei keycode 67
-     *
-     * Events go through TawcInputConnection (via InputMethodManager) so they
-     * exercise the same code path as real Gboard input, including the
-     * BaseInputConnection Editable updates and all TawcInputConnection logic.
-     *
-     * QUERY_STATE lives on CompositorService instead — it has to work
-     * even when no Activity is in the foreground.
-     */
-    /**
-     * BroadcastReceiver for injecting test input.
-     *
-     * **These broadcasts bypass [TawcInputConnection] and call native
-     * directly.** The reason: the system IME (OpenBoard, Gboard, etc.) is
-     * also bound to our SurfaceView's InputConnection and reacts to every
-     * Editable change with its own `setComposingRegion`/`setComposingText`
-     * calls (e.g. marking the just-typed word as composing for autocorrect).
-     * That makes integration tests non-deterministic — a test broadcast
-     * that says "type X at cursor" gets amplified by the IME into "replace
-     * the whole word with X". Bypassing the InputConnection here means
-     * tests drive the compositor's text-input pipeline directly without
-     * any third-party IME in the loop.
-     *
-     * Real IME input still goes through [TawcInputConnection] — the system
-     * IMM picks the IC returned by `onCreateInputConnection`, and that
-     * path applies all the composing-region translation, Editable mirror,
-     * etc. that real Gboard usage needs.
-     *
-     * Test broadcasts mirror the [TawcInputConnection] surface but accept
-     * explicit `deleteBefore`/`deleteAfter` integers (UTF-16 code unit
-     * counts around the cursor). These let tests simulate Gboard's
-     * "replace the composing region" semantics without an IME present.
-     */
-    private val testInputReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            // With multi-window every CompositorActivity registers a
-            // receiver. Only the one currently in the foreground should
-            // act on the broadcast — otherwise N Activities each
-            // commit the same text and the test sees N copies.
-            if (!hasWindowFocus()) {
-                Log.d(TAG, "${intent.action}: not focused, ignoring (activityId=$activityId)")
-                return
-            }
-            when (intent.action) {
-                "me.phie.tawc.TEXT_INPUT" -> {
-                    val text = intent.getStringExtra("text") ?: return
-                    val before = intent.getIntExtra("deleteBefore", 0)
-                    val after = intent.getIntExtra("deleteAfter", 0)
-                    Log.d(TAG, "TestInput: commitText \"$text\" delete=$before/$after")
-                    if (text == "\n") {
-                        NativeBridge.nativeSendKeyEvent(android.view.KeyEvent.KEYCODE_ENTER)
-                    } else {
-                        NativeBridge.nativeCommitText(text, before, after)
-                    }
-                }
-                "me.phie.tawc.SET_COMPOSING_TEXT" -> {
-                    val text = intent.getStringExtra("text") ?: return
-                    val before = intent.getIntExtra("deleteBefore", 0)
-                    val after = intent.getIntExtra("deleteAfter", 0)
-                    Log.d(TAG, "TestInput: setComposingText \"$text\" delete=$before/$after")
-                    NativeBridge.nativeSetComposingText(text, before, after)
-                }
-                "me.phie.tawc.FINISH_COMPOSING_TEXT" -> {
-                    Log.d(TAG, "TestInput: finishComposingText")
-                    NativeBridge.nativeFinishComposingText()
-                }
-                "me.phie.tawc.DELETE_SURROUNDING_TEXT" -> {
-                    val before = intent.getIntExtra("before", 0)
-                    val after = intent.getIntExtra("after", 0)
-                    Log.d(TAG, "TestInput: deleteSurroundingText $before/$after")
-                    // Backspace / Forward-Delete keys — same wire as the IC path.
-                    // The bypass exists to skip the local Editable mirror, not to
-                    // exercise a separate Wayland code path.
-                    repeat(before) { NativeBridge.nativeSendKeyEvent(android.view.KeyEvent.KEYCODE_DEL) }
-                    repeat(after) { NativeBridge.nativeSendKeyEvent(android.view.KeyEvent.KEYCODE_FORWARD_DEL) }
-                }
-                "me.phie.tawc.KEY_EVENT" -> {
-                    val keycode = intent.getIntExtra("keycode", -1)
-                    if (keycode >= 0) {
-                        Log.d(TAG, "TestInput: sendKeyEvent $keycode")
-                        NativeBridge.nativeSendKeyEvent(keycode)
-                    }
-                }
-
-                // ---- IC-driven test broadcasts ----
-                // The above broadcasts bypass TawcInputConnection to avoid
-                // IME amplification. These ones do the opposite: they call
-                // the active TawcInputConnection's IME methods directly so
-                // tests can exercise the IC's own logic (composing-region
-                // delta computation, Editable mirror, etc.) — i.e. the
-                // path real Gboard takes. Use these only for tests that
-                // specifically need IC behaviour; they may be racy with the
-                // system IME's reactions.
-                "me.phie.tawc.IC_COMMIT_TEXT" -> {
-                    val text = intent.getStringExtra("text") ?: return
-                    val ic = NativeBridge.activeInputConnection
-                    Log.d(TAG, "TestInput[IC]: commitText \"$text\" (ic=${ic != null})")
-                    ic?.commitText(text, 1)
-                }
-                "me.phie.tawc.IC_SET_COMPOSING_TEXT" -> {
-                    val text = intent.getStringExtra("text") ?: return
-                    val ic = NativeBridge.activeInputConnection
-                    Log.d(TAG, "TestInput[IC]: setComposingText \"$text\" (ic=${ic != null})")
-                    ic?.setComposingText(text, 1)
-                }
-                "me.phie.tawc.IC_SET_COMPOSING_REGION" -> {
-                    val start = intent.getIntExtra("start", -1)
-                    val end = intent.getIntExtra("end", -1)
-                    if (start < 0 || end < 0) return
-                    val ic = NativeBridge.activeInputConnection
-                    Log.d(TAG, "TestInput[IC]: setComposingRegion $start..$end (ic=${ic != null})")
-                    ic?.setComposingRegion(start, end)
-                }
-                "me.phie.tawc.IC_FINISH_COMPOSING" -> {
-                    val ic = NativeBridge.activeInputConnection
-                    Log.d(TAG, "TestInput[IC]: finishComposingText (ic=${ic != null})")
-                    ic?.finishComposingText()
-                }
-                "me.phie.tawc.IC_SET_SELECTION" -> {
-                    val start = intent.getIntExtra("start", -1)
-                    val end = intent.getIntExtra("end", -1)
-                    if (start < 0 || end < 0) return
-                    val ic = NativeBridge.activeInputConnection
-                    Log.d(TAG, "TestInput[IC]: setSelection $start..$end (ic=${ic != null})")
-                    ic?.setSelection(start, end)
-                }
-            }
         }
     }
 
@@ -231,38 +95,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
         NativeBridge.inputView = surfaceView
 
-        // Debug-only test input receiver. android.permission.DUMP gates
-        // the sender to UIDs holding it (shell, system, platform-signed)
-        // — adb-issued broadcasts work, other installed apps can't reach
-        // it. Same access model as ExecBroker (SO_PEERCRED), just at the
-        // broadcast layer.
-        if (BuildConfig.DEBUG) {
-            val filter = IntentFilter().apply {
-                addAction("me.phie.tawc.TEXT_INPUT")
-                addAction("me.phie.tawc.SET_COMPOSING_TEXT")
-                addAction("me.phie.tawc.FINISH_COMPOSING_TEXT")
-                addAction("me.phie.tawc.DELETE_SURROUNDING_TEXT")
-                addAction("me.phie.tawc.KEY_EVENT")
-                addAction("me.phie.tawc.IC_COMMIT_TEXT")
-                addAction("me.phie.tawc.IC_SET_COMPOSING_TEXT")
-                addAction("me.phie.tawc.IC_SET_COMPOSING_REGION")
-                addAction("me.phie.tawc.IC_FINISH_COMPOSING")
-                addAction("me.phie.tawc.IC_SET_SELECTION")
-            }
-            registerReceiver(
-                testInputReceiver,
-                filter,
-                "android.permission.DUMP",
-                null,
-                RECEIVER_EXPORTED,
-            )
-        }
         initialized = true
     }
 
     override fun onDestroy() {
         if (initialized) {
-            if (BuildConfig.DEBUG) unregisterReceiver(testInputReceiver)
             NativeBridge.nativeOnActivityDestroyed(activityId)
             compositorService?.unregisterActivity(activityId)
             try {

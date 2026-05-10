@@ -118,9 +118,10 @@ OP_TITLE arch: pacman -Syu
 - `TAWCEXEC 1` — magic + version. Must be the first line.
 - `ARGV <s>` (ARGV-form only) — one per arg. At least one required.
   `argv[0]` is the program path; the broker passes it through to
-  ProcessBuilder unchanged. Strings are UTF-8 and may not contain LF.
+  ProcessBuilder unchanged after decoding. Strings are UTF-8.
 - `ENV <KEY=VALUE>` (ARGV-form only) — zero or more. **Replaces** the
   inherited environment entirely (no merge). Omit for an empty env.
+  `KEY` is split off the first `=`; `VALUE` is decoded.
 - `CWD <path>` (ARGV-form only) — optional. Default: the app process's
   cwd.
 - `ACTION <name>` (ACTION-form only) — exactly one. Must be a name
@@ -140,6 +141,29 @@ OP_TITLE arch: pacman -Syu
   combining is a protocol error.
 - The empty line terminates the header. Frame stream begins
   immediately after.
+
+#### Value encoding
+
+Every value-bearing field — `ARGV` arg, `ENV` value half (after the
+`=`), `CWD`, `ARG` value, `CMD`, `OP_TITLE` — is encoded so a `\n` in
+user-supplied data doesn't end the header line early. The encoding is
+small and reversible:
+
+```
+\\  ⇒ \\\\
+\n  ⇒ \\n
+\r  ⇒ \\r
+```
+
+It's a no-op for any value that contains none of those three chars
+(the common case for ASCII shell commands), so normal text passes
+through unchanged. See `tools/tawc-exec/src/main.rs::encode_value`
+(host) and `ExecBrokerSession.kt::decodeValue` (device).
+
+Programmatic identifiers — `ACTION` name, `RUNINSIDE` install id, and
+the `KEY` half of `ENV K=V` / `ARG k=v` — are not encoded; they're
+matched against registered handlers / regex-validated slugs / shell
+identifier rules and never carry control chars.
 
 ### Frames (binary, multiplexed)
 
@@ -257,9 +281,47 @@ plus the kernel keeping the process alive while it has user threads is
 enough.
 
 `TawcApplication.onCreate` also calls
-`me.phie.tawc.install.InstallActions.registerAll()` to populate
-`ActionRegistry` with the `install` / `uninstall` handlers before any
+`me.phie.tawc.install.InstallActions.registerAll()` (install /
+uninstall) and `me.phie.tawc.dev.InputActions.registerAll()` (the
+test input handlers below) to populate `ActionRegistry` before any
 client connection arrives.
+
+## Registered actions
+
+| Action | Source | Purpose |
+|--------|--------|---------|
+| `install` | InstallActions | Run the install state machine; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. See `scripts/install-distro.sh`. |
+| `uninstall` | InstallActions | Same shape, opposite direction. See `scripts/uninstall-distro.sh`. |
+| `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` so the compositor logs a `COMPOSITOR_STATE …` line under `tawc-native`. Observational only — doesn't change input state. Needs no focused activity. |
+| `enable-test-input` / `disable-test-input` | InputActions | Swap `NativeBridge.imeOutput` for a `RecordingImeOutput` (or back). Stops the system IME from reacting to `updateSelection` and racing input tests. Doesn't bypass our state machine — stubs out the *third-party* IME at the boundary. Process-global; reset on process death. |
+| `ic-commit-text` (`text`) | InputActions | `TawcInputConnection.commitText(text, 1)`. |
+| `ic-set-composing-text` (`text`) | InputActions | `TawcInputConnection.setComposingText(text, 1)`. |
+| `ic-set-composing-region` (`start`, `end`) | InputActions | `TawcInputConnection.setComposingRegion(start, end)`. |
+| `ic-finish-composing` | InputActions | `TawcInputConnection.finishComposingText()`. |
+| `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`. |
+| `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
+| `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
+
+**Rule for input actions: every driver goes through `TawcInputConnection`.**
+There is intentionally no broker action that calls `NativeBridge.native*`
+trampolines directly. Tests act as a keyboard (the IC) or as an app
+(observing `gtk4-debug-app` events on the wayland side); never as
+something poking the compositor in the middle. Earlier revisions had
+bypass actions (`inject-text`, `set-composing`, …) that skipped the IC
+— they were deleted because text-input-v3's done-ordering produces
+correct GTK observables on the wayland side regardless of what the IC
+computed, so a buggy IC could pass bypass tests and a wayland-side
+assertion became a redundant proof of text-input-v3. Driving every
+scenario through IC closes that. See `notes/text-input.md`
+"Test infrastructure note" for the rationale.
+
+All `InputActions` `ic-*` handlers require a focused `CompositorActivity`
+and post the call to the main looper. The handler resolves the activity
+via `CompositorService.focusedActivity()` (walking
+`activities: Map<String, WeakReference<…>>` for `hasWindowFocus()`); no
+focused activity means exit 1 with `err("no focused CompositorActivity")`
+rather than a silent skip — loud beats silent since that's almost always
+a test setup bug.
 
 Cold-starting any of the app's entry points (MainActivity,
 InstallActivity, CompositorActivity) brings up the broker. Stopping the

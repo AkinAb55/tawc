@@ -214,8 +214,9 @@ cmd_start() {
     # whole package for user 0, so no activities/services run. Persists
     # across reboots; resets on AVD wipe (so we re-apply every start).
     # tawc tests don't need Android's IME — Wayland clients have
-    # zwp_text_input, and TEXT_INPUT broadcasts inject text directly
-    # into the compositor.
+    # zwp_text_input, and the broker `ic-commit-text` action drives our
+    # TawcInputConnection directly (the same path the system IMM uses
+    # to dispatch Gboard events).
     "$ADB" -s "$serial" shell 'pm disable-user --user 0 com.google.android.inputmethod.latin' >/dev/null 2>&1 || \
         echo "WARNING: failed to disable Gboard package; stylus education popup may interfere with tests" >&2
     "$ADB" -s "$serial" shell 'am force-stop com.google.android.inputmethod.latin' >/dev/null 2>&1 || true

@@ -406,8 +406,8 @@ Post-boot it also brings the AVD into a known-good state for tawc dev:
   even when it isn't the active IME; `pm disable-user` stops the
   whole package for user 0. Persists across reboots; resets on AVD
   wipe (so the script re-applies every `start`). tawc tests don't
-  use Android's IME — Wayland clients have zwp_text_input;
-  TEXT_INPUT broadcasts inject text directly into the compositor.
+  use Android's IME — Wayland clients have zwp_text_input; the broker
+  `ic-commit-text` action drives our TawcInputConnection directly.
 - Forces `hw.keyboard = yes` in the AVD's `config.ini`. `avdmanager`
   defaults this to `no`, which silently drops host-keyboard
   keystrokes in the emulator window (the soft keyboard works, but a
