@@ -2,9 +2,12 @@ package me.phie.tawc.install
 
 import android.graphics.Typeface
 import android.os.Bundle
+import android.text.InputType
 import android.text.format.Formatter
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -24,6 +27,7 @@ import kotlinx.coroutines.runInterruptible
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.destructiveButton
+import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
 /**
@@ -140,16 +144,61 @@ class DistroInfoActivity : AppCompatActivity() {
         }
         content.addView(infoRowWithValue("Size:", sizeValue), rowLp(pad))
 
-        // Push Uninstall to the bottom with a flexible spacer so it
-        // doesn't crowd the info rows.
+        // Push the action buttons to the bottom with a flexible spacer
+        // so they don't crowd the info rows.
         content.addView(
             android.view.View(this),
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f),
         )
+        // Run is gated on READY — the other states either have no
+        // rootfs to enter (no dir, INSTALLING) or are mid-mutation
+        // (UNINSTALLING) or are likely broken (FAILED).
+        if (installation.state == Installation.State.READY) {
+            content.addView(
+                tonalButton("Run") { showRunDialog(installation) },
+                verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+            )
+        }
         content.addView(
             destructiveButton("Delete") { confirmUninstall(installation) },
             verticalLp(MATCH_PARENT, WRAP_CONTENT),
         )
+    }
+
+    private fun showRunDialog(installation: Installation) {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply {
+            hint = "e.g. firefox"
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setSingleLine(false)
+            maxLines = 6
+            typeface = Typeface.MONOSPACE
+            textSize = 14f
+        }
+        // Wrap so the EditText gets dialog-edge padding without
+        // touching MaterialAlertDialog's own content insets.
+        val wrap = FrameLayout(this).apply { setPadding(pad, pad / 2, pad, 0) }
+        wrap.addView(input, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Run command in ${renderDistroLabel(installation)}")
+            .setView(wrap)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Run") { _, _ ->
+                val cmd = input.text.toString().trim()
+                if (cmd.isNotEmpty()) RunCommandOp.start(this, installation, cmd)
+            }
+            .show()
+        // Default Material3 paints both buttons in colorPrimary (yellow-
+        // orange), which makes Cancel look like a recommended path. Tone
+        // it down to colorOnSurfaceVariant so Run reads as the action.
+        dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.let { btn ->
+            btn.setTextColor(
+                MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
+            )
+        }
+        input.requestFocus()
     }
 
     private fun confirmUninstall(installation: Installation) {
