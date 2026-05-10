@@ -16,22 +16,23 @@
 //! pidfile, no lifecycle plumbing. See
 //! `notes/gfxstream-bridge.md` "Why kumquat must run as untrusted_app".
 //!
-//! aarch64-only: the gfxstream host renderer cross-build
-//! (`scripts/build-gfxstream-backend.sh`) targets aarch64 NDK; on
-//! x86_64 emulator targets the compositor stays libhybris-only and
-//! `spawn()` is a no-op. Selection is in `Cargo.toml` (the
-//! `kumquat_virtio` dep is gated on `cfg(target_arch = "aarch64")`).
+//! Built for both Android target arches. `libgfxstream_backend.so` is
+//! cross-built per-ABI (`scripts/build-gfxstream-backend.sh --abi=both`)
+//! and staged into `app/src/main/jniLibs/<abi>/`. The kumquat_virtio
+//! dep itself is `target_os = "android"`-gated (compositor/Cargo.toml)
+//! so host-side test builds (target_os = "linux") still compile.
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(target_os = "android"))]
 pub fn spawn() {
-    log::info!("kumquat: skipping spawn — bridge backend is aarch64-only");
+    // Host-side test builds — no kumquat dep available.
+    log::info!("kumquat: skipping spawn — not an Android target build");
 }
 
-#[cfg(target_arch = "aarch64")]
-pub use aarch64::spawn;
+#[cfg(target_os = "android")]
+pub use android::spawn;
 
-#[cfg(target_arch = "aarch64")]
-mod aarch64 {
+#[cfg(target_os = "android")]
+mod android {
 use kumquat_virtio::kumquat::KumquatBuilder;
 use log::{error, info};
 
@@ -93,4 +94,4 @@ fn run() {
         }
     }
 }
-} // mod aarch64
+} // mod android

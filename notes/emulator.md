@@ -19,11 +19,15 @@ plugged in. GPU/AHB/libhybris work still has to run on a real device.
   `arm64-v8a`; on x86_64 emulator builds the asset is absent and
   `LibhybrisInstallProvider` returns an empty manifest (TawcInstaller
   records the empty list + stamp so subsequent app starts no-op).
-  Anything that exercises the AHB import path
-  (most integration tests) will still fail; SHM-only paths
-  (magenta-tinted) should work. The blocker is **not** missing GPU
-  vendor blobs (the emulator does ship `libEGL_emulation.so`,
-  `vulkan.ranchu.so`, gralloc/mapper) — see "libhybris on x86_64" below.
+  The blocker is **not** missing GPU vendor blobs (the emulator
+  does ship `libEGL_emulation.so`, `vulkan.ranchu.so`, gralloc/
+  mapper) — see "libhybris on x86_64" below.
+  The **gfxstream bridge** does work on x86_64 and is the default
+  `GraphicsBackend` there; see [gfxstream-bridge.md](gfxstream-bridge.md).
+  Vulkan enumeration is the bring-up milestone; presentation needs
+  Phases 4/5 (AHB handoff + `VK_KHR_wayland_surface`) which are
+  ABI-agnostic and still TODO. The GL path needs Phase 6
+  (Zink-on-gfxstream-vk).
 - Architecture is x86_64 (real device is aarch64). Most code doesn't
   care, but anything arch-specific won't transfer.
 

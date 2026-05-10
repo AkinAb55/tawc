@@ -177,6 +177,27 @@ val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
     outputs.file(smithayCargoToml)
 }
 
+// Apply our rutabaga_gfx patches (in particular
+// `03-kumquat-server-as-lib.patch`, which exposes the `KumquatBuilder`
+// type the compositor links against). The compositor's
+// `kumquat_virtio = { path = "../deps/rutabaga_gfx/kumquat/server" }`
+// dep resolves at cargo metadata time, so this has to run before
+// `buildRustLibrary<Abi>`. Sentinel-gated inside the script, so
+// gradle just re-invokes it cheaply when patches change.
+val rutabagaPatchSentinel = "$tawcRootForSmithay/deps/rutabaga_gfx/kumquat/server/src/lib.rs"
+val setupRutabagaTask = tasks.register<Exec>("setupRutabaga") {
+    workingDir = tawcRootForSmithay
+    commandLine("bash", "scripts/setup-rutabaga.sh")
+    inputs.file("$tawcRootForSmithay/scripts/setup-rutabaga.sh")
+    inputs.dir("$tawcRootForSmithay/deps/rutabaga-patches")
+    inputs.file("$tawcRootForSmithay/deps/deps.list")
+    inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
+    // src/lib.rs only exists post-patch (03-kumquat-server-as-lib
+    // creates it), so its presence is a valid up-to-date signal for
+    // Gradle's incremental tracking.
+    outputs.file(rutabagaPatchSentinel)
+}
+
 tawcAbis.forEach { abi ->
     val triple = rustTripleFor[abi] ?: error("Unsupported ABI: $abi")
     val capAbi = abi.replaceFirstChar { it.uppercase() }
@@ -202,7 +223,7 @@ tawcAbis.forEach { abi ->
     }
 
     val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
-        dependsOn(buildLibxkbcommonTask, setupSmithayTask)
+        dependsOn(buildLibxkbcommonTask, setupSmithayTask, setupRutabagaTask)
         workingDir = file("${rootProject.projectDir}/compositor")
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
         commandLine(
@@ -283,25 +304,30 @@ tawcAbis.forEach { abi ->
 }
 
 // Cross-build the gfxstream host renderer (libgfxstream_backend.so) for
-// the aarch64 NDK and stage it under jniLibs/ alongside libcompositor.so.
-// Aarch64-only: the cross-build sysroot is aarch64-shaped and we don't
-// support the bridge on x86_64 yet (libhybris is the path there).
+// every enabled Android ABI and stage it under jniLibs/ alongside
+// libcompositor.so. Both arm64-v8a and x86_64 are supported — the bridge
+// is the only working GPU path on the x86_64 emulator (libhybris doesn't
+// load there; see notes/emulator.md).
 //
 // libcompositor.so links against `gfxstream_backend` via the
-// `kumquat_virtio` dep (compositor/Cargo.toml, target-gated to aarch64),
+// `kumquat_virtio` dep (compositor/Cargo.toml, target_os=android-gated),
 // which expects to find the .so at the path in `GFXSTREAM_PATH_RELEASE`.
 // The kumquat server itself runs as a thread of the compositor process —
 // no separate daemon, no broker plumbing. See notes/gfxstream-bridge.md.
-if ("arm64-v8a" in tawcAbis) {
+val gfxstreamAbiToScriptArg = mapOf("arm64-v8a" to "aarch64", "x86_64" to "x86_64")
+tawcAbis.forEach { abi ->
     val tawcRoot = rootProject.projectDir
-    val bridgeJniLibsDir = "$tawcRoot/app/src/main/jniLibs/arm64-v8a"
+    val scriptAbi = gfxstreamAbiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
+    val capAbi = abi.replaceFirstChar { it.uppercase() }
+    val bridgeJniLibsDir = "$tawcRoot/app/src/main/jniLibs/$abi"
     val gfxstreamLib = "$bridgeJniLibsDir/libgfxstream_backend.so"
     val libcppLib = "$bridgeJniLibsDir/libc++_shared.so"
+    val gfxstreamOutDir = "$tawcRoot/build/gfxstream-android-$scriptAbi"
 
-    val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend") {
+    val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "scripts/build-gfxstream-backend.sh")
+        commandLine("bash", "scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
         inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
         inputs.dir("$tawcRoot/deps/gfxstream-patches")
         // Pin bumps in deps/deps.list (gfxstream) must invalidate.
@@ -310,14 +336,14 @@ if ("arm64-v8a" in tawcAbis) {
         outputs.files(gfxstreamLib, libcppLib)
     }
 
-    // The aarch64 cargo build needs the .so present *and* its location
-    // in `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the
-    // right `-L` / `-l` flags. We extend the existing `buildRustLibrary`
-    // task there (registered above in the per-ABI loop) instead of
+    // The cargo build needs the .so present *and* its location in
+    // `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the right
+    // `-L` / `-l` flags. We extend the existing `buildRustLibrary<Abi>`
+    // task (registered above in the per-ABI loop) instead of
     // duplicating the cross-build wrapper.
-    tasks.named<Exec>("buildRustLibraryArm64-v8a") {
+    tasks.named<Exec>("buildRustLibrary$capAbi") {
         dependsOn(buildGfxstreamBackendTask)
-        environment("GFXSTREAM_PATH_RELEASE", "$tawcRoot/build/gfxstream-android")
+        environment("GFXSTREAM_PATH_RELEASE", gfxstreamOutDir)
     }
 }
 
@@ -392,26 +418,38 @@ if ("arm64-v8a" in tawcAbis) {
     tasks.named("preBuild") {
         dependsOn(packLibhybrisTask)
     }
+} // end libhybris (arm64-v8a in tawcAbis)
 
-    // Cross-build Mesa's chroot-side gfxstream Vulkan ICD
-    // (libvulkan_gfxstream.so + the matching JSON manifest) and ship
-    // both as APK assets. Extracted at runtime by
-    // CompositorService.ensureMesaGfxstreamExtracted into the app's
-    // filesDir; [BridgeInstallProvider] copies them into each rootfs
-    // at install time under /usr/local/lib + /usr/local/share/vulkan/
-    // icd.d. Selected at runtime via the GraphicsBackend pref
-    // (RootfsEnv pins VK_ICD_FILENAMES at the install path).
-    //
-    // Aarch64-only — the bridge isn't supported on x86_64 yet (the
-    // host-side renderer + kumquat dep are aarch64-only too).
-    val mesaGfxstreamInstallDir = "$tawcRoot/build/mesa-aarch64/install/usr/local"
+// Cross-build Mesa's chroot-side gfxstream Vulkan ICD
+// (libvulkan_gfxstream.so + the matching JSON manifest) for every
+// enabled Android ABI, and ship both as APK assets keyed by ABI under
+// `assets/mesa-gfxstream/<abi>/`. Extracted at runtime by
+// CompositorService.ensureMesaGfxstreamExtracted into the app's
+// filesDir; [BridgeInstallProvider] copies them into each rootfs at
+// install time under /usr/local/lib + /usr/local/share/vulkan/icd.d.
+// Selected at runtime via the GraphicsBackend pref (RootfsEnv pins
+// VK_ICD_FILENAMES at the install path).
+//
+// The Mesa source emits the ICD JSON with an arch-suffixed name
+// (`gfxstream_vk_icd.aarch64.json` / `gfxstream_vk_icd.x86_64.json`).
+// We rename to a single `gfxstream_vk_icd.json` in the asset dir so
+// the runtime extractor doesn't need to know the arch.
+val mesaGfxstreamAbiToScriptArg = mapOf(
+    "arm64-v8a" to ("aarch64" to "aarch64"),
+    "x86_64"    to ("x86_64"  to "x86_64"),
+)
+tawcAbis.forEach { abi ->
+    val tawcRoot = rootProject.projectDir
+    val (scriptAbi, mesonCpu) = mesaGfxstreamAbiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
+    val capAbi = abi.replaceFirstChar { it.uppercase() }
+    val mesaGfxstreamInstallDir = "$tawcRoot/build/mesa-$scriptAbi/install/usr/local"
     val mesaGfxstreamLib = "$mesaGfxstreamInstallDir/lib/libvulkan_gfxstream.so"
-    val mesaGfxstreamIcd = "$mesaGfxstreamInstallDir/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json"
-    val mesaGfxstreamAssetDir = "src/main/assets/mesa-gfxstream"
+    val mesaGfxstreamIcd = "$mesaGfxstreamInstallDir/share/vulkan/icd.d/gfxstream_vk_icd.$mesonCpu.json"
+    val mesaGfxstreamAssetDir = "src/main/assets/mesa-gfxstream/$abi"
 
-    val buildMesaGfxstreamTask = tasks.register<Exec>("buildMesaGfxstream") {
+    val buildMesaGfxstreamTask = tasks.register<Exec>("buildMesaGfxstream$capAbi") {
         workingDir = tawcRoot
-        commandLine("bash", "scripts/build-mesa-gfxstream.sh")
+        commandLine("bash", "scripts/build-mesa-gfxstream.sh", "--abi=$scriptAbi")
         // Same incremental-input contract as buildLibhybris:
         //   - the build script
         //   - the patches dir (a patch edit must rebuild)
@@ -423,18 +461,26 @@ if ("arm64-v8a" in tawcAbis) {
         outputs.files(mesaGfxstreamLib, mesaGfxstreamIcd)
     }
 
-    val packMesaGfxstreamTask = tasks.register<Copy>("packMesaGfxstream") {
+    val packMesaGfxstreamTask = tasks.register<Copy>("packMesaGfxstream$capAbi") {
         dependsOn(buildMesaGfxstreamTask)
         // Two raw assets — no symlinks, so no tar wrapper needed (unlike
-        // libhybris). The runtime extractor opens each by name.
+        // libhybris). Rename the arch-suffixed ICD JSON to a single
+        // generic name so the runtime extractor opens the same file on
+        // both ABIs.
         into("${project.projectDir}/$mesaGfxstreamAssetDir")
         from(mesaGfxstreamLib)
-        from(mesaGfxstreamIcd)
+        from(mesaGfxstreamIcd) {
+            rename { "gfxstream_vk_icd.json" }
+        }
     }
 
     tasks.named("preBuild") {
         dependsOn(packMesaGfxstreamTask)
     }
+}
+
+if ("arm64-v8a" in tawcAbis) {
+    val tawcRoot = rootProject.projectDir
 
     // Cross-compile Xwayland (and its bionic-ported X11 / font / pixman
     // dep tree) and stage the result for the APK. Binaries + DT_NEEDED

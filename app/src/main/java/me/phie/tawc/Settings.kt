@@ -2,6 +2,7 @@ package me.phie.tawc
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 
 /**
  * Process-global settings backed by [SharedPreferences].
@@ -83,7 +84,21 @@ enum class GraphicsBackend(val key: String, val displayName: String, val tagline
     CPU("cpu", "CPU", "software-only");
 
     companion object {
-        val DEFAULT = LIBHYBRIS
+        /**
+         * Default backend picked when nothing is saved yet.
+         *
+         * On x86_64 (emulator) libhybris can't load against bionic
+         * (notes/emulator.md "libhybris on x86_64"), so libhybris would
+         * just no-op and every GPU client would fall back to SHM. The
+         * gfxstream bridge is the only working GPU path there — make
+         * it the default so a fresh install Just Works on the AVD.
+         * Everywhere else (aarch64 physical), libhybris stays the
+         * default — proven, lower latency, no IPC.
+         */
+        val DEFAULT: GraphicsBackend = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+            "x86_64" -> GFXSTREAM
+            else -> LIBHYBRIS
+        }
 
         fun fromKeyOrDefault(key: String?): GraphicsBackend =
             entries.firstOrNull { it.key == key } ?: DEFAULT

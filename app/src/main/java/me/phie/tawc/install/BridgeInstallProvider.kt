@@ -15,15 +15,17 @@ import java.io.File
  * [CompositorService.ensureMesaGfxstreamExtracted]. From there
  * [TawcInstaller] copies them into each rootfs at install time.
  *
- * Always installed when the asset is shipped (currently aarch64 only),
- * regardless of which [me.phie.tawc.GraphicsBackend] is selected — the
- * pref controls which env [RootfsEnv] sets, not which files exist on
- * disk. Two unused files cost nothing; making the manifest depend on a
- * runtime pref would invalidate the cached install on every toggle.
+ * Always installed when the asset is shipped (both arm64-v8a and
+ * x86_64 ride in the APK as per-ABI subdirs under
+ * `assets/mesa-gfxstream/<abi>/`; the runtime picks the matching one
+ * via [CompositorService.ensureMesaGfxstreamExtracted]), regardless of
+ * which [me.phie.tawc.GraphicsBackend] is selected — the pref controls
+ * which env [RootfsEnv] sets, not which files exist on disk. Two
+ * unused files cost nothing; making the manifest depend on a runtime
+ * pref would invalidate the cached install on every toggle.
  *
- * Returns an empty list on devices where the asset isn't shipped (today:
- * x86_64 emulator). The compositor-side kumquat thread is also
- * aarch64-gated, so this matches.
+ * Returns an empty list if for some reason no asset shipped for this
+ * device's ABI (e.g. a custom `-PtawcAbis` build that dropped it).
  */
 internal object BridgeInstallProvider : TawcInstallProvider {
     override val name: String = "mesa-gfxstream"

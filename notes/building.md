@@ -37,8 +37,8 @@ and launch as documented in CLAUDE.md's Quick Reference.
 |-----------|--------------------------------------------------------|------------------------------------------------------|
 | JDK 21    | `jdk21-openjdk`                                        | `openjdk-21-jdk`                                     |
 | Rust      | `rustup` (then `rustup default stable`)                | `rustup` (via rustup.rs)                             |
-| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds). The kumquat server is a Cargo dep of the compositor crate (target-aarch64-only), so the same target also covers the gfxstream-bridge build; no extra toolchain. | same |
-| Rust aarch64 glibc target (`build-mesa-gfxstream.sh` cross-builds Mesa's gfxstream-vk Rust pieces) | `rustup target add aarch64-unknown-linux-gnu` | same |
+| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds). The kumquat server is a Cargo dep of the compositor crate (`target_os="android"`-gated), so the same target also covers the gfxstream-bridge build; no extra toolchain. | same |
+| Rust glibc targets (`build-mesa-gfxstream.sh` cross-builds Mesa's gfxstream-vk Rust pieces) | `rustup target add aarch64-unknown-linux-gnu` (and `rustup target add x86_64-unknown-linux-gnu` for the emulator bridge) | same |
 | `bindgen` (Mesa's gfxstream-vk meson Rust bindings) | `cargo install bindgen-cli` | same |
 | Cargo NDK (cargo subcommand — `cargo build` will fail with `error: no such command: ndk` if missing) | `cargo install cargo-ndk` | same |
 | Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). | same |
@@ -72,6 +72,32 @@ targets bionic and is the wrong toolchain.
 
 For the rest of our native build (the Rust compositor, libxkbcommon),
 the NDK is correct and we keep using it.
+
+### x86_64 glibc compiler (mesa-gfxstream for the emulator)
+
+`scripts/build-mesa-gfxstream.sh --abi=x86_64` cross-builds the
+chroot-side gfxstream Vulkan ICD for the AVD's x86_64 rootfs. Since
+the build host is also x86_64-glibc, this is technically a "native"
+build — the system `gcc`/`g++` (Arch: `base-devel`; Debian/Ubuntu:
+`build-essential`; Fedora: `gcc gcc-c++`) is the right compiler. The
+script prefers the triple-prefixed names (`x86_64-linux-gnu-gcc`,
+which Debian ships by default) when present and falls back to plain
+`gcc` otherwise. No separate cross-toolchain is needed.
+
+### Sysroot pull (per-ABI)
+
+Both `--abi=aarch64` and `--abi=x86_64` cross-builds of
+`build-mesa-gfxstream.sh` link `libvulkan_gfxstream.so` against a
+curated set of distro `.so`s + headers (wayland, libdrm, libudev,
+libffi) sitting in `build/<arch>-sysroot/`. Populate via
+`bash scripts/pull-sysroot.sh` — uses the standard
+`.tawctarget`/`TAWC_TARGET` device selection, picks ABI from the
+connected device, and tars the relevant subset out of the installed
+chroot.
+
+This whole arrangement is fragile (see
+[../issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md));
+keep using it for now.
 
 ## Environment variables
 

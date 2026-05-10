@@ -625,19 +625,30 @@ indefinitely; the radio selector is the user's choice.
 ## Build status (May 2026)
 
 **End-to-end Vulkan from chroot to vendor blob via gfxstream is
-working on a physical device.** `vulkaninfo --summary` from inside
-the chroot enumerates a `Virtio-GPU GFXStream (Adreno (TM) 660)`
-device whose `driverID = DRIVER_ID_QUALCOMM_PROPRIETARY` confirms
-the host-side renderer reaches the real Adreno blob.
+working on a physical device, and the build pipeline is in place for
+x86_64 emulator parity.** `vulkaninfo --summary` from inside the
+chroot enumerates a `Virtio-GPU GFXStream (Adreno (TM) 660)` device
+whose `driverID = DRIVER_ID_QUALCOMM_PROPRIETARY` confirms the host-
+side renderer reaches the real Adreno blob.
 
-Phases done: 0.1 (host renderer cross-build), 0.2 (kumquat server),
-1.1 (guest driver kumquat-enabled), **1.2 (`BridgeInstallProvider`
-ships the chroot-side .so + ICD as APK assets and lays them into
-each rootfs at install time)**, 2 (UI radio + persisted pref +
-RootfsEnv branch), 3 (kumquat embedded as a thread of the
-compositor process). Still TODO: Phase 4 (zero-copy AHB handoff
-after vkQueuePresentKHR), Phase 5 (Wayland WSI plumbing — the
-surface_lost_khr error on the wayland-surface query is the gap).
+Phases done: 0.1 (host renderer cross-build, both aarch64 and x86_64
+via `scripts/build-gfxstream-backend.sh --abi=both`), 0.2 (kumquat
+server), 1.1 (guest driver kumquat-enabled, both ABIs via
+`scripts/build-mesa-gfxstream.sh --abi=both`), **1.2 (`BridgeInstallProvider`
+ships the chroot-side .so + ICD as per-ABI APK assets and lays them
+into each rootfs at install time)**, 2 (UI radio + persisted pref +
+RootfsEnv branch), 3 (kumquat embedded as a thread of the compositor
+process — `target_os="android"`-gated, so both ABIs compile in).
+Still TODO: Phase 4 (zero-copy AHB handoff after vkQueuePresentKHR),
+Phase 5 (Wayland WSI plumbing — the surface_lost_khr error on the
+wayland-surface query is the gap), Phase 7 (real-world AVD validation
+beyond `vulkaninfo --summary`).
+
+The x86_64 build path is symmetric with aarch64 — same scripts, same
+gradle tasks, same `BridgeInstallProvider`, just `--abi=x86_64`
+instead. The `GraphicsBackend` default flips to `GFXSTREAM` on
+x86_64 since libhybris is a non-starter there
+(`notes/emulator.md` "libhybris on x86_64").
 
 Tests pin their backend per spawn via the broker `GRAPHICS` header on
 RUNINSIDE (`tawc-exec --in-rootfs … --graphics gfxstream`, or
@@ -764,21 +775,21 @@ screen:
 4. **Vulkan WSI Wayland↔kumquat plumbing.** gfxstream-vk's WSI is Android-shaped; need to remap `VK_KHR_wayland_surface` calls to allocate AHB-backed ColorBuffers via the bridge. The vulkaninfo smoke test sees `VK_KHR_wayland_surface failed with SURFACE_LOST_KHR` — that's exactly this gap. Enumeration works fine, presentation doesn't. `gfxstream::test_vkcube_renders_via_ahb` fails on this today; the matching libhybris test in `hybris::` passes, so the regression has somewhere to live until the gap closes.
 5. **AHB buffer handoff.** After `vkQueuePresentKHR`, our daemon calls `exportColorBufferMemory()` and feeds the AHB to the existing compositor import path. Option A in the "Zero-copy buffer sharing" section above — no gfxstream patches needed. The current rutabaga `01-drop-nativewindow-dep.patch` returns `InvalidResourceId` for PLATFORM_AHB exports; replacing that stub with the actual handoff is what unblocks vkcube + Phase 4.
 
-### Sysroot pull (one-time, until automated)
+### Sysroot pull
 
-```bash
-mkdir -p build/aarch64-sysroot && cd build/aarch64-sysroot
-. ../../scripts/lib/select-device.sh
-. ../../scripts/lib/tawc-exec.sh
-"$TAWC_EXEC_BIN" -- /system/bin/sh -c "cd /data/data/me.phie.tawc/distros/arch/rootfs && tar -czf - \
-  usr/include usr/lib/pkgconfig usr/share/pkgconfig \
-  usr/lib/libwayland-* usr/lib/libdrm* usr/lib/libudev* usr/lib/libffi* \
-  usr/lib/libstdc++.so.6 usr/lib/libgcc_s.so.1 \
-  usr/lib/libdisplay-info* usr/lib/libvulkan.so.1 usr/lib/libxkbcommon* \
-  2>/dev/null" | tar -xzf -
-```
+`bash scripts/pull-sysroot.sh` — hooks into the standard
+`.tawctarget` / `TAWC_TARGET` device-selection mechanism, picks ABI
+from `ro.product.cpu.abi`, and tars a curated subset of the
+installed rootfs into `build/<arch>-sysroot/`. Run once after every
+fresh install (or every time the in-rootfs library set rolls — e.g.
+a pacman upgrade that bumps a soname).
 
-`build/aarch64-sysroot/` is gitignored (under `build/`); regenerate any time the rootfs's library set changes.
+`build/<arch>-sysroot/` is gitignored (under `build/`).
+
+The whole "pull from a live device" approach is fragile — see
+[../issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md).
+The script is the supported way today, but it shouldn't be the
+permanent answer.
 
 ## Implementation plan
 

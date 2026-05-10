@@ -32,15 +32,13 @@ serde_json = "1"
 # links against `libgfxstream_backend.so` (built by
 # scripts/build-gfxstream-backend.sh and staged next to libcompositor.so
 # as a jniLib). cargo picks up the .so via `GFXSTREAM_PATH_RELEASE`
-# which gradle's `buildRustLibraryArm64-v8a` task sets.
+# which gradle's `buildRustLibrary<Abi>` task sets per-ABI.
 #
-# Aarch64-only: we don't cross-build libgfxstream_backend.so for x86_64
-# (gfxstream-vk-on-AVD is the whole reason the bridge exists, but the
-# emulator hosts a x86_64 chroot whose Mesa would talk to an aarch64
-# kumquat — that's a separate axis we haven't tackled). On x86_64 the
-# compositor stays libhybris-only and `bridge::spawn()` is a no-op
-# (see compositor/src/bridge.rs's cfg gates).
-[target.'cfg(target_arch = "aarch64")'.dependencies]
+# Built for both Android targets (arm64-v8a, x86_64). The bridge is
+# the only working GPU path on the x86_64 emulator (libhybris doesn't
+# load there — see notes/emulator.md "libhybris on x86_64"), so we
+# can't gate it off.
+[target.'cfg(target_os = "android")'.dependencies]
 kumquat_virtio = { path = "../deps/rutabaga_gfx/kumquat/server", features = ["gfxstream"] }
 
 [build-dependencies]

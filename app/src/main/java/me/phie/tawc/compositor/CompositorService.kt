@@ -413,34 +413,41 @@ class CompositorService : Service() {
 
         /**
          * Names of the two raw assets shipped under
-         * `assets/mesa-gfxstream/` by Gradle's `packMesaGfxstream`. Listed
-         * here so [ensureMesaGfxstreamExtracted] and
+         * `assets/mesa-gfxstream/<abi>/` by Gradle's `packMesaGfxstream<Abi>`.
+         * Listed here so [ensureMesaGfxstreamExtracted] and
          * [me.phie.tawc.install.BridgeInstallProvider] agree on what to
          * stage / install — change once, both sides follow.
+         *
+         * The Mesa source emits the ICD JSON with an arch-suffixed name
+         * (`gfxstream_vk_icd.aarch64.json` / `.x86_64.json`); the Gradle
+         * pack task renames to a single arch-free name so the runtime
+         * doesn't need a per-ABI branch here.
          */
         const val MESA_GFXSTREAM_LIB_ASSET = "libvulkan_gfxstream.so"
-        const val MESA_GFXSTREAM_ICD_ASSET = "gfxstream_vk_icd.aarch64.json"
+        const val MESA_GFXSTREAM_ICD_ASSET = "gfxstream_vk_icd.json"
 
         /**
-         * Extract `assets/mesa-gfxstream/{libvulkan_gfxstream.so,
-         * gfxstream_vk_icd.aarch64.json}` into `<filesDir>/mesa-gfxstream/`.
-         * Same versioned-stamp + atomic-rename pattern as
-         * [ensureLibhybrisExtracted], minus the tar walk — these are two
-         * raw asset files with no symlink topology to preserve.
+         * Extract `assets/mesa-gfxstream/<abi>/{libvulkan_gfxstream.so,
+         * gfxstream_vk_icd.json}` into `<filesDir>/mesa-gfxstream/`. Picks
+         * the asset subdir by [Build.SUPPORTED_ABIS][0]. Same versioned-
+         * stamp + atomic-rename pattern as [ensureLibhybrisExtracted],
+         * minus the tar walk — these are two raw asset files with no
+         * symlink topology to preserve.
          *
-         * Returns true if extracted (or already up to date), false if the
-         * asset isn't shipped (e.g. x86_64 emulator build — the bridge is
-         * aarch64-only today).
+         * Returns true if extracted (or already up to date), false if no
+         * asset is shipped for this device's ABI.
          */
         fun ensureMesaGfxstreamExtracted(context: Context): Boolean = synchronized(MESA_GFXSTREAM_EXTRACT_LOCK) {
+            val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return false
+            val assetDir = "mesa-gfxstream/$abi"
             val available = try {
-                context.assets.open("mesa-gfxstream/$MESA_GFXSTREAM_LIB_ASSET").close()
+                context.assets.open("$assetDir/$MESA_GFXSTREAM_LIB_ASSET").close()
                 true
             } catch (_: java.io.IOException) {
                 false
             }
             if (!available) {
-                Log.i(TAG, "No mesa-gfxstream asset shipped; gfxstream backend unavailable")
+                Log.i(TAG, "No mesa-gfxstream asset shipped for ABI $abi; gfxstream backend unavailable")
                 return false
             }
 
@@ -454,13 +461,13 @@ class CompositorService : Service() {
             stagingDir.deleteRecursively()
             stagingDir.mkdirs()
             for (name in listOf(MESA_GFXSTREAM_LIB_ASSET, MESA_GFXSTREAM_ICD_ASSET)) {
-                context.assets.open("mesa-gfxstream/$name").use { input ->
+                context.assets.open("$assetDir/$name").use { input ->
                     File(stagingDir, name).outputStream().use { out -> input.copyTo(out) }
                 }
             }
             atomicReplaceDir(stagingDir, destDir)
             File(destDir, ".version").writeText(currentStamp)
-            Log.i(TAG, "Extracted mesa-gfxstream to $destDir")
+            Log.i(TAG, "Extracted mesa-gfxstream ($abi) to $destDir")
             return true
         }
 
