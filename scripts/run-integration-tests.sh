@@ -188,12 +188,19 @@ fi
 echo "=== Setting graphics backend: $GRAPHICS ==="
 "$TAWC_EXEC_BIN" --action set-graphics-backend --arg "value=$GRAPHICS"
 if [ "$GRAPHICS" = "gfxstream" ]; then
+    # The gfxstream backend needs the kumquat daemon listening on
+    # /tmp/kumquat-gpu-0 inside the rootfs. start-bridge-daemon is
+    # idempotent — returns immediately if it's already up — so always
+    # call it. bridge-setup.sh start does the same thing plus stages
+    # the in-rootfs libvulkan_gfxstream.so + ICD JSON; that staging
+    # also ran during APK build (gradle's preBuild dep) but the chroot
+    # files only get laid down by bridge-setup, not gradle. Rerun the
+    # setup if the runner sees the socket missing — much friendlier
+    # than asking the operator to spot it from a buried warning.
     if ! "$TAWC_EXEC_BIN" --in-rootfs "$INSTALL_ID" -- \
             sh -c 'test -S /tmp/kumquat-gpu-0' >/dev/null 2>&1; then
-        echo "WARNING: kumquat-gpu-0 socket not present in the rootfs." >&2
-        echo "         Start the bridge daemon first:" >&2
-        echo "           bash scripts/bridge-setup.sh start" >&2
-        echo "         (Continuing anyway — gfxstream tests will fail.)" >&2
+        echo "=== Starting kumquat bridge daemon ==="
+        bash "$ROOT_DIR/scripts/bridge-setup.sh" start
     fi
 fi
 
@@ -211,7 +218,7 @@ fi
 # install-test-deps after editing any source under `tests/apps/`.
 cd "$ROOT_DIR/tests/integration"
 set +e
-cargo test -- "${LIBTEST_ARGS[@]}"
+TAWC_GRAPHICS_BACKEND="$GRAPHICS" cargo test -- "${LIBTEST_ARGS[@]}"
 TEST_EXIT=$?
 set -e
 

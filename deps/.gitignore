@@ -12,3 +12,7 @@
 !xwayland-patches/**
 !mesa-patches/
 !mesa-patches/**
+!gfxstream-patches/
+!gfxstream-patches/**
+!rutabaga-patches/
+!rutabaga-patches/**

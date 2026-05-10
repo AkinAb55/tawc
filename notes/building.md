@@ -37,7 +37,7 @@ and launch as documented in CLAUDE.md's Quick Reference.
 |-----------|--------------------------------------------------------|------------------------------------------------------|
 | JDK 21    | `jdk21-openjdk`                                        | `openjdk-21-jdk`                                     |
 | Rust      | `rustup` (then `rustup default stable`)                | `rustup` (via rustup.rs)                             |
-| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds) | same |
+| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds). For the kumquat bridge build, also add this target to the toolchain pinned by `deps/rutabaga_gfx/rust-toolchain.toml` (currently 1.88.0): `rustup target add aarch64-linux-android --toolchain 1.88.0`. | same |
 | Rust aarch64 glibc target (`build-mesa-gfxstream.sh` cross-builds Mesa's gfxstream-vk Rust pieces) | `rustup target add aarch64-unknown-linux-gnu` | same |
 | `bindgen` (Mesa's gfxstream-vk meson Rust bindings) | `cargo install bindgen-cli` | same |
 | Cargo NDK (cargo subcommand — `cargo build` will fail with `error: no such command: ndk` if missing) | `cargo install cargo-ndk` | same |

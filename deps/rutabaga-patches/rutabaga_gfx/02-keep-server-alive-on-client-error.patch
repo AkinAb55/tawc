@@ -1,0 +1,53 @@
+From: tawc
+Origin: own
+
+Don't tear down the kumquat server when a single client's
+process_command bubbles up an error. The original code uses `?` to
+propagate per-request failures to Kumquat::run, where they short-
+circuit the whole event loop and exit main(); a guest hitting an
+unimplemented backend path (e.g. gfxstream's PLATFORM_AHB export,
+which our `01-drop-nativewindow-dep.patch` lights up cleanly with
+InvalidResourceId since the AHB-via-libnativewindow Rust shim isn't
+in scope yet) takes the daemon with it. That's particularly painful
+in the integration suite, where one failing test would knock kumquat
+out from under every subsequent test in the same run.
+
+Trade the panic for an eprintln + drop-this-connection: the failing
+client gets EOF on its socket and surfaces the error its own way; the
+next vulkaninfo / next test's connection reconnects to a healthy
+server. The connection's resources die with `o.remove_entry()` →
+KumquatGpuConnection::Drop, same path as a normal disconnect.
+
+diff --git a/kumquat/server/src/kumquat.rs b/kumquat/server/src/kumquat.rs
+index a4906e5..47acd43 100644
+--- a/kumquat/server/src/kumquat.rs
++++ b/kumquat/server/src/kumquat.rs
+@@ -56,8 +56,26 @@ impl Kumquat {
+                         KumquatConnection::GpuConnection(ref mut gpu_conn) => {
+                             if event.readable {
+                                 if let Some(ref mut kumquat_gpu) = self.kumquat_gpu_opt {
+-                                    hung_up =
+-                                        !gpu_conn.process_command(kumquat_gpu)? && event.hung_up;
++                                    // tawc-fork: don't tear down the
++                                    // whole server because one client's
++                                    // request hit a backend error
++                                    // (gfxstream not implementing some
++                                    // ColorBuffer export path, etc).
++                                    // Drop just this connection; sibling
++                                    // chroots and the next reconnect
++                                    // attempt keep working.
++                                    match gpu_conn.process_command(kumquat_gpu) {
++                                        Ok(no_more_data) => {
++                                            hung_up = !no_more_data && event.hung_up;
++                                        }
++                                        Err(e) => {
++                                            eprintln!(
++                                                "kumquat: dropping connection {} after error: {:?}",
++                                                event.connection_id, e
++                                            );
++                                            hung_up = true;
++                                        }
++                                    }
+                                 }
+                             }
+ 

@@ -28,6 +28,22 @@ pub fn install_id() -> String {
     ID.get_or_init(resolve_install_id).clone()
 }
 
+/// In-app graphics-driver pick the test runner flipped before the
+/// suite started. Mirrors `Settings.graphicsBackend` (Kotlin); `"libhybris"`
+/// is the assumed default when the runner didn't pass `--graphics
+/// gfxstream`. Read by tests that gate libhybris-specific assertions
+/// (Android META-EGL, vkcube WSI, …) — those have no working analogue
+/// under the gfxstream-bridge backend until phases 4–5 land
+/// (notes/gfxstream-bridge.md "Remaining work to a fully-integrated
+/// bridge backend"). Tests that share a code path between backends
+/// don't need to consult this.
+pub fn graphics_backend() -> String {
+    std::env::var("TAWC_GRAPHICS_BACKEND")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "libhybris".to_string())
+}
+
 fn resolve_install_id() -> String {
     if let Ok(v) = std::env::var("TAWC_INSTALL_ID") {
         if !v.is_empty() {
