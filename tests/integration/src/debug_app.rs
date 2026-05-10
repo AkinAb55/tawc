@@ -11,8 +11,7 @@ const PROTOCOL_PREFIX: &str = "TAWC_DEBUG:";
 /// Minimum delay after each wait completes, so actions are visible on screen.
 const MIN_ACTION_DELAY: Duration = Duration::from_millis(50);
 
-/// A running instance of a debug app (gtk3-debug-app or gtk4-debug-app) with
-/// structured output capture.
+/// A running instance of gtk4-debug-app with structured output capture.
 pub struct DebugApp {
     process: RootfsProcess,
     /// All received protocol lines (without the TAWC_DEBUG: prefix).
@@ -23,7 +22,7 @@ pub struct DebugApp {
 
 impl DebugApp {
     /// Start the debug app with the given subcommand.
-    /// `binary_path` is the path inside the chroot (e.g. "/tmp/gtk3-debug-app/gtk3-debug-app").
+    /// `binary_path` is the path inside the chroot (e.g. "/tmp/gtk4-debug-app/gtk4-debug-app").
     /// `env` is a shell-style env prefix prepended to the command, e.g.
     /// `"GDK_GL=disabled"` to override the chroot's default `gles:always`
     /// and force GTK3's SHM path. Pass `""` for no extra env.

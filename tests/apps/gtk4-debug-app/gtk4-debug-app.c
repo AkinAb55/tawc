@@ -1,10 +1,8 @@
 /*
  * gtk4-debug-app: A GTK4 debug/test app for the tawc compositor.
  *
- * Sister binary to gtk3-debug-app, ported to GTK4. Same subcommand CLI and
- * output protocol (TAWC_DEBUG: prefix parsed by the Rust harness), so tests
- * can target GTK4 (always hardware-buffered via android_wlegl) and GTK3
- * (SHM vs AHB selectable via GDK_GL) through one harness.
+ * Subcommand CLI; output is the TAWC_DEBUG: protocol parsed by the
+ * Rust integration harness.
  *
  * Usage: gtk4-debug-app <command>
  *

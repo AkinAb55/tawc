@@ -281,9 +281,9 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
 /// Encode a header-line value so it survives the LF-terminated header.
 /// Applied uniformly to every value-bearing field (ARGV / ENV / CWD /
 /// ARG / CMD / OP_TITLE) so a literal `\n` in any of them — tests
-/// inject Enter via `inject-text` / `ic-commit-text` with `text="\n"`,
-/// shell glue passes `--env FOO=bar\nbaz`, etc. — doesn't end the line
-/// early. Mirror in `ExecBrokerSession.kt::decodeValue`.
+/// inject Enter via `ic-commit-text` with `text="\n"`, shell glue
+/// passes `--env FOO=bar\nbaz`, etc. — doesn't end the line early.
+/// Mirror in `ExecBrokerSession.kt::decodeValue`.
 ///
 /// Encoding (small, reversible):
 ///   `\\` -> `\\\\`  (escape the escape char first)
