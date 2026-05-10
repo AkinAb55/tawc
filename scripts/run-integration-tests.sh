@@ -7,10 +7,11 @@
 # --no-build to skip the rebuild/redeploy phase.
 #
 # Prerequisites:
-#   - Android device or emulator connected via adb with root (su) access
-#     and selected via ./.tawctarget or TAWC_TARGET=physical|emulator
-#     (see scripts/lib/select-device.sh -- no auto-fallback to a single
-#     connected target).
+#   - Android device or emulator connected via adb and selected via
+#     ./.tawctarget or TAWC_TARGET=physical|emulator (see
+#     scripts/lib/select-device.sh -- no auto-fallback to a single
+#     connected target). The tawcroot path needs no `su`; only the
+#     `chroot` install method does (and that's debug-only).
 #   - tawc app installed (this script reinstalls it during build).
 #     libhybris ships inside the APK as an asset and is symlinked into
 #     each rootfs at install time — no on-device libhybris build step.
@@ -30,11 +31,13 @@
 #                                                                 e.g. `<module>::` or `<module>::test_foo`
 #   bash scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
 #   bash scripts/run-integration-tests.sh --graphics gfxstream  # flip the in-app graphics-driver
-#                                                                 pref before running (default: libhybris)
-#                                                                 — for gfxstream the kumquat daemon
-#                                                                 must already be up; this script does
-#                                                                 NOT auto-start it (use
-#                                                                 `bash scripts/bridge-setup.sh start`).
+#                                                                 pref before running (default: libhybris).
+#                                                                 The kumquat server runs in the
+#                                                                 compositor process, so nothing else
+#                                                                 needs starting; only the chroot-side
+#                                                                 libvulkan_gfxstream.so + ICD JSON
+#                                                                 need to be staged into the rootfs
+#                                                                 (the runner does that automatically).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -188,19 +191,15 @@ fi
 echo "=== Setting graphics backend: $GRAPHICS ==="
 "$TAWC_EXEC_BIN" --action set-graphics-backend --arg "value=$GRAPHICS"
 if [ "$GRAPHICS" = "gfxstream" ]; then
-    # The gfxstream backend needs the kumquat daemon listening on
-    # /tmp/kumquat-gpu-0 inside the rootfs. start-bridge-daemon is
-    # idempotent — returns immediately if it's already up — so always
-    # call it. bridge-setup.sh start does the same thing plus stages
-    # the in-rootfs libvulkan_gfxstream.so + ICD JSON; that staging
-    # also ran during APK build (gradle's preBuild dep) but the chroot
-    # files only get laid down by bridge-setup, not gradle. Rerun the
-    # setup if the runner sees the socket missing — much friendlier
-    # than asking the operator to spot it from a buried warning.
+    # The kumquat server runs in the compositor process — already up
+    # since `am start MainActivity` above. The only chroot-side state
+    # is `libvulkan_gfxstream.so` + the ICD JSON under `/usr/local/`;
+    # bridge-setup.sh stages them via the broker (same uid as rootfs).
+    # Idempotent — `cp` overwrite is fine if they're already there.
     if ! "$TAWC_EXEC_BIN" --in-rootfs "$INSTALL_ID" -- \
-            sh -c 'test -S /tmp/kumquat-gpu-0' >/dev/null 2>&1; then
-        echo "=== Starting kumquat bridge daemon ==="
-        bash "$ROOT_DIR/scripts/bridge-setup.sh" start
+            sh -c 'test -f /usr/local/lib/libvulkan_gfxstream.so' >/dev/null 2>&1; then
+        echo "=== Staging gfxstream chroot bits ==="
+        bash "$ROOT_DIR/scripts/bridge-setup.sh"
     fi
 fi
 

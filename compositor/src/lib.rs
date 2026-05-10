@@ -14,6 +14,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::Transform;
 use wayland_server::Display;
 
+mod bridge;
 mod egl_android;
 mod gl_import;
 mod host;
@@ -137,8 +138,14 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
         return;
     }
 
-    info!("nativeStartCompositor: spawning compositor thread");
+    info!("nativeStartCompositor: spawning compositor + kumquat threads");
     RUNNING.store(true, Ordering::SeqCst);
+
+    // gfxstream-bridge kumquat server runs as a sibling thread of the
+    // calloop event loop. Always-on, no broker handshake — clients
+    // connect lazily when a chroot process loads gfxstream-vk. See
+    // notes/gfxstream-bridge.md.
+    bridge::spawn();
 
     // Create the channels here, BEFORE the compositor thread starts,
     // so JNI calls (especially `nativeRegisterActivitySurface`) can

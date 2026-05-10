@@ -75,11 +75,16 @@ internal object RootfsEnv {
                 // (no libhybris libvulkan.so.1 shadowing it), pinned to
                 // Mesa's gfxstream-vk ICD. VIRTGPU_KUMQUAT=1 makes Mesa's
                 // gfxstream-vk select the userspace kumquat socket
-                // transport instead of /dev/dri/cardN. See
-                // notes/gfxstream-bridge.md.
+                // transport instead of /dev/dri/cardN, and our Mesa patch
+                // (deps/mesa-patches/mesa/03-kumquat-socket-env-override.patch)
+                // honours VIRTGPU_KUMQUAT_GPU_SOCKET so the client dials
+                // the compositor-process kumquat thread at the path the
+                // host-side share bind exposes — `/usr/share/tawc/...`,
+                // not `/tmp/...`. See notes/gfxstream-bridge.md.
                 put("VK_ICD_FILENAMES",
                     "/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json")
                 put("VIRTGPU_KUMQUAT", "1")
+                put("VIRTGPU_KUMQUAT_GPU_SOCKET", "/usr/share/tawc/kumquat-gpu-0")
             }
         }
         put("DISPLAY", ":0")

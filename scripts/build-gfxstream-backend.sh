@@ -132,6 +132,21 @@ ninja -C "$BUILD_DIR" host/libgfxstream_backend.so
 # ── Stage outputs ──
 cp "$BUILD_DIR/host/libgfxstream_backend.so" "$OUT_DIR/"
 
+# Stage as a real shared lib alongside libcompositor.so. The compositor
+# crate links against `gfxstream_backend` via rutabaga_gfx's gfxstream
+# feature (see compositor/Cargo.toml's kumquat_virtio dep), so
+# libcompositor.so picks up a DT_NEEDED on libgfxstream_backend.so. The
+# backend itself has DT_NEEDED on libc++_shared.so — both ride along
+# in nativeLibraryDir so the dynamic linker resolves them at app
+# startup.
+JNILIBS_DIR="$REPO_DIR/app/src/main/jniLibs/arm64-v8a"
+mkdir -p "$JNILIBS_DIR"
+cp "$OUT_DIR/libgfxstream_backend.so" "$JNILIBS_DIR/libgfxstream_backend.so"
+LIBCPP="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+cp "$LIBCPP" "$JNILIBS_DIR/libc++_shared.so"
+
 echo "==> built libgfxstream_backend.so:"
 ls -la "$OUT_DIR/libgfxstream_backend.so"
 file "$OUT_DIR/libgfxstream_backend.so"
+echo "==> staged jniLibs:"
+ls -la "$JNILIBS_DIR/libgfxstream_backend.so" "$JNILIBS_DIR/libc++_shared.so"

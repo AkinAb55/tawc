@@ -1,18 +1,20 @@
 #!/bin/bash
-# Set up the gfxstream-bridge end-to-end on the device for development
-# and integration testing.
+# Stage the chroot-side gfxstream-bridge bits into a rootfs:
+# `libvulkan_gfxstream.so` + the Vulkan ICD JSON. Both come from
+# scripts/build-mesa-gfxstream.sh (host-side aarch64 cross-build of
+# Mesa's gfxstream-vk driver with the kumquat transport enabled) and
+# need to live under `/usr/local/` inside the rootfs so the chroot's
+# vulkan-icd-loader picks them up via the `VK_ICD_FILENAMES` env var
+# RootfsEnv sets in the gfxstream branch.
 #
-# Splits cleanly into "build/install bits" (does both kumquat and the
-# guest-side libvulkan_gfxstream.so) and "start/stop the daemon" (which
-# uses the broker, so kumquat runs as the app uid + untrusted_app
-# SELinux context — see notes/gfxstream-bridge.md "Why kumquat must run
-# as untrusted_app", and BridgeActions.kt for the SCM_RIGHTS reasoning).
+# The kumquat *server* runs in the compositor process — see
+# notes/gfxstream-bridge.md and compositor/src/bridge.rs. There is no
+# daemon to start/stop here. This script's only job is the file
+# staging (eventually replaced by an in-app BridgeInstallProvider that
+# lays the same files down at install time, like LibhybrisInstallProvider).
 #
 # Usage:
-#   bash scripts/bridge-setup.sh start    # default; build, install, start
-#   bash scripts/bridge-setup.sh stop
-#   bash scripts/bridge-setup.sh status
-#   bash scripts/bridge-setup.sh restart
+#   bash scripts/bridge-setup.sh [install-id]
 
 set -euo pipefail
 
@@ -27,68 +29,23 @@ source "$SCRIPT_DIR/lib/tawc-exec.sh"
 # shellcheck source=lib/tawc-install-id.sh
 source "$SCRIPT_DIR/lib/tawc-install-id.sh"
 
-ACTION="${1:-start}"
-
 ROOTFS_DIR="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/rootfs"
-SOCKET_GUEST_PATH="/tmp/kumquat-gpu-0"
-
-GFXSTREAM_LIB="$REPO_DIR/build/gfxstream-android/libgfxstream_backend.so"
-KUMQUAT_BIN="$REPO_DIR/build/kumquat-server-android/kumquat"
 MESA_LIB="$REPO_DIR/build/mesa-aarch64/install/usr/local/lib/libvulkan_gfxstream.so"
 MESA_ICD="$REPO_DIR/build/mesa-aarch64/install/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json"
 
-case "$ACTION" in
-    start|restart)
-        # Build artefacts (idempotent — each script's incremental).
-        for f in "$GFXSTREAM_LIB" "$KUMQUAT_BIN" "$MESA_LIB" "$MESA_ICD"; do
-            if [ ! -f "$f" ]; then
-                echo "==> missing $f — building everything"
-                bash "$SCRIPT_DIR/build-mesa-gfxstream.sh"
-                bash "$SCRIPT_DIR/build-gfxstream-backend.sh"
-                bash "$SCRIPT_DIR/build-kumquat-server.sh"
-                break
-            fi
-        done
+if [ ! -f "$MESA_LIB" ] || [ ! -f "$MESA_ICD" ]; then
+    echo "==> building mesa-gfxstream (libvulkan_gfxstream.so + ICD)"
+    bash "$SCRIPT_DIR/build-mesa-gfxstream.sh"
+fi
 
-        # libvulkan_gfxstream.so + ICD JSON live inside the rootfs at
-        # /usr/local/. Until [BridgeInstallProvider] (Phase 1.2) ships,
-        # drop them in via the broker (runs as the app uid, owns the
-        # rootfs tree).
-        echo "==> staging libvulkan_gfxstream.so + ICD into rootfs"
-        DEVICE_STAGE_DIR="$TAWC_SCRATCH/bridge-stage"
-        adb shell "mkdir -p $DEVICE_STAGE_DIR" >/dev/null
-        adb push "$MESA_LIB" "$MESA_ICD" "$DEVICE_STAGE_DIR/" >/dev/null
-        "$TAWC_EXEC_BIN" /system/bin/sh -c "
-            mkdir -p $ROOTFS_DIR/usr/local/lib $ROOTFS_DIR/usr/local/share/vulkan/icd.d &&
-            cp $DEVICE_STAGE_DIR/libvulkan_gfxstream.so $ROOTFS_DIR/usr/local/lib/ &&
-            cp $DEVICE_STAGE_DIR/gfxstream_vk_icd.aarch64.json $ROOTFS_DIR/usr/local/share/vulkan/icd.d/
-        " >/dev/null
+echo "==> staging libvulkan_gfxstream.so + ICD into $ROOTFS_DIR"
+DEVICE_STAGE_DIR="$TAWC_SCRATCH/bridge-stage"
+adb shell "mkdir -p $DEVICE_STAGE_DIR" >/dev/null
+adb push "$MESA_LIB" "$MESA_ICD" "$DEVICE_STAGE_DIR/" >/dev/null
+"$TAWC_EXEC_BIN" /system/bin/sh -c "
+    mkdir -p $ROOTFS_DIR/usr/local/lib $ROOTFS_DIR/usr/local/share/vulkan/icd.d &&
+    cp $DEVICE_STAGE_DIR/libvulkan_gfxstream.so $ROOTFS_DIR/usr/local/lib/ &&
+    cp $DEVICE_STAGE_DIR/gfxstream_vk_icd.aarch64.json $ROOTFS_DIR/usr/local/share/vulkan/icd.d/
+" >/dev/null
 
-        if [ "$ACTION" = "restart" ]; then
-            echo "==> stopping existing daemon"
-            "$TAWC_EXEC_BIN" --action stop-bridge-daemon || true
-        fi
-
-        echo "==> starting kumquat (socket=$SOCKET_GUEST_PATH inside rootfs)"
-        "$TAWC_EXEC_BIN" --action start-bridge-daemon --arg "install=$TAWC_INSTALL_ID"
-        ;;
-
-    stop)
-        echo "==> stopping kumquat"
-        "$TAWC_EXEC_BIN" --action stop-bridge-daemon
-        ;;
-
-    status)
-        adb shell "pidof kumquat 2>/dev/null && echo RUNNING || echo NOT_RUNNING"
-        if "$TAWC_EXEC_BIN" /system/bin/sh -c "test -S $ROOTFS_DIR$SOCKET_GUEST_PATH" >/dev/null 2>&1; then
-            echo "socket present at $ROOTFS_DIR$SOCKET_GUEST_PATH"
-        else
-            echo "socket missing"
-        fi
-        ;;
-
-    *)
-        echo "Usage: $0 {start|stop|status|restart}" >&2
-        exit 1
-        ;;
-esac
+echo "==> done. The kumquat server runs in the compositor process; nothing else to start."

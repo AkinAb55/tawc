@@ -282,47 +282,42 @@ tawcAbis.forEach { abi ->
     }
 }
 
-// Cross-build the gfxstream-bridge daemon (kumquat + libgfxstream_backend)
-// for aarch64 and stage them as `lib*.so` under jniLibs/. Aarch64-only:
-// libhybris's bridge backend doesn't exist on x86_64 emulator targets
-// the same way, and the cross-build sysroot is aarch64-shaped. The
-// daemon binary lands as `libkumquat.so` (the jniLib trick — Android
-// extracts files matching `lib*.so` to `nativeLibraryDir` with the
-// `apk_data_file` SELinux label, the only file label `untrusted_app`
-// is allowed to `execute`). Co-located `libgfxstream_backend.so` and
-// `libc++_shared.so` are real shared libs; the broker spawns kumquat
-// with `LD_LIBRARY_PATH=<nativeLibraryDir>` so the dynamic linker
-// resolves them. Same trick proot/Xwayland already use.
+// Cross-build the gfxstream host renderer (libgfxstream_backend.so) for
+// the aarch64 NDK and stage it under jniLibs/ alongside libcompositor.so.
+// Aarch64-only: the cross-build sysroot is aarch64-shaped and we don't
+// support the bridge on x86_64 yet (libhybris is the path there).
 //
-// See app/src/main/java/me/phie/tawc/dev/BridgeActions.kt for the
-// SELinux/SCM_RIGHTS rationale ("Why kumquat must run as untrusted_app").
+// libcompositor.so links against `gfxstream_backend` via the
+// `kumquat_virtio` dep (compositor/Cargo.toml, target-gated to aarch64),
+// which expects to find the .so at the path in `GFXSTREAM_PATH_RELEASE`.
+// The kumquat server itself runs as a thread of the compositor process —
+// no separate daemon, no broker plumbing. See notes/gfxstream-bridge.md.
 if ("arm64-v8a" in tawcAbis) {
     val tawcRoot = rootProject.projectDir
-    val bridgeAbi = "arm64-v8a"
-    val bridgeJniLibsDir = "$tawcRoot/app/src/main/jniLibs/$bridgeAbi"
-    val kumquatBin = "$bridgeJniLibsDir/libkumquat.so"
+    val bridgeJniLibsDir = "$tawcRoot/app/src/main/jniLibs/arm64-v8a"
     val gfxstreamLib = "$bridgeJniLibsDir/libgfxstream_backend.so"
     val libcppLib = "$bridgeJniLibsDir/libc++_shared.so"
 
-    val buildBridgeTask = tasks.register<Exec>("buildBridge") {
+    val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        // build-kumquat-server.sh internally checks for
-        // libgfxstream_backend.so and runs build-gfxstream-backend.sh
-        // if missing — so this one entry point covers both.
-        commandLine("bash", "scripts/build-kumquat-server.sh")
-        inputs.file("$tawcRoot/scripts/build-kumquat-server.sh")
+        commandLine("bash", "scripts/build-gfxstream-backend.sh")
         inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
         inputs.dir("$tawcRoot/deps/gfxstream-patches")
-        inputs.dir("$tawcRoot/deps/rutabaga-patches")
-        // Pin bumps in deps/deps.list (gfxstream, rutabaga_gfx) must
-        // invalidate the cache.
+        // Pin bumps in deps/deps.list (gfxstream) must invalidate.
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        outputs.files(kumquatBin, gfxstreamLib, libcppLib)
+        outputs.files(gfxstreamLib, libcppLib)
     }
-    tasks.named("preBuild") {
-        dependsOn(buildBridgeTask)
+
+    // The aarch64 cargo build needs the .so present *and* its location
+    // in `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the
+    // right `-L` / `-l` flags. We extend the existing `buildRustLibrary`
+    // task there (registered above in the per-ABI loop) instead of
+    // duplicating the cross-build wrapper.
+    tasks.named<Exec>("buildRustLibraryArm64-v8a") {
+        dependsOn(buildGfxstreamBackendTask)
+        environment("GFXSTREAM_PATH_RELEASE", "$tawcRoot/build/gfxstream-android")
     }
 }
 

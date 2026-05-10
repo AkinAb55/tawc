@@ -59,11 +59,14 @@ enum class GraphicsBackend(val key: String, val displayName: String, val tagline
     LIBHYBRIS("libhybris", "libhybris", "fastest"),
 
     /**
-     * Forward GL/Vulkan command streams to an Android-side gfxstream
-     * renderer over the kumquat Unix socket. No vendor blob inside
-     * the chroot — slightly slower per-call, but much more robust to
-     * vendor / Android-version drift. Requires the kumquat daemon
-     * to be running (today: `bash scripts/bridge-setup.sh start`).
+     * Forward GL/Vulkan command streams to an in-compositor-process
+     * gfxstream renderer over a kumquat AF_UNIX socket. No vendor
+     * blob inside the chroot — slightly slower per-call, but much
+     * more robust to vendor / Android-version drift. The kumquat
+     * server runs as a thread of the compositor app (always on),
+     * so there's no daemon to start; only the chroot-side
+     * libvulkan_gfxstream.so + ICD JSON need to be staged into the
+     * rootfs (today: `bash scripts/bridge-setup.sh`).
      */
     GFXSTREAM("gfxstream", "gfxstream", "fast, reliable");
 
