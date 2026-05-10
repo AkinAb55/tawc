@@ -7,11 +7,16 @@
  *      `..`, clamps at root, applies the well-known-symlink memo
  *      (mode-gated for sole-component leaves), and resolves bind
  *      mounts.
- *   3. Issues the host syscall against (base_fd, suffix). For
- *      openat, on kernel ≥5.6 we route through openat2 with
- *      RESOLVE_IN_ROOT so the kernel handles arbitrary non-final-
- *      component symlinks (incl. absolute targets) by re-rooting
- *      resolution at base_fd.
+ *   3. Issues the host syscall against (base_fd, suffix). Symlink
+ *      resolution is left to the kernel for the leaf component, with
+ *      tawcroot_path_resolve_symlinks pre-walking non-leaf in-rootfs
+ *      symlinks so absolute targets fold back through the bind table.
+ *      We deliberately do NOT use openat2 with RESOLVE_IN_ROOT: when
+ *      base_fd is a bind src dirfd, RESOLVE_IN_ROOT re-roots an
+ *      absolute symlink target at the bind src, breaking symlinks
+ *      whose target lives in a different bind (e.g. Android's
+ *      /system/lib64/libc.so → /apex/com.android.runtime/lib64/bionic/
+ *      libc.so).
  *
  * Argument shape per arch is in tawcroot_syscall_args (see arch.h):
  *   args.a = arg0 (kernel reg 0), .b = arg1, ...
@@ -217,32 +222,20 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * only landed in 6.6, kernel 5.4 device doesn't have it). */
 	const char *p = use_empty ? "." : suffix;
 
-	/* On kernel ≥ 5.6, route through openat2 with RESOLVE_IN_ROOT.
-	 * The kernel then handles arbitrary in-rootfs symlinks (including
-	 * absolute targets that would otherwise escape) by re-rooting them
-	 * at base_fd. When base_fd is a bind src (not the rootfs root),
-	 * RESOLVE_IN_ROOT clamps at the bind src — guest can't `..` back
-	 * into the rootfs view through the bind, mirroring mount-namespace
-	 * semantics. Older kernels stay on the string-fold + well-known-
-	 * memo path, which handles the typical glibc-rootfs `/lib`-style
-	 * symlinks but not arbitrary ones. */
-	if (tawcroot_openat2_works) {
-		struct tawc_open_how how;
-		how.flags = (uint64_t)(uint32_t)flags;
-		/* The kernel rejects open_how with non-zero `mode` when no
-		 * creation flag is set. Mirror libc's discipline.
-		 *
-		 * O_TMPFILE is `__O_TMPFILE | O_DIRECTORY`; checking via plain
-		 * bitwise AND on O_TMPFILE would also match plain O_DIRECTORY,
-		 * so test for both bits. (Review finding B8.) */
-		int has_create   = (flags & O_CREAT) != 0;
-		int has_tmpfile  = (flags & __O_TMPFILE) == __O_TMPFILE &&
-				   (flags & O_DIRECTORY) == O_DIRECTORY;
-		how.mode = (has_create || has_tmpfile)
-			? (uint64_t)(uint32_t)mode : 0;
-		how.resolve = TAWC_RESOLVE_IN_ROOT;
-		return tawc_openat2(base_fd, p, &how, sizeof how);
-	}
+	/* Plain openat — the kernel chases a leaf symlink against the
+	 * process's actual fs root. Non-leaf in-rootfs symlinks are
+	 * pre-folded by tawcroot_path_resolve_symlinks during translate
+	 * (path_orchestrate.c), so by here `suffix` no longer contains
+	 * unresolved rootfs-side directory components.
+	 *
+	 * We don't use openat2 with RESOLVE_IN_ROOT: that would clamp
+	 * absolute symlink targets at base_fd, but when base_fd is a
+	 * bind src dirfd a leaf symlink whose target points into a
+	 * *different* bind (e.g. /system/lib64/libc.so →
+	 * /apex/com.android.runtime/lib64/bionic/libc.so on Android)
+	 * needs the kernel to follow through the host root, not the
+	 * bind src. See test_prod_rootfs.c::prod_rootfs_cross_bind_abs_symlink
+	 * and notes/tawcroot.md "Cross-bind absolute symlinks". */
 	return tawc_openat(base_fd, p, flags, mode);
 }
 
@@ -513,8 +506,8 @@ static long dirfd_to_guest_abs(int dirfd, char *out, size_t out_cap)
  * syscall with `dirfd` and the literal path.
  *
  * Special case: a relative path containing `..` would let the kernel
- * walk above the dirfd, which on kernel < 5.6 (no openat2 RESOLVE_IN_ROOT)
- * leaks the host filesystem when the dirfd sits at the rootfs root.
+ * walk above the dirfd and leak the host filesystem when the dirfd
+ * sits at the rootfs root.
  * Reproducer: systemd's `path_is_root_at(rootfs_fd, NULL)` opens
  * `(rootfs_fd, "..")`, gets the host's parent of the rootfs, compares
  * inodes against rootfs_fd, sees a mismatch, concludes "not at root",

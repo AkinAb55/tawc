@@ -1,57 +1,29 @@
 /* Manual symlink-aware path canonicalization.
  *
- * =======================================================================
- *  WHY THIS EXISTS
- * =======================================================================
+ * tawcroot is not actually `chroot()`'d, so an in-rootfs symlink with
+ * an *absolute* target (e.g. `/etc/host-secret -> /etc/passwd`) would
+ * otherwise escape our rootfs view: the kernel would resolve the
+ * absolute target against the host root, not against
+ * `tawcroot_rootfs_fd`. This resolver pre-walks non-leaf rootfs-side
+ * symlinks during translate, splicing absolute targets back through
+ * the rootfs-fd-relative form so by the time the result reaches the
+ * kernel-side syscall the path is already clamped.
  *
- * Linux kernel <5.6 does not have `openat2(RESOLVE_IN_ROOT)`. Without
- * it, an in-rootfs symlink with an *absolute* target (e.g.
- * `/etc/host-secret -> /etc/passwd`) escapes our rootfs view, because
- * we are not actually `chroot()`'d: the kernel resolves the absolute
- * target against the host root, not against `tawcroot_rootfs_fd`.
+ * The leaf component is left to the kernel — for paths that route
+ * through a bind src_fd the kernel does the right thing (chases the
+ * leaf symlink against the host root, where binds expose real host
+ * paths). For paths inside the rootfs the resolver also walks the
+ * leaf when mode==FOLLOW, so the kernel never sees an unclamped
+ * rootfs-internal absolute symlink.
  *
- * Our primary device (OnePlus 9, Android 14, kernel 5.4.284) is in
- * this category. Manual symlink resolution is therefore correctness-
- * required there, not optional.
- *
- * On kernel >=5.6 we still call into this resolver. The kernel's
- * `openat2(RESOLVE_IN_ROOT)` would do equivalent clamping inside the
- * `openat` handler, but running our resolver first means *every*
- * path-bearing handler (`fstatat`, `readlinkat`, `unlinkat`, ...)
- * gets the same clamping discipline regardless of kernel version. The
- * cost is a few extra `readlinkat` calls per non-cached path; the
- * well-known-symlink memo absorbs the hot-path glibc rootfs symlinks
- * (`/lib`, `/lib64`, ...) so the typical request hits zero
- * resolver-issued readlinks.
- *
- * The well-known-symlink memo in `path.c` is intentionally NOT here:
- * it is also a perf optimization on kernels that have `openat2`, so
- * it stays even if this file goes away.
- *
- * =======================================================================
- *  HOW TO DROP THIS WHEN OUR MIN KERNEL BECOMES 5.6+
- * =======================================================================
- *
- *   1. Delete `tawcroot/src/path_resolve.c`.
- *   2. Delete `tawcroot/include/path_resolve.h` and `path_oracle.h`.
- *   3. In `tawcroot/src/path.c`, remove the `#include "path_resolve.h"`,
- *      the production oracle (`prod_*`), and the call to
- *      `tawcroot_path_resolve_symlinks(...)` inside
- *      `tawcroot_path_translate()`. (One call site, marked `LEGACY-5.4`.)
- *   4. Remove `path_resolve.c` from `tawcroot/Makefile`'s `PROD_C` /
- *      `PROD_C_FOR_TESTS` and from `tawcroot/build`'s
- *      `SRC_C_PROD`.
- *   5. Delete `tawcroot/tests/unit/test_path_resolve.c`.
- *   6. In `tawcroot/tests/testhost/src/phase1.c`, re-gate the absolute-symlink
- *      escape test on `tawcroot_openat2_works` (it once was, before
- *      this resolver landed) and audit each non-`openat` path-bearing
- *      handler for symlink-clamp coverage; on >=5.6-only the only
- *      handler currently routing through `openat2(RESOLVE_IN_ROOT)`
- *      is `handle_openat`, so the others would need either explicit
- *      `openat2(O_PATH | RESOLVE_IN_ROOT)` canonicalization or a
- *      different design.
- *
- * =======================================================================
+ * History note: an earlier design conditionally swapped this resolver
+ * out for `openat2(RESOLVE_IN_ROOT)` inside `handle_openat` on kernel
+ * >=5.6. That broke cross-bind absolute symlinks (Android's
+ * `/system/lib64/libc.so → /apex/com.android.runtime/lib64/bionic/`
+ * `libc.so` — the absolute target was re-rooted at the bind src
+ * dirfd). The resolver is now the single contract regardless of
+ * kernel version, and `handle_openat` always uses plain
+ * `tawc_openat`. See test_prod_rootfs.c::prod_rootfs_cross_bind_abs_symlink.
  */
 
 #pragma once

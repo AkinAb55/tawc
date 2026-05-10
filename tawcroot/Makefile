@@ -307,6 +307,15 @@ $(OUT)/programs/static_open_creat_argv1: $(SRC_TS)/integration/programs/static_o
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
 
+# static_open_rdonly_argv1: like static_open_creat_argv1 but O_RDONLY.
+# Used by the cross-bind absolute-symlink regression test in
+# test_prod_rootfs.c — argv[1] is a symlink in bind A whose target is
+# in bind B; success means the kernel chased the absolute target out
+# of the bind src and into the right place.
+$(OUT)/programs/static_open_rdonly_argv1: $(SRC_TS)/integration/programs/static_open_rdonly_argv1_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+
 # static_sleep_open_creat_argv1: like static_open_creat_argv1 but with a
 # 1 s nanosleep before the open. The PDEATHSIG regression test in
 # test_exec_child.c uses the sleep window to force-fire pdeath_signal

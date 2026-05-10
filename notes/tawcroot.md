@@ -914,16 +914,23 @@ Then apply these rules to the guest-absolute path `P`:
    `*statat`/`readlinkat`/etc the flag is well-supported and fine.
    (Confirmed empirically on Android 16 / kernel 6.6 emulator.)
 
-   **Optional optimization for kernel ≥ 5.6:** for `openat`
-   specifically, use `openat2` with `RESOLVE_IN_ROOT` to let the
-   kernel do the clamping (kernel treats our rootfs fd as `/`,
-   `..` at the top stays at the top, absolute symlinks resolve
-   relative to the rootfs fd). Probe for `openat2` at init with
-   a single call; if it returns `-ENOSYS`, fall back to manual
-   canonicalization for all paths. **Our primary test device
-   (OnePlus 9, Android 14, kernel 5.4) predates `openat2`**, so
-   manual canonicalization is the primary code path and must be
-   correct and fast on its own.
+   **No `openat2(RESOLVE_IN_ROOT)` shortcut.** An earlier design
+   conditionally used `openat2` with `RESOLVE_IN_ROOT` inside
+   `handle_openat` on kernel ≥ 5.6 to let the kernel re-root
+   absolute symlink targets at `base_fd`. That broke cross-bind
+   absolute symlinks: when `base_fd` is a bind src dirfd, an
+   absolute symlink target (e.g. Android's `/system/lib64/libc.so
+   → /apex/com.android.runtime/lib64/bionic/libc.so`) gets
+   re-rooted at the bind src instead of the host root, so
+   `<bind_src>/apex/...` is opened, fails with `ENOENT`, and the
+   guest sees "library not found". Specifically: this silently
+   broke libhybris's bionic-libc load on Pixel 10 Pro Fold (kernel
+   ≥ 5.6) while older devices like the Pixel 4a (kernel 4.14, no
+   `openat2`) worked. The manual resolver is now the single
+   contract regardless of kernel version, and `handle_openat`
+   always uses plain `tawc_openat`. Regression test:
+   `prod_rootfs_cross_bind_abs_symlink` in
+   `tests/integration/test_prod_rootfs.c`.
 
    This is not a security boundary — see §"What it explicitly is
    not" — but it stops accidental escapes (build scripts, config
@@ -1715,10 +1722,10 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── loader_jump.h   # asm-only stack-pivot + final jump to ld.so/_start
 │   ├── loader_map.h    # mmap/mprotect of PT_LOADs, AT_PHDR computation
 │   ├── loader_stack.h  # synthesize argv/envp/auxv on a fresh stack
-│   ├── path.h          # translator, modes, bind table, openat2 probe
+│   ├── path.h          # translator, modes, bind table
 │   ├── path_oracle.h   # readlink/openat oracle interface used by resolver
 │   ├── path_resolve.h  # symlink walker — operates against an oracle
-│   ├── raw_sys.h       # tawc_<syscall> wrappers + open_how struct
+│   ├── raw_sys.h       # tawc_<syscall> wrappers
 │   ├── sysnr.h         # per-arch syscall numbers
 │   └── usercopy.h      # process_vm_readv-based guarded copy
 ├── src/                                # production sources — no test scaffolding
@@ -1731,7 +1738,7 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── strings.c       # pure libc-free str/mem helpers — also linked into the
 │   │                   #   cleat test runner under hosted glibc for unit tests
 │   │                   #   (tawcroot/tests/unit/test_strings.c)
-│   ├── path.c          # translate(), reverse-translate, bind table, memo, openat2 probe
+│   ├── path.c          # translate(), reverse-translate, bind table, memo
 │   ├── path_fold.c     # absolute-path folder (`.`/`..`/empty/`//`) — pure
 │   ├── path_orchestrate.c # fold→bind→memo→resolve→bind staging, binds_reanchor — pure
 │   ├── path_resolve.c  # symlink walker — pure, oracle-driven

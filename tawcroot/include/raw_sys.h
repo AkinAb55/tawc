@@ -81,30 +81,6 @@ static inline long tawc_readlinkat(int dirfd, const char *path,
 static inline long tawc_getdents64(int fd, void *buf, size_t n)
 { return TAWC_RAW(TAWC_SYS_getdents64, fd, (long)buf, (long)n, 0, 0, 0); }
 
-/* openat2 (kernel ≥ 5.6). Same shape as openat but takes a struct
- * open_how instead of bare flags+mode, and supports `resolve` flags
- * including RESOLVE_IN_ROOT — the kernel's chroot-equivalent path
- * resolution mode. We use it for generic non-final-component symlink
- * resolution: under RESOLVE_IN_ROOT, absolute symlink targets
- * encountered during walk are reinterpreted relative to dirfd, and
- * `..` past dirfd stays at dirfd. Probe at init via
- * tawcroot_openat2_works; older kernels stay on the string-fold +
- * well-known-memo path. */
-struct tawc_open_how {
-	uint64_t flags;
-	uint64_t mode;
-	uint64_t resolve;
-};
-
-#define TAWC_RESOLVE_BENEATH      0x08
-#define TAWC_RESOLVE_IN_ROOT      0x10
-#define TAWC_RESOLVE_NO_SYMLINKS  0x04
-
-static inline long tawc_openat2(int dirfd, const char *path,
-				const struct tawc_open_how *how, size_t size)
-{ return TAWC_RAW(TAWC_SYS_openat2, dirfd, (long)path, (long)how,
-		  (long)size, 0, 0); }
-
 /* mmap / mprotect / munmap / pread / getrandom — used by the manual
  * ELF loader (loader_io_prod.c) and elsewhere as needed. The loader
  * doesn't include raw_sys.h directly; it goes through a vtable so it

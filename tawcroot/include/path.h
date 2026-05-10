@@ -235,18 +235,3 @@ extern size_t tawcroot_self_host_path_len;
  * clears our globals and the fresh incarnation needs the path
  * re-stashed). Idempotent. */
 void tawcroot_init_self_host_path(void);
-
-/* Probe whether the kernel supports `openat2(2)` (≥5.6). Sets
- * `tawcroot_openat2_works` to 1 on success, 0 on failure. Call
- * BEFORE the seccomp filter goes up — the probe issues an openat2
- * directly, which would otherwise TRAP through our handler (we don't
- * dispatch openat2 yet, so the handler would 0-ENOSYS it, falsely
- * indicating no kernel support).
- *
- * When `tawcroot_openat2_works` is 1, the openat handler routes
- * through openat2 with RESOLVE_IN_ROOT, which fixes generic non-
- * final-component symlink resolution for free (kernel handles symlink
- * walks and `..`-clamp inside the rootfs fd). On older kernels the
- * handler falls back to the string-fold + well-known-memo path. */
-extern int tawcroot_openat2_works;
-void tawcroot_path_probe_openat2(void);

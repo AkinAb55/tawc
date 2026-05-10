@@ -296,7 +296,7 @@ tawcroot_path_result tawcroot_path_translate_with_ctx(
 		if (rf < 0) { r.err = rf; return r; }
 	}
 
-	/* LEGACY-5.4: manual symlink resolver. See path_resolve.h banner. */
+	/* Manual symlink resolver. See path_resolve.h banner. */
 	if (ctx->oracle) {
 		long er = tawcroot_path_resolve_symlinks(out_suffix, out_cap,
 							 mode, ctx->oracle);

@@ -50,8 +50,6 @@ size_t tawcroot_guest_exe_path_len      = 0;
 char   tawcroot_self_host_path[4096]    = {0};
 size_t tawcroot_self_host_path_len      = 0;
 
-int    tawcroot_openat2_works           = 0;
-
 void tawcroot_set_guest_exe_path(const char *path)
 {
 	if (!path) {
@@ -141,21 +139,6 @@ long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap)
 	while (n > 1 && out[n - 1] == '/') n--;
 	out[n] = 0;
 	return n;
-}
-
-void tawcroot_path_probe_openat2(void)
-{
-	struct tawc_open_how how;
-	how.flags   = 0x200000 /*O_PATH*/ | 0x80000 /*O_CLOEXEC*/;
-	how.mode    = 0;
-	how.resolve = TAWC_RESOLVE_IN_ROOT;
-	long fd = tawc_openat2(AT_FDCWD, "/", &how, sizeof how);
-	if (fd >= 0) {
-		tawcroot_openat2_works = 1;
-		(void)TAWC_RAW(TAWC_SYS_close, fd, 0, 0, 0, 0, 0);
-	} else {
-		tawcroot_openat2_works = 0;
-	}
 }
 
 /* Well-known-symlink memoization. After fold_absolute, the orchestrator

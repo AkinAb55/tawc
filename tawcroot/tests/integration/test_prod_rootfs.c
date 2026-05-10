@@ -15,11 +15,12 @@
  *   - non-existent guest under -r returns the loader open-failed code
  */
 
+#define _GNU_SOURCE
+
 #include <cleat/test.h>
 #include <cleat/subproc.h>
 #include <stc/cstr.h>
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -47,6 +48,9 @@
 #endif
 #ifndef TAWCROOT_STATIC_EXECVE_EXIT42_BIN
 # error "TAWCROOT_STATIC_EXECVE_EXIT42_BIN must be defined"
+#endif
+#ifndef TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN
+# error "TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN must be defined"
 #endif
 
 #ifndef TAWCROOT_TEST_TMPDIR
@@ -246,5 +250,156 @@ test(prod_rootfs_dotdot_clamps_at_root)
 	};
 	test_int_eq(run_with(args), 42);
 
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* Cross-bind absolute symlink: a symlink that lives in bind A whose
+ * absolute target is a real host path must follow through to that
+ * host file. This is the Pixel-10-Pro-Fold libhybris regression:
+ * `/system/lib64/libc.so → /apex/com.android.runtime/lib64/bionic/libc.so`
+ * with same-path binds for both `/system` and `/apex`. With openat2 +
+ * RESOLVE_IN_ROOT the kernel re-roots the absolute target at bind A's
+ * src_fd looking for `<bindA>/<absolute>` and returns ENOENT — older
+ * kernels without openat2 (e.g. Pixel 4a's 4.14) fall through to plain
+ * openat, which chases the absolute target via the host root and
+ * works.
+ *
+ * Same-path binds (this test) match Android's actual /system→/system,
+ * /apex→/apex layout. A companion test
+ * (prod_rootfs_cross_bind_abs_symlink_different_paths) verifies that
+ * the contract isn't "src must equal dst" — it's "target must be a
+ * real host path".
+ *
+ * Layout:
+ *   <bind_a>/link.txt → <bind_b>/target.txt   (absolute, real host path)
+ *   <bind_b>/target.txt                       (real file)
+ *   tawcroot args: -b <bind_a>:<bind_a> -b <bind_b>:<bind_b>
+ *
+ * The fixture opens its argv[1] read-only and exits 0 on success / 201
+ * on open failure. We launch it as `/bin/static_open_rdonly_argv1
+ * <bind_a>/link.txt` so the symlink chase happens inside the guest's
+ * openat, which is the broken code path. Pre-bug: 201. Post-fix: 0.
+ */
+test(prod_rootfs_cross_bind_abs_symlink)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+
+	char bind_a[PATH_MAX];
+	char bind_b[PATH_MAX];
+	snprintf(bind_a, sizeof bind_a,
+	         TAWCROOT_TEST_TMPDIR "/tawcroot-test-prod-bind-a");
+	snprintf(bind_b, sizeof bind_b,
+	         TAWCROOT_TEST_TMPDIR "/tawcroot-test-prod-bind-b");
+	rh_rmrf(bind_a);
+	rh_rmrf(bind_b);
+	test_true(rh_mkdir_p(bind_a, 0755));
+	test_true(rh_mkdir_p(bind_b, 0755));
+
+	/* The host fixture binary lives in <FAKE_ROOTFS>/bin/, copied by
+	 * build_rootfs above as /bin/static_open_rdonly_argv1. */
+	char fixture[PATH_MAX];
+	snprintf(fixture, sizeof fixture,
+	         "%s/bin/static_open_rdonly_argv1", FAKE_ROOTFS);
+	test_true(rh_copy_file(TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN,
+	                       fixture, 0755));
+
+	char target[PATH_MAX];
+	snprintf(target, sizeof target, "%s/target.txt", bind_b);
+	test_true(rh_write_text(target, "ok\n"));
+
+	char link[PATH_MAX];
+	snprintf(link, sizeof link, "%s/link.txt", bind_a);
+	test_true(symlink(target, link) == 0);
+
+	/* Same-path binds (src == dst), matching Android's /system→/system
+	 * and /apex→/apex layout. */
+	char ba_spec[PATH_MAX];
+	char bb_spec[PATH_MAX];
+	snprintf(ba_spec, sizeof ba_spec, "%s:%s", bind_a, bind_a);
+	snprintf(bb_spec, sizeof bb_spec, "%s:%s", bind_b, bind_b);
+
+	char guest_link[PATH_MAX];
+	snprintf(guest_link, sizeof guest_link, "%s/link.txt", bind_a);
+
+	const char *args[] = {
+		"-r", FAKE_ROOTFS,
+		"-b", ba_spec,
+		"-b", bb_spec,
+		"--", "/bin/static_open_rdonly_argv1", guest_link, NULL
+	};
+	test_int_eq(run_with(args), 0);
+
+	rh_rmrf(bind_a);
+	rh_rmrf(bind_b);
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* Like prod_rootfs_cross_bind_abs_symlink but with *different-path*
+ * binds. The contract isn't "bind src must equal bind dst" — it's "the
+ * symlink's absolute target must be a real host path the kernel can
+ * follow from /". With `-b <bind_a_host>:/dst_a -b <bind_b_host>:/dst_b`
+ * and a symlink at `<bind_a_host>/link.txt → <bind_b_host>/target.txt`
+ * (absolute, real host path), opening `/dst_a/link.txt` should still
+ * succeed: the kernel chases the absolute target through the host
+ * filesystem, doesn't care that the path text never appears in the
+ * guest view.
+ *
+ * This pins down the actual contract — see notes/tawcroot.md
+ * §"No `openat2(RESOLVE_IN_ROOT)` shortcut". The case that *isn't*
+ * supported is a symlink whose target is a guest-view-only path
+ * (e.g. /dst_b/...) where the underlying host path differs; that
+ * would need the manual resolver to walk leaf symlinks across bind
+ * boundaries and we don't currently do that.
+ */
+test(prod_rootfs_cross_bind_abs_symlink_different_paths)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+
+	char bind_a[PATH_MAX];
+	char bind_b[PATH_MAX];
+	snprintf(bind_a, sizeof bind_a,
+	         TAWCROOT_TEST_TMPDIR "/tawcroot-test-prod-bind-a-diff");
+	snprintf(bind_b, sizeof bind_b,
+	         TAWCROOT_TEST_TMPDIR "/tawcroot-test-prod-bind-b-diff");
+	rh_rmrf(bind_a);
+	rh_rmrf(bind_b);
+	test_true(rh_mkdir_p(bind_a, 0755));
+	test_true(rh_mkdir_p(bind_b, 0755));
+
+	char fixture[PATH_MAX];
+	snprintf(fixture, sizeof fixture,
+	         "%s/bin/static_open_rdonly_argv1", FAKE_ROOTFS);
+	test_true(rh_copy_file(TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN,
+	                       fixture, 0755));
+
+	char target[PATH_MAX];
+	snprintf(target, sizeof target, "%s/target.txt", bind_b);
+	test_true(rh_write_text(target, "ok\n"));
+
+	char link[PATH_MAX];
+	snprintf(link, sizeof link, "%s/link.txt", bind_a);
+	test_true(symlink(target, link) == 0);
+
+	/* Different-path binds: bind src is the host tmp dir, bind dst is
+	 * a synthetic /dst_a, /dst_b inside the rootfs view. The symlink
+	 * target text (host path) doesn't appear anywhere in the guest
+	 * view — it's resolved by the kernel through the host root. */
+	char ba_spec[PATH_MAX];
+	char bb_spec[PATH_MAX];
+	snprintf(ba_spec, sizeof ba_spec, "%s:/dst_a", bind_a);
+	snprintf(bb_spec, sizeof bb_spec, "%s:/dst_b", bind_b);
+
+	const char *args[] = {
+		"-r", FAKE_ROOTFS,
+		"-b", ba_spec,
+		"-b", bb_spec,
+		"--", "/bin/static_open_rdonly_argv1", "/dst_a/link.txt", NULL
+	};
+	test_int_eq(run_with(args), 0);
+
+	rh_rmrf(bind_a);
+	rh_rmrf(bind_b);
 	rh_rmrf(FAKE_ROOTFS);
 }

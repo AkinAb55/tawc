@@ -654,11 +654,10 @@ static int test_dotdot_via_bind_dst_dirfd(void)
  * and the second-pass translate routes back through the bind so `..`
  * clamps at the bind-dst boundary.
  *
- * We probe via faccessat(F_OK), not openat: the openat handler routes
- * through openat2(RESOLVE_IN_ROOT) on kernels ≥ 5.6 which incidentally
- * clamps `..` at base_fd, so an openat probe wouldn't exercise this
- * code path. faccessat (and other *at syscalls) forwards verbatim,
- * making it the right vector for a regression test. */
+ * We probe via faccessat(F_OK) rather than openat — both go through
+ * the same fetch_and_translate_at lift today, but faccessat is the
+ * narrower test (it can't accidentally succeed via O_CREAT or any
+ * open-time side effect). */
 static int test_dotdot_via_bind_dst_does_not_escape_to_host(void)
 {
 	int fails = 0;
@@ -1357,11 +1356,9 @@ static int test_truncate_create_and_resize(void)
  * `/etc/host-secret` as an absolute symlink -> `/etc/passwd`. The
  * manual resolver in path_resolve.c clamps absolute symlink targets
  * at the rootfs (so `/etc/passwd` is re-rooted at <rootfs>/etc/passwd,
- * which doesn't exist in the fake rootfs -> ENOENT). This must work
- * on every kernel we target; on >=5.6 the kernel's
- * openat2(RESOLVE_IN_ROOT) does the same job in handle_openat too,
- * but the resolver runs unconditionally so all path-bearing handlers
- * (fstatat, readlinkat, ...) get the same clamping. */
+ * which doesn't exist in the fake rootfs -> ENOENT). The resolver
+ * runs unconditionally during translate, so this clamping is uniform
+ * across all path-bearing handlers (openat, fstatat, readlinkat, …). */
 static int test_openat_abs_symlink_resolver_clamps(void)
 {
 	int fails = 0;
@@ -3777,22 +3774,6 @@ int tawcroot_phase1_main(const char *rootfs)
 		(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 1 /*SIG_UNBLOCK*/,
 		               (long)&bit_sigsys, 0, 8, 0, 0);
 	}
-
-	/* Probe openat2 (kernel ≥ 5.6). Sets `tawcroot_openat2_works` so
-	 * the openat handler can route through openat2 with RESOLVE_IN_ROOT
-	 * for generic non-final-component symlink resolution.
-	 *
-	 * Must run AFTER install_handler — Android's untrusted_app filter
-	 * RET_TRAPs openat2 (NR 437); the synthesized-Android-filter test
-	 * wrapper does the same. With the handler installed, the trap
-	 * dispatches to "no slot → -ENOSYS" (since openat2 isn't in our
-	 * dispatch table) and the probe interprets that as "openat2
-	 * unavailable, fall back to manual canonicalization". Without the
-	 * handler, default SIGSYS disposition kills the process. Mirrors
-	 * the production fix in main.c (see notes/tawcroot.md "Bugs found
-	 * and fixed during install pipeline validation"). */
-	tawcroot_path_probe_openat2();
-	tawc_io_kv_dec("    openat2_works", (long)tawcroot_openat2_works);
 
 	int trap_nrs[256];
 	const size_t trap_cap = sizeof trap_nrs / sizeof trap_nrs[0];

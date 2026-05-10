@@ -152,23 +152,14 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 	 * With SIGSYS blocked, the kernel kills the process by default
 	 * instead of invoking our handler; with other signals blocked,
 	 * daemons spawned later (gpg-agent, anything that select()'s on
-	 * SIGCHLD) hang. Fresh empty mask matches a clean login shell.
-	 * Must run BEFORE probe_openat2 (next step) since the probe trips
-	 * Android's stacked filter and needs the SIGSYS handler invocable. */
+	 * SIGCHLD) hang. Fresh empty mask matches a clean login shell. */
 	{
 		uint64_t empty = 0;
 		(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 2 /*SIG_SETMASK*/,
 		               (long)&empty, 0, 8, 0, 0);
 	}
 
-	/* (9) openat2 probe. Android's `untrusted_app` filter TRAPs
-	 * openat2 (NR 437) on recent platform versions; with our handler
-	 * installed and SIGSYS deliverable, the trap dispatches to "no
-	 * slot -> -ENOSYS", which the probe treats as "openat2
-	 * unavailable, fall back to manual canonicalisation". */
-	tawcroot_path_probe_openat2();
-
-	/* (10) Stash /proc/self/exe (libtawcroot's host path) so the
+	/* (9) Stash /proc/self/exe (libtawcroot's host path) so the
 	 * readlink handler can recognise it bouncing back through
 	 * `readlinkat(O_PATH-fd, "")` (the bypass glibc's realpath uses
 	 * for /proc/self/exe). Pinned for the life of the APK install,
