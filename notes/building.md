@@ -37,7 +37,8 @@ and launch as documented in CLAUDE.md's Quick Reference.
 |-----------|--------------------------------------------------------|------------------------------------------------------|
 | JDK 21    | `jdk21-openjdk`                                        | `openjdk-21-jdk`                                     |
 | Rust      | `rustup` (then `rustup default stable`)                | `rustup` (via rustup.rs)                             |
-| Cargo NDK | `cargo install cargo-ndk`                              | same                                                 |
+| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds) | same |
+| Cargo NDK (cargo subcommand — `cargo build` will fail with `error: no such command: ndk` if missing) | `cargo install cargo-ndk` | same |
 | Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). | same |
 | Build basics | `base-devel`                                        | `build-essential pkg-config`                         |
 | Meson + Ninja (libxkbcommon) | `meson ninja`                            | `meson ninja-build`                                  |
@@ -240,6 +241,11 @@ toolchain swap that we tried and reverted.
 
 NDK clang against bionic, via `cargo-ndk`. Invoked by Gradle
 automatically; no separate command needed.
+
+`cargo-ndk` is a cargo subcommand that has to be installed once per
+user (`cargo install cargo-ndk` — also listed in the Host packages
+table). Without it, the Rust build fails with `error: no such command:
+ndk`.
 
 ```bash
 # Manual invocation (Gradle does this for you):
