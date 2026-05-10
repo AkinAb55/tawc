@@ -43,3 +43,30 @@ pub fn ensure_tawc_dri_test() -> io::Result<String> {
 pub fn ensure_eglx11_test() -> io::Result<String> {
     check_rootfs_app("eglx11-test")
 }
+
+/// `libhybris-tls-repro` — regression test for the libhybris bionic
+/// linker's TLS-module unregister assertion (`linker_tls.cpp:93`).
+/// Returns the absolute path to the `libhybris-tls-repro` binary
+/// inside the rootfs. The NDK-cross-built `tls_lib.so` companion lives
+/// next to it at `/tmp/libhybris-tls-repro/tls_lib.so`.
+pub fn ensure_libhybris_tls_repro() -> io::Result<String> {
+    let bin = check_rootfs_app("libhybris-tls-repro")?;
+    // Also confirm the bionic-side .so landed — install-test-deps cross-
+    // builds it via NDK; if missing, the binary check above passes but
+    // the test would fail with a confusing dlopen error.
+    let so = "/tmp/libhybris-tls-repro/tls_lib.so";
+    let probe = format!("test -f {so} && echo OK || echo MISSING");
+    let output = adb::rootfs_run(&probe)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.lines().any(|l| l.trim() == "OK") {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{so} not found. Run `bash scripts/install-test-deps.sh` \
+                 (which cross-builds the bionic-ABI tls_lib.so via the \
+                 Android NDK on the host)."
+            ),
+        ));
+    }
+    Ok(bin)
+}

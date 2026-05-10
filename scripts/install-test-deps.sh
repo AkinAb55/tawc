@@ -197,23 +197,66 @@ build_test_app() {
     "$ROOT_DIR/scripts/rootfs-run.sh" "/bin/bash $rootfs_path/build.sh"
 }
 
+# NDK cross-build the bionic side of libhybris-tls-repro. The matching
+# glibc binary is compiled inside the rootfs by build_test_app below;
+# this step produces the Android-ABI .so that the test asks libhybris
+# to dlopen+dlclose. Drops the .so directly into the rootfs (overlapping
+# build_test_app's path) so it lands alongside the compiled `repro` exe.
+build_libhybris_tls_repro_helper() {
+    local src="$ROOT_DIR/tests/apps/libhybris-tls-repro/tls_lib.c"
+    local rootfs_path="/tmp/libhybris-tls-repro/tls_lib.so"
+    local fs_path="$TAWC_DISTROS_DIR/rootfs$rootfs_path"
+    local ndk_root="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${ANDROID_HOME:-$HOME/Android/Sdk}/ndk}}"
+    local ndk_clang
+    # ANDROID_NDK_ROOT may already point at a versioned NDK; otherwise
+    # we landed on the .../ndk umbrella and pick the highest version.
+    if [ -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" ]; then
+        ndk_clang="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+    else
+        local ndk_versioned
+        ndk_versioned=$(ls -d "$ndk_root"/*/toolchains/llvm/prebuilt/linux-x86_64/bin 2>/dev/null \
+                       | sort -V | tail -n1)
+        if [ -z "$ndk_versioned" ]; then
+            echo "ERROR: cannot locate Android NDK under $ndk_root" >&2
+            echo "       set ANDROID_NDK_ROOT or install the NDK via sdkmanager" >&2
+            exit 1
+        fi
+        ndk_clang="$ndk_versioned/aarch64-linux-android29-clang"
+    fi
+    echo "=== Cross-building libhybris-tls-repro/tls_lib.so ==="
+    local tmp_so
+    tmp_so=$(mktemp -t tawc-tls-lib.XXXXXX.so)
+    "$ndk_clang" -fPIC -shared -o "$tmp_so" "$src"
+    adb push "$tmp_so" "$TAWC_SCRATCH/libhybris-tls-repro-tls_lib.so" >/dev/null
+    rm -f "$tmp_so"
+    "$TAWC_EXEC_BIN" /system/bin/sh -c \
+        "mkdir -p $(dirname $fs_path) && cp $TAWC_SCRATCH/libhybris-tls-repro-tls_lib.so $fs_path && chmod a+rx $fs_path"
+}
+
 # Apps that integration tests actually consume — keep this list in sync
 # with `tests/integration/src/rootfs.rs::ensure_*`. `adreno-struct-varying`
 # under `tests/apps/` is debug-only and intentionally not built here.
 #
-# `tawc-dri-test` link-depends on `-lhybris-common`, which only exists
-# on aarch64 (libhybris isn't shipped for x86_64 — see notes/emulator.md).
-# Skip it on the emulator; the integration tests that consume it already
-# fail there (`tests/integration/tests/apps.rs:9`).
+# `tawc-dri-test` and `libhybris-tls-repro` link against
+# `-lhybris-common`, which only exists on aarch64 (libhybris isn't
+# shipped for x86_64 — see notes/emulator.md). Skip them on the
+# emulator; the integration tests that consume them already fail there
+# (`tests/integration/tests/apps.rs:9`,
+#  `tests/integration/tests/libhybris.rs`).
 HOST_ARCH=$("$TAWC_EXEC_BIN" /system/bin/uname -m | tr -d '\r\n')
 APPS=(gtk4-debug-app eglx11-test)
 if [ "$HOST_ARCH" = "aarch64" ]; then
-    APPS+=(tawc-dri-test)
+    APPS+=(tawc-dri-test libhybris-tls-repro)
 else
-    echo "=== Skipping tawc-dri-test on $HOST_ARCH (needs libhybris, aarch64-only) ==="
+    echo "=== Skipping tawc-dri-test, libhybris-tls-repro on $HOST_ARCH (need libhybris, aarch64-only) ==="
 fi
 for app in "${APPS[@]}"; do
     build_test_app "$app"
+    if [ "$app" = "libhybris-tls-repro" ]; then
+        # Drop the NDK-built bionic .so beside the just-compiled repro
+        # binary in the rootfs.
+        build_libhybris_tls_repro_helper
+    fi
 done
 
 echo "=== Done ==="
