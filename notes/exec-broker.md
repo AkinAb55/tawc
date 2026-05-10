@@ -105,12 +105,18 @@ calls `InstallationMethod.startInside`, the single Kotlin entry point
 for "enter the chroot" (notes/rootfs-sessions.md). Used by
 `rootfs-run.sh`, `install-test-deps.sh`, and the integration
 test crate. Omit `CMD` for interactive `bash -l`. `OP_TITLE` is
-optional and behaves the same as on ARGV form.
+optional and behaves the same as on ARGV form. `GRAPHICS` is
+optional and overrides the in-rootfs `GraphicsBackend` for this one
+spawn (libhybris / gfxstream / cpu); without it `Settings.graphicsBackend`
+(the user's UI pick) is used. Integration tests pin a backend per
+spawn here so the suite exercises every backend without flipping the
+persisted pref.
 
 ```
 TAWCEXEC 1
 RUNINSIDE arch
 CMD pacman -Syu
+GRAPHICS libhybris
 OP_TITLE arch: pacman -Syu
 
 ```
@@ -134,6 +140,12 @@ OP_TITLE arch: pacman -Syu
 - `CMD <command>` (RUNINSIDE-form only) — optional. The command runs
   via `bash -lc <command>` inside the rootfs. Omit for interactive
   `bash -l`.
+- `GRAPHICS <key>` (RUNINSIDE-form only) — optional. One of
+  `libhybris` / `gfxstream` / `cpu`; unknown keys are rejected. When
+  set, the broker passes this through to `InstallationMethod.startInside`
+  and `RootfsEnv` uses it instead of `Settings.graphicsBackend` for
+  this spawn only. Tests use it to run a single client under a
+  specific backend without touching the persisted pref.
 - `OP_TITLE <title>` (ARGV-form / RUNINSIDE-form only) — optional. When
   set, mirrors process stdio into a `LogScreenActivity` panel titled
   with `<title>`. See [BrokerOpMirror].
@@ -302,7 +314,7 @@ before any client connection arrives.
 | `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`. |
 | `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
 | `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
-| `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream`). Used by `scripts/run-integration-tests.sh --graphics …`. |
+| `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream` / `cpu`). Used by the Settings screen for ad-hoc developer toggling. **Tests do NOT use this** — they pass `--graphics` on each RUNINSIDE spawn so the persisted pref isn't disturbed. |
 | `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
 
 **Rule for input actions: every driver goes through `TawcInputConnection`.**

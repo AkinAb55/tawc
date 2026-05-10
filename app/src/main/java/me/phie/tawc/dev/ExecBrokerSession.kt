@@ -4,6 +4,7 @@ import android.net.LocalSocket
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
+import me.phie.tawc.GraphicsBackend
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -60,6 +61,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
             val installId: String,
             val cmd: String?,
             val opTitle: String?,
+            val graphics: GraphicsBackend?,
         ) : Request()
     }
 
@@ -113,7 +115,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
         }
         val rootfs = store.rootfsDir(req.installId).absolutePath
         val proc: Process = try {
-            method.startInside(rootfs, req.cmd)
+            method.startInside(rootfs, req.cmd, req.graphics)
         } catch (t: Throwable) {
             sendErrorAndExit(sout, "startInside: ${t.javaClass.simpleName}: ${t.message}")
             return
@@ -420,10 +422,14 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
      *     [name] up in [ActionRegistry] and runs the handler in-process,
      *     streaming its output back on stdout/stderr.
      *   - **RUNINSIDE-form** (chroot dispatch): one `RUNINSIDE <id>`
-     *     line plus an optional `CMD <command>` line. The session
-     *     resolves the install's method, calls
-     *     [InstallationMethod.startInside], and streams stdio.
-     *     `CMD` absent = interactive `bash -l`.
+     *     line plus an optional `CMD <command>` line and an optional
+     *     `GRAPHICS <backend-key>` line. The session resolves the
+     *     install's method, calls [InstallationMethod.startInside], and
+     *     streams stdio. `CMD` absent = interactive `bash -l`.
+     *     `GRAPHICS` absent = use the user's [me.phie.tawc.Settings]
+     *     pick; present = override for this one spawn (tests use this
+     *     to run a single client under a specific backend without
+     *     flipping the global pref).
      */
     private fun readHeader(stream: InputStream): Request {
         val firstLine = readHeaderLine(stream)
@@ -438,6 +444,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
         val actionArgs = mutableMapOf<String, String>()
         var runInsideId: String? = null
         var runInsideCmd: String? = null
+        var runInsideGraphics: GraphicsBackend? = null
         var opTitle: String? = null
         while (true) {
             val line = readHeaderLine(stream) ?: throw IOException("EOF in header")
@@ -479,6 +486,19 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
                     if (runInsideCmd != null) throw IOException("duplicate CMD line")
                     runInsideCmd = decodeValue(value)
                 }
+                "GRAPHICS" -> {
+                    // RUNINSIDE-only: per-spawn override of the in-rootfs
+                    // graphics backend. `null` (header absent) means
+                    // "use Settings.graphicsBackend" — the UI pick. Tests
+                    // pass an explicit value via tawc-exec's --graphics
+                    // flag to exercise one backend without flipping the
+                    // global pref.
+                    if (runInsideGraphics != null) throw IOException("duplicate GRAPHICS line")
+                    if (value.isEmpty()) throw IOException("GRAPHICS needs a backend key")
+                    runInsideGraphics = GraphicsBackend.entries.firstOrNull { it.key == value }
+                        ?: throw IOException("GRAPHICS: unknown backend '$value' " +
+                            "(valid: ${GraphicsBackend.entries.joinToString { it.key }})")
+                }
                 "OP_TITLE" -> {
                     if (opTitle != null) throw IOException("duplicate OP_TITLE line")
                     if (value.isEmpty()) throw IOException("OP_TITLE needs a non-empty title")
@@ -498,7 +518,10 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
             if (opTitle != null) throw IOException("OP_TITLE is not allowed with ACTION")
             return Request.Action(actionName!!, actionArgs)
         }
-        if (isRunInside) return Request.RunInside(runInsideId!!, runInsideCmd, opTitle)
+        if (isRunInside) {
+            return Request.RunInside(runInsideId!!, runInsideCmd, opTitle, runInsideGraphics)
+        }
+        if (runInsideGraphics != null) throw IOException("GRAPHICS is only valid with RUNINSIDE")
         if (!isExec) throw IOException("no ARGV / ACTION / RUNINSIDE in header")
         return Request.Exec(argv, env, cwd, opTitle)
     }

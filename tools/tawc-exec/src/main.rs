@@ -31,7 +31,7 @@ fn main() -> ExitCode {
             eprintln!("tawc-exec: {e}");
             eprintln!("usage: tawc-exec [--cwd DIR] [--env K=V ...] [--op-title TITLE] -- ARGV0 [ARG ...]");
             eprintln!("       tawc-exec --action NAME [--arg K=V ...]");
-            eprintln!("       tawc-exec --in-rootfs ID [--op-title TITLE] [-- CMD ...]");
+            eprintln!("       tawc-exec --in-rootfs ID [--graphics libhybris|gfxstream|cpu] [--op-title TITLE] [-- CMD ...]");
             return ExitCode::from(2);
         }
     };
@@ -66,11 +66,16 @@ enum Parsed {
     },
     /// Run a command inside an installed chroot. The broker dispatches
     /// to the install's [InstallationMethod.startInside]. `cmd` empty =
-    /// interactive `bash -l`.
+    /// interactive `bash -l`. `graphics` non-empty overrides the
+    /// in-rootfs `GraphicsBackend` for this spawn (libhybris / gfxstream
+    /// / cpu) without touching the user's persisted Settings pick;
+    /// empty means "use Settings". Tests use this to run a single
+    /// client under a specific backend.
     RunInside {
         install_id: String,
         cmd: String,
         op_title: Option<String>,
+        graphics: Option<String>,
     },
 }
 
@@ -80,6 +85,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut action_name: Option<String> = None;
     let mut action_args: Vec<(String, String)> = Vec::new();
     let mut run_inside_id: Option<String> = None;
+    let mut run_inside_graphics: Option<String> = None;
     let mut op_title: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -119,6 +125,16 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 run_inside_id = Some(v);
                 i += 1;
             }
+            "--graphics" => {
+                i += 1;
+                let v = args.get(i).ok_or("--graphics needs a backend key")?.clone();
+                if v.is_empty() { return Err("--graphics key must not be empty".into()); }
+                // Validation against the GraphicsBackend enum happens
+                // device-side in ExecBrokerSession; we just forward the
+                // string. Avoids duplicating the enum on the host.
+                run_inside_graphics = Some(v);
+                i += 1;
+            }
             "--op-title" => {
                 i += 1;
                 let v = args.get(i).ok_or("--op-title needs argument")?.clone();
@@ -151,7 +167,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         } else {
             String::new()
         };
-        return Ok(Parsed::RunInside { install_id: id, cmd, op_title });
+        return Ok(Parsed::RunInside { install_id: id, cmd, op_title, graphics: run_inside_graphics });
+    }
+    if run_inside_graphics.is_some() {
+        return Err("--graphics is only valid with --in-rootfs".into());
     }
     if let Some(name) = action_name {
         // ACTION form. ARGV must be empty; --env / --cwd are also
@@ -265,12 +284,15 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
                 h.push('\n');
             }
         }
-        Parsed::RunInside { install_id, cmd, op_title } => {
+        Parsed::RunInside { install_id, cmd, op_title, graphics } => {
             h.push_str("RUNINSIDE "); h.push_str(install_id); h.push('\n');
             // Empty cmd means interactive shell — omit the CMD line.
             if !cmd.is_empty() {
                 h.push_str("CMD "); h.push_str(&encode_value(cmd)); h.push('\n');
             }
+            // GRAPHICS key is a programmatic identifier (libhybris /
+            // gfxstream / cpu); no encoding needed.
+            if let Some(g) = graphics { h.push_str("GRAPHICS "); h.push_str(g); h.push('\n'); }
             if let Some(t) = op_title { h.push_str("OP_TITLE "); h.push_str(&encode_value(t)); h.push('\n'); }
         }
     }

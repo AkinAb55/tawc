@@ -69,7 +69,7 @@ case "$DISTRO_KEY" in
             # gtk4-demos provides gtk4-widget-factory; firefox + supertuxkart
             # are real-app tests on hardware buffers.
             gtk3 gtk3-demos gtk4-demos firefox supertuxkart
-            # graphics:: tests
+            # hybris:: / gfxstream:: / cpu_graphics:: tests
             mesa-utils weston vulkan-tools
             # xwayland::test_xwayland_xclock_renders_via_shm — pure-X11 client
             # exercising our bionic-built Xwayland (see notes/xwayland.md).

@@ -1,19 +1,26 @@
 //! Application-level smoke tests. Verify that real desktop programs
 //! launch, map a toplevel, and (for some) do something simple in response
 //! to input. Deliberately do **not** assert which buffer path the client
-//! uses — that's the `graphics::` module's job. The same app may appear
-//! here (launch smoke) and in `graphics::` (buffer-path coverage); see
-//! `notes/testing.md` "Test layout" for the partition.
+//! uses — that's the `cpu_graphics::` / `hybris::` / `gfxstream::`
+//! modules' job. The same app may appear here (launch smoke) and in one
+//! of those (buffer-path coverage); see `notes/testing.md` "Test layout"
+//! for the partition.
 //!
-//! Requires the compositor to be up and an in-app distro installed. Most
-//! tests need a real GPU stack, so they fail on the emulator.
+//! Every test here runs under [`GraphicsBackend::Cpu`]: the launch path
+//! is the most portable backend and these tests don't care which buffer
+//! type ends up on the wire. Backend-specific launches (Firefox/STK
+//! under libhybris / gfxstream) live in the per-backend modules.
+//!
+//! Requires the compositor to be up and an in-app distro installed.
 
 use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_compositor_clean, launch_and_wait_for_toplevel, TIMEOUT,
 };
-use tawc_integration::{adb, compositor};
+use tawc_integration::{adb, compositor, GraphicsBackend};
+
+const BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 
 const FIREFOX_CMD: &str = "firefox --no-remote";
 
@@ -23,7 +30,8 @@ const LXTERMINAL_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const LXTERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Firefox launches, maps a toplevel, and the compositor sees a client.
-/// Buffer-path coverage lives in `graphics::test_firefox_uses_hardware_buffers`.
+/// Buffer-path coverage lives in `hybris::test_firefox_renders_via_ahb` and
+/// `gfxstream::test_firefox_renders_via_ahb`.
 #[test]
 fn test_firefox_launches() {
     // Remove lock/crash files so Firefox doesn't show the troubleshoot-mode dialog
@@ -36,7 +44,7 @@ fn test_firefox_launches() {
          rm -rf ~/.config/mozilla/firefox/*/sessionstore-backups",
     );
 
-    let mut firefox = launch_and_wait_for_toplevel(FIREFOX_CMD, "Firefox", FIREFOX_LAUNCH_TIMEOUT);
+    let mut firefox = launch_and_wait_for_toplevel(BACKEND, FIREFOX_CMD, "Firefox", FIREFOX_LAUNCH_TIMEOUT);
 
     let state = compositor::query_state(TIMEOUT)
         .expect("Failed to query compositor state while Firefox running");
@@ -53,10 +61,11 @@ fn test_firefox_launches() {
 /// supertuxkart launches and maps a toplevel; sticks around past first
 /// paint (some GL init failures only manifest a moment after the window
 /// appears). Buffer-path coverage lives in
-/// `graphics::test_supertuxkart_uses_hardware_buffers`.
+/// `hybris::test_supertuxkart_renders_via_ahb` and
+/// `gfxstream::test_supertuxkart_renders_via_ahb`.
 #[test]
 fn test_supertuxkart_launches() {
-    let mut stk = launch_and_wait_for_toplevel("supertuxkart", "supertuxkart", STK_LAUNCH_TIMEOUT);
+    let mut stk = launch_and_wait_for_toplevel(BACKEND, "supertuxkart", "supertuxkart", STK_LAUNCH_TIMEOUT);
 
     std::thread::sleep(Duration::from_secs(1));
     assert!(
@@ -92,6 +101,7 @@ fn test_lxterminal_input_and_exit() {
     adb::enable_test_input().expect("enable-test-input action");
 
     let mut term = launch_and_wait_for_toplevel(
+        BACKEND,
         "lxterminal",
         "lxterminal",
         LXTERMINAL_LAUNCH_TIMEOUT,

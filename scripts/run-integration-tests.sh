@@ -25,20 +25,19 @@
 #     `bash scripts/install-test-deps.sh` once per chroot install)
 #   - JAVA_HOME set or java-21-openjdk installed at default path
 #
+# Each test pins its own in-rootfs graphics backend per spawn via the
+# broker `GRAPHICS` header on RUNINSIDE (`tawc-exec --graphics …`), so a
+# single suite run exercises every backend without a global flip. The
+# `hybris::` / `gfxstream::` / `cpu_graphics::` modules each pin their
+# matching backend; `apps::` / `input::` use CPU (the most portable
+# launch path); `xwayland::` uses libhybris (TAWC-DRI / `xwl_tawc` are
+# libhybris-native). See `notes/testing.md`.
+#
 # Usage:
 #   bash scripts/run-integration-tests.sh                       # everything
 #   bash scripts/run-integration-tests.sh <filter>              # libtest substring filter,
 #                                                                 e.g. `<module>::` or `<module>::test_foo`
 #   bash scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
-#   bash scripts/run-integration-tests.sh --graphics cpu        # software-only (llvmpipe/lavapipe)
-#   bash scripts/run-integration-tests.sh --graphics gfxstream  # flip the in-app graphics-driver
-#                                                                 pref before running (default: libhybris).
-#                                                                 The kumquat server runs in the
-#                                                                 compositor process and the chroot-side
-#                                                                 libvulkan_gfxstream.so + ICD JSON ride
-#                                                                 in the APK and are laid into each rootfs
-#                                                                 by [BridgeInstallProvider] at install
-#                                                                 time, so there's nothing extra to stage.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,24 +47,11 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 
 DO_BUILD=1
-GRAPHICS="libhybris"
 TEST_FILTER=""
-expect_graphics=0
 for arg in "$@"; do
-    if [ "$expect_graphics" -eq 1 ]; then
-        GRAPHICS="$arg"
-        expect_graphics=0
-        continue
-    fi
     case "$arg" in
         --no-build|-n)
             DO_BUILD=0
-            ;;
-        --graphics)
-            expect_graphics=1
-            ;;
-        --graphics=*)
-            GRAPHICS="${arg#--graphics=}"
             ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | sed 's/^# \?//;$d'
@@ -80,14 +66,6 @@ for arg in "$@"; do
             ;;
     esac
 done
-if [ "$expect_graphics" -eq 1 ]; then
-    echo "ERROR: --graphics requires a value (libhybris|gfxstream|cpu)" >&2
-    exit 2
-fi
-case "$GRAPHICS" in
-    libhybris|gfxstream|cpu) ;;
-    *) echo "ERROR: --graphics must be libhybris, gfxstream, or cpu (got '$GRAPHICS')" >&2; exit 2 ;;
-esac
 
 # shellcheck source=../scripts/lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
@@ -183,15 +161,6 @@ if [ "$COMPOSITOR_READY" -ne 1 ]; then
     exit 1
 fi
 
-# Flip the in-app graphics-driver pref to whichever backend the test
-# run wants. RootfsEnv reads it on every rootfs spawn (the broker is
-# already up by this point — TawcApplication.onCreate registers the
-# action handlers), so subsequent client launches inherit the right
-# env (LD_LIBRARY_PATH for libhybris vs VK_ICD_FILENAMES +
-# VIRTGPU_KUMQUAT for gfxstream).
-echo "=== Setting graphics backend: $GRAPHICS ==="
-"$TAWC_EXEC_BIN" --action set-graphics-backend --arg "value=$GRAPHICS"
-
 LIBTEST_ARGS=(--nocapture --test-threads=1)
 if [ -n "$TEST_FILTER" ]; then
     LIBTEST_ARGS+=("$TEST_FILTER")
@@ -206,7 +175,7 @@ fi
 # install-test-deps after editing any source under `tests/apps/`.
 cd "$ROOT_DIR/tests/integration"
 set +e
-TAWC_GRAPHICS_BACKEND="$GRAPHICS" cargo test -- "${LIBTEST_ARGS[@]}"
+cargo test -- "${LIBTEST_ARGS[@]}"
 TEST_EXIT=$?
 set -e
 

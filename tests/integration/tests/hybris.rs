@@ -1,14 +1,36 @@
-//! libhybris-specific tests. Everything here is *logically* about
-//! libhybris itself — the bionic linker, TLS handling, dlopen, etc. —
-//! rather than behaviour you'd observe through any Wayland compositor.
-//! Bug-for-bug repros of historical aborts live here; broader buffer-path
-//! or app-launch coverage that happens to exercise libhybris in the
-//! libhybris-backend configuration belongs in `graphics::` / `apps::` /
-//! `xwayland::` instead.
+//! Tests for the libhybris path: bionic-linker regressions (TLS, dlopen)
+//! plus every "X renders via hardware buffers through libhybris" smoke.
+//! Each spawn pins [`GraphicsBackend::Libhybris`] explicitly so the
+//! user's persisted Settings pick can't leak in — under libhybris the
+//! chroot's `LD_LIBRARY_PATH` puts libhybris's `libEGL.so` /
+//! `libvulkan.so.1` ahead of the distro Mesa loader, which is precisely
+//! what these tests are about.
+//!
+//! Companion module: `gfxstream::` runs the same hardware-buffer
+//! smokes against the bridge backend, so a regression in one path
+//! doesn't accidentally hide behind the other. The SHM-only smokes
+//! (`weston-simple-shm`, GTK with software renderers) live in
+//! `cpu_graphics::` since they're backend-agnostic by construction.
 //!
 //! libhybris is aarch64-only in tawc, so these fail on the emulator.
 
-use tawc_integration::{adb, rootfs};
+use std::time::Duration;
+
+use tawc_integration::helpers::{
+    assert_client_animating, assert_compositor_clean, assert_renders_via_ahb,
+    launch_and_wait_for_ahb, require_compositor, TIMEOUT,
+};
+use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
+
+const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
+
+const WESTON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
+const VKCUBE_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+const GTK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+const STK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+const FIREFOX_CMD: &str = "firefox --no-remote";
 
 /// Regression test for libhybris's TLS handling. Three historical
 /// regressions get covered in one round-trip; see repro.c for the
@@ -56,19 +78,12 @@ use tawc_integration::{adb, rootfs};
 ///     of owning the initializer bytes
 #[test]
 fn test_libhybris_tls_dlclose_does_not_abort() {
-    if tawc_integration::skip_if_gfxstream(
-        "libhybris-tls-repro tests bionic-linker TLS handling inside libhybris; \
-         libhybris isn't on LD_LIBRARY_PATH under gfxstream and the regression \
-         class doesn't apply to the bridge path",
-    ) {
-        return;
-    }
     let bin = rootfs::ensure_libhybris_tls_repro().expect("libhybris-tls-repro build");
 
     // Run from inside the install dir so the relative `./tls_lib.so`
     // arg keeps the test self-contained.
     let cmd = format!("cd /tmp/libhybris-tls-repro && {} ./tls_lib.so", bin);
-    let output = adb::rootfs_run(&cmd).expect("run libhybris-tls-repro");
+    let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run libhybris-tls-repro");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -124,4 +139,261 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
          (unresolved weak), restoring silent corruption / wild pointers.\n\
          stdout: {stdout}\nstderr: {stderr}"
     );
+}
+
+/// Sanity-check that libhybris can load the Android Vulkan driver via
+/// `android_dlopen` and that our `vulkanplatform_wayland.so` advertises
+/// `VK_KHR_wayland_surface` by remapping `VK_KHR_android_surface`. Runs
+/// `vulkaninfo --summary` in the chroot; `/usr/local/lib` is first on
+/// `LD_LIBRARY_PATH` so libhybris's `libvulkan.so.1` shadows the standard
+/// `vulkan-icd-loader` copy. Doesn't exercise swapchain/present — the
+/// `test_vkcube_renders_via_ahb` test below does.
+#[test]
+fn test_vulkaninfo_loads_android_driver() {
+    require_compositor();
+
+    let out = adb::rootfs_run_with(BACKEND, "vulkaninfo --summary")
+        .expect("failed to run vulkaninfo in chroot");
+    assert!(
+        out.status.success(),
+        "vulkaninfo exited non-zero: status={:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The WSI platform layer rewrites VK_KHR_android_surface to
+    // VK_KHR_wayland_surface in the instance extension list — a
+    // signature only our libhybris+vulkanplatform_wayland stack
+    // produces. The distro vulkan-icd-loader by itself only
+    // advertises VK_KHR_xcb_surface / VK_KHR_xlib_surface (or
+    // nothing on a headless box), never VK_KHR_wayland_surface
+    // pointing at an Android Vulkan driver.
+    assert!(
+        stdout.contains("VK_KHR_wayland_surface"),
+        "VK_KHR_wayland_surface not advertised — distro vulkan-icd-loader shadowed our libvulkan.so, or vulkanplatform_wayland.so didn't load?\nstdout:\n{stdout}"
+    );
+
+    // Some Android Vulkan driver got loaded. The exact vendor depends on the
+    // phone (Adreno / Mali / ...) — just check we have a driver at all.
+    assert!(
+        stdout.contains("driverID") && stdout.contains("DRIVER_ID_"),
+        "no Vulkan physical device reported\nstdout:\n{stdout}"
+    );
+}
+
+/// `eglinfo -B` in the chroot picks up libhybris's `libEGL.so` shim
+/// (`android_dlopen` → bionic libEGL → vendor blob) and reports
+/// `EGL_VENDOR=Android META-EGL` plus the device's GPU as the GLES
+/// renderer. The `Android META-EGL` signature is the smoking gun that
+/// our shim got loaded.
+#[test]
+fn test_eglinfo_loads_android_driver() {
+    require_compositor();
+
+    let out = adb::rootfs_run_with(BACKEND, "eglinfo -B")
+        .expect("failed to run eglinfo in chroot");
+
+    // eglinfo's exit code tracks whether *every* platform initialized
+    // — under libhybris it picks the single "Default display platform"
+    // and exits 0, so check stdout regardless of status.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("OpenGL ES profile renderer:"),
+        "no GLES renderer reported — driver init failed?\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Distinctive Android EGL identifier; distro Mesa would say "Mesa
+    // Project". This is also what tells us our libEGL.so shim was
+    // loaded and that it dlopen'd the bionic libEGL behind it.
+    assert!(
+        stdout.contains("Android META-EGL"),
+        "EGL vendor string is not Android — distro Mesa libEGL shadowed \
+         our shim or libhybris failed to load the Android driver?\n\
+         stdout:\n{stdout}"
+    );
+}
+
+/// `weston-simple-egl` (canonical minimal EGL/GLES client) maps a window
+/// via `wl_egl_window`, binds `android_wlegl`, allocates
+/// `ANativeWindowBuffer`s through libhybris, and presents via AHB —
+/// exactly the path the compositor's `wlegl` module imports.
+#[test]
+fn test_weston_simple_egl_renders_via_ahb() {
+    let mut app = launch_and_wait_for_ahb(
+        BACKEND,
+        "weston-simple-egl",
+        "weston-simple-egl",
+        WESTON_LAUNCH_TIMEOUT,
+    );
+
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor state while weston-simple-egl running");
+    assert!(
+        state.toplevels >= 1,
+        "Compositor should see at least 1 toplevel, got {:?}",
+        state
+    );
+
+    assert_client_animating("weston-simple-egl", Duration::from_millis(1500), 10);
+
+    app.stop().expect("weston-simple-egl failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// Vulkan client end-to-end: `vkcube` opens a Wayland surface via
+/// `vulkanplatform_wayland.so`, the swapchain hands out
+/// `ANativeWindowBuffer`s, and the compositor imports those as AHB
+/// textures. Complements `test_vulkaninfo_loads_android_driver` (which
+/// only inspects extension strings) by actually exercising present.
+#[test]
+fn test_vkcube_renders_via_ahb() {
+    // `--c` caps the frame count; we still kill via stop() so the value
+    // mostly just guards against the test runner hanging if stop() fails.
+    let mut app = launch_and_wait_for_ahb(
+        BACKEND,
+        "vkcube --wsi wayland --c 3000",
+        "vkcube",
+        VKCUBE_LAUNCH_TIMEOUT,
+    );
+
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor state while vkcube running");
+    assert!(
+        state.toplevels >= 1,
+        "Compositor should see at least 1 toplevel, got {:?}",
+        state
+    );
+
+    assert_client_animating("vkcube", Duration::from_millis(1500), 10);
+
+    app.stop().expect("vkcube failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// GTK3 with the chroot's default `GDK_GL=gles:always` (set by
+/// [`RootfsEnv`] for libhybris) renders through `android_wlegl` and
+/// presents via AHB hardware buffers.
+#[test]
+fn test_gtk3_renders_via_ahb() {
+    assert_renders_via_ahb(
+        BACKEND,
+        "gtk3-demo-application",
+        "gtk3-demo-application",
+        GTK_LAUNCH_TIMEOUT,
+    );
+}
+
+/// GTK4's default GSK renderer goes through `android_wlegl` on libhybris,
+/// so launching `gtk4-widget-factory` must produce AHB imports. Catches
+/// GTK4-specific regressions in the GL path.
+///
+/// (We use `gtk4-widget-factory` rather than `gtk4-demo-application`
+/// because the latter pulls in a session-bus / GApplication setup that
+/// errors out in this rootfs and never actually maps a window.)
+#[test]
+fn test_gtk4_renders_via_ahb() {
+    assert_renders_via_ahb(
+        BACKEND,
+        "gtk4-widget-factory",
+        "gtk4-widget-factory",
+        GTK_LAUNCH_TIMEOUT,
+    );
+}
+
+/// Firefox steady-state asserts the chrome surface presents through the
+/// libhybris/AHB path, not falling back to SHM. Pairs with
+/// `apps::test_firefox_launches` (which only checks that the process
+/// comes up).
+///
+/// Earlier revisions counted "wlegl: imported ANativeWindowBuffer as
+/// texture" log lines in a 2-second window. That looked sensible — the
+/// AHB is hot, the import path runs every frame — but actually the
+/// compositor only logs an *import* the first time it sees a given AHB;
+/// subsequent commits of the same buffer come through the cached
+/// EGLImage and emit nothing. Firefox's WebRender-on-AHB path settles
+/// into a small ring (2-6 buffers) within the first few hundred ms, so
+/// post-launch the import-line count is zero even though every chrome
+/// frame is rendering as AHB at 60 fps.
+///
+/// Use the compositor state snapshot instead. It exposes the *currently
+/// attached* buffer count per type (`surfaces_wlegl`, `surfaces_shm`) and
+/// a monotonic `frames` counter that ticks on every commit. The two
+/// together catch:
+///   - "Firefox attached AHB once, then switched to SHM mid-run"
+///     → surfaces_wlegl drops to 0, surfaces_shm rises.
+///   - "WebRender disabled, every chrome frame is cairo/SHM"
+///     → surfaces_wlegl == 0 from the start.
+///   - "Firefox is wedged / not committing"
+///     → frames doesn't advance.
+#[test]
+fn test_firefox_renders_via_ahb() {
+    // Remove lock/crash files so Firefox doesn't show the troubleshoot-mode dialog.
+    let _ = adb::rootfs_run_with(
+        BACKEND,
+        "rm -f ~/.config/mozilla/firefox/*/.parentlock \
+              ~/.config/mozilla/firefox/*/lock \
+              ~/.config/mozilla/firefox/*/sessionstore.jsonlz4 \
+              ~/.config/mozilla/firefox/*/sessionCheckpoints.json && \
+         rm -rf ~/.config/mozilla/firefox/*/sessionstore-backups",
+    );
+
+    let mut firefox = launch_and_wait_for_ahb(
+        BACKEND,
+        FIREFOX_CMD,
+        "Firefox",
+        FIREFOX_LAUNCH_TIMEOUT,
+    );
+
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor state while Firefox running");
+    let frames_before = state.frames;
+    std::thread::sleep(Duration::from_secs(2));
+    let state = compositor::query_state(TIMEOUT)
+        .expect("Failed to query compositor steady-state");
+    assert!(
+        state.surfaces_wlegl >= 1,
+        "Firefox has no AHB-attached surfaces during steady state — \
+         fell back to SHM? state={state:?}"
+    );
+    assert!(
+        state.surfaces_shm == 0,
+        "Firefox attached SHM buffers during steady-state rendering — \
+         WebRender disabled, chrome falling back to cairo? Likely a \
+         libhybris EGL probe regression (Firefox auto-detects WebRender \
+         and dmabuf via libhybris stubs — see notes/firefox.md). \
+         state={state:?}"
+    );
+    assert!(
+        state.frames > frames_before,
+        "Compositor frames counter did not advance over 2 s — Firefox \
+         appears wedged / not committing. before={frames_before} after={state:?}"
+    );
+
+    firefox.stop().expect("Firefox process group failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// supertuxkart presents through the libhybris/AHB GL path. Pairs with
+/// `apps::test_supertuxkart_launches`.
+#[test]
+fn test_supertuxkart_renders_via_ahb() {
+    let mut stk = launch_and_wait_for_ahb(
+        BACKEND,
+        "supertuxkart",
+        "supertuxkart",
+        STK_LAUNCH_TIMEOUT,
+    );
+
+    assert!(
+        stk.is_running(),
+        "supertuxkart exited after reaching first render"
+    );
+
+    stk.stop()
+        .expect("supertuxkart process group failed to stop cleanly");
+    assert_compositor_clean();
 }

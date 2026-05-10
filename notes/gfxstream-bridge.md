@@ -639,102 +639,52 @@ compositor process). Still TODO: Phase 4 (zero-copy AHB handoff
 after vkQueuePresentKHR), Phase 5 (Wayland WSI plumbing — the
 surface_lost_khr error on the wayland-surface query is the gap).
 
-The previous `graphics_bridge.rs` test file has been folded back into
-the regular suite: `bash scripts/run-integration-tests.sh --graphics
-gfxstream` flips the in-app pref via the `set-graphics-backend` broker
-action and runs the full integration suite with
-`TAWC_GRAPHICS_BACKEND=gfxstream`. Nothing else to manage — the
-kumquat server is part of `libcompositor.so` and starts when the
-compositor thread starts (see `compositor/src/bridge.rs`); the
-chroot-side bits come from the same `TawcInstaller` pass that lays
-down libhybris.
+Tests pin their backend per spawn via the broker `GRAPHICS` header on
+RUNINSIDE (`tawc-exec --in-rootfs … --graphics gfxstream`, or
+`RootfsProcess::spawn_with` from the Rust harness), so a single
+`bash scripts/run-integration-tests.sh` exercises libhybris, gfxstream
+and CPU side by side without flipping the user's persisted
+`Settings.graphicsBackend` pick. The kumquat server is part of
+`libcompositor.so` and starts when the compositor thread starts (see
+`compositor/src/bridge.rs`); the chroot-side bits come from the same
+`TawcInstaller` pass that lays down libhybris.
 
-### Test pass/fail/skip under `--graphics gfxstream` (May 2026)
+### Test coverage layout
 
-Tests are intentionally **not blanket-skipped** under gfxstream. The
-suite reflects what's actually broken — each failing case maps to the
-unfinished phase that would unblock it. The
-`tawc_integration::skip_if_gfxstream(reason)` helper is reserved for
-tests that **fundamentally** can't apply (libhybris-internal
-regressions, libhybris-X11-EGL-plugin assertions); everything else
-runs and either passes or fails meaningfully.
+The integration suite splits the gfxstream-aware tests across three
+modules so a regression in one backend can't accidentally hide behind
+another:
 
-**Pass under gfxstream (the working slice):**
-- `graphics::test_vulkaninfo_loads_android_driver` — Vulkan
-  enumeration end-to-end (chroot Mesa → kumquat → in-process renderer
-  → Adreno). The single best smoke test for the bridge.
-- `graphics::test_weston_simple_shm_uses_shm_buffers` and
-  `graphics::test_gtk{3,4}_app_uses_shm_buffers` — SHM clients are
-  GPU-independent.
-- `xwayland::test_xwayland_xclock_renders_via_shm` — pixman/SHM
-  client through Xwayland. Xwayland itself is bionic-built and links
-  libhybris, but the SHM forwarding path doesn't exercise libhybris;
-  the test asserts only on Xwayland↔compositor SHM plumbing.
+- **`hybris::`** — libhybris-only assertions. The TLS / dlclose
+  regression smoke (`test_libhybris_tls_dlclose_does_not_abort`),
+  vulkaninfo via libhybris's `vulkanplatform_wayland.so`, eglinfo
+  with the `Android META-EGL` signature, and every "X renders via
+  hardware buffers through libhybris" smoke (weston-simple-egl,
+  vkcube, GTK3/4, Firefox, supertuxkart).
+- **`gfxstream::`** — the same hardware-buffer smokes under the
+  bridge backend, plus an `eglinfo` software-fallback guard. The
+  vkcube case and the Mesa-EGL cases currently fail until phase 4
+  (AHB handoff) / phase 5 (`VK_KHR_wayland_surface` plumbing) /
+  phase 6 (Zink-on-gfxstream-vk) land — that's *by design*. The
+  smoking gun for the surface_lost gap is
+  `vkGetPhysicalDeviceSurfacePresentModesKHR failed with
+  ERROR_SURFACE_LOST_KHR`. Mesa's stock `wsi_wayland.c` binds
+  `zwp_linux_dmabuf_v1`; the compositor doesn't advertise it yet.
+  Cleanest fix: implement `DmabufHandler` in the compositor
+  (Smithay-supported), so Mesa allocates dmabuf-backed swapchain
+  images and presents via the standard path. The host side already
+  exposes AHBs via `exportColorBufferMemory()`.
+- **`cpu_graphics::`** — backend-agnostic SHM paths plus an
+  `eglinfo` llvmpipe/swrast sanity. These don't care about the
+  GPU backend at all — they exist to keep the SHM plumbing covered
+  while the GL/Vulkan paths are still being wired up.
 
-**Fail under gfxstream (each maps to a missing phase):**
-- `graphics::test_vulkan_client_uses_hardware_buffers` (vkcube) —
-  Phase 4 (AHB handoff) + Phase 5 (`VK_KHR_wayland_surface` plumbing).
-  The smoking gun: `vkGetPhysicalDeviceSurfacePresentModesKHR failed
-  with ERROR_SURFACE_LOST_KHR`. Mesa's stock `wsi_wayland.c` binds
-  `zwp_linux_dmabuf_v1` for buffer allocation; the compositor doesn't
-  advertise that protocol yet. **Cleanest fix:** implement
-  `DmabufHandler` in the compositor (Smithay-supported), so Mesa
-  allocates dmabuf-backed swapchain images and presents via the
-  standard path. Buffer plumbing on the host side: gfxstream
-  renderer's `exportColorBufferMemory()` already returns AHBs that
-  can be unwrapped to dmabuf fds.
-- `graphics::test_eglinfo_loads_android_driver`,
-  `graphics::test_weston_simple_egl_uses_hardware_buffers`,
-  `graphics::test_gtk{3,4}_app_uses_hardware_buffers`,
-  `graphics::test_firefox_uses_hardware_buffers`,
-  `graphics::test_supertuxkart_uses_hardware_buffers`,
-  `apps::test_firefox_launches`,
-  `apps::test_supertuxkart_launches`,
-  `apps::test_lxterminal_input_and_exit` — all need GL via
-  Zink-on-gfxstream-vk, Phase 6. Zink in turn needs the Vulkan WSI
-  story above, plus a `kopper`-style EGL loader path so Mesa GL ⇒
-  Zink ⇒ Vulkan WSI ⇒ AHB. Today Mesa GL EGL fails up front with
-  `egl: failed to create dri2 screen` because there's no `/dev/dri/
-  cardN` for the GBM/DRI2 path it expects, and falls back to llvmpipe
-  software rasterisation. `test_eglinfo_loads_android_driver` is the
-  smoking-gun assertion for that fallback under gfxstream — it's
-  backend-aware and asserts `!llvmpipe && (Adreno || gfxstream)`
-  rather than the libhybris-only `Android META-EGL` string.
-- `input::test_input_dispatch`,
-  `input::test_surroundingless_client_uses_keyboard_for_backspace` —
-  GTK4-debug-app uses GSK's default Vulkan renderer; same gap as the
-  graphics tests above. The input-dispatch logic these tests cover
-  is buffer-path-independent, so they'll start passing the moment
-  GSK can produce frames under gfxstream. `GSK_RENDERER=cairo` is
-  the obvious workaround but is broken on the second frame
-  (`issues/gtk4-cairo-renderer-broken.md`).
-
-**Skipped under gfxstream (libhybris-specific path under test, no
-analogue under the bridge):** the principle is *if a test exercises
-libhybris code, it doesn't belong in the gfxstream run* — even if it
-happens to pass because libhybris is still installed in the rootfs
-under `/usr/lib/hybris`.
-- `xwayland::test_eglx11_renders_via_ahb` — `eglx11-test` has
-  `RUNPATH=/usr/lib/hybris` baked into the binary, so it loads
-  libhybris's `libEGL.so.1` even with `LD_LIBRARY_PATH` empty. The
-  test happens to pass under gfxstream but what it covers is
-  libhybris's X11 EGL platform plugin (`eglplatform_x11.so`), which
-  is orthogonal to the bridge.
-- `xwayland::test_es2gears_x11_renders_via_ahb` — like `eglx11-test`
-  but via the stock distro binary; it normally exercises libhybris's
-  X11 EGL plugin only when `LD_LIBRARY_PATH` overlays libhybris's
-  `libEGL.so.1` ahead of the distro's. Under gfxstream the overlay
-  isn't there, so the libhybris path under test doesn't run at all.
-- `xwayland::test_xwayland_test_pattern_ahb_round_trip` — Xwayland's
-  `-tawc-test-pattern` allocates the AHB through libhybris's
-  `libnativewindow`. The test asserts the compositor sees that
-  specific allocation path.
-- `xwayland::test_tawc_dri_ahb_present_round_trip` and
-  `…_animated_loop` — `tawc-dri-test` allocates AHBs via libhybris+
-  libnativewindow and ships them through TAWC-DRI to the (libhybris-
-  built) Xwayland. Tests the libhybris AHB-shipping path end-to-end.
-- `hybris::test_libhybris_tls_dlclose_does_not_abort` — exercises
-  libhybris's bionic-linker TLS implementation directly.
+`xwayland::` always pins libhybris (TAWC-DRI / `xwl_tawc` /
+`-tawc-test-pattern` are libhybris-native — no analogue under
+gfxstream until a bridge-side AHB-shipping pipe gets built). `apps::`
+and `input::` pin CPU: their launch / input-dispatch logic is
+buffer-path-independent, and CPU is the most portable spawn (no GPU
+required), so they can run unattended on the emulator too.
 
 ### What works
 
@@ -809,9 +759,9 @@ themselves. The remaining items are about getting frames onto the
 screen:
 
 1. **~~`BridgeInstallProvider` Kotlin.~~** Done — `app/src/main/java/me/phie/tawc/install/BridgeInstallProvider.kt` is a sibling of `LibhybrisInstallProvider` in `TawcInstaller.providers`. Gradle's `buildMesaGfxstream` + `packMesaGfxstream` ship the .so + ICD JSON as raw assets under `assets/mesa-gfxstream/`; `CompositorService.ensureMesaGfxstreamExtracted` stages them into `<filesDir>/mesa-gfxstream/` on the same versioned-stamp pattern as libhybris; the provider returns two `TawcInstall.COPY` entries that land at `/usr/local/lib/libvulkan_gfxstream.so` + `/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json`. Always installed (gated only on the asset being shipped — aarch64 only today), regardless of the live backend pref, so flipping `GraphicsBackend` doesn't invalidate any cached install.
-2. **~~`GpuBackend` enum + `RootfsEnv` branch.~~** Done — `GraphicsBackend` enum lives in `app/src/main/java/me/phie/tawc/Settings.kt`, persisted via `SharedPreferences` (`tawc-settings`), exposed in the in-app Settings screen (tonal button on the home screen). `RootfsEnv.build(method)` reads `Settings.graphicsBackend` and emits libhybris-style env (`LD_LIBRARY_PATH=/usr/lib/hybris/...`) or gfxstream-style env (`VK_ICD_FILENAMES=BridgeInstallProvider.GUEST_ICD_PATH`, `VIRTGPU_KUMQUAT=1`). Tests flip the pref via the broker `set-graphics-backend` action — `bash scripts/run-integration-tests.sh --graphics gfxstream`.
+2. **~~`GpuBackend` enum + `RootfsEnv` branch.~~** Done — `GraphicsBackend` enum lives in `app/src/main/java/me/phie/tawc/Settings.kt`, persisted via `SharedPreferences` (`tawc-settings`), exposed in the in-app Settings screen (tonal button on the home screen). `RootfsEnv.build(method)` reads `Settings.graphicsBackend` and emits libhybris-style env (`LD_LIBRARY_PATH=/usr/lib/hybris/...`) or gfxstream-style env (`VK_ICD_FILENAMES=BridgeInstallProvider.GUEST_ICD_PATH`, `VIRTGPU_KUMQUAT=1`). Tests pin a backend per spawn via the broker `GRAPHICS` header on RUNINSIDE (`tawc-exec --in-rootfs <id> --graphics gfxstream`); `Settings.graphicsBackend` is left untouched so the user's UI pick survives a suite run.
 3. **~~Kumquat in the compositor process.~~** Done — `compositor/src/bridge.rs` spawns the kumquat server on a sibling thread of the calloop loop in `nativeStartCompositor`. The crate dep is `kumquat_virtio = { path = "../deps/rutabaga_gfx/kumquat/server", features = ["gfxstream"] }`, gated to `cfg(target_arch = "aarch64")` (we don't cross-build `libgfxstream_backend.so` for x86_64 yet). Same SELinux domain as the chroot client so SCM_RIGHTS just works. No broker actions, no pidfile, no separate jniLib — kumquat is part of `libcompositor.so` now.
-4. **Vulkan WSI Wayland↔kumquat plumbing.** gfxstream-vk's WSI is Android-shaped; need to remap `VK_KHR_wayland_surface` calls to allocate AHB-backed ColorBuffers via the bridge. The vulkaninfo smoke test sees `VK_KHR_wayland_surface failed with SURFACE_LOST_KHR` — that's exactly this gap. Enumeration works fine, presentation doesn't. `tests/integration/tests/graphics.rs::test_vulkan_client_uses_hardware_buffers` is gated on this — currently `SKIP:`s under `--graphics gfxstream`.
+4. **Vulkan WSI Wayland↔kumquat plumbing.** gfxstream-vk's WSI is Android-shaped; need to remap `VK_KHR_wayland_surface` calls to allocate AHB-backed ColorBuffers via the bridge. The vulkaninfo smoke test sees `VK_KHR_wayland_surface failed with SURFACE_LOST_KHR` — that's exactly this gap. Enumeration works fine, presentation doesn't. `gfxstream::test_vkcube_renders_via_ahb` fails on this today; the matching libhybris test in `hybris::` passes, so the regression has somewhere to live until the gap closes.
 5. **AHB buffer handoff.** After `vkQueuePresentKHR`, our daemon calls `exportColorBufferMemory()` and feeds the AHB to the existing compositor import path. Option A in the "Zero-copy buffer sharing" section above — no gfxstream patches needed. The current rutabaga `01-drop-nativewindow-dep.patch` returns `InvalidResourceId` for PLATFORM_AHB exports; replacing that stub with the actual handoff is what unblocks vkcube + Phase 4.
 
 ### Sysroot pull (one-time, until automated)

@@ -1,5 +1,6 @@
 mod apps;
-mod graphics;
+mod cpu_graphics;
+mod gfxstream;
 mod hybris;
 mod input;
 mod tawcroot;

@@ -21,21 +21,37 @@ scripts/
 Each test module's own docstring documents what it covers and what its
 prerequisites are. As of writing the modules are:
 
-| Module      | Scope |
-|-------------|-------|
-| `apps`      | App-level smoke: program launches, maps a toplevel, and (optionally) does something simple. **No buffer-type assertions.** Pair tests here with a deeper one in `graphics::`/`xwayland::` when a buffer-path regression is worth catching separately. |
-| `graphics`  | Buffer-path coverage. **Every test asserts** which path the client uses (`wl_shm`, AHB-via-`android_wlegl`, or Vulkan). Covers minimal weston demos and the real toolkits (GTK3/4, Firefox, supertuxkart), plus `vulkaninfo`/`eglinfo` sanity. |
-| `xwayland`  | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, `-tawc-test-pattern`, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. Buffer-type assertions inside these stay here rather than moving to `graphics::`. |
-| `hybris`    | Logically libhybris-specific tests (bionic linker, TLS, dlopen). Broader buffer-path coverage that happens to use libhybris in the default backend lives in `graphics::`/`xwayland::` instead. |
-| `input`     | gtk4-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). |
-| `tawcroot`  | tawcroot device-side smokes. |
+| Module          | Backend pin | Scope |
+|-----------------|-------------|-------|
+| `apps`          | `cpu`       | App-level smoke: program launches, maps a toplevel, and (optionally) does something simple. **No buffer-type assertions.** Pair tests here with a deeper one in the per-backend modules when a buffer-path regression is worth catching separately. |
+| `hybris`        | `libhybris` | TLS / bionic-linker regressions plus every "X renders via hardware buffers through libhybris" smoke — `weston-simple-egl`, `vkcube`, GTK3/4, Firefox, supertuxkart, plus `vulkaninfo`/`eglinfo` sanity. |
+| `gfxstream`     | `gfxstream` | Same hardware-buffer smokes as `hybris::` but under the bridge backend, plus an `eglinfo` software-fallback guard. Some of these currently fail (phase 4-5 of `notes/gfxstream-bridge.md`); that's by design — when the bridge is finished they pass without rewriting tests. |
+| `cpu_graphics`  | `cpu`       | Backend-agnostic SHM paths under software-only rendering: `weston-simple-shm`, GTK3 with `GDK_GL=disabled`, GTK4 with `GSK_RENDERER=cairo`, plus an `eglinfo` llvmpipe/swrast sanity. |
+| `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, `-tawc-test-pattern`, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. |
+| `input`         | `cpu`       | gtk4-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). Buffer type is irrelevant for input. |
+| `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
+
+The **backend pin** for each module is enforced at every spawn: tests
+in `hybris::` call `RootfsProcess::spawn_with(GraphicsBackend::Libhybris, …)`
+(and the corresponding `launch_and_wait_for_*` / `assert_renders_via_*`
+variants), `gfxstream::` pins `Gfxstream`, `cpu_graphics::` /
+`apps::` / `input::` pin `Cpu`, `xwayland::` pins `Libhybris`. The
+broker carries the override through to `InstallationMethod.startInside`
+on every spawn (`GRAPHICS <key>` header on RUNINSIDE, see
+[exec-broker.md](exec-broker.md)) — the user's persisted
+`Settings.graphicsBackend` (the in-app Settings screen pick) is left
+untouched, so a single suite run exercises every backend without a
+global flip.
 
 **Where does this app go?** Apps that need both a launch smoke and a
 buffer-path assertion get two tests — one in `apps::` (just maps a
-window) and one in the matching deeper module (`graphics::` for native
-Wayland clients, `xwayland::` if the path goes through Xwayland). Apps
-where buffer type is irrelevant (e.g. `lxterminal` driving text input)
-get a single `apps::` entry.
+window) and one in the matching deeper module. Real-toolkit AHB
+smokes (Firefox / GTK / STK) live in **both** `hybris::` and
+`gfxstream::` so a regression in one backend doesn't accidentally
+hide behind the other; SHM smokes live only in `cpu_graphics::` (the
+compositor's SHM plumbing doesn't depend on the chroot's graphics
+env). Apps where buffer type is irrelevant (e.g. `lxterminal` driving
+text input) get a single `apps::` entry.
 
 ## Debug App (`gtk4-debug-app`)
 
@@ -188,13 +204,33 @@ Host (cargo test)                    Phone
   `assert_running`) and query its state via the broker `query-state` action. The compositor itself
   is launched by `run-integration-tests.sh` before `cargo test` runs — the
   Rust harness never starts it, only asserts it's there.
-- **`helpers.rs`**: Shared test helpers (`require_compositor`, `start_text_input`,
-  `assert_compositor_clean`, `launch_and_wait_for_toplevel` (for
-  `apps::`, no buffer-path assertion), `launch_and_wait_for_ahb` (for
-  `graphics::`/`xwayland::`, asserts AHB import), `saw_ahb_import`,
-  `saw_shm_import`). `require_compositor` panics with a clear message if the
-  compositor isn't running, telling the developer to use the run script
-  instead of invoking `cargo test` directly. The OnceLock state means
+- **`helpers.rs`**: Shared test helpers. Every spawn helper takes an
+  explicit `GraphicsBackend` so the in-rootfs env is hermetic — the
+  user's UI pick never leaks in.
+  - `require_compositor`, `assert_compositor_clean`, `saw_ahb_import`,
+    `saw_shm_import` — observation primitives.
+  - `start_text_input` / `start_text_input_no_surrounding` — for
+    `input::`.
+  - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
+    until the client has committed its first frame regardless of
+    buffer type.
+  - `launch_and_wait_for_ahb(backend, …)` — for the per-backend
+    hardware-buffer tests that need to keep the process alive after
+    first paint (e.g. Firefox's steady-state surface-count check,
+    `vkcube`'s animating check). Returns the still-running
+    `RootfsProcess`.
+  - `assert_renders_via_shm(backend, cmd, name, timeout)` — one-call
+    SHM smoke: spawn, wait for SHM import, assert no AHB, assert ≥1
+    toplevel, stop cleanly, assert clean. The body of every
+    forced-SHM test reduces to this single call.
+  - `assert_renders_via_ahb(backend, cmd, name, timeout)` — same
+    shape for the AHB fast path. Bespoke tests that need extra
+    steady-state checks (Firefox, vkcube) keep using
+    `launch_and_wait_for_ahb` directly.
+
+  `require_compositor` panics with a clear message if the compositor
+  isn't running, telling the developer to use the run script instead
+  of invoking `cargo test` directly. The OnceLock state means
   one-time setup (debug-app build) runs once per `cargo test` invocation.
 
 ## Adding New Tests

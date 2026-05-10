@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::rootfs_process::RootfsProcess;
+use crate::GraphicsBackend;
 
 const PROTOCOL_PREFIX: &str = "TAWC_DEBUG:";
 
@@ -26,13 +27,20 @@ impl DebugApp {
     /// `env` is a shell-style env prefix prepended to the command, e.g.
     /// `"GDK_GL=disabled"` to override the chroot's default `gles:always`
     /// and force GTK3's SHM path. Pass `""` for no extra env.
-    pub fn start(binary_path: &str, subcommand: &str, env: &str) -> io::Result<Self> {
+    /// `backend` pins the in-rootfs [GraphicsBackend] for this spawn so
+    /// the input tests don't inherit the user's UI pick.
+    pub fn start(
+        backend: GraphicsBackend,
+        binary_path: &str,
+        subcommand: &str,
+        env: &str,
+    ) -> io::Result<Self> {
         let cmd = if env.is_empty() {
             format!("{} {}", binary_path, subcommand)
         } else {
             format!("{} {} {}", env, binary_path, subcommand)
         };
-        let mut proc = RootfsProcess::spawn(&cmd)?;
+        let mut proc = RootfsProcess::spawn_with(backend, &cmd)?;
 
         let stdout = proc.take_stdout().expect("stdout was piped");
         let lines = Arc::new(Mutex::new(Vec::new()));

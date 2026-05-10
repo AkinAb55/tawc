@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::rootfs_process::RootfsProcess;
 use crate::debug_app::DebugApp;
-use crate::{adb, rootfs, compositor};
+use crate::{adb, rootfs, compositor, GraphicsBackend};
 
 /// Default deadline for short waits (compositor state queries, app startup
 /// after a window is mapped, etc).
@@ -60,14 +60,15 @@ pub fn wait_for_keyboard_shown(timeout: Duration) {
 /// system IME doesn't react to `updateSelection` and race the test
 /// (`issues/input-tests-skip-ic-and-race-system-ime.md`). The recorder
 /// is process-global; tests don't need to reset it between scenes.
-pub fn start_text_input(env: &str) -> DebugApp {
+pub fn start_text_input(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_gtk4_debug_app();
     adb::logcat_clear().expect("Failed to clear logcat");
     // Install the recording ImeOutput before the GTK app comes up so
     // the very first `onShowKeyboard` lands on the recorder rather than
     // briefly waking up Gboard / OpenBoard / AOSP-latin.
     adb::enable_test_input().expect("enable-test-input action");
-    let app = DebugApp::start(&binary, "text-input", env).expect("Failed to start debug app");
+    let app = DebugApp::start(backend, &binary, "text-input", env)
+        .expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
 
     // Wait for the client's IM context to enable text input. Without this,
@@ -99,11 +100,11 @@ pub fn start_text_input(env: &str) -> DebugApp {
 /// — the compositor must NOT send `delete_surrounding_text` to them
 /// (the protocol's "current cursor index" is undefined and real-world
 /// clients close the connection on receipt).
-pub fn start_text_input_no_surrounding(env: &str) -> DebugApp {
+pub fn start_text_input_no_surrounding(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_gtk4_debug_app();
     adb::logcat_clear().expect("Failed to clear logcat");
     adb::enable_test_input().expect("enable-test-input action");
-    let app = DebugApp::start(&binary, "text-input-no-surrounding", env)
+    let app = DebugApp::start(backend, &binary, "text-input-no-surrounding", env)
         .expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
     wait_for_keyboard_shown(TIMEOUT);
@@ -173,18 +174,31 @@ pub fn assert_compositor_clean() {
 /// attached** (i.e. the client has committed its first frame, whatever
 /// buffer type it picked). Doesn't care which path — the `apps::` tests
 /// use this to verify a program launches and gets to first paint; buffer-
-/// type assertions belong in `graphics::` (or `xwayland::`/`hybris::`).
+/// type assertions belong in `cpu_graphics::` / `hybris::` / `gfxstream::`
+/// (or `xwayland::`).
 ///
 /// Waiting for first-frame-attached (not just "toplevel mapped") matters
 /// for tests that drive the client immediately after launch — e.g.
 /// `lxterminal` needs the shell + IM ready before injected text reaches
 /// the PTY, and that only happens once the first frame has gone through.
 ///
+/// `backend` pins the in-rootfs [GraphicsBackend] for this spawn. Suite
+/// tests pass an explicit value (typically `Cpu` for `apps::`/`input::`
+/// since they don't care about buffer type and CPU is the most portable
+/// path); without an override the user's Settings pick would leak in,
+/// making tests non-hermetic.
+///
 /// Panics if the app crashes or doesn't reach first paint within `timeout`.
-pub fn launch_and_wait_for_toplevel(cmd: &str, name: &str, timeout: Duration) -> RootfsProcess {
+pub fn launch_and_wait_for_toplevel(
+    backend: GraphicsBackend,
+    cmd: &str,
+    name: &str,
+    timeout: Duration,
+) -> RootfsProcess {
     require_compositor();
 
-    let mut proc = RootfsProcess::spawn(cmd).unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
+    let mut proc = RootfsProcess::spawn_with(backend, cmd)
+        .unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
     proc.ensure_pgid();
 
     let deadline = Instant::now() + timeout;
@@ -224,13 +238,23 @@ pub fn launch_and_wait_for_toplevel(cmd: &str, name: &str, timeout: Duration) ->
 /// hardware-buffered frame). Panics if the app crashes or doesn't render
 /// within `timeout`.
 ///
+/// `backend` pins the in-rootfs [GraphicsBackend] — pass `Libhybris` or
+/// `Gfxstream` (the two paths that can actually produce AHBs). CPU has
+/// no AHB path, so callers should use [assert_renders_via_shm] instead.
+///
 /// On return the process is still running; the caller is responsible for
 /// stopping it (typically via `proc.stop()`).
-pub fn launch_and_wait_for_ahb(cmd: &str, name: &str, timeout: Duration) -> RootfsProcess {
+pub fn launch_and_wait_for_ahb(
+    backend: GraphicsBackend,
+    cmd: &str,
+    name: &str,
+    timeout: Duration,
+) -> RootfsProcess {
     require_compositor();
     adb::logcat_clear().expect("Failed to clear logcat");
 
-    let mut proc = RootfsProcess::spawn(cmd).unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
+    let mut proc = RootfsProcess::spawn_with(backend, cmd)
+        .unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
     proc.ensure_pgid();
 
     let deadline = Instant::now() + timeout;
@@ -257,4 +281,107 @@ pub fn launch_and_wait_for_ahb(cmd: &str, name: &str, timeout: Duration) -> Root
         timeout
     );
     proc
+}
+
+/// Spawn `cmd`, wait until the compositor imports an SHM buffer for it,
+/// assert no AHB import ever fires during the run, assert ≥1 mapped
+/// toplevel, then stop cleanly and assert the compositor returns to a
+/// clean state. The single-call smoke for the
+/// `gtk*-with-software-renderer` / `weston-simple-shm` / cpu-only family.
+///
+/// `backend` pins the in-rootfs [GraphicsBackend]. Same SHM-only client
+/// against libhybris (GDK_GL=disabled, GSK_RENDERER=cairo) versus
+/// against CPU (no GPU available → distro Mesa falls through to
+/// llvmpipe, the few GL apps that work still pick SHM) tests slightly
+/// different invariants — the helper handles both.
+pub fn assert_renders_via_shm(
+    backend: GraphicsBackend,
+    cmd: &str,
+    name: &str,
+    timeout: Duration,
+) {
+    require_compositor();
+    adb::logcat_clear().expect("Failed to clear logcat");
+
+    let mut app = RootfsProcess::spawn_with(backend, cmd)
+        .unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
+    app.ensure_pgid();
+
+    let deadline = Instant::now() + timeout;
+    let mut saw = false;
+    while Instant::now() < deadline {
+        if !app.is_running() {
+            app.stop().ok();
+            panic!("{name} crashed/exited before rendering");
+        }
+        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+        if saw_shm_import(&logs) {
+            saw = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    // Grace period so a regression that only manifests on the second
+    // SHM commit (e.g. GTK4's cairo double-release bug) still trips
+    // the no-AHB / still-running checks below.
+    thread::sleep(Duration::from_millis(500));
+
+    assert!(
+        saw,
+        "{name} did not produce SHM buffer imports within {timeout:?}"
+    );
+
+    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    assert!(
+        !saw_ahb_import(&logs),
+        "Unexpected AHB import — {name} should not use hardware buffers \
+         under backend={:?}",
+        backend,
+    );
+    assert!(
+        app.is_running(),
+        "{name} exited shortly after first SHM commit (regression of an \
+         SHM cleanup bug under backend={:?}?)",
+        backend,
+    );
+
+    let state = compositor::query_state(TIMEOUT)
+        .expect("query compositor state while client running");
+    assert!(
+        state.toplevels >= 1,
+        "compositor sees no toplevel for {name}: {state:?}"
+    );
+
+    app.stop().unwrap_or_else(|e| panic!("{name} failed to stop cleanly: {e}"));
+    assert_compositor_clean();
+}
+
+/// Spawn `cmd`, wait for an AHB import (the hardware-buffer fast path),
+/// assert ≥1 mapped toplevel, stop cleanly, assert clean. The single-
+/// call smoke for the `gtk*-default-renderer` / `weston-simple-egl` /
+/// `vkcube` / real-toolkit family.
+///
+/// `backend` pins the in-rootfs [GraphicsBackend] — meaningful values
+/// are `Libhybris` and `Gfxstream`. (Under CPU, the AHB path doesn't
+/// exist; the same client would commit SHM and this helper would
+/// timeout.)
+///
+/// Bespoke tests that need a steady-state surface-count or
+/// frames-counter check (e.g. Firefox's WebRender → AHB assertion) keep
+/// using [launch_and_wait_for_ahb] directly.
+pub fn assert_renders_via_ahb(
+    backend: GraphicsBackend,
+    cmd: &str,
+    name: &str,
+    timeout: Duration,
+) {
+    let mut app = launch_and_wait_for_ahb(backend, cmd, name, timeout);
+    let state = compositor::query_state(TIMEOUT)
+        .expect("query compositor state while client running");
+    assert!(
+        state.toplevels >= 1,
+        "compositor sees no toplevel for {name}: {state:?}"
+    );
+    app.stop().unwrap_or_else(|e| panic!("{name} failed to stop cleanly: {e}"));
+    assert_compositor_clean();
 }

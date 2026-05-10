@@ -2,6 +2,8 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.util.Log
+import me.phie.tawc.GraphicsBackend
+import me.phie.tawc.Settings
 import java.io.File
 import java.io.IOException
 
@@ -128,7 +130,7 @@ class ProotMethod(context: Context) : InstallationMethod {
      * /etc/profile + profile.d so locale and package PATH additions
      * still apply.
      */
-    override fun startInside(rootfs: String, command: String?): Process {
+    override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
         // Pre-create the bind targets and proot's scratch dir. proot
         // refuses to bind to a guest path that doesn't exist on disk,
         // so we materialise `<rootfs>/usr/share/tawc` (the wayland
@@ -164,7 +166,7 @@ class ProotMethod(context: Context) : InstallationMethod {
         // shell-layer quoting — sh -c "<script>" $0 $1 makes $1 = the
         // user command verbatim.
         val invokeArgv =
-            prootArgv(rootfs) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT)
+            prootArgv(rootfs) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: Settings.graphicsBackend)
         val invokeShell = invokeArgv.joinToString(" ") { shellQuote(it) }
         val script = if (command != null) {
             "exec /system/bin/setsid $invokeShell /bin/bash -lc \"\$1\""

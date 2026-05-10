@@ -1,6 +1,7 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import me.phie.tawc.GraphicsBackend
 import java.io.File
 
 /**
@@ -95,6 +96,12 @@ interface InstallationMethod {
      * login shell with no command. Useful for `rootfs-run.sh`
      * with no args.
      *
+     * `graphics` overrides the in-rootfs [GraphicsBackend] for this
+     * one spawn (libhybris / gfxstream / cpu env). `null` falls back
+     * to [me.phie.tawc.Settings.graphicsBackend] (the user's UI
+     * pick). Test harnesses use the override to exercise a specific
+     * backend without flipping the global pref.
+     *
      * Method-specific notes:
      *   - [ChrootMethod] needs `su` (CAP_SYS_CHROOT). The bind-mount
      *     + chroot script is piped to `su` via stdin, which means the
@@ -108,7 +115,7 @@ interface InstallationMethod {
      * env comes entirely from [RootfsEnv]; nothing about the env
      * needs to be on disk between calls.
      */
-    fun startInside(rootfs: String, command: String?): Process
+    fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend? = null): Process
 
     /**
      * Convenience wrapper around [startInside] for in-process callers
@@ -126,7 +133,8 @@ interface InstallationMethod {
         rootfs: String,
         command: String,
         onLine: ((String) -> Unit)? = null,
-    ): MethodResult = MethodRunHelper.runInside(this, rootfs, command, onLine)
+        graphics: GraphicsBackend? = null,
+    ): MethodResult = MethodRunHelper.runInside(this, rootfs, command, onLine, graphics)
 
     /**
      * Tar-extract [tarball] into [rootfs]. The implementations diverge:

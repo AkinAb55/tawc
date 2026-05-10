@@ -2,6 +2,8 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.util.Log
+import me.phie.tawc.GraphicsBackend
+import me.phie.tawc.Settings
 import java.io.File
 import java.io.IOException
 
@@ -91,7 +93,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * -lc` still runs the distro-shipped /etc/profile + profile.d so
      * locale and package PATH additions still apply.
      */
-    override fun startInside(rootfs: String, command: String?): Process {
+    override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
         // Pre-create bind targets. tawcroot's `tawcroot_path_add_bind`
         // opens the SRC dir at startup; the in-rootfs DST dir doesn't
         // need to exist (it's purely a name-rewriting key). We still
@@ -117,7 +119,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             addAll(listOf("-r", rootfs))
             for ((src, dst) in bindSpecs()) addAll(listOf("-b", "$src:$dst"))
             add("--")
-            addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT))
+            addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
             add("/bin/bash")
             if (command != null) {
                 add("-lc"); add(command)

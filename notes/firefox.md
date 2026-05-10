@@ -8,7 +8,7 @@ fall back to SHM (no `zwp_linux_dmabuf_v1` support yet in this compositor).
 configuration** — no env vars, no autoconfig `firefox.cfg`, no GPU-process
 prefs. Tested on Arch Linux ARM (Firefox 150.0.1), Void Linux (150.0.2),
 and Manjaro ARM (141.0.3). The
-`graphics::test_firefox_uses_hardware_buffers` integration test
+`hybris::test_firefox_renders_via_ahb` integration test
 passes on the OnePlus 9 against all three distros. The earlier "Firefox closed unexpectedly while
 starting" recovery-dialog symptom and the tawcroot-side parent-process
 SEGV (Mozilla's `shm_open(3)` against an unbacked `/dev/shm`) are both

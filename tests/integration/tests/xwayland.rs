@@ -2,17 +2,23 @@
 //! compositor spawns at startup — pure-X11 clients, the `-tawc-test-pattern`
 //! debug hook, the TAWC-DRI AHB-shipping pipe, and EGL-on-X11 via the
 //! libhybris X11 platform plugin. Buffer-type assertions inside these tests
-//! stay here (rather than moving to `graphics::`) because what's under test
-//! is the Xwayland integration, not the buffer plumbing in isolation.
+//! stay here (rather than moving to `cpu_graphics::` / `hybris::` /
+//! `gfxstream::`) because what's under test is the Xwayland integration,
+//! not the buffer plumbing in isolation.
 //!
-//! Requires libhybris + a real Android GPU driver, so these fail on the
-//! emulator and on the gfxstream backend (skipped explicitly).
+//! Every spawn pins [`GraphicsBackend::Libhybris`]: TAWC-DRI / `xwl_tawc`
+//! / Xwayland's `-tawc-test-pattern` and the X11 EGL platform plugin
+//! are all libhybris-native — no analogue under gfxstream (and under
+//! CPU the AHB asserts here would never fire). Requires libhybris + a
+//! real Android GPU driver, so these still fail on the emulator.
 
 use std::time::Duration;
 
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::helpers::{assert_compositor_clean, require_compositor};
-use tawc_integration::{adb, compositor, rootfs};
+use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
+
+const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -35,8 +41,8 @@ fn test_xwayland_xclock_renders_via_shm() {
     // and the test would race the very first SHM import. DISPLAY=:0 is
     // already exported by RootfsEnv on rootfs entry, but be explicit
     // so the test doesn't depend on env order.
-    let mut app =
-        RootfsProcess::spawn("DISPLAY=:0 xclock -update 1").expect("spawn xclock");
+    let mut app = RootfsProcess::spawn_with(BACKEND, "DISPLAY=:0 xclock -update 1")
+        .expect("spawn xclock");
     app.ensure_pgid();
 
     let deadline = std::time::Instant::now() + XWAYLAND_LAUNCH_TIMEOUT;
@@ -92,14 +98,6 @@ fn test_xwayland_xclock_renders_via_shm() {
 /// shape every other test expects.
 #[test]
 fn test_xwayland_test_pattern_ahb_round_trip() {
-    if tawc_integration::skip_if_gfxstream(
-        "Xwayland's `-tawc-test-pattern` allocates the AHB via libhybris+\
-         libnativewindow; the test asserts the compositor sees that \
-         specific allocation path. Bridge-side AHB allocation goes via \
-         gfxstream's renderer instead — different code path, no analogue",
-    ) {
-        return;
-    }
     require_compositor();
 
     // Enable opt-in flag.
@@ -207,14 +205,6 @@ fn test_xwayland_test_pattern_ahb_round_trip() {
 /// See notes/xwayland.md for the broader Phase 2 plan.
 #[test]
 fn test_tawc_dri_ahb_present_round_trip() {
-    if tawc_integration::skip_if_gfxstream(
-        "tawc-dri-test allocates an AHB through libhybris+libnativewindow \
-         and ships it through TAWC-DRI to the libhybris-built Xwayland. \
-         Tests the libhybris AHB-shipping path end-to-end; no libhybris \
-         analogue under the bridge",
-    ) {
-        return;
-    }
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
 
@@ -225,7 +215,7 @@ fn test_tawc_dri_ahb_present_round_trip() {
     // the window mapped for screencap inspection in an integration test
     // that only verifies the compositor logs.
     let cmd = format!("DISPLAY=:0 TAWC_DRI_HOLD_SECS=1 {}", bin);
-    let output = adb::rootfs_run(&cmd).expect("run tawc-dri-test");
+    let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run tawc-dri-test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -286,12 +276,6 @@ fn test_tawc_dri_ahb_present_round_trip() {
 ///     blocking it).
 #[test]
 fn test_tawc_dri_ahb_present_animated_loop() {
-    if tawc_integration::skip_if_gfxstream(
-        "Animated variant of test_tawc_dri_ahb_present_round_trip — same \
-         libhybris+libnativewindow path",
-    ) {
-        return;
-    }
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
 
@@ -304,7 +288,7 @@ fn test_tawc_dri_ahb_present_animated_loop() {
         "DISPLAY=:0 TAWC_DRI_LOOP_FRAMES={} {}",
         FRAMES, bin
     );
-    let output = adb::rootfs_run(&cmd).expect("run tawc-dri-test loop");
+    let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run tawc-dri-test loop");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -386,15 +370,6 @@ fn test_tawc_dri_ahb_present_animated_loop() {
 /// allocate (it should match what `tawc-dri-test` already emits cleanly).
 #[test]
 fn test_eglx11_renders_via_ahb() {
-    if tawc_integration::skip_if_gfxstream(
-        "Tests libhybris's X11 EGL platform plugin (eglplatform_x11.so) \
-         end-to-end. The eglx11-test binary has RUNPATH=/usr/lib/hybris \
-         baked in so it loads libhybris's libEGL even with empty \
-         LD_LIBRARY_PATH — the test still passes under gfxstream, but \
-         what's being tested is the libhybris path, not the bridge",
-    ) {
-        return;
-    }
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
 
@@ -406,7 +381,7 @@ fn test_eglx11_renders_via_ahb() {
         "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 TAWC_EGLX11_FRAMES=30 {}",
         bin
     );
-    let output = adb::rootfs_run(&cmd).expect("run eglx11-test");
+    let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run eglx11-test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -463,16 +438,6 @@ fn test_eglx11_renders_via_ahb() {
 /// load-bearing for any non-trivial GL workload.
 #[test]
 fn test_es2gears_x11_renders_via_ahb() {
-    if tawc_integration::skip_if_gfxstream(
-        "es2gears_x11 is a stock distro binary linked against /usr/lib/\
-         libEGL.so.1 (libglvnd → distro Mesa). It exercises the libhybris \
-         X11 EGL plugin only when libhybris's libEGL shadows that path on \
-         LD_LIBRARY_PATH. Under gfxstream the chroot's LD_LIBRARY_PATH is \
-         empty (Mesa loads stock), so HYBRIS_EGLPLATFORM=x11 has no effect \
-         and the plugin path under test never runs. No analogue under bridge",
-    ) {
-        return;
-    }
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
 
@@ -482,7 +447,7 @@ fn test_es2gears_x11_renders_via_ahb() {
     // total frame count, so longer runs would only dilute signal.
     let cmd = "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 timeout 4 es2gears_x11 \
                > /dev/null 2>&1; true";
-    let output = adb::rootfs_run(cmd).expect("run es2gears_x11");
+    let output = adb::rootfs_run_with(BACKEND, cmd).expect("run es2gears_x11");
     assert!(
         output.status.success(),
         "es2gears_x11 wrapper exited non-zero ({:?}). The wrapper ends \

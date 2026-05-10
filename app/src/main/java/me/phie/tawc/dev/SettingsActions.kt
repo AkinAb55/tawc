@@ -8,10 +8,11 @@ import me.phie.tawc.Settings
  * Broker actions that read/write entries in [Settings]. Registered
  * from [me.phie.tawc.TawcApplication.onCreate] (debug builds only).
  *
- * Used today by `scripts/run-integration-tests.sh --graphics …` so the
- * test runner can flip the persisted graphics-driver pick before
- * spawning client processes — same code path users hit by toggling
- * the radio on the in-app Settings screen.
+ * Used for ad-hoc developer toggling that should persist — same code
+ * path users hit by toggling the radio on the in-app Settings screen.
+ * The integration test suite does NOT use this; tests pass a
+ * `GRAPHICS` header on each broker RUNINSIDE spawn so the persisted
+ * pref isn't disturbed (see `notes/exec-broker.md`).
  *
  * | Action | Args | Effect |
  * |--------|------|--------|

@@ -1,6 +1,7 @@
 package me.phie.tawc.install
 
 import android.util.Log
+import me.phie.tawc.GraphicsBackend
 import java.io.IOException
 
 /**
@@ -23,8 +24,9 @@ internal object MethodRunHelper {
         rootfs: String,
         command: String,
         onLine: ((String) -> Unit)?,
+        graphics: GraphicsBackend? = null,
     ): MethodResult {
-        val proc = method.startInside(rootfs, command)
+        val proc = method.startInside(rootfs, command, graphics)
         // We don't redirectErrorStream up at startInside (the broker
         // path needs them split into separate frames), so collect both
         // here and merge into one ordered-by-arrival line stream.

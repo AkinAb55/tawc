@@ -51,6 +51,12 @@ use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
     assert_compositor_clean, start_text_input, start_text_input_no_surrounding, TIMEOUT,
 };
+use tawc_integration::GraphicsBackend;
+
+/// Input dispatch has no buffer-type stake; pick the most portable
+/// backend (no libhybris LD_LIBRARY_PATH, no gfxstream env) so a single
+/// run exercises the dispatch paths without depending on a GPU.
+const INPUT_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 
 // Physical screen coordinates for tapping inside the text view.
 // Compositor uses 2x scale, so logical = physical / 2.
@@ -66,11 +72,13 @@ const TAP_TEXT_MID_Y: u32 = 250;
 const TAP_TEXT_START_X: u32 = 85;
 
 /// Env passed to gtk4-debug-app for input tests. Currently empty — i.e.
-/// GTK4 uses its default GSK renderer (Vulkan/GL via libhybris on device).
-/// We'd rather use `GSK_RENDERER=cairo` so this group is buffer-path
-/// independent and runs on the emulator too, but the cairo path currently
-/// dies right after the first frame with "the target surface has been
-/// finished" — see issues/gtk4-cairo-renderer-broken.md.
+/// GTK4 uses its default GSK renderer. Under [INPUT_BACKEND] = CPU, GSK
+/// picks up the distro Mesa loaded via llvmpipe (Vulkan via lavapipe if
+/// `vulkan-swrast` is installed, GL otherwise). We'd rather use
+/// `GSK_RENDERER=cairo` so this group is buffer-path independent, but
+/// the cairo path currently dies right after the first frame with
+/// "the target surface has been finished" — see
+/// issues/gtk4-cairo-renderer-broken.md.
 const INPUT_ENV: &str = "";
 
 /// Reset the GTK4 buffer + preedit between scenarios so we don't pay GTK
@@ -720,7 +728,7 @@ fn scene_update_from_compositor_clears_composing_spans(app: &DebugApp) {
 /// exactly where coverage broke.
 #[test]
 fn test_input_dispatch() {
-    let mut app = start_text_input(INPUT_ENV);
+    let mut app = start_text_input(INPUT_BACKEND, INPUT_ENV);
 
     scene_basic_input_and_delete(&app);
     reset_buffer(&app);
@@ -785,7 +793,7 @@ fn test_input_dispatch() {
 /// GtkEventControllerKey.
 #[test]
 fn test_surroundingless_client_uses_keyboard_for_backspace() {
-    let mut app = start_text_input_no_surrounding(INPUT_ENV);
+    let mut app = start_text_input_no_surrounding(INPUT_BACKEND, INPUT_ENV);
 
     // Sanity: the IM context never asked us for surrounding text on its
     // own and we never volunteered it — confirms we're exercising the

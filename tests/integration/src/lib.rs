@@ -28,40 +28,30 @@ pub fn install_id() -> String {
     ID.get_or_init(resolve_install_id).clone()
 }
 
-/// In-app graphics-driver pick the test runner flipped before the
-/// suite started. Mirrors `Settings.graphicsBackend` (Kotlin); `"libhybris"`
-/// is the assumed default when the runner didn't pass `--graphics
-/// gfxstream`. Read by tests that gate libhybris-specific assertions
-/// (Android META-EGL, vkcube WSI, …) — those have no working analogue
-/// under the gfxstream-bridge backend until phases 4–5 land
-/// (notes/gfxstream-bridge.md "Remaining work to a fully-integrated
-/// bridge backend"). Tests that share a code path between backends
-/// don't need to consult this.
-pub fn graphics_backend() -> String {
-    std::env::var("TAWC_GRAPHICS_BACKEND")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "libhybris".to_string())
+/// In-rootfs graphics backend pick. Mirrors `me.phie.tawc.GraphicsBackend`
+/// (Kotlin). Tests pass a value to the spawn helpers
+/// ([`crate::rootfs_process::RootfsProcess::spawn_with`],
+/// [`crate::adb::rootfs_run_with`], `helpers::launch_and_wait_for_*`,
+/// `helpers::assert_renders_via_*`) to run that one client under a
+/// specific backend without touching the user's persisted Settings
+/// pick. The override travels over the broker as a `GRAPHICS <key>`
+/// header on the RUNINSIDE form (see `notes/exec-broker.md`); the
+/// backend-less call shapes (`spawn`, `rootfs_run`) honour the user's
+/// UI pick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphicsBackend {
+    Libhybris,
+    Gfxstream,
+    Cpu,
 }
 
-/// Skip-guard for tests that fundamentally exercise a libhybris-only
-/// path (the chroot's `LD_LIBRARY_PATH` points at libhybris, EGL-via-
-/// libhybris is the only working GL driver, etc.). Returns `true` when
-/// the test should bail out cleanly under `--graphics gfxstream`; the
-/// caller prints a `SKIP:` line explaining the gap and `return`s.
-///
-/// `reason` should be a short human-readable explanation that points at
-/// the relevant phase in `notes/gfxstream-bridge.md` so a future reader
-/// knows what would unblock the test. Examples:
-///   - `"GL via Zink-on-bridge (phase 6) not implemented yet"`
-///   - `"Vulkan WSI (phases 4-5) not implemented yet"`
-///   - `"libhybris-only — no analogue under bridge"`
-pub fn skip_if_gfxstream(reason: &str) -> bool {
-    if graphics_backend() == "gfxstream" {
-        eprintln!("SKIP: {reason}");
-        true
-    } else {
-        false
+impl GraphicsBackend {
+    pub fn as_key(&self) -> &'static str {
+        match self {
+            GraphicsBackend::Libhybris => "libhybris",
+            GraphicsBackend::Gfxstream => "gfxstream",
+            GraphicsBackend::Cpu => "cpu",
+        }
     }
 }
 

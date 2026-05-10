@@ -1,6 +1,8 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import me.phie.tawc.GraphicsBackend
+import me.phie.tawc.Settings
 import java.io.File
 
 /**
@@ -43,7 +45,7 @@ object ChrootMethod : InstallationMethod {
      * (notes/rootfs-sessions.md): every chroot invocation runs in its
      * own session.
      */
-    override fun startInside(rootfs: String, command: String?): Process {
+    override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
         // Magisk's su inherits the calling process's mount namespace,
         // so we wrap with `unshare -m` so any leaked binds go away when
         // the script exits. (See [Su.run]'s docstring for context.)
@@ -60,7 +62,7 @@ object ChrootMethod : InstallationMethod {
             // [RootfsEnv]'s map, with PATH/locale further refined by
             // the distro's /etc/profile.
             val rootfsQ = shellQuote(rootfs)
-            val envArgvQ = RootfsEnv.envArgv(RootfsEnv.Method.CHROOT)
+            val envArgvQ = RootfsEnv.envArgv(RootfsEnv.Method.CHROOT, graphics ?: Settings.graphicsBackend)
                 .joinToString(" ") { shellQuote(it) }
             if (command != null) {
                 val cmdQ = shellQuote(command)

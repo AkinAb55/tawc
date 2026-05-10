@@ -3,7 +3,7 @@ use std::process::ChildStdout;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::adb;
+use crate::{adb, GraphicsBackend};
 
 /// How long to wait for the process group to die after SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +51,22 @@ impl RootfsProcess {
     ///
     /// Does NOT block waiting for the PGID — call `ensure_pgid()` later when
     /// you're ready to wait. This avoids blocking stdout reads.
+    ///
+    /// Uses the user's persisted `Settings.graphicsBackend`. Tests that
+    /// want a specific in-rootfs backend should call [Self::spawn_with].
     pub fn spawn(cmd: &str) -> io::Result<Self> {
+        Self::spawn_inner(None, cmd)
+    }
+
+    /// Backend-pinned variant of [Self::spawn]: the broker uses
+    /// `backend` as the in-rootfs [GraphicsBackend] for this one spawn,
+    /// regardless of the user's Settings pick. See `notes/exec-broker.md`
+    /// (GRAPHICS header on RUNINSIDE).
+    pub fn spawn_with(backend: GraphicsBackend, cmd: &str) -> io::Result<Self> {
+        Self::spawn_inner(Some(backend), cmd)
+    }
+
+    fn spawn_inner(backend: Option<GraphicsBackend>, cmd: &str) -> io::Result<Self> {
         ensure_pidfile_helper()?;
 
         // Generate a unique pidfile path
@@ -68,7 +83,10 @@ impl RootfsProcess {
             "{} {} {}",
             PIDFILE_HELPER_CHROOT, pidfile_chroot, cmd
         );
-        let child = adb::rootfs_spawn(&wrapped)?;
+        let child = match backend {
+            Some(b) => adb::rootfs_spawn_with(b, &wrapped)?,
+            None => adb::rootfs_spawn(&wrapped)?,
+        };
 
         Ok(Self {
             child,

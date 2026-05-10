@@ -24,6 +24,8 @@ use std::io;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
+use crate::GraphicsBackend;
+
 /// Path to the host-side tawc-exec helper. Absolute path lets tests
 /// invoke it without needing it on $PATH. Built by
 /// `scripts/build-tawc-exec.sh`. Override via `TAWC_EXEC_BIN`.
@@ -66,10 +68,19 @@ pub fn rootfs_host_exec(argv: &[&str]) -> io::Result<Output> {
 /// to the install's [InstallationMethod.startInside] (see
 /// notes/exec-broker.md, notes/rootfs-sessions.md). Single entry point
 /// for every install method — chroot handles its own `su` internally.
+///
+/// Uses whatever graphics backend the user picked in Settings. Tests
+/// that want a specific backend should call [rootfs_run_with] instead.
 pub fn rootfs_run(cmd: &str) -> io::Result<Output> {
-    Command::new(tawc_exec_bin())
-        .args(["--in-rootfs", &crate::install_id(), "--", cmd])
-        .output()
+    run_inside_argv(None, cmd).output()
+}
+
+/// Same as [rootfs_run] but pins the in-rootfs [GraphicsBackend] for
+/// this one spawn. Travels over the broker as a `GRAPHICS <key>` header
+/// on the RUNINSIDE form (see notes/exec-broker.md); the persisted
+/// `Settings.graphicsBackend` is untouched.
+pub fn rootfs_run_with(backend: GraphicsBackend, cmd: &str) -> io::Result<Output> {
+    run_inside_argv(Some(backend), cmd).output()
 }
 
 /// Spawn a command in the chroot with piped stdout/stderr (non-blocking).
@@ -79,11 +90,31 @@ pub fn rootfs_run(cmd: &str) -> io::Result<Output> {
 /// (notes/rootfs-sessions.md) is enforced inside
 /// [InstallationMethod.startInside] — no caller-side `setsid` needed.
 pub fn rootfs_spawn(cmd: &str) -> io::Result<std::process::Child> {
-    Command::new(tawc_exec_bin())
-        .args(["--in-rootfs", &crate::install_id(), "--", cmd])
+    run_inside_argv(None, cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+}
+
+/// Backend-pinned variant of [rootfs_spawn]. See [rootfs_run_with].
+pub fn rootfs_spawn_with(backend: GraphicsBackend, cmd: &str) -> io::Result<std::process::Child> {
+    run_inside_argv(Some(backend), cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+/// Build the `tawc-exec --in-rootfs … [--graphics …] -- <cmd>` Command.
+/// Shared by `rootfs_run` / `rootfs_run_with` / spawn variants — only
+/// the stdio piping and `.output()` vs `.spawn()` differs.
+fn run_inside_argv(backend: Option<GraphicsBackend>, cmd: &str) -> Command {
+    let mut c = Command::new(tawc_exec_bin());
+    c.args(["--in-rootfs", &crate::install_id()]);
+    if let Some(b) = backend {
+        c.args(["--graphics", b.as_key()]);
+    }
+    c.args(["--", cmd]);
+    c
 }
 
 /// Run a broker action via tawc-exec. `args` are passed as repeated
