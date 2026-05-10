@@ -77,6 +77,10 @@ case "$DISTRO_KEY" in
             # apps::test_es2gears_x11_renders_via_ahb — real-app GLES-on-X11
             # client driving the libhybris X11 EGL platform plugin.
             mesa-demos
+            # apps::test_lxterminal_input_and_exit — VTE-shape surroundingless
+            # text-input-v3 client; verifies commit_string + wl_keyboard Enter
+            # reach the shell.
+            lxterminal
         )
         # `-Syu` (instead of plain `-S`): refresh local DB in the same
         # transaction we install in, so we never reference a `pkg.tar.xz`
@@ -132,6 +136,7 @@ case "$DISTRO_KEY" in
             xclock
             mesa-demos mesa-dri
             dejavu-fonts-ttf
+            lxterminal
         )
         # xbps quirk: `xbps-install -uy <pkgs>` updates only the listed
         # packages + their deps, NOT the whole system. Without an

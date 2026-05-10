@@ -217,7 +217,21 @@ fi
 # overrides anymore. (LD_LIBRARY_PATH is still needed for the
 # by-name `dlopen("libEGL.so")` first-level lookup since we don't
 # ship --enable-glvnd; see notes/wsi-layer.md.)
+# Detect prefix drift: the build dir is in-tree (`deps/libhybris/hybris/`),
+# so a previous build with a different `--prefix` leaves a Makefile that
+# survives the host-side build/ wipe. If the recorded prefix doesn't
+# match the one we're about to bake, force a reconfigure — otherwise
+# `make install` lands binaries at the old path and the verify step
+# below trips with all libs "missing".
+NEED_CONFIGURE=0
 if [ ! -f "$BUILD_DIR/Makefile" ] || [ "$CLEAN" = "1" ]; then
+    NEED_CONFIGURE=1
+elif ! grep -qE '^prefix = /usr/lib/hybris$' "$BUILD_DIR/Makefile"; then
+    echo "==> stale Makefile (wrong prefix) — distclean + reconfigure"
+    ( cd "$BUILD_DIR" && make distclean ) >/dev/null 2>&1 || true
+    NEED_CONFIGURE=1
+fi
+if [ "$NEED_CONFIGURE" = "1" ]; then
     echo "==> configure (host=$HOST_TRIPLE prefix=/usr/lib/hybris)"
     ( cd "$BUILD_DIR" && \
       ./configure \

@@ -24,6 +24,8 @@ const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const STK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const GTK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
+const LXTERMINAL_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+const LXTERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn test_firefox_launches_with_hardware_buffers() {
@@ -695,6 +697,69 @@ fn test_eglx11_renders_via_ahb() {
          allocate and the compositor's wlegl import path.\nlogs:\n{}",
         &logs[logs.len().saturating_sub(4096)..],
     );
+    assert_compositor_clean();
+}
+
+/// lxterminal hosts a VTE terminal — the canonical surroundingless
+/// text-input-v3 client (see `test_surroundingless_client_uses_keyboard_for_backspace`
+/// in tests/input.rs for the protocol-level coverage). This test wires
+/// up the full real-world stack: launch lxterminal, verify it stays up
+/// past first paint, type `exit` followed by Enter, and assert the
+/// process actually exits. That implicitly proves:
+///   - `commit_string` (text-input-v3) reaches VTE → PTY → shell as
+///     keystrokes; without it the shell never sees `exit`.
+///   - `wl_keyboard` Enter reaches the shell as a newline; without it
+///     the shell never executes the typed command.
+///   - Compositor cleans up on a normal client exit (no leftover
+///     toplevel/client).
+///
+/// Requires `lxterminal` in the chroot — added by
+/// `scripts/install-test-deps.sh`. Re-run that script if the binary is
+/// missing.
+#[test]
+fn test_lxterminal_input_and_exit() {
+    let mut term = launch_and_wait_for_ahb(
+        "lxterminal",
+        "lxterminal",
+        LXTERMINAL_LAUNCH_TIMEOUT,
+    );
+
+    // launch_and_wait_for_ahb already panics if the process exits
+    // before its first frame, but a terminal that opens then closes
+    // shortly after first paint (e.g. shell crash on startup) wouldn't
+    // be caught by its in-loop check. Sleep past the 1s post-render
+    // grace and re-verify.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        term.is_running(),
+        "lxterminal exited shortly after first frame — shell crash on startup?"
+    );
+
+    // Drive the shell: "exit" via text-input-v3 commit_string, newline
+    // via wl_keyboard Enter. Same wire shape as a soft-keyboard user
+    // typing into the terminal.
+    adb::input_text("exit").expect("commit 'exit'");
+    adb::input_keyevent(adb::KEYCODE_ENTER).expect("Enter");
+
+    let deadline = std::time::Instant::now() + LXTERMINAL_EXIT_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if !term.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        !term.is_running(),
+        "lxterminal still running {:?} after `exit`+Enter — input didn't \
+         reach the shell. commit_string lost between text-input-v3 and \
+         VTE's PTY, or KEYCODE_ENTER never delivered as a wl_keyboard key.",
+        LXTERMINAL_EXIT_TIMEOUT
+    );
+
+    // term already exited; stop() returns Err for already-gone
+    // processes — discard it. Drop tears down the lingering local adb
+    // shell wrapper.
+    let _ = term.stop();
     assert_compositor_clean();
 }
 
