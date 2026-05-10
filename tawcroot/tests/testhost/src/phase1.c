@@ -1673,11 +1673,15 @@ static int test_ioctl_translation(void)
 		rv == -25);
 	tawc_io_kv_dec("    rv", rv);
 
+	/* TCSETS2 on a regfile: -ENOTTY on lenient kernels, -EACCES on
+	 * Android policies that gate write-side tty ioctls on regfiles
+	 * (OnePlus 9). Both prove the dispatch reached the kernel — the
+	 * actual data path is covered by test_ioctl_pty_translation. */
 	INLINE_SYS6(TAWC_SYS_ioctl, fd, 0x402C542BL /*TCSETS2*/,
 		    (long)tbuf, 0, 0, 0, rv);
 	fails += tawc_io_step(
-		"ioctl(regfile, TCSETS2) -> -ENOTTY (translated to TCSETS)",
-		rv == -25);
+		"ioctl(regfile, TCSETS2) -> -ENOTTY or -EACCES (dispatch reached kernel)",
+		rv == -25 || rv == -13);
 	tawc_io_kv_dec("    rv", rv);
 
 	/* (NULL-arg behaviour is pinned in test_ioctl_pty_translation —
