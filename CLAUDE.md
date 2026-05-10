@@ -142,7 +142,7 @@ has bitten us with hardcoded `/home/ai/libxkbcommon` paths in
 - **Run Wayland app:** `bash scripts/rootfs-run.sh '<command>'` (env vars set by profile)
 - **Firefox:** `bash scripts/rootfs-run.sh 'firefox --no-remote'`
 - **Screenshot:** `adb shell screencap -p /data/local/tmp/tawc-dev/screenshot.png && adb pull /data/local/tmp/tawc-dev/screenshot.png /tmp/screenshot.png` (analyze with sub-agent, then `adb shell rm /data/local/tmp/tawc-dev/screenshot.png && rm /tmp/screenshot.png`). No `su` needed — `screencap` works as the `shell` uid and the scratch dir is shell-writable.
-- **Logs:** `adb logcat -s tawc-native` (Rust) or `adb logcat -s tawc` (Kotlin). Filter frame spam: `grep -v renderer_gles2_frame`
+- **Logs:** `adb logcat -s tawc-native` (Rust) or `adb logcat -s tawc` (Kotlin)
 - **Kill Firefox:** `adb shell "su -c 'killall firefox'"`
 - **Restart compositor:** `bash scripts/app-build-install.sh --no-build` (force-stops, reinstalls the existing APK, launches MainActivity)
 - **Simulate touch:** `adb shell input tap X Y` (screen pixel coords, 1:1 with SurfaceView due to immersive fullscreen)

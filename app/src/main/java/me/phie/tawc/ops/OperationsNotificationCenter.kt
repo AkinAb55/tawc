@@ -11,7 +11,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -136,11 +140,28 @@ object OperationsNotificationCenter {
     private suspend fun collectFor(op: Operation) {
         val ctx = appContext ?: return
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
-        op.progress.collect { _ ->
-            // Read the full op snapshot (title may eventually go reactive).
-            nm.notify(notificationIdFor(op.id), buildNotification(ctx, op))
-        }
+        // Throttle: a fast-cached download or pacman line stream can
+        // emit progress at hundreds of hertz; Android's notifier rate-
+        // limits and silently drops everything past ~5 Hz, so most of
+        // the work was wasted. distinctUntilChanged drops repeat-content
+        // emits (eg. the same "Installing base packages…" message
+        // re-published with a new InstallStage internal field), conflate
+        // collapses bursts to the latest, and the post-emit delay keeps
+        // us under the system's drop rate. Terminal stages skip the
+        // delay so the final "Installed"/"Failed"/"Deleted" message
+        // never sits behind a 250 ms timer.
+        op.progress
+            .map { p -> NotificationSnapshot(p.stage.isTerminal, p.message) }
+            .distinctUntilChanged()
+            .conflate()
+            .collect { snap ->
+                nm.notify(notificationIdFor(op.id), buildNotification(ctx, op))
+                if (!snap.terminal) delay(NOTIFICATION_THROTTLE_MS)
+            }
     }
+
+    private data class NotificationSnapshot(val terminal: Boolean, val message: String)
+    private const val NOTIFICATION_THROTTLE_MS: Long = 250
 
     private fun buildNotification(ctx: Context, op: Operation): Notification =
         buildNotificationContent(

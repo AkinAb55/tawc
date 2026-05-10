@@ -100,7 +100,16 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Debug)
-            .with_tag("tawc-native"),
+            .with_tag("tawc-native")
+            // smithay's gles backend traces every frame at info level
+            // via tracing → log bridge ("renderer_gles2_frame; …"),
+            // which floods logcat at the framerate. Drop to warn so we
+            // still see real renderer errors.
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse("debug,smithay::backend::renderer::gles=warn")
+                    .build(),
+            ),
     );
     // The default Rust panic handler writes to stderr, which Bionic
     // routes to /dev/null for app processes — so a panic in the
