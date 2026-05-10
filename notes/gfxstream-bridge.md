@@ -105,6 +105,16 @@ already works. (2) is incrementally interesting if we want a future
 where the compositor doesn't depend on Android EGL extensions, but
 that's a separate fight.
 
+**Update (May 2026):** the framing of both paths above turned out to
+be misleading on key details — (1) can't actually "send the dmabuf
+fd back to the chroot" because an AHB isn't a single fd, and (2)'s
+`EGL_EXT_image_dma_buf_import` doesn't work on Android vendor EGL
+(confirmed in `notes/gpu-strategy.md` and `notes/xwayland.md`). The
+actual chosen design is a third hybrid that combines (1)'s
+AHB-import compositor side with (2)'s wire format, using the dmabuf
+fd as an opaque registry cookie. See §"WSI plan: dmabuf-v1 as a
+cookie envelope" below.
+
 ## Cost vs libhybris
 
 Lose: every GL/Vulkan call crosses an IPC boundary. Vulkan amortizes
@@ -431,6 +441,13 @@ coordinating with gfxstream's internal reference counting. Disadvantage:
 Option A is the right starting point. Option B is worth pursuing only
 if buffer lifecycle coordination proves painful.
 
+**Update (May 2026):** Option A is what we're doing, but "passes it
+to the compositor via the existing AHB import path" turned out to
+need careful design — see §"WSI plan: dmabuf-v1 as a cookie
+envelope" below for the concrete wire-format choice (we abuse
+`zwp_linux_dmabuf_v1` as a cookie envelope rather than reviving
+`android_wlegl` or building a custom Vulkan WSI).
+
 ## Distro Mesa is half the story (May 2026)
 
 We checked what Arch and Debian actually ship: **the gfxstream-vk
@@ -675,16 +692,15 @@ another:
 - **`gfxstream::`** — the same hardware-buffer smokes under the
   bridge backend, plus an `eglinfo` software-fallback guard. The
   vkcube case and the Mesa-EGL cases currently fail until phase 4
-  (AHB handoff) / phase 5 (`VK_KHR_wayland_surface` plumbing) /
-  phase 6 (Zink-on-gfxstream-vk) land — that's *by design*. The
-  smoking gun for the surface_lost gap is
+  (cookie-envelope WSI) / phase 6 (Zink-on-gfxstream-vk) land —
+  that's *by design*. The smoking gun for the surface_lost gap is
   `vkGetPhysicalDeviceSurfacePresentModesKHR failed with
   ERROR_SURFACE_LOST_KHR`. Mesa's stock `wsi_wayland.c` binds
   `zwp_linux_dmabuf_v1`; the compositor doesn't advertise it yet.
-  Cleanest fix: implement `DmabufHandler` in the compositor
-  (Smithay-supported), so Mesa allocates dmabuf-backed swapchain
-  images and presents via the standard path. The host side already
-  exposes AHBs via `exportColorBufferMemory()`.
+  The fix is the dmabuf-v1-as-cookie-envelope hack described in
+  §"WSI plan: dmabuf-v1 as a cookie envelope" — **not** a real
+  dmabuf-v1 implementation; vendor Android EGL can't import real
+  dmabufs. Read that section before touching either side.
 - **`cpu_graphics::`** — backend-agnostic SHM paths plus an
   `eglinfo` llvmpipe/swrast sanity. These don't care about the
   GPU backend at all — they exist to keep the SHM plumbing covered
@@ -772,8 +788,8 @@ screen:
 1. **~~`BridgeInstallProvider` Kotlin.~~** Done — `app/src/main/java/me/phie/tawc/install/BridgeInstallProvider.kt` is a sibling of `LibhybrisInstallProvider` in `TawcInstaller.providers`. Gradle's `buildMesaGfxstream` + `packMesaGfxstream` ship the .so + ICD JSON as raw assets under `assets/mesa-gfxstream/`; `CompositorService.ensureMesaGfxstreamExtracted` stages them into `<filesDir>/mesa-gfxstream/` on the same versioned-stamp pattern as libhybris; the provider returns two `TawcInstall.COPY` entries that land at `/usr/local/lib/libvulkan_gfxstream.so` + `/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json`. Always installed (gated only on the asset being shipped — aarch64 only today), regardless of the live backend pref, so flipping `GraphicsBackend` doesn't invalidate any cached install.
 2. **~~`GpuBackend` enum + `RootfsEnv` branch.~~** Done — `GraphicsBackend` enum lives in `app/src/main/java/me/phie/tawc/Settings.kt`, persisted via `SharedPreferences` (`tawc-settings`), exposed in the in-app Settings screen (tonal button on the home screen). `RootfsEnv.build(method)` reads `Settings.graphicsBackend` and emits libhybris-style env (`LD_LIBRARY_PATH=/usr/lib/hybris/...`) or gfxstream-style env (`VK_ICD_FILENAMES=BridgeInstallProvider.GUEST_ICD_PATH`, `VIRTGPU_KUMQUAT=1`). Tests pin a backend per spawn via the broker `GRAPHICS` header on RUNINSIDE (`tawc-exec --in-rootfs <id> --graphics gfxstream`); `Settings.graphicsBackend` is left untouched so the user's UI pick survives a suite run.
 3. **~~Kumquat in the compositor process.~~** Done — `compositor/src/bridge.rs` spawns the kumquat server on a sibling thread of the calloop loop in `nativeStartCompositor`. The crate dep is `kumquat_virtio = { path = "../deps/rutabaga_gfx/kumquat/server", features = ["gfxstream"] }`, gated to `cfg(target_arch = "aarch64")` (we don't cross-build `libgfxstream_backend.so` for x86_64 yet). Same SELinux domain as the chroot client so SCM_RIGHTS just works. No broker actions, no pidfile, no separate jniLib — kumquat is part of `libcompositor.so` now.
-4. **Vulkan WSI Wayland↔kumquat plumbing.** gfxstream-vk's WSI is Android-shaped; need to remap `VK_KHR_wayland_surface` calls to allocate AHB-backed ColorBuffers via the bridge. The vulkaninfo smoke test sees `VK_KHR_wayland_surface failed with SURFACE_LOST_KHR` — that's exactly this gap. Enumeration works fine, presentation doesn't. `gfxstream::test_vkcube_renders_via_ahb` fails on this today; the matching libhybris test in `hybris::` passes, so the regression has somewhere to live until the gap closes.
-5. **AHB buffer handoff.** After `vkQueuePresentKHR`, our daemon calls `exportColorBufferMemory()` and feeds the AHB to the existing compositor import path. Option A in the "Zero-copy buffer sharing" section above — no gfxstream patches needed. The current rutabaga `01-drop-nativewindow-dep.patch` returns `InvalidResourceId` for PLATFORM_AHB exports; replacing that stub with the actual handoff is what unblocks vkcube + Phase 4.
+4. **Compositor dmabuf-v1 advertisement + cookie registry.** `vulkaninfo` currently dies at `vkGetPhysicalDeviceSurfacePresentModesKHR` with `SURFACE_LOST_KHR` because the compositor doesn't bind `zwp_linux_dmabuf_v1` and Mesa's stock `wsi_wayland.c` has no other path. Closed by implementing Smithay's `DmabufHandler` with the cookie-registry lookup — see §"WSI plan: dmabuf-v1 as a cookie envelope" for the design. **This is not a real dmabuf-v1 implementation**; constraints listed in that section (don't bind `wp_linux_drm_syncobj_manager_v1`, no real dmabuf clients, format/modifier is cosmetic) are load-bearing.
+5. **Kumquat PLATFORM_AHB export.** The current rutabaga `01-drop-nativewindow-dep.patch` returns `InvalidResourceId`. Replace with the cookie-memfd + `(dev, ino) → AHardwareBuffer*` registry shipping pattern from §"WSI plan". Unblocks `gfxstream::test_vkcube_renders_via_ahb` plus the GTK4/Firefox/STK gfxstream-side smokes.
 
 ### Sysroot pull
 
@@ -790,6 +806,141 @@ The whole "pull from a live device" approach is fragile — see
 [../issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md).
 The script is the supported way today, but it shouldn't be the
 permanent answer.
+
+## WSI plan: dmabuf-v1 as a cookie envelope (May 2026)
+
+**This is a hack.** The compositor advertises `zwp_linux_dmabuf_v1`
+and Mesa's stock `wsi_wayland.c` ships swapchain buffers over it —
+but the fd travelling over the protocol is a cookie, not a real
+dmabuf. We do NOT support the dmabuf-v1 protocol in any honest
+sense; advertising it is a transport convenience that lets us reuse
+stock Mesa WSI unmodified. Anyone reading this in the future who is
+confused why our "dmabuf support" doesn't accept real dmabufs:
+correct, by design.
+
+### Why we can't ship real dmabuf-v1
+
+- Stock Android vendor EGLs (Adreno, Mali, PowerVR, Xclipse) don't
+  expose `EGL_EXT_image_dma_buf_import`. See
+  `notes/gpu-strategy.md` and `notes/xwayland.md`. Real dmabuf import
+  on the compositor side fails before it starts.
+- AHBs aren't dmabufs. An `AHardwareBuffer*` wraps a `native_handle_t`
+  with variable fds + variable ints (gralloc layout, vendor modifier,
+  metadata channels, sometimes a refcount fd). You cannot reduce it
+  to a single fd and round-trip back to an AHB.
+- The compositor's working AHB import path is
+  `EGL_NATIVE_BUFFER_ANDROID`, which needs the full handle. The
+  `android_wlegl` protocol (already implemented in
+  `compositor/src/wlegl.rs` for libhybris) is purpose-built for that
+  shape: variable fd list + variable int list + AHB descriptor.
+
+A structurally honest design has gfxstream-vk's WSI talk
+`android_wlegl` instead of `zwp_linux_dmabuf_v1`. That means a Mesa
+fork or an out-of-tree Vulkan WSI layer (the libhybris model — see
+`vulkanplatform_wayland.so` in libhybris). Real, ongoing maintenance
+burden — Vulkan WSI surface is small but not free. See "Fallback"
+below.
+
+### The hack
+
+Kumquat runs as a thread of the compositor process. The AHB never
+leaves the compositor's address space. So we don't ship buffer
+contents — we ship an identifier the compositor uses to look up the
+AHB it allocated.
+
+Mesa's `wsi_wayland.c` treats the dmabuf fd as fully opaque between
+export and ship (verified by reading the code in
+`deps/mesa/src/vulkan/wsi/`):
+
+- `vkGetMemoryFdKHR(DMA_BUF_BIT_EXT)` produces it. We control the
+  return value: gfxstream-vk's `on_vkGetMemoryFdKHR` →
+  `VirtGpuKumquatResource::exportBlob` → kumquat server's
+  `RESOURCE_EXPORT_BLOB` handler.
+- `zwp_linux_buffer_params_v1_add(fd, plane, offset, stride, mod)`
+  ships it via SCM_RIGHTS. The fd's content is never touched.
+- `close(fd)` after the wl_buffer exists.
+
+The only other use is `drmIoctl(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)` in
+the explicit-sync path — gated on the compositor advertising
+`wp_linux_drm_syncobj_manager_v1`. Smithay doesn't bind that by
+default; we won't either.
+
+The design:
+
+1. Kumquat server allocates the AHB host-side via the gfxstream
+   renderer's `exportColorBufferMemory()` path. The full
+   `AHardwareBuffer*` lives in the compositor process.
+2. For each AHB, the server `memfd_create("tawc-ahb-cookie", …)` a
+   1-byte placeholder and stashes a `(dev, ino) → AHardwareBuffer*`
+   entry in an in-process registry.
+3. The kumquat `RESOURCE_EXPORT_BLOB` op (currently stubbed in
+   `deps/rutabaga-patches/rutabaga_gfx/01-drop-nativewindow-dep.patch`)
+   returns the cookie memfd via SCM_RIGHTS, claiming the type is
+   PLATFORM_AHB or MEM_DMABUF.
+4. Mesa's stock `wsi_wayland.c` ships it through `zwp_linux_dmabuf_v1`,
+   picking a format/modifier from whatever the host renderer
+   advertises (cosmetic — `ABGR8888` + `DRM_FORMAT_MOD_INVALID` is
+   fine; nobody on either side semantically uses it).
+5. Compositor's `DmabufHandler::dmabuf_imported` `fstat`s the
+   incoming fd, looks up `(dev, ino)` in the registry. Hit →
+   `eglGetNativeClientBufferANDROID(ahb)` + `EGL_NATIVE_BUFFER_ANDROID`
+   → `glEGLImageTargetTexture2DOES`. Miss → reject (dmabuf-v1 error
+   path).
+
+Lifetime: the cookie memfd is held by the kumquat-side resource;
+the registry entry drops on resource destroy. No inode-reuse concern
+— the fd stays open as long as the entry exists.
+
+### Load-bearing constraints
+
+- **Do not bind `wp_linux_drm_syncobj_manager_v1`** on the
+  compositor. If we do, Mesa will `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`
+  the cookie and fail. (Smithay's default is fine.)
+- **There must be no real dmabuf clients.** A client shipping a
+  genuine dmabuf hits the registry miss and gets rejected. In our
+  world chroot clients go through gfxstream-vk or wl_shm — but the
+  advertisement is technically a lie, so future "why doesn't my
+  dmabuf client work?" debugging starts here.
+- **Format/modifier negotiation is cosmetic.** Host renderer
+  advertises something plausible, Mesa picks it, we ignore it. If
+  any real importer ever inspects the modifier, it finds a lie.
+
+### When to retire the hack
+
+Fall back to the libhybris-shaped WSI (below) if any of:
+
+- We need to interop with clients that ship real dmabufs.
+- We need explicit sync (`wp_linux_drm_syncobj_manager_v1`).
+- We need buffer shapes the compositor can't reconstruct from the
+  AHB pointer alone — multi-plane YUV, vendor-compressed layouts,
+  packed metadata. Plain RGBA8888 swapchain images are fine; the
+  AHB carries everything `EGL_NATIVE_BUFFER_ANDROID` needs.
+- The hack becomes a recurring debugging tax.
+
+### Fallback: a libhybris-shaped Vulkan WSI
+
+The structurally clean design — what libhybris already does for its
+Vulkan path:
+
+- Out-of-tree Vulkan WSI layer (or Mesa fork) handling
+  `VK_KHR_wayland_surface` for gfxstream-vk by talking
+  `android_wlegl` directly instead of going through Mesa's
+  `wsi_wayland.c`. libhybris's `vulkanplatform_wayland.so` is the
+  template.
+- Kumquat's `RESOURCE_EXPORT_BLOB` (PLATFORM_AHB type) ships the
+  full `native_handle_t`: multiple fds via SCM_RIGHTS aux + ints
+  inline. Equivalent to what the AOSP `nativewindow` Rust crate did
+  before `01-drop-nativewindow-dep.patch` ripped it out — we'd be
+  reimplementing its shipping path, not inventing a new one.
+- Guest WSI re-emits the handle into `android_wlegl.create_handle`
+  + `add_fd` × N + `create_buffer`.
+- Compositor's existing `wlegl.rs` reconstructs the AHB via
+  `AHardwareBuffer_createFromHandle`. No new compositor code needed
+  on this side — same code libhybris already drives.
+
+Cost is the WSI layer itself. Small and slow-moving but not free:
+tracks `VK_KHR_swapchain` evolution, semaphore/timeline sync,
+surface format probing.
 
 ## Implementation plan
 
@@ -871,38 +1022,58 @@ Snapshot/restore stubbed.
 chroot `vkcube` → bridge → Adreno → no frames yet, but command
 stream completes.
 
-### Phase 4 — zero-copy buffer handoff (Option A in §"Zero-copy buffer sharing")
-4.1 **Intercept post.** Hook `PostWorker::post()` completion (or
-`stream_renderer` post callback) so we don't drive `DisplayVk`. On
-swap, call `exportColorBufferMemory(colorBufferHandle)` →
-`AHardwareBuffer*`.
+### Phase 4 — cookie-envelope WSI (per §"WSI plan")
+Supersedes earlier "intercept PostWorker / run a per-client wl_display
+inside the bridge" sketch. The original Phase 4 + Phase 5 split
+collapses: stock Mesa `wsi_wayland.c` handles `VK_KHR_wayland_surface`
+unmodified once the protocol envelope is in place.
 
-4.2 **Map kumquat client → wl_surface.** Bridge needs to know which
-compositor surface this AHB is for. Easiest: bridge runs alongside
-a tiny per-client wl_display connection that owns a `wl_surface`
-and feeds AHBs via the existing `android_wlegl` import path the
-compositor already speaks. Reuses everything from the libhybris
-path on the compositor side.
+4.1 **Compositor `DmabufHandler` with cookie registry.** Add Smithay's
+`DmabufHandler` impl + the `zwp_linux_dmabuf_v1` global. On
+`dmabuf_imported`: `fstat` the incoming fd, look up `(dev, ino)` in
+the in-process AHB registry. Hit → reuse the AHB → texture path
+already in `compositor/src/wlegl.rs`
+(`eglGetNativeClientBufferANDROID` + `EGL_NATIVE_BUFFER_ANDROID`).
+Miss → reject. **Do not bind `wp_linux_drm_syncobj_manager_v1`** —
+see "Load-bearing constraints" in §"WSI plan".
 
-4.3 **Triple-buffering / lifecycle.** gfxstream owns the buffer
-pool; release callbacks drive its internal refcount. If this gets
-painful, fall through to Option B (~50 LOC patch in
-`allocExternalMemory()` mirroring `QnxScreenBuffer`).
+4.2 **Kumquat `RESOURCE_EXPORT_BLOB` handler.** Replace the
+`InvalidResourceId` stub in `01-drop-nativewindow-dep.patch`. For a
+gfxstream-owned color buffer: grab the `AHardwareBuffer*` via
+`exportColorBufferMemory()` (it's already in-process), allocate a
+cookie memfd, register `(dev, ino) → AHB*`, ship the cookie fd via
+SCM_RIGHTS.
 
-4.4 **First real frame:** chroot `vkcube` → AHB → compositor
-texture → on screen.
+4.3 **Modifier advertisement.** Host renderer needs to claim at
+least one `(format, modifier)` pair that Mesa's modifier query
+consumes (e.g. `ABGR8888` + `DRM_FORMAT_MOD_INVALID`). Compositor's
+dmabuf feedback tranche lists the same. Both values are cosmetic —
+nobody semantically uses them — but they have to intersect or Mesa
+fails the swapchain.
 
-### Phase 5 — Vulkan WSI for real apps
-5.1 **`VK_KHR_wayland_surface` in the guest.** gfxstream-vk's WSI
-is Android-shaped; remap to Wayland either guest-side (mirroring
-libhybris's trick) or via a tiny implicit layer. Bridge resolves
-the `wl_surface` to a kumquat-side ColorBuffer.
+4.4 **Lifetime.** Cookie memfd held by the kumquat resource; on
+resource destroy, drop the registry entry. Compositor-side AHB
+texture cache evicts on `wl_buffer` destroy (already wired in
+`wlegl.rs`).
 
-5.2 **Format negotiation** matching what the compositor's gralloc
-importer accepts (same constraints as today's libhybris path;
-mostly inherits).
+4.5 **First real frame:** chroot `vkcube` → AHB → compositor
+texture → on screen. `gfxstream::test_vkcube_renders_via_ahb`
+flips green.
 
-5.3 **Suite:** `vulkaninfo`, `vkcube`, Firefox WebGPU, glmark2-vulkan.
+### Phase 5 — Validation under the cookie envelope
+Stock Mesa WSI works end-to-end once Phase 4 lands. Validate:
+
+5.1 `vulkaninfo --summary` present-modes probe succeeds (closes the
+`SURFACE_LOST_KHR` gap).
+
+5.2 `vkcube`, `vkgears`, `vkmark`.
+
+5.3 GTK4 / Firefox accelerated rendering / supertuxkart — every
+`gfxstream::` test currently failing-by-design.
+
+5.4 (Stretch) Multi-plane / YUV-decode paths. Expected to hit the
+cookie-hack limits; fall back to the libhybris-shaped WSI if we need
+them (see "Fallback" in §"WSI plan").
 
 ### Phase 6 — Zink wired up for GL/GLES
 Mostly env-only at this point — the rootfs already has Mesa with
