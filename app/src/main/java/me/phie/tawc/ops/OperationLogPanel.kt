@@ -5,7 +5,6 @@ import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.text.SpannableString
 import android.text.Spanned
-import android.text.method.ScrollingMovementMethod
 import android.text.style.LeadingMarginSpan
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -87,8 +86,11 @@ class OperationLogPanel(private val activity: Activity) {
         logText = TextView(activity).apply {
             typeface = Typeface.MONOSPACE
             textSize = 11f
+            // setTextIsSelectable installs ArrowKeyMovementMethod, which is
+            // what makes long-press select + copy work. Don't override it
+            // with ScrollingMovementMethod — the wrapping ScrollView already
+            // handles scrolling, and that override silently kills selection.
             setTextIsSelectable(true)
-            movementMethod = ScrollingMovementMethod.getInstance()
             val innerPad = pad / 2
             setPadding(innerPad, innerPad, innerPad, innerPad)
         }
