@@ -282,9 +282,10 @@ enough.
 
 `TawcApplication.onCreate` also calls
 `me.phie.tawc.install.InstallActions.registerAll()` (install /
-uninstall) and `me.phie.tawc.dev.InputActions.registerAll()` (the
-test input handlers below) to populate `ActionRegistry` before any
-client connection arrives.
+uninstall), `me.phie.tawc.dev.InputActions.registerAll()` (the test
+input handlers below), and `me.phie.tawc.dev.SettingsActions.registerAll()`
+(the settings get/set actions below) to populate `ActionRegistry`
+before any client connection arrives.
 
 ## Registered actions
 
@@ -301,6 +302,8 @@ client connection arrives.
 | `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`. |
 | `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
 | `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
+| `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream`). Used by `scripts/run-integration-tests.sh --graphics …`. |
+| `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
 
 **Rule for input actions: every driver goes through `TawcInputConnection`.**
 There is intentionally no broker action that calls `NativeBridge.native*`

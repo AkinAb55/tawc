@@ -61,6 +61,13 @@ class MainActivity : AppCompatActivity() {
         )
 
         scaffold.content.addView(
+            tonalButton("Settings") {
+                startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+            },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = cardMargin),
+        )
+
+        scaffold.content.addView(
             primaryButton("Install new distro") {
                 startActivity(Intent(this@MainActivity, InstallActivity::class.java))
             },

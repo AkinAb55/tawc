@@ -88,6 +88,11 @@
             android:exported="false"
             android:label="Task manager" />
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Settings" />
+
         <!-- Generic per-operation log viewer. Pure viewer: opening it
              never triggers any operation. Exported=true so an
              am start with operationId from adb can attach to a running

@@ -1,5 +1,8 @@
 package me.phie.tawc.install
 
+import me.phie.tawc.GraphicsBackend
+import me.phie.tawc.Settings
+
 /**
  * Environment variables passed to the in-rootfs `bash -lc` shell.
  *
@@ -16,11 +19,22 @@ package me.phie.tawc.install
  * tracer; tawcroot/chroot have no tracer and let the sandbox come up
  * cleanly, so applying these vars there would weaken security for no
  * gain.
+ *
+ * Per-backend tweak: env diverges by [GraphicsBackend] (read fresh
+ * from [Settings] on every spawn). Libhybris is the historical default
+ * and keeps the libhybris dirs on `LD_LIBRARY_PATH`; gfxstream pins
+ * Mesa's gfxstream Vulkan ICD via `VK_ICD_FILENAMES` and selects the
+ * kumquat transport via `VIRTGPU_KUMQUAT=1`, and it deliberately keeps
+ * libhybris off `LD_LIBRARY_PATH` so libhybris's `libvulkan.so.1`
+ * doesn't shadow the distro vulkan-icd-loader.
  */
 internal object RootfsEnv {
     enum class Method { TAWCROOT, PROOT, CHROOT }
 
-    fun build(method: Method): Map<String, String> = buildMap {
+    fun build(method: Method): Map<String, String> =
+        build(method, Settings.graphicsBackend)
+
+    fun build(method: Method, backend: GraphicsBackend): Map<String, String> = buildMap {
         put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         put("HOME", "/root")
         put("TMPDIR", "/tmp")
@@ -32,30 +46,47 @@ internal object RootfsEnv {
         // symlink needed.
         put("WAYLAND_DISPLAY", "/usr/share/tawc/wayland-0")
         put("XDG_RUNTIME_DIR", "/tmp")
-        // libhybris is laid down by [TawcInstaller] /
-        // [LibhybrisInstallProvider] as real files under /usr/lib/hybris/
-        // (a tawc-owned namespace — /usr/local/lib/ stays free for the
-        // user's own installs). gl-shims first so the libGL/libGLESv2
-        // wrappers shadow any distro-shipped libs.
-        put("LD_LIBRARY_PATH",
-            "${LibhybrisInstallProvider.GUEST_GL_SHIMS_DIR}:${LibhybrisInstallProvider.GUEST_LIB_DIR}")
-        // No HYBRIS_*_DIR overrides needed — `scripts/build-libhybris.sh`
-        // configures libhybris with `--prefix=/usr/lib/hybris
-        // --libdir=/usr/lib/hybris`, so the PKGLIBDIR + LINKER_PLUGIN_DIR
-        // macros baked into the .so files by the autotools build (see
-        // deps/libhybris/hybris/{egl/ws.c, vulkan/ws.c, common/hooks.c})
-        // already point at where [LibhybrisInstallProvider] copies the
-        // plugin tree. Build-time bake > per-entry env override.
-        put("HYBRIS_EGLPLATFORM", "wayland")
+        when (backend) {
+            GraphicsBackend.LIBHYBRIS -> {
+                // libhybris is laid down by [TawcInstaller] /
+                // [LibhybrisInstallProvider] as real files under /usr/lib/hybris/
+                // (a tawc-owned namespace — /usr/local/lib/ stays free for the
+                // user's own installs). gl-shims first so the libGL/libGLESv2
+                // wrappers shadow any distro-shipped libs.
+                put("LD_LIBRARY_PATH",
+                    "${LibhybrisInstallProvider.GUEST_GL_SHIMS_DIR}:${LibhybrisInstallProvider.GUEST_LIB_DIR}")
+                // No HYBRIS_*_DIR overrides needed — `scripts/build-libhybris.sh`
+                // configures libhybris with `--prefix=/usr/lib/hybris
+                // --libdir=/usr/lib/hybris`, so the PKGLIBDIR + LINKER_PLUGIN_DIR
+                // macros baked into the .so files by the autotools build (see
+                // deps/libhybris/hybris/{egl/ws.c, vulkan/ws.c, common/hooks.c})
+                // already point at where [LibhybrisInstallProvider] copies the
+                // plugin tree. Build-time bake > per-entry env override.
+                put("HYBRIS_EGLPLATFORM", "wayland")
+                // GTK uses libhybris GLES (→ AHB) instead of falling back to
+                // its software/cairo path (→ wl_shm, magenta-tinted). See
+                // notes/firefox.md "Why GDK_GL=gles:always". Libhybris-only —
+                // under gfxstream we don't have a working GL path yet, so
+                // GDK auto-pick / software fallback is the right behaviour.
+                put("GDK_GL", "gles:always")
+            }
+            GraphicsBackend.GFXSTREAM -> {
+                // gfxstream path: distro vulkan-icd-loader is the loader
+                // (no libhybris libvulkan.so.1 shadowing it), pinned to
+                // Mesa's gfxstream-vk ICD. VIRTGPU_KUMQUAT=1 makes Mesa's
+                // gfxstream-vk select the userspace kumquat socket
+                // transport instead of /dev/dri/cardN. See
+                // notes/gfxstream-bridge.md.
+                put("VK_ICD_FILENAMES",
+                    "/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json")
+                put("VIRTGPU_KUMQUAT", "1")
+            }
+        }
         put("DISPLAY", ":0")
         // SDL2 prefers X11 when DISPLAY is set, but our Xwayland is
         // GLAMOR-disabled — SDL apps that probe X11 die on createWindow.
         // Force Wayland-first.
         put("SDL_VIDEODRIVER", "wayland,x11")
-        // GTK uses libhybris GLES (→ AHB) instead of falling back to
-        // its software/cairo path (→ wl_shm, magenta-tinted). See
-        // notes/firefox.md "Why GDK_GL=gles:always".
-        put("GDK_GL", "gles:always")
         if (method == Method.PROOT) {
             put("MOZ_DISABLE_CONTENT_SANDBOX", "1")
             put("MOZ_DISABLE_GPU_SANDBOX", "1")
@@ -81,13 +112,15 @@ internal object RootfsEnv {
      * `HOME=/root` set above. Requires GNU env (coreutils ≥ 9.0); both
      * Arch and Void ship 9.x.
      */
-    fun envArgv(method: Method): List<String> {
+    fun envArgv(method: Method): List<String> = envArgv(method, Settings.graphicsBackend)
+
+    fun envArgv(method: Method, backend: GraphicsBackend): List<String> {
         val out = ArrayList<String>(4 + 16)
         out += "/usr/bin/env"
         out += "-i"
         out += "-C"
         out += "/root"
-        for ((k, v) in build(method)) out += "$k=$v"
+        for ((k, v) in build(method, backend)) out += "$k=$v"
         return out
     }
 }

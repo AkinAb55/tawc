@@ -29,6 +29,12 @@
 #   bash scripts/run-integration-tests.sh <filter>              # libtest substring filter,
 #                                                                 e.g. `<module>::` or `<module>::test_foo`
 #   bash scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
+#   bash scripts/run-integration-tests.sh --graphics gfxstream  # flip the in-app graphics-driver
+#                                                                 pref before running (default: libhybris)
+#                                                                 — for gfxstream the kumquat daemon
+#                                                                 must already be up; this script does
+#                                                                 NOT auto-start it (use
+#                                                                 `bash scripts/bridge-setup.sh start`).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,11 +44,24 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 
 DO_BUILD=1
+GRAPHICS="libhybris"
 TEST_FILTER=""
+expect_graphics=0
 for arg in "$@"; do
+    if [ "$expect_graphics" -eq 1 ]; then
+        GRAPHICS="$arg"
+        expect_graphics=0
+        continue
+    fi
     case "$arg" in
         --no-build|-n)
             DO_BUILD=0
+            ;;
+        --graphics)
+            expect_graphics=1
+            ;;
+        --graphics=*)
+            GRAPHICS="${arg#--graphics=}"
             ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | sed 's/^# \?//;$d'
@@ -57,6 +76,14 @@ for arg in "$@"; do
             ;;
     esac
 done
+if [ "$expect_graphics" -eq 1 ]; then
+    echo "ERROR: --graphics requires a value (libhybris|gfxstream)" >&2
+    exit 2
+fi
+case "$GRAPHICS" in
+    libhybris|gfxstream) ;;
+    *) echo "ERROR: --graphics must be libhybris or gfxstream (got '$GRAPHICS')" >&2; exit 2 ;;
+esac
 
 # shellcheck source=../scripts/lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
@@ -150,6 +177,24 @@ if [ "$COMPOSITOR_READY" -ne 1 ]; then
     echo "ERROR: compositor did not become ready within 15s" >&2
     adb shell am force-stop me.phie.tawc || true
     exit 1
+fi
+
+# Flip the in-app graphics-driver pref to whichever backend the test
+# run wants. RootfsEnv reads it on every rootfs spawn (the broker is
+# already up by this point — TawcApplication.onCreate registers the
+# action handlers), so subsequent client launches inherit the right
+# env (LD_LIBRARY_PATH for libhybris vs VK_ICD_FILENAMES +
+# VIRTGPU_KUMQUAT for gfxstream).
+echo "=== Setting graphics backend: $GRAPHICS ==="
+"$TAWC_EXEC_BIN" --action set-graphics-backend --arg "value=$GRAPHICS"
+if [ "$GRAPHICS" = "gfxstream" ]; then
+    if ! "$TAWC_EXEC_BIN" --in-rootfs "$INSTALL_ID" -- \
+            sh -c 'test -S /tmp/kumquat-gpu-0' >/dev/null 2>&1; then
+        echo "WARNING: kumquat-gpu-0 socket not present in the rootfs." >&2
+        echo "         Start the bridge daemon first:" >&2
+        echo "           bash scripts/bridge-setup.sh start" >&2
+        echo "         (Continuing anyway — gfxstream tests will fail.)" >&2
+    fi
 fi
 
 LIBTEST_ARGS=(--nocapture --test-threads=1)

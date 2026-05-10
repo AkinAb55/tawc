@@ -26,6 +26,10 @@ import kotlin.concurrent.thread
 class TawcApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Bind the SharedPreferences instance early so non-Activity
+        // code (RootfsEnv on the broker thread, etc.) can read settings
+        // without a Context handle. Cheap (memory-mapped pref file).
+        Settings.init(this)
         // Start the per-op notification center before any service can
         // register an Operation. The center is the single owner of the
         // `tawc-operations` notification channel and the
@@ -63,6 +67,7 @@ class TawcApplication : Application() {
             // but won't dispatch ACTION headers to a missing handler.
             me.phie.tawc.install.InstallActions.registerAll()
             me.phie.tawc.dev.InputActions.registerAll()
+            me.phie.tawc.dev.SettingsActions.registerAll()
         }
     }
 
