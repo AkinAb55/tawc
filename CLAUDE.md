@@ -33,7 +33,8 @@ The `notes/` directory contains architecture and implementation notes. Edit/crea
 - [installation.md](notes/installation.md) -- in-app Kotlin rootfs installer; broker `--action install/uninstall` CLI for adb-driven workflows
 - [launcher.md](notes/launcher.md) -- per-distro app picker + Rust .desktop scanner with icon resolution
 - [log-screen.md](notes/log-screen.md) -- generic Operation/registry/LogScreen abstraction shared between install, uninstall, and future broker actions
-- [proot.md](notes/proot.md) -- rootless install method: vendored Termux/proot fork, why upstream proot doesn't work on Android, Android quirks worked around
+- [proot.md](notes/proot.md) -- dev-only (not officially supported) install method: vendored Termux/proot fork, why upstream proot doesn't work on Android, Android quirks worked around
+- [chroot.md](notes/chroot.md) -- dev-only (not officially supported) install method: real `chroot(2)` via Magisk `su`, mount lifecycle
 - [xwayland.md](notes/xwayland.md) -- bionic-build Xwayland for X11 client support; current dep build state and pending stages
 - [tawcroot.md](notes/tawcroot.md) -- design + implementation plan for the from-scratch C systrap-based proot replacement (lives in `tawcroot/`)
 - [tawcroot-readonly-binds.md](notes/tawcroot-readonly-binds.md) -- design notes for adding RO bind support to tawcroot (not implemented; recorded so we don't re-derive next time)

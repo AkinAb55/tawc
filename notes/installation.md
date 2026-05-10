@@ -1,33 +1,34 @@
 # In-app installation system
 
-The tawc Android app includes a Kotlin re-implementation of the chroot
+The tawc Android app includes a Kotlin re-implementation of the
 install/run/destroy logic that previously lived only in the
 `client/arch-chroot-*` shell scripts. This lets the app:
 
 - ship a "Manage installations" screen as a first-class feature
-- store the chroot inside its private data dir, so uninstalling the app
+- store the rootfs inside its private data dir, so uninstalling the app
   reclaims everything
 - offer the same operations to adb / integration tests via the
   `scripts/rootfs-run.sh` host script (no broadcast surface)
 
-This is the *only* chroot system in the project. The earlier
-`client/arch-chroot-*` scripts (which targeted `/data/local/arch-chroot/`)
-have been deleted; their logic now lives entirely in this Kotlin package.
-Rootfs entry goes through [InstallationMethod.startInside] (see
+The earlier `client/arch-chroot-*` scripts (which targeted
+`/data/local/arch-chroot/`) have been deleted; their logic now lives
+entirely in this Kotlin package. Rootfs entry goes through
+[InstallationMethod.startInside] (see
 [rootfs-sessions.md](rootfs-sessions.md)); there is no on-disk wrapper
 script.
 
 ## Install methods
 
 Three [InstallationMethod] implementations exist. **tawcroot is the
-default and only officially supported method**; chroot/proot are
-dev-only and only ship in debug builds.
+default and only officially supported method.** chroot and proot are
+**not officially supported** — they're debug-build-only, kept around
+purely for the dev loop, and never exposed to release users.
 
 | key       | builds it ships in     | notes |
 |-----------|------------------------|-------|
 | tawcroot  | debug + release (default) | Custom systrap-based syscall emulator (`tawcroot/`). Rootless. The default for new installs and the only one users see in release builds. |
-| proot     | debug only             | Termux fork of proot, ptrace-based fake chroot. Rootless. Kept for performance comparisons + as a fallback during tawcroot bring-up. |
-| chroot    | debug only             | Real `chroot(2)` via Magisk `su`. Fastest path with no syscall translation, but only works on rooted devices and is not exposed to release users. |
+| proot     | debug only — **not officially supported** | Termux fork of proot, ptrace-based fake chroot. Rootless. Kept for performance comparisons + as a fallback during tawcroot bring-up. See [notes/proot.md](proot.md). |
+| chroot    | debug only — **not officially supported** | Real `chroot(2)` via Magisk `su`. Fastest path with no syscall translation, but only works on rooted devices. See [notes/chroot.md](chroot.md). |
 
 ### Build-time selection
 
@@ -393,38 +394,13 @@ uninstall again.
 
 ## Mount lifecycle
 
-Magisk's `su` inherits the **calling** process's mount namespace by
-default — bind mounts done inside one `Su.run` would persist into the
-app's namespace and pile up across calls. The recursive
-`/data/data/<pkg> → <rootfs>/data/data/<pkg>` bind in particular is
-the smoking gun: it makes `find -xdev` walk back into itself ("loop
-detected") and the uninstall delete fails on a tree it created
-moments earlier. To keep each invocation isolated, [Su.run] wraps the
-non-mount-master path in `unshare -m` so every script gets its own
-private mount namespace that's torn down when the script exits.
-
-The canonical chroot entry point is [ChrootMethod.startInside], which
-pipes [ChrootMounter.mountScript] + the chroot exec to `su` over stdin
-as one shell — the mounts exist for the lifetime of that shell and
-never leak. The mount logic is rebuilt fresh in Kotlin on every entry,
-so changes pick up without reinstalling. There is no separate `MOUNT`
-operation because there can't be — the mounts only exist for the
-lifetime of that one shell. This avoids polluting the global mount
-table with stale entries (and avoids the zygote-fork crash that
-follows when `/data/data/<pkg>/...` has live bind mounts during
-package fork).
-
-The install path **never** touches mounts. It can't possibly delete
-through one because it doesn't delete at all (the gate guarantees an
-empty slot). Mount cleanup belongs to the uninstall path
-([RootfsCleaner]); see *Uninstall pipeline* above.
-
-`ChrootMounter.unmount` `realpath`s the rootfs before scanning
-`/proc/mounts`, because Kotlin's `File.absolutePath` returns the
-`/data/user/0/...` symlink form while `/proc/mounts` reports the
-canonical `/data/data/...` form — naive substring matching misses
-every entry. The match is also a strict prefix check (`==` or starts
-with `r"/"`) so paths containing `.` don't over-match other mounts.
+Mount-namespace handling is chroot-only (tawcroot and proot don't
+need real mounts) — see [notes/chroot.md](chroot.md) "Mount
+lifecycle". The relevant cross-method invariant is that mounts only
+exist for the lifetime of a single `startInside` shell and never
+leak into the global mount table; uninstall ([RootfsCleaner]) is
+defensive about cleaning up anything that does leak. The install
+path never touches mounts.
 
 ## /usr/share/tawc
 

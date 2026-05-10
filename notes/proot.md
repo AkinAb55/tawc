@@ -6,11 +6,12 @@ ptrace-based fake chroot. This note covers what makes it work on
 Android, the non-obvious bits we hit during integration, and the
 maintenance contract for the vendored sources.
 
-**Status: dev-only.** [tawcroot](tawcroot.md) is the default and only
-officially supported install method; release builds ship only tawcroot
-(see `notes/installation.md` "Install methods"). proot remains in
-debug builds for performance comparisons and as a fallback during
-tawcroot bring-up — it's not exposed to release users.
+**Status: dev-only, not officially supported.** [tawcroot](tawcroot.md)
+is the default and only officially supported install method; release
+builds ship only tawcroot (see `notes/installation.md` "Install
+methods"). proot remains in debug builds for performance comparisons
+and as a fallback during tawcroot bring-up — it is not exposed to
+release users. chroot is in the same boat (see [notes/chroot.md](chroot.md)).
 
 libhybris-driven GPU acceleration works under proot too: `ProotMethod`
 binds `/apex /vendor /system /system_ext /linkerconfig` into the
@@ -221,6 +222,136 @@ options in roughly increasing pain:
 3. Switch back to `proot-me/proot` — but you'll need to backport
    the SIGSYS handler from Termux's `src/tracee/seccomp.c` or
    write your own. Don't do this unless you have a reason.
+
+## Parked dev-only issues
+
+proot is debug-build-only and not on the path to a fix. The following
+issues are documented here so they don't sit in `issues/` clogging the
+real backlog. Re-promote to `issues/` only if proot stops being
+dev-only.
+
+### `ProcessBuilder` exec of proot fails silently — shell wrapper in place
+
+`ProotMethod.runInside` can't `ProcessBuilder` the proot binary
+directly: it forks, the loader stub fails to `execve_no_trans`
+through the SELinux+seccomp gauntlet, and exits 255 silently
+(`redirectErrorStream` + no shell wrapping = no diagnostic). Going
+through `/system/bin/sh -c '<proot args>'` makes the shell handle
+exec — Android's app seccomp policy allows that path.
+
+Workaround costs: an extra shell process per entry, brittle
+single-quoting nested through `eval "$(printf %s … | base64 -d)"`,
+and a side-log tee to recover proot's last lines when it dies before
+the merged-fd reader drains. To fix properly: `strace -f` (or
+`simpleperf`) a direct-exec invocation, check `dmesg | grep avc` for
+SELinux denials, then drop the wrapper if there's a clean direct
+path. References: the `// We invoke proot via the system shell …`
+block in `ProotMethod.runInside` and the `// No `set -e` prefix here.`
+block in `runShell`.
+
+### `/dev/shm` is disk-backed; wants memfd via a proot extension
+
+`ProotMethod` binds `<filesDir>/proot-dev-shm` (real on-disk
+app-private storage) at `/dev/shm` so Firefox's `shm_open(3)`
+succeeds. Three problems: every SHM write hits flash (Firefox IPC
+SHM is hot), files accumulate across crashes (`filesDir`, not
+`cacheDir` — chosen to avoid SIGBUS on live mappings), and there's
+no pruning.
+
+The right fix is a proot extension at
+`deps/proot/src/extension/dev_shm/dev_shm.c` that intercepts
+`open*`/`unlink`/`stat`/`access` on `/dev/shm/<name>` and rewrites
+to `memfd_create(MFD_CLOEXEC)`. memfd vs. ashmem because ftruncate
+post-mmap and mremap-grow work; available since kernel 3.17 and
+allowed under `untrusted_app`. Subsequent
+`mmap`/`ftruncate`/`mremap`/`mprotect`/`munmap`/`close` need zero
+handling — they operate on a real kernel fd. `pidfd_getfd(2)`
+(kernel ≥ 5.6) covers the cross-process open-by-name case if
+needed; Firefox passes shm fds via `SCM_RIGHTS` so option A
+(fd-passing only) is sufficient. The Termux fork's
+`src/extension/ashmem_memfd` is a working template. ~1 focused
+week for a working prototype. Land as a local patch in
+`scripts/build-proot.sh` first; upstream to Termux once stable.
+
+Not urgent — the disk-backed bind works; nobody's complained about
+flash wear.
+
+### Wipe has two open-coded su-retry blocks
+
+After the cancel-uninstall split, `ProotMethod.wipe` runs two
+`find -xdev -depth -delete` passes (rootfs subtree first, then
+`metadata.json` + container) and each pass duplicates the same
+"try app-uid, retry via Su.run, throw on residual" pattern with
+slightly different log strings. Pass 1 ~`ProotMethod.kt:296-315`,
+pass 2 ~`329-339`. Refactor to a single helper
+(`deleteWithSuRetry(cmd, label, expectGone, log)`) — pure refactor,
+no behaviour change. The chroot-side `RootfsCleaner.wipe` is the
+clean reference (single su-only path, no duplication).
+
+### Wipe su-retry is probably legacy
+
+The `Su.run("find … -xdev -depth -delete")` fallback exists because
+historical proot-via-su entry paths could leave pacman files
+root-owned on disk; plain app-uid `chmod -R u+rwX` then couldn't
+make those files writable. The current entry path is broker-mediated
+and runs as the app uid throughout — no `su` is ever forked for proot
+installs. The only remaining justification is **stale installs from
+before the broker dispatch landed**. Either drop the su-retry
+entirely (early-development project, nobody's relying on
+months-old installs — users can recover with
+`adb shell su -c 'rm -rf …'`) or keep with mount-aware semantics
+(today's `find -xdev -depth -delete` already refuses to cross
+filesystem boundaries — match `RootfsCleaner.wipe`, never weaken
+it; bind-mounted device nodes inside the rootfs are a recurring
+footgun).
+
+### `MOZ_DISABLE_*_SANDBOX` in the universal proot env
+
+`RootfsEnv.build(PROOT)` injects seven Firefox-specific env vars
+(`MOZ_DISABLE_{CONTENT,GPU,RDD,SOCKET_PROCESS,UTILITY,GMP,VR}_SANDBOX=1`)
+into the in-rootfs bash on every proot entry. The hack works for
+Firefox but it's app-specific code in a universal codepath
+(Chromium / Thunderbird / Electron will need similar knobs), and
+disabling the sandboxes really does reduce isolation even inside an
+app-uid sandbox. Discoverability is poor — the user can't tell why
+their Firefox has different security posture under tawc.
+
+The right shape is "let nested seccomp work":
+- **Option A — PR_SET_NO_NEW_PRIVS aware proot.** A
+  `--allow-tracee-seccomp` flag in the Termux fork that skips proot's
+  filter when the tracee tries to install its own. Filters compose
+  natively under `PR_SET_NO_NEW_PRIVS`.
+- **Option B — per-app launcher wrappers.** Move the env vars into a
+  Firefox-specific wrapper script. System env stays generic; the user
+  has to know to run the wrapper.
+- **Option C — runtime detect Firefox in the spawner.** The future
+  per-app launcher injects env when it sees an executable named
+  `firefox`. Doesn't help command-line `rootfs-run firefox`.
+
+Nested-seccomp work is its own project; not urgent. Documented at
+`RootfsEnv.kt` (the `MOZ_DISABLE_*` entries gated on `Method.PROOT`).
+
+### Integration test harness requires root even against proot installs
+
+The proot install + runtime path is genuinely rootless (broker
+dispatch routes through `run-as $PKG`), but the integration test
+scaffolding originally went straight through `su -c` for any
+device-side filesystem or `/proc` poke. Result: `run-integration-tests.sh`
+against a proot install triggered a superuser-permission popup and
+silently required a rooted device — exactly the headline
+rootless-on-unrooted story we ship proot to support.
+
+Partly mitigated by the broker migration: tests now route through
+`adb::rootfs_host_exec` / `adb::rootfs_run` (`tests/integration/src/adb.rs`),
+and the source files were renamed (`chroot_process.rs` →
+`rootfs_process.rs`, `chroot.rs` → `rootfs.rs`). Without re-running
+tests on an unrooted device we can't be sure every previously
+su-bound site is gone; the broker may still need root for some
+non-tawcroot install methods. Re-verify by running
+`scripts/run-integration-tests.sh` on a Magisk-disabled emulator
+against a proot install — no "granted su permission" popup, no
+errors. Precondition for honestly claiming we test the rootless path
+in CI on unrooted emulators.
 
 ## Reproducing the failure with upstream
 
