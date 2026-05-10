@@ -274,11 +274,15 @@ for dir in $DIRS; do
 done
 
 echo "==> install (DESTDIR=$PREFIX)"
-make -C "$BUILD_DIR/common" install-libLTLIBRARIES DESTDIR="$PREFIX" 2>&1 | tail -3 || true
-make -C "$BUILD_DIR/common/q" install DESTDIR="$PREFIX" 2>&1 | tail -3 || true
+# We only install the dirs we actually built above (common top-level +
+# the q linker plugin + DIRS). No `|| true` swallowing — real install
+# failures must propagate, otherwise the verify step below trips on the
+# missing artefacts and hides the underlying error.
+make -C "$BUILD_DIR/common" install-libLTLIBRARIES DESTDIR="$PREFIX" 2>&1 | tail -3
+make -C "$BUILD_DIR/common/q" install DESTDIR="$PREFIX" 2>&1 | tail -3
 for dir in $DIRS; do
     if [ -d "$BUILD_DIR/$dir" ] && [ -f "$BUILD_DIR/$dir/Makefile" ]; then
-        make -C "$BUILD_DIR/$dir" install DESTDIR="$PREFIX" 2>&1 | tail -3 || true
+        make -C "$BUILD_DIR/$dir" install DESTDIR="$PREFIX" 2>&1 | tail -3
     fi
 done
 
