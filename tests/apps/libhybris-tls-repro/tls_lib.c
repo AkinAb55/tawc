@@ -16,6 +16,12 @@
 __thread int g_tls_var = 42;
 __thread int g_tls_zero;
 __thread char g_tls_pad[32];
+/* Uninitialised TLS object exercising a meaningful .tbss tail. memsz
+ * here is 256 bytes past filesz, so a regression that bounds-checks
+ * against filesz only (init_size) instead of memsz (segment.size) lets
+ * a write to g_tbss_block[255] land in adjacent IE TLS without
+ * tripping. */
+__thread char g_tbss_block[256];
 
 int get_tls(void) { return g_tls_var; }
 void set_tls(int v) { g_tls_var = v; }
@@ -29,6 +35,15 @@ int get_pad_sum(void) {
     return sum;
 }
 void set_pad_first(int v) { g_tls_pad[0] = (char)v; }
+int get_tbss_sum(void) {
+    int sum = 0;
+    for (size_t i = 0; i < sizeof(g_tbss_block); i++) {
+        sum += (unsigned char)g_tbss_block[i];
+    }
+    return sum;
+}
+int get_tbss_high(void) { return (unsigned char)g_tbss_block[sizeof(g_tbss_block) - 1]; }
+void set_tbss_high(int v) { g_tbss_block[sizeof(g_tbss_block) - 1] = (char)v; }
 
 __attribute__((constructor))
 static void on_load(void) {

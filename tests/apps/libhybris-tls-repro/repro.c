@@ -22,18 +22,16 @@
 //     libc), so glibc's _dl_update_slotinfo asserts on a bionic
 //     module_id that has no entry in glibc's slotinfo table. Manifests
 //     loudly on devices whose bionic stack churns the TLS-modules
-//     generation enough to flip the cmp in tlsdesc_resolver_dynamic
-//     (Pixel 4a's Adreno + GTK init does; OnePlus 9 + the simple
-//     repro doesn't, which is why the OnePlus tests passed and the
-//     Pixel ones blew up).
-//
-//     We try to force the slow path the way the simple repro doesn't:
-//     repeatedly dlopen a TLS-using .so, recycling slots by dlclosing
-//     between iterations. Each register/unregister bumps
-//     __libc_shared_globals()->tls_modules.generation; eventually it
-//     overtakes the host glibc DTV gen the resolver compares against,
-//     `cmp x21, x22; b.lo .fallback` branches, and the slow path runs
-//     glibc's __tls_get_addr -> Inconsistency detected by ld.so abort.
+//     generation enough to flip the cmp in tlsdesc_resolver_dynamic.
+//     Caught here by the value-correctness assert in #3: a TLSDESC read
+//     that took the dynamic resolver's slow path would either abort in
+//     glibc or hand back garbage, neither of which equals 42. The
+//     earlier dlopen+dlclose stress loop that tried to force the abort
+//     path was removed -- it relied on leaking static_tls_layout slots
+//     each cycle (unregister can't recycle promoted slots, see
+//     linker_tls.cpp::get_unused_module_index) which made the test
+//     budget-fragile and failure-prone whenever per-cycle promote cost
+//     drifted (apex libc upgrade, libhybris layout shift, etc.).
 //
 //  3. Per-.so __thread storage broken for ALL devices  (existed since
 //     the patcher landed; surfaced as silent garbage). bionic .so
@@ -64,26 +62,6 @@ extern char* hybris_dlerror(void);
 extern void* _hybris_hook___get_tls_hooks(void);
 
 #define EXPECTED_TLS_VALUE 42
-// Each register/unregister cycle bumps libhybris's bionic
-// __libc_shared_globals.tls_modules.generation by 1, and also leaks
-// ~56 bytes of libhybris's static-TLS layout (the bionic linker
-// reloads tls_lib's transitive deps + apex libc bookkeeping per
-// dlopen, all of which promote; promoted slots can't be recycled
-// without risking a static-pointer free in the dynamic-tls path --
-// see linker_tls.cpp::get_unused_module_index). With
-// hooks.c::BIONIC_STATIC_TLS_SIZE = 1024, after bionic_tcb (80B) and
-// first-iteration libc baseline (~80B), the headroom is ~864B / 56B/iter
-// = ~15 iters. 10 iters leaves headroom for variation across devices
-// while still bumping bionic_gen past ~22 (well over the typical
-// glibc gen of a libhybris-loaded process, ~10).
-//
-// Note this is a "regression catcher", not a complete reproducer: with
-// the dynamic-resolver bug present, this loop will sometimes survive
-// without aborting if the local glibc gen happened to land above ~22
-// (varies per glibc build / per process). The post-loop value-correctness
-// assert (get_tls() == 42) is what catches the bug deterministically;
-// the stress is just opportunistic extra coverage for the abort path.
-#define STRESS_ITERATIONS 10
 
 typedef int (*get_int_fn)(void);
 typedef void (*set_int_fn)(int);
@@ -95,6 +73,14 @@ struct tls_api {
     set_int_fn set_zero_tls;
     get_int_fn get_pad_sum;
     set_int_fn set_pad_first;
+    /* .tbss-tail helpers: g_tbss_block[256] is uninitialised, so memsz
+     * reaches well past filesz. A regression that bounds-checks
+     * static_offset+init_size instead of static_offset+segment.size
+     * will silently truncate the layout and the high-offset write/read
+     * here lands on adjacent IE TLS instead of the .so's own slot. */
+    get_int_fn get_tbss_sum;
+    get_int_fn get_tbss_high;
+    set_int_fn set_tbss_high;
 };
 
 static int expect_int(const char* what, int got, int expected) {
@@ -113,9 +99,13 @@ static int resolve_api(void* h, struct tls_api* api, const char* label) {
     api->set_zero_tls = (set_int_fn)hybris_dlsym(h, "set_zero_tls");
     api->get_pad_sum = (get_int_fn)hybris_dlsym(h, "get_pad_sum");
     api->set_pad_first = (set_int_fn)hybris_dlsym(h, "set_pad_first");
+    api->get_tbss_sum = (get_int_fn)hybris_dlsym(h, "get_tbss_sum");
+    api->get_tbss_high = (get_int_fn)hybris_dlsym(h, "get_tbss_high");
+    api->set_tbss_high = (set_int_fn)hybris_dlsym(h, "set_tbss_high");
 
     if (!api->get_tls || !api->set_tls || !api->get_zero_tls ||
-        !api->set_zero_tls || !api->get_pad_sum || !api->set_pad_first) {
+        !api->set_zero_tls || !api->get_pad_sum || !api->set_pad_first ||
+        !api->get_tbss_sum || !api->get_tbss_high || !api->set_tbss_high) {
         fprintf(stderr, "[repro] %s: hybris_dlsym failed: %s\n", label, hybris_dlerror());
         return 1;
     }
@@ -126,6 +116,8 @@ static int check_initial_tls(const struct tls_api* api, const char* label) {
     if (expect_int(label, api->get_tls(), EXPECTED_TLS_VALUE)) return 1;
     if (expect_int("get_zero_tls()", api->get_zero_tls(), 0)) return 1;
     if (expect_int("get_pad_sum()", api->get_pad_sum(), 0)) return 1;
+    if (expect_int("get_tbss_sum()", api->get_tbss_sum(), 0)) return 1;
+    if (expect_int("get_tbss_high()", api->get_tbss_high(), 0)) return 1;
     return 0;
 }
 
@@ -135,6 +127,7 @@ struct thread_check_args {
     int write_value;
     int zero_write_value;
     int pad_write_value;
+    int tbss_high_write_value;
 };
 
 static void* tls_thread_check(void* opaque) {
@@ -154,10 +147,17 @@ static void* tls_thread_check(void* opaque) {
     if (expect_int("thread get_pad_sum()", args->api.get_pad_sum(), 0)) {
         return (void*)(intptr_t)1;
     }
+    if (expect_int("thread get_tbss_sum()", args->api.get_tbss_sum(), 0)) {
+        return (void*)(intptr_t)1;
+    }
+    if (expect_int("thread get_tbss_high()", args->api.get_tbss_high(), 0)) {
+        return (void*)(intptr_t)1;
+    }
 
     args->api.set_tls(args->write_value);
     args->api.set_zero_tls(args->zero_write_value);
     args->api.set_pad_first(args->pad_write_value);
+    args->api.set_tbss_high(args->tbss_high_write_value);
 
     if (expect_int("thread get_tls() after set", args->api.get_tls(), args->write_value)) {
         return (void*)(intptr_t)1;
@@ -170,6 +170,10 @@ static void* tls_thread_check(void* opaque) {
                    args->api.get_pad_sum(), args->pad_write_value)) {
         return (void*)(intptr_t)1;
     }
+    if (expect_int("thread get_tbss_high() after set",
+                   args->api.get_tbss_high(), args->tbss_high_write_value)) {
+        return (void*)(intptr_t)1;
+    }
     return NULL;
 }
 
@@ -178,6 +182,7 @@ static int run_thread_isolation_check(const struct tls_api* api) {
     api->set_tls(7);
     api->set_zero_tls(11);
     api->set_pad_first(13);
+    api->set_tbss_high(199);
 
     struct thread_check_args args = {
         .api = *api,
@@ -185,6 +190,7 @@ static int run_thread_isolation_check(const struct tls_api* api) {
         .write_value = 99,
         .zero_write_value = 123,
         .pad_write_value = 17,
+        .tbss_high_write_value = 211,
     };
 
     pthread_t thread;
@@ -206,6 +212,7 @@ static int run_thread_isolation_check(const struct tls_api* api) {
     if (expect_int("main get_tls() after child set", api->get_tls(), 7)) return 1;
     if (expect_int("main get_zero_tls() after child set", api->get_zero_tls(), 11)) return 1;
     if (expect_int("main get_pad_sum() after child set", api->get_pad_sum(), 13)) return 1;
+    if (expect_int("main get_tbss_high() after child set", api->get_tbss_high(), 199)) return 1;
     fprintf(stderr, "[repro] thread isolation check OK\n");
     return 0;
 }
@@ -272,36 +279,6 @@ int main(int argc, char** argv) {
     // TLS registry kept a raw .tdata pointer into the now-unloaded .so,
     // this catch-up replay can read unmapped memory and crash.
     if (run_post_dlclose_replay_check()) return 1;
-
-    // ---- Failure mode #2: stress register/unregister to force the
-    // TLSDESC dynamic-resolver fallback path. If the static-promote on
-    // TLSDESC has regressed back to dynamic-only, this loop will trip
-    // glibc's _dl_update_slotinfo assertion before iteration STRESS_ITERATIONS.
-    fprintf(stderr, "[repro] stress: %d x (hybris_dlopen + get_tls + hybris_dlclose)\n",
-            STRESS_ITERATIONS);
-    for (int i = 0; i < STRESS_ITERATIONS; i++) {
-        void* h = hybris_dlopen(path, 2 /* RTLD_NOW */);
-        if (!h) {
-            fprintf(stderr, "[repro] stress: hybris_dlopen failed at iter %d: %s\n",
-                    i, hybris_dlerror());
-            return 1;
-        }
-        struct tls_api api;
-        if (resolve_api(h, &api, "stress")) return 1;
-        // The TLS access itself is what trips the dynamic-resolver bug
-        // -- fetching a value, not opening, is what runs through the
-        // patched MRS + TLSDESC resolver. Also assert the initialiser so
-        // every iteration checks both TLSDESC and .tdata replay.
-        if (expect_int("stress get_tls()", api.get_tls(), EXPECTED_TLS_VALUE)) {
-            return 1;
-        }
-        if (hybris_dlclose(h) != 0) {
-            fprintf(stderr, "[repro] stress: hybris_dlclose failed at iter %d\n", i);
-            return 1;
-        }
-    }
-    fprintf(stderr, "[repro] stress: %d iterations OK (no fallback->__tls_get_addr abort)\n",
-            STRESS_ITERATIONS);
 
     // ---- Failure mode #1 + #3: dlopen one more time, read the TLS
     // variable, and require it return its declared initialiser. Catches

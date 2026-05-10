@@ -40,17 +40,14 @@ use tawc_integration::{adb, rootfs};
 /// glibc-side `repro` executable is built inside the rootfs and links
 /// `-lhybris-common`. Drives a full hybris_dlopen + hybris_dlsym +
 /// hybris_dlclose round-trip plus thread isolation, post-dlclose replay,
-/// a stress loop, and an assert that get_tls() returns the declared
-/// initialiser.
+/// and an assert that get_tls() returns the declared initialiser.
 ///
 /// Failure modes:
 ///   - SIGABRT (exit 134) inside hybris_dlclose — regression of #1
-///   - SIGABRT (exit 134) inside the stress loop reading
-///     `Inconsistency detected by ld.so: dl-tls.c: 857:
-///     _dl_update_slotinfo: Assertion 'max_modid >= req_modid' failed!`
-///     — regression of #2
 ///   - exit 1 with `get_tls() = 0 (expected 42)` and a libhybris
-///     pointer to the broken code path — regression of #3
+///     pointer to the broken code path — regression of #2 or #3 (a
+///     TLSDESC dynamic-resolver regression hands back garbage instead
+///     of the .tdata initialiser, same symptom as a missing .tdata copy)
 ///   - exit 1 or SIGSEGV around `post-dlclose replay check` — the
 ///     promoted-TLS registry kept a pointer into an unloaded .so instead
 ///     of owning the initializer bytes
@@ -66,10 +63,8 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Exit code maps to the failure mode (see fn doc + repro.c):
-    //   134 = SIGABRT, either the unregister CHECK or the
-    //         glibc _dl_update_slotinfo assertion;
-    //     1 = repro's own assert (e.g. get_tls() != 42, or a hybris_dlopen
-    //         failure mid-stress).
+    //   134 = SIGABRT, the unregister CHECK abort;
+    //     1 = repro's own assert (e.g. get_tls() != 42).
     // Any non-zero is a libhybris regression -- surface enough hints in
     // the message that someone seeing this in CI knows where to look.
     assert!(
@@ -77,15 +72,12 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
         "libhybris-tls-repro exited non-zero ({:?}).\n\
          - exit 134 + `unregister_tls_module CHECK 'mod.static_offset == SIZE_MAX' failed`\n\
            => the IE/TLSDESC lazy-promote fix in libhybris linker_tls.cpp has regressed\n\
-         - exit 134 + `Inconsistency detected by ld.so: dl-tls.c: ... _dl_update_slotinfo`\n\
-           => TLSDESC promote has regressed -- the dynamic resolver is now reaching\n\
-              glibc __tls_get_addr with a bionic module_id (see linker.cpp\n\
-              R_GENERIC_TLSDESC handler)\n\
          - exit 1 + `get_tls() = 0 (expected 42)`\n\
            => promote_tls_module_to_static is not pushing .tdata into the calling\n\
               thread's tls_static_tls, OR the bionic_tcb / tls_tp_base math has\n\
-              drifted (see hooks.c::tls_static_tls + linker_tls.cpp + linker.cpp\n\
-              tls_tp_base)\n\
+              drifted, OR a TLSDESC handler regressed back to the dynamic resolver\n\
+              path (see hooks.c::tls_static_tls + linker_tls.cpp + linker.cpp\n\
+              tls_tp_base + R_GENERIC_TLSDESC handler)\n\
          stdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
