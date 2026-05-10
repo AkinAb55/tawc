@@ -19,9 +19,32 @@ object NativeBridge {
      *  Phase 6 will replace this with a per-Activity lookup via CompositorService. */
     private var inputViewRef: WeakReference<View>? = null
 
+    /** Whether the compositor most recently asked for the keyboard to be
+     *  shown (vs. hidden). Sticky so that an activity which registers its
+     *  view *after* the Wayland client enabled text-input — e.g. when the
+     *  client maps + enables text-input faster than Android brings up the
+     *  Activity — still gets the keyboard request replayed once the view
+     *  is available. Without this the request silently no-ops and the
+     *  view never gains focus, so IMM never calls `onCreateInputConnection`
+     *  and no `TawcInputConnection` is ever bound. */
+    @Volatile private var pendingKeyboardShown: Boolean = false
+
     var inputView: View?
         get() = inputViewRef?.get()
-        set(value) { inputViewRef = value?.let { WeakReference(it) } }
+        set(value) {
+            inputViewRef = value?.let { WeakReference(it) }
+            // Replay the last keyboard-show on register so a late-arriving
+            // Activity catches up with the compositor's current state.
+            if (value != null && pendingKeyboardShown) {
+                mainHandler.post {
+                    val v = inputView ?: return@post
+                    if (pendingKeyboardShown) {
+                        v.requestFocus()
+                        imeOutput.showSoftInput(v)
+                    }
+                }
+            }
+        }
 
     /** The currently active TawcInputConnection. Set by TawcInputConnection's
      *  init, cleared by closeConnection. The Wayland-to-Android Editable sync
@@ -186,6 +209,7 @@ object NativeBridge {
     @JvmStatic
     fun onShowKeyboard() {
         Log.d(TAG, "onShowKeyboard (from compositor)")
+        pendingKeyboardShown = true
         mainHandler.post {
             val view = inputView ?: return@post
             view.requestFocus()
@@ -197,6 +221,7 @@ object NativeBridge {
     @JvmStatic
     fun onHideKeyboard() {
         Log.d(TAG, "onHideKeyboard (from compositor)")
+        pendingKeyboardShown = false
         mainHandler.post {
             val view = inputView ?: return@post
             imeOutput.hideSoftInput(view)

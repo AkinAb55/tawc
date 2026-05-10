@@ -111,6 +111,7 @@ With `fullEditor=true`, `mFallbackMode=false`, so `sendCurrentText()` is a no-op
 - When any text input instance is enabled: `InputMethodManager.showSoftInput()`.
 - When no instances are enabled: `InputMethodManager.hideSoftInputFromWindow()`.
 - Keyboard visibility is tracked to avoid redundant calls and handle rapid disable+enable cycles (e.g., cursor movement within a text field may trigger disable+enable in quick succession).
+- `NativeBridge.pendingKeyboardShown` is sticky: it records the compositor's most recent show/hide request and is replayed when `inputView` registers. Required because clients that map + enable text-input faster than Android brings the Activity up (lxterminal/VTE was the canonical case) would otherwise see `onShowKeyboard` no-op against a null `inputView` and the IMM would never call `onCreateInputConnection`, leaving no bound `TawcInputConnection`.
 
 ### Cursor change notification
 
