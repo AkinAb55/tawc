@@ -1,9 +1,16 @@
 # Desktop GL via Mesa+Zink, dispatched in libhybris's libEGL
 
-**Status:** design only, not implemented. Triggered by kitty (issue: kitty
-segfaults on startup; root cause is desktop-GL-only). Same architectural gap
-also blocks alacritty, supertuxkart-class games, and any other desktop-GL-only
-app.
+**Status:** design only, not implemented. Likely superseded by
+[`libhybris-zink.md`](libhybris-zink.md), which gets the same
+desktop-GL capability via configuration alone (~30 LOC of Kotlin + one
+JSON file) at the cost of routing GLES through Zink too. Keep this doc
+as the fallback if Zink-on-libhybris-vulkan's GLES overhead turns out
+to be unacceptable in measurement — then the dispatcher comes back to
+preserve the GLES fast path.
+
+Triggered by kitty (issue: kitty segfaults on startup; root cause is
+desktop-GL-only). Same architectural gap also blocks alacritty,
+supertuxkart-class games, and any other desktop-GL-only app.
 
 ## The problem
 
@@ -46,29 +53,44 @@ shim from us:
 
 ## Dispatcher design
 
-libhybris's libEGL becomes a thin dispatcher that lazily loads two backends:
+libhybris's libEGL becomes a thin dispatcher over two backends:
 
 - **hybris backend**: today's libhybris EGL code, unchanged. Used for GLES.
 - **mesa backend**: `dlopen("libEGL_mesa.so.0")` (or `libEGL.so.1` via
   glvnd, doesn't matter which). Used for desktop GL.
 
-`EGLDisplay` / `EGLContext` / `EGLSurface` handles are wrapped in
-`{ backend_tag, real_handle }` pairs. Every EGL entry point unwraps, looks
-up the backend, and dispatches.
+EGL's API choice lives on the **context**, not the display: one
+`EGLDisplay` can legally host a GLES context and a desktop-GL context
+simultaneously. So the backend tag belongs on the **config** (set when
+`eglChooseConfig` decides which backend the config came from) and
+propagates from there to contexts and surfaces.
+
+`EGLConfig` / `EGLContext` / `EGLSurface` / `EGLImage` / `EGLSync` handles
+are wrapped in `{ backend_tag, real_handle }` pairs. `EGLDisplay` is *not*
+wrapped — both backends are initialized against the same display and the
+app sees a single shared handle. Every entry point that takes a backend-
+owned handle unwraps it to pick the backend; entry points that take only
+an `EGLDisplay` look at thread state (current context, bound API) or the
+call's own arguments.
 
 ### Selection rules
 
-The first call that reveals the app's intent picks the backend for that display:
+Per-config, decided at `eglChooseConfig`:
 
-| Call | Routes to |
+| Request | Source of configs |
 |---|---|
-| `eglBindAPI(EGL_OPENGL_API)` | mesa |
-| `eglChooseConfig` with `EGL_RENDERABLE_TYPE` containing `EGL_OPENGL_BIT` | mesa |
-| `eglCreateContext` with `EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR` set | mesa |
-| Anything else | hybris (default; today's behavior preserved) |
+| `EGL_RENDERABLE_TYPE` contains `EGL_OPENGL_BIT` | mesa |
+| `EGL_RENDERABLE_TYPE` is GLES-only (or unset, defaults to GLES) | hybris |
+| Both bits set (rare but legal) | merged list, each config tagged with its origin |
 
-Ambiguity (e.g. an app creates two displays, one for each API in the same
-process) is allowed: each display is independent.
+Per-context, decided at `eglCreateContext`: the config's backend tag wins.
+Bound API (`eglBindAPI`) and `EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR` only
+matter as cross-checks against the config; they don't override it.
+
+`eglMakeCurrent` reads the context's tag to pick the backend for
+subsequent calls on that thread. Apps that mix backends in one process
+(Firefox does this in some configurations) just work — each context
+routes to its own backend independently.
 
 ### What mesa actually renders with
 
@@ -114,8 +136,8 @@ even loaded into their process.
 All in libhybris. Roughly:
 
 - `hybris/egl/egl_dispatcher.c` (new, ~600-800 LOC): wraps every EGL entry
-  point. Per-display backend tag, dispatch table for each backend, mesa
-  loader (~50 LOC), handle-wrapping infrastructure (~100 LOC).
+  point. Per-config/per-context backend tag, dispatch table for each
+  backend, mesa loader (~50 LOC), handle-wrapping infrastructure (~100 LOC).
 - `hybris/egl/egl.c` (existing, minor changes): becomes the "hybris backend"
   whose entry points are called by the dispatcher instead of being exposed as
   the public symbols.
@@ -179,8 +201,17 @@ Each milestone is independently testable.
   app.
 - **`eglGetProcAddress` ambiguity.** The function pointer returned should
   itself dispatch per-current-context. Mirrors how libglvnd does it.
-- **Multi-context apps that mix backends** in the same process. Allowed by
-  the design; rare in practice.
+- **Eager dual init.** Both backends `eglInitialize` against the same
+  display up front (or symmetrically on first config query), so
+  `eglChooseConfig` can answer for either API without re-entering. Apps
+  that never touch desktop GL still pay one mesa `dlopen` +
+  `eglInitialize`. Probably fine; measure if it bites startup.
+- **Shared `wl_display`.** Both backends talking to the same Wayland
+  connection is the most likely real-world fight (gbm/dmabuf vs gralloc,
+  registry globals). Smoke-test early.
+- **Merged config lists.** When a request matches both backends (rare),
+  the order returned matters because apps often pick `configs[0]`. Tie-
+  break toward hybris to preserve today's behavior for GLES-leaning apps.
 - **The kitty + tawcroot crash** isn't blocked by any of this and probably
   isn't dispatcher-related, but is worth a separate investigation since it'd
   block the obvious "kitty works now" demo.

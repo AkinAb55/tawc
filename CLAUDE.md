@@ -18,7 +18,8 @@ The `notes/` directory contains architecture and implementation notes. Edit/crea
 - [building.md](notes/building.md) -- build instructions and deployment
 - [gpu-strategy.md](notes/gpu-strategy.md) -- GPU driver strategy, libhybris, AHB buffer sharing
 - [gfxstream-bridge.md](notes/gfxstream-bridge.md) -- bridge backend: GL/Vulkan command-stream forwarding to an Android-side kumquat daemon, no libhybris. Vulkan enumeration works end-to-end; WSI presentation + AHB handoff (phases 4-5) still TODO.
-- [desktop-gl-dispatch.md](notes/desktop-gl-dispatch.md) -- design (not implemented) for an API-aware libEGL shim in libhybris that routes desktop-GL apps to mesa+Zink-on-libhybris-vulkan while keeping today's direct-GLES fast path
+- [libhybris-zink.md](notes/libhybris-zink.md) -- design (not implemented) for a `LibhybrisZink` graphics backend: distro mesa + Zink on top of libhybris-vulkan; ~30 LOC of Kotlin + one ICD JSON, GLES also routed through Zink
+- [desktop-gl-dispatch.md](notes/desktop-gl-dispatch.md) -- design (not implemented, likely superseded by libhybris-zink) for an API-aware libEGL dispatcher in libhybris that preserves today's direct-GLES fast path while routing desktop-GL to mesa+Zink
 - [wsi-layer.md](notes/wsi-layer.md) -- client-side EGL WSI layer
 - [rendering.md](notes/rendering.md) -- window management, coordinate system, SHM buffers
 - [multi-activity.md](notes/multi-activity.md) -- plan for one Android task per window
