@@ -26,7 +26,7 @@ that's the right answer for the bin'd `kumquat` binary, which has
 no AHB consumer wired up.
 
 diff --git a/src/gfxstream.rs b/src/gfxstream.rs
-index 65612a1..5f07d3c 100644
+index 65612a1..36f93bc 100644
 --- a/src/gfxstream.rs
 +++ b/src/gfxstream.rs
 @@ -22,6 +22,7 @@ use std::process::abort;
@@ -45,7 +45,7 @@ index 65612a1..5f07d3c 100644
  use serde::Deserialize;
  use serde::Serialize;
  
-@@ -68,6 +70,31 @@ use crate::snapshot::RutabagaSnapshotReader;
+@@ -68,6 +70,34 @@ use crate::snapshot::RutabagaSnapshotReader;
  #[cfg(gfxstream_unstable)]
  use crate::snapshot::RutabagaSnapshotWriter;
  
@@ -80,7 +80,7 @@ index 65612a1..5f07d3c 100644
  // See `virtgpu-gfxstream-renderer.h` for definitions
  const STREAM_RENDERER_PARAM_USER_DATA: u64 = 1;
  const STREAM_RENDERER_PARAM_RENDERER_FLAGS: u64 = 2;
-@@ -530,40 +563,24 @@ impl Gfxstream {
+@@ -530,45 +560,24 @@ impl Gfxstream {
          ret_to_res(ret)?;
  
          if stream_handle.handle_type == RUTABAGA_HANDLE_TYPE_PLATFORM_AHB {
@@ -148,7 +148,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 index 991b766..06267c5 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -32,6 +32,13 @@ pub use mesa3d_util::RawDescriptor as RutabagaRawDescriptor;
+@@ -32,6 +32,14 @@ pub use mesa3d_util::RawDescriptor as RutabagaRawDescriptor;
  pub use mesa3d_util::MESA_HANDLE_TYPE_MEM_DMABUF as RUTABAGA_HANDLE_TYPE_MEM_DMABUF;
  pub use mesa3d_util::MESA_HANDLE_TYPE_MEM_OPAQUE_FD as RUTABAGA_HANDLE_TYPE_MEM_OPAQUE_FD;
  

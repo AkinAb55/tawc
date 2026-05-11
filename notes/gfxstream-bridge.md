@@ -1,15 +1,15 @@
 # gfxstream bridge: a libhybris-free GPU path
 
-**Status:** Phase 4 partial. Host-visible Vulkan memory works
-end-to-end (vulkaninfo + ~3 BLOB allocations cleanly). The custom
-Vulkan WSI is fully wired in dispatch on both sides (compositor +
-chroot). The one remaining gap is the per-swapchain-image alloc
-primitive `allocate_swapchain_image()` -- it currently returns
-`VK_ERROR_INITIALIZATION_FAILED` rather than implementing the
-"kumquat `RESOURCE_CREATE_BLOB` then `VkImportColorBufferGOOGLE`"
-sequence the design needs. Plan and rationale in
-[issues/gfxstream-wsi-swapchain-alloc-blocker.md](../issues/gfxstream-wsi-swapchain-alloc-blocker.md);
-see §"WSI plan: custom Vulkan WSI" below for the surrounding design.
+**Status:** Phase 4 done. End-to-end Vulkan-via-AHB works:
+`gfxstream::test_vkcube_renders_via_ahb` passes against the Adreno
+660 — chroot's gfxstream-vk WSI allocates an AHB-backed ColorBuffer
+via kumquat blob create + `VkImportColorBufferGOOGLE`, presents the
+ColorBuffer id over the `tawc_gfxstream` Wayland protocol, and the
+compositor imports the resolved AHB through the existing
+android_wlegl texture path. Phase 5 (real-world AVD validation),
+Phase 6 (Zink-on-gfxstream-vk for GL/GLES) still TODO — see
+§"WSI plan: custom Vulkan WSI" for design and §"GL/GLES under custom
+WSI" for the GL gap.
 
 ## Orientation for future readers
 
@@ -720,22 +720,21 @@ handler, the `tawc_gfxstream_lookup_ahb` C entry point in
 `libgfxstream_backend.so`, and the dmabuf-v1 stepping-stone cleanup
 all landed. See "Compositor side — what landed May 2026" below.
 
-**Phase 4 partial done: chroot-side WSI dispatch shell** — the strong
-`gfxstream_vk_*` overrides for the surface entrypoints, swapchain
-shell, Wayland registry binding, and present loop all landed in
+**Phase 4 done end-to-end** — the chroot-side WSI dispatch shell
+landed alongside the per-image alloc primitive
+`allocate_swapchain_image()`, all in
 `deps/mesa-patches/mesa/05-tawc-vulkan-wsi.patch`. vkcube reaches our
-`vkCreateSwapchainKHR` and binds `tawc_gfxstream` end-to-end.
+`vkCreateSwapchainKHR`, binds `tawc_gfxstream`, allocates AHB-backed
+ColorBuffers via kumquat blob create + `VkImportColorBufferGOOGLE`,
+and presents them through to the compositor's existing AHB import
+path. `gfxstream::test_vkcube_renders_via_ahb` passes on the
+physical Adreno 660 device.
 
-**Phase 4 remaining: per-image alloc primitive
-`allocate_swapchain_image()`** — currently a stub that returns
-`VK_ERROR_INITIALIZATION_FAILED`. The plan ("kumquat
-`RESOURCE_CREATE_BLOB` then `VkImportColorBufferGOOGLE`") is in
-[issues/gfxstream-wsi-swapchain-alloc-blocker.md](../issues/gfxstream-wsi-swapchain-alloc-blocker.md)
-and summarized at the top of `gfxstream_vk_tawc_wsi.cpp`.
-
-Still TODO after that: Phase 6 (Zink-on-gfxstream-vk; see "GL/GLES
-under custom WSI" below), Phase 7 (real-world AVD validation beyond
-`vulkaninfo --summary`).
+Still TODO: Phase 6 (Zink-on-gfxstream-vk for GL/GLES; see "GL/GLES
+under custom WSI" below — the rest of the `gfxstream::` integration
+suite — gtk3, gtk4, firefox, supertuxkart, weston-simple-egl,
+eglinfo — is all gated on this), Phase 7 (real-world AVD
+validation beyond `vulkaninfo --summary`).
 
 The x86_64 build path is symmetric with aarch64 — same scripts, same
 gradle tasks, same `BridgeInstallProvider`, just `--abi=x86_64`
@@ -798,7 +797,7 @@ required), so they can run unattended on the emulator too.
   - `01-add-cargo-toml.patch`: drops `Cargo.toml` files into the four Mesa-internal Rust crates (`mesa3d_util`, `mesa3d_protocols`, `virtgpu_kumquat`, `virtgpu_kumquat_ffi`) plus a workspace `Cargo.toml`, so cargo can build them directly. Templates copied from the matching crates in magma-gpu/rutabaga_gfx (which Cargo-builds the same source). Differences: thiserror 2.0 (Mesa floor; rutabaga ships 1.0), zerocopy 0.8.13.
   - `02-meson-external-kumquat-ffi.patch`: adds a meson option `virtgpu_kumquat_external_ffi=true` that, when set, skips the four `subdir(...)` calls that build the Rust pieces via meson and instead resolves `dep_virtgpu_kumquat_ffi` via plain pkg-config. Also gates the `add_languages('rust')` block on the same condition, so meson never spins up the Rust subproject machinery at all.
   - `03-kumquat-socket-env-override.patch`: lets the chroot-side gfxstream-vk read `VIRTGPU_KUMQUAT_GPU_SOCKET` for the kumquat socket path. Compositor binds at `<appdata>/share/kumquat-gpu-0` (so the existing share bind exposes it inside the rootfs at `/usr/share/tawc/kumquat-gpu-0`), and `RootfsEnv` sets the env var to that path on the gfxstream branch. The upstream `/tmp/kumquat-gpu-0` default still works when the env var is unset.
-  - `05-tawc-vulkan-wsi.patch`: custom Wayland WSI shell for the gfxstream bridge. Present is wired; image allocation is still the blocker tracked in the issue file.
+  - `05-tawc-vulkan-wsi.patch`: custom Wayland WSI for the gfxstream bridge — surface entrypoints, swapchain shell + per-image alloc (kumquat blob create + `VkImportColorBufferGOOGLE`), present loop with `wl_surface.frame()` throttling for FIFO mode. End-to-end with `gfxstream::test_vkcube_renders_via_ahb`.
 - **The cargo + meson-external split** is what unblocked kumquat. Mesa's `subprojects/packagefiles/*/meson.build` hard-code `native: true` on every Rust crate's `static_library()`. The proc-macro chain (cfg-if/syn/quote/proc-macro2/unicode-ident) and the regular host-machine crates (cfg-if as `mesa3d_util` dep) can't both satisfy meson in a cross-build context — see git history for the dead-end attempts. Cargo handles cross-builds + proc-macros transparently and produces a static lib that's just linked in like any other dep.
 - **`deps/deps.list` pins:** `mesa` (mesa-25.3.6), `gfxstream` (current main), `rutabaga_gfx` (magma-gpu fork with the kumquat server source).
 - **Cross-build sysroot pull:** the script reads `build/aarch64-sysroot/usr/lib`, which the operator pre-populates with `tar -C /data/data/me.phie.tawc/distros/<id>/rootfs -czf - usr/include usr/lib/pkgconfig usr/lib/libwayland-* usr/lib/libdrm* usr/lib/libudev* …` over `tawc-exec`. **Not yet automated** — TODO is to either bake this into the script (pull from device on demand) or vendor the relevant aarch64 .so files alongside the libhybris assets so it's reproducible without a connected device.
@@ -854,12 +853,12 @@ footgun. Folding it into the compositor process drops all of that.)
 
 ### Remaining work to a fully-integrated bridge backend
 
-End-to-end Vulkan enumeration works, host-visible memory works,
-chroot-side bits install themselves, the compositor side of the
-custom Vulkan WSI is in, and the chroot-side WSI dispatch shell is
-in. The one remaining work item is the per-image alloc primitive
-(`allocate_swapchain_image()`) -- a single function in our existing
-Mesa patch.
+End-to-end Vulkan-via-AHB works:
+`gfxstream::test_vkcube_renders_via_ahb` passes against the physical
+Adreno 660 device. Phase 4 is done; the rest of the `gfxstream::`
+integration suite (gtk*/firefox/supertuxkart/weston-simple-egl/
+eglinfo) is gated on Phase 6 — Zink-on-gfxstream-vk routing for
+GL/EGL apps.
 
 **Done:**
 
@@ -905,7 +904,7 @@ Mesa patch.
    * AHB export hook moved to `compositor/src/ahb_export.rs` (the
      keepers from the old `dmabuf.rs`).
 
-**Done (chroot-side WSI dispatch — May 2026):**
+**Done (chroot-side WSI dispatch + per-image alloc — May 2026):**
 
 10. **~~Custom WSI dispatch shell.~~** Done.
     `deps/mesa-patches/mesa/05-tawc-vulkan-wsi.patch` lands strong
@@ -916,42 +915,52 @@ Mesa patch.
     `vkAcquireNextImage(2)KHR`, and `vkQueuePresentKHR`. Adds the
     `tawc_gfxstream` protocol XML to Mesa's tree, runs
     `mod_wl.scan_xml` on it, links libvulkan_gfxstream against
-    libwayland-client. Verified: vkcube reaches our
-    `vkCreateSwapchainKHR`, the chroot-side Wayland binding for
-    `tawc_gfxstream` succeeds end-to-end (registry walk → bind on
-    a dedicated `wl_event_queue`).
+    libwayland-client.
 
-**Remaining (chroot side, one focused work item):**
-
-11. **Per-image alloc primitive — `allocate_swapchain_image()`**
-    (open issue:
-    [issues/gfxstream-wsi-swapchain-alloc-blocker.md](../issues/gfxstream-wsi-swapchain-alloc-blocker.md)).
-    Currently a stub returning
-    `VK_ERROR_INITIALIZATION_FAILED` so apps fail fast rather than
-    hanging. The plan -- "kumquat `RESOURCE_CREATE_BLOB` then
-    `VkImportColorBufferGOOGLE`" -- is in the issue file. Short
-    summary:
-
-      1. Drive a kumquat `RESOURCE_CREATE_BLOB` directly from the
-         WSI with `VIRGL_BIND_RENDER_TARGET` and the image's
-         dimensions. Host gfxstream allocates an AHB-backed
-         ColorBuffer and returns a u32.
-      2. Create a plain VkImage (no external-memory hints).
-      3. `vkAllocateMemory` with `VkImportColorBufferGOOGLE` chained
-         on `pNext`, naming the colorbuffer from (1).
+11. **~~Per-image alloc primitive — `allocate_swapchain_image()`.~~**
+    Done. The implementation:
+      1. Creates a plain VkImage (no external-memory hints) and
+         queries memReqs for its size.
+      2. Drives a kumquat `RESOURCE_CREATE_BLOB` with
+         `VIRGL_BIND_RENDER_TARGET` and the image's
+         width/height/format/size. The host gfxstream renderer's
+         blob handler decodes the create3d cmd (forwarded via
+         kumquat's SUBMIT_3D before the BLOB request) and allocates
+         an AHB-backed ColorBuffer via its existing
+         `createColorBufferWithResourceHandle` path.
+      3. `vkAllocateMemory` with `VkImportColorBufferGOOGLE`
+         chained on `pNext`, naming the colorbuffer from (2).
          `VkImportColorBufferGOOGLE` is gfxstream's internal "bind
          this VkDeviceMemory to host ColorBuffer N" extension; not
          part of Vulkan's external-memory framework.
       4. `vkBindImageMemory`.
 
-    The earlier attempt to use `VkExportMemoryAllocateInfo` with
-    `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` reused
-    gfxstream-vk's `LINUX_GUEST_BUILD` `exportDmabuf` path, which
-    exists for in-VM Wayland-client buffer sharing, not for swapchain
-    image allocation. See the issue file for why that path can't work
-    for our purpose (wrong ordering: it requires the host to size an
-    external image before the AHB exists; the AHB has to exist first to
-    determine the image's layout).
+    Three sharp edges that bit during the build-up:
+
+    - **Retain the `VirtGpuResourcePtr` for the image's lifetime.**
+      Dropping the shared_ptr at function return sends
+      `RESOURCE_UNREF` to the kumquat server, which destroys the
+      host ColorBuffer the compositor is about to look up. Stored
+      on `gfxstream_vk_swapchain_image` and freed in
+      `free_swapchain_image()`.
+    - **Advertise R8G8B8A8 only.** Android `AHardwareBuffer` has no
+      BGRA8888 format; advertising `VK_FORMAT_B8G8R8A8_UNORM`
+      caused vkcube to pick it and the host's `vkAllocateMemory`
+      to NULL-deref inside the Adreno blob during AHB allocation.
+    - **`AHardwareBuffer_acquire` in `tawc_gfxstream_lookup_ahb`.**
+      `exportColorBuffer` / `dupExternalMemory` on Android does not
+      bump the refcount on its own (`AHardwareBuffer*` is not
+      "duped"); without an explicit acquire, `WleglBufferData::Drop`
+      would `AHardwareBuffer_release` an unowned ref → SIGBUS on
+      next operation.
+
+    Plus a Wayland-throughput fix:
+    `vkQueuePresentKHR` requests a `wl_surface.frame()` callback in
+    FIFO mode and dispatches our private event queue until it fires
+    (bounded). Without this the chroot has no compositor-driven
+    pacing — apps with a frame-count exit (`vkcube --c 3000`) burn
+    through their budget in milliseconds and the test asserts on
+    a stale `clients=0` snapshot.
 
 12. **(Optional, deferred)** Sentinel-fd optimisation on the kumquat
     server for DEVICE_LOCAL allocations. See §"Sentinel-fd
@@ -1101,31 +1110,39 @@ Three pieces:
   BlobDescriptorInfo) — keeps the compositor crate's build off the
   gfxstream include tree.
 
-- **Chroot side — custom Vulkan WSI layer** (dispatch shell done,
-  per-image alloc remaining).
+- **Chroot side — custom Vulkan WSI layer** (done).
   `deps/mesa-patches/mesa/05-tawc-vulkan-wsi.patch` (file:
   `src/gfxstream/guest/vulkan/gfxstream_vk_tawc_wsi.cpp`) ships
   strong `gfxstream_vk_*` overrides for the surface entrypoints,
   every surface caps query, the swapchain shell, the Wayland
-  registry binding, and the present loop. The remaining gap is the
-  per-image alloc primitive `allocate_swapchain_image()` which
-  currently returns failure; design pinned in
-  [issues/gfxstream-wsi-swapchain-alloc-blocker.md](../issues/gfxstream-wsi-swapchain-alloc-blocker.md):
-    1. Drive a kumquat `RESOURCE_CREATE_BLOB` directly from the
-       WSI (with `VIRGL_BIND_RENDER_TARGET` and image-shaped
-       width / height / format) → host gfxstream allocates an
-       AHB-backed ColorBuffer and returns a u32 resource handle.
-    2. Create a plain VkImage (no `VkExternalMemoryImageCreateInfo`).
+  registry binding, the present loop, and the per-image alloc
+  primitive `allocate_swapchain_image()`:
+
+    1. Create a plain VkImage (no `VkExternalMemoryImageCreateInfo`)
+       and query memReqs.
+    2. Drive a kumquat `RESOURCE_CREATE_BLOB` from the WSI with
+       `VIRGL_BIND_RENDER_TARGET` and the image's width / height /
+       format / size. Host gfxstream allocates an AHB-backed
+       ColorBuffer and returns a u32 resource handle. The
+       `VirtGpuResourcePtr` is **retained on the swapchain image**
+       — dropping it sends `RESOURCE_UNREF`, which destroys the
+       host ColorBuffer the compositor will look up at present.
     3. `vkAllocateMemory` with `VkImportColorBufferGOOGLE` chained
-       on `pNext`, naming the colorbuffer from (1). This is
+       on `pNext`, naming the colorbuffer from (2). This is
        gfxstream's internal "bind this VkDeviceMemory to host
        ColorBuffer N" extension; *not* part of Vulkan's external
        memory framework.
     4. `vkBindImageMemory`.
 
-  `vkQueuePresentKHR` (already implemented) emits
+  `vkQueuePresentKHR` emits
   `tawc_gfxstream.create_buffer(colorbuffer_id, ...)` over the
-  Wayland client connection.
+  Wayland client connection, then in FIFO mode requests a
+  `wl_surface.frame()` callback and dispatches our private event
+  queue until it fires (bounded). The surface formats list is
+  R8G8B8A8 only — Android's `AHardwareBuffer` has no BGRA8888
+  format, so advertising `VK_FORMAT_B8G8R8A8` causes the host's
+  AHB-backed `vkAllocateMemory` to NULL-deref inside the Adreno
+  blob.
 
 ### How the chroot gets the ColorBuffer resource_id
 
@@ -1252,20 +1269,20 @@ Vulkan WSI" above).
 
 ## Next implementation work
 
-The broad bridge plumbing is in place. The remaining work is:
+Phase 4 is done; vkcube renders via AHB end-to-end. The remaining
+work is:
 
-1. Implement `allocate_swapchain_image()` in
-   `deps/mesa-patches/mesa/05-tawc-vulkan-wsi.patch`; the concrete
-   plan lives in
-   [issues/gfxstream-wsi-swapchain-alloc-blocker.md](../issues/gfxstream-wsi-swapchain-alloc-blocker.md).
-2. Re-run `gfxstream::test_vkcube_renders_via_ahb`, then sweep the
-   rest of the `gfxstream::` smokes.
-3. Investigate the GL path. Plain `MESA_LOADER_DRIVER_OVERRIDE=zink`
-   is not enough while Mesa's EGL Wayland path still tries to open
-   `/dev/dri/cardN`; either make EGL ride Vulkan WSI or write a small
-   EGL shim.
-4. Validate the same path on x86_64 AVD once Vulkan-native swapchain
-   presentation works.
+1. Investigate the GL path (Phase 6). Plain
+   `MESA_LOADER_DRIVER_OVERRIDE=zink` is not enough while Mesa's EGL
+   Wayland path still tries to open `/dev/dri/cardN`; either make
+   EGL ride Vulkan WSI or write a small EGL shim. Until this lands,
+   the rest of the `gfxstream::` integration suite (gtk*/firefox/
+   supertuxkart/weston-simple-egl/eglinfo) stays red.
+2. Validate the same path on x86_64 AVD (Phase 7). The aarch64
+   build target is symmetric with x86_64; the gating piece is
+   `build/x86_64-sysroot/` (run `scripts/pull-sysroot.sh` against a
+   live AVD with the rootfs installed) — see
+   [issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md).
 
 ## Relation to existing notes
 
