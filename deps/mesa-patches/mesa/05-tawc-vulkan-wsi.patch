@@ -1,0 +1,734 @@
+From: tawc
+Origin: own
+
+Custom Vulkan WSI for the gfxstream-bridge GPU path -- chroot side.
+
+Replaces Mesa's wsi_common-driven swapchain path for our gfxstream-vk
+ICD with a layer that ships a u32 colorbuffer_id over a custom
+`tawc_gfxstream` Wayland protocol on each present. The compositor
+(in-process with the host gfxstream renderer) resolves the id back to
+the AHardwareBuffer* via `tawc_gfxstream_lookup_ahb` (gfxstream patch
+02-tawc-lookup-ahb.patch) and binds it as a wl_buffer using its
+existing AHB-import path.
+
+No Vulkan external-memory machinery is involved on the wire. No
+dmabufs anywhere. The chroot never holds an fd for swapchain images;
+the AHB lives entirely in the compositor process and is named by an
+opaque u32. See `notes/gfxstream-bridge.md` "WSI plan: custom Vulkan
+WSI" for the full design.
+
+What this patch ships:
+
+  * `src/gfxstream/guest/vulkan/tawc_gfxstream.xml` -- protocol mirror
+    of the compositor's copy. Lives in-tree so the Mesa build is
+    self-contained.
+  * `src/gfxstream/guest/vulkan/gfxstream_vk_tawc_wsi.cpp` -- strong
+    `gfxstream_vk_*` overrides for vkCreateWaylandSurfaceKHR,
+    vkDestroySurfaceKHR, every surface caps query,
+    vkCreateSwapchainKHR / vkDestroySwapchainKHR /
+    vkGetSwapchainImagesKHR, vkAcquireNextImage(2)KHR,
+    vkQueuePresentKHR. The strong symbols win over the weak entries
+    in `gfxstream_vk_entrypoints.{h,c}` (vk_entrypoints_gen --weak)
+    via the device dispatch-table merge in
+    `gfxstream_vk_create_device` (gfxstream first, wsi second with
+    `overwrite=false`).
+  * `src/gfxstream/guest/vulkan/meson.build` -- runs `mod_wl.scan_xml`
+    on the protocol XML, links libvulkan_gfxstream against
+    libwayland-client, includes the new TU.
+
+STATUS (May 2026):
+
+The dispatch wiring, surface entrypoints, swapchain shell, Wayland
+binding, and present loop are all implemented. The one remaining
+piece is `allocate_swapchain_image()` -- it currently returns
+VK_ERROR_INITIALIZATION_FAILED rather than implementing the
+"kumquat RESOURCE_CREATE_BLOB then VkImportColorBufferGOOGLE"
+sequence the design needs. See the STATUS comment at the top of
+`gfxstream_vk_tawc_wsi.cpp` and
+`issues/gfxstream-wsi-swapchain-alloc-blocker.md` for the
+function-by-function plan and the rationale for why earlier
+attempts (using VkExportMemoryAllocateInfo with a Linux DMA_BUF
+handle type) were a misappropriation of an unrelated upstream
+buffer-sharing path.
+
+Until that lands, vkCreateSwapchainKHR returns a clean error
+rather than hanging. vulkaninfo and other non-swapchain Vulkan
+workloads keep working through the existing gfxstream-vk
+machinery.
+
+diff --git a/src/gfxstream/guest/vulkan/gfxstream_vk_tawc_wsi.cpp b/src/gfxstream/guest/vulkan/gfxstream_vk_tawc_wsi.cpp
+new file mode 100644
+index 0000000..922ed23
+--- /dev/null
++++ b/src/gfxstream/guest/vulkan/gfxstream_vk_tawc_wsi.cpp
+@@ -0,0 +1,582 @@
++/*
++ * Copyright (c) tawc authors.
++ * SPDX-License-Identifier: MIT
++ *
++ * Custom Vulkan WSI for the tawc gfxstream bridge -- chroot side.
++ *
++ * Replaces Mesa's wsi_common-driven swapchain path for our gfxstream-vk
++ * ICD with a layer that ships a u32 colorbuffer_id over a custom
++ * `tawc_gfxstream` Wayland protocol on each present. The compositor
++ * (in-process with the host gfxstream renderer) resolves the id back to
++ * the AHardwareBuffer* via `tawc_gfxstream_lookup_ahb` (gfxstream patch
++ * 02-tawc-lookup-ahb.patch) and binds it as a wl_buffer using its
++ * existing AHB-import path.
++ *
++ * No Vulkan external-memory machinery is involved on the wire. No
++ * dmabufs. The chroot never holds an fd for swapchain images -- the AHB
++ * lives entirely in the compositor process and is named by an opaque
++ * u32. See `notes/gfxstream-bridge.md` "WSI plan: custom Vulkan WSI"
++ * for the full design.
++ *
++ * --------------------------------------------------------------------
++ * STATUS (May 2026):
++ *
++ * Surface entrypoints, dispatch wiring, swapchain shell, Wayland
++ * registry binding, present loop -- all implemented.
++ *
++ * The one missing piece is `allocate_swapchain_image()`. It needs to:
++ *   1. Drive a kumquat `RESOURCE_CREATE_BLOB` directly (with
++ *      `VIRGL_BIND_RENDER_TARGET`) so the host gfxstream renderer
++ *      allocates an AHB-backed ColorBuffer and returns a u32.
++ *   2. Create a plain VkImage (no `VkExternalMemoryImageCreateInfo`).
++ *   3. Allocate VkDeviceMemory with `VkImportColorBufferGOOGLE`
++ *      (gfxstream-internal extension; not part of Vulkan's external
++ *      memory framework) chained on the alloc info, naming the
++ *      colorbuffer from step 1.
++ *   4. `vkBindImageMemory` to bind the image to that memory.
++ *
++ * See `issues/gfxstream-wsi-swapchain-alloc-blocker.md` for why this
++ * specific shape (and why the `VkExportMemoryAllocateInfo` /
++ * `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` shape from earlier
++ * attempts was a misappropriation of an unrelated upstream code path).
++ *
++ * Until step (1)-(4) lands, `vkCreateSwapchainKHR` returns
++ * VK_ERROR_INITIALIZATION_FAILED at the first image alloc. vulkaninfo
++ * and other non-swapchain Vulkan workloads keep working.
++ */
++
++#include <pthread.h>
++#include <wayland-client.h>
++
++#include <algorithm>
++#include <cstring>
++#include <new>
++#include <vector>
++
++#include "tawc_gfxstream-client-protocol.h"
++
++#include "gfxstream_vk_entrypoints.h"
++#include "gfxstream_vk_private.h"
++
++#include "util/log.h"
++#include "vk_alloc.h"
++#include "vk_object.h"
++
++#include <vulkan/vk_icd.h>
++
++namespace gfxstream {
++namespace vk {
++
++// ---------------------------------------------------------------------------
++// VkSurfaceKHR
++// ---------------------------------------------------------------------------
++//
++// Surfaces are allocated against the VkInstance and outlive any device.
++// We allocate a flat struct (not a vk_object) and round-trip the
++// pointer; the only consumers are our own entrypoints below. The first
++// member is VkIcdSurfaceWayland so the loader's introspection can still
++// reach the wl_display/wl_surface fields via the standard offset.
++
++struct gfxstream_vk_surface {
++    VkIcdSurfaceWayland icd;  // icd.base.platform = VK_ICD_WSI_PLATFORM_WAYLAND
++};
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_CreateWaylandSurfaceKHR(
++    VkInstance _instance, const VkWaylandSurfaceCreateInfoKHR* pCreateInfo,
++    const VkAllocationCallbacks* pAllocator, VkSurfaceKHR* pSurface) {
++    VK_FROM_HANDLE(gfxstream_vk_instance, instance, _instance);
++
++    gfxstream_vk_surface* surface = (gfxstream_vk_surface*)vk_zalloc2(
++        &instance->vk.alloc, pAllocator, sizeof(*surface), 8,
++        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++    if (!surface) return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++    surface->icd.base.platform = VK_ICD_WSI_PLATFORM_WAYLAND;
++    surface->icd.display = pCreateInfo->display;
++    surface->icd.surface = pCreateInfo->surface;
++
++    *pSurface = (VkSurfaceKHR)(uintptr_t)surface;
++    return VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR void VKAPI_CALL gfxstream_vk_DestroySurfaceKHR(
++    VkInstance _instance, VkSurfaceKHR _surface, const VkAllocationCallbacks* pAllocator) {
++    VK_FROM_HANDLE(gfxstream_vk_instance, instance, _instance);
++    if (!_surface) return;
++    gfxstream_vk_surface* surface = (gfxstream_vk_surface*)(uintptr_t)_surface;
++    vk_free2(&instance->vk.alloc, pAllocator, surface);
++}
++
++// ---------------------------------------------------------------------------
++// Surface caps / formats / present modes
++// ---------------------------------------------------------------------------
++//
++// Hardcoded to keep this layer tiny. The compositor re-imports each
++// frame's AHB by colorbuffer_id; there is no display server to negotiate
++// against and the AHB import path doesn't care about presentation
++// transforms.
++
++static const VkFormat kSupportedFormats[] = {
++    VK_FORMAT_B8G8R8A8_UNORM,
++    VK_FORMAT_R8G8B8A8_UNORM,
++};
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfaceSupportKHR(
++    VkPhysicalDevice /*physicalDevice*/, uint32_t /*queueFamilyIndex*/, VkSurfaceKHR /*surface*/,
++    VkBool32* pSupported) {
++    *pSupported = VK_TRUE;
++    return VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfaceCapabilitiesKHR(
++    VkPhysicalDevice /*physicalDevice*/, VkSurfaceKHR /*_surface*/,
++    VkSurfaceCapabilitiesKHR* pSurfaceCapabilities) {
++    pSurfaceCapabilities->minImageCount = 2;
++    pSurfaceCapabilities->maxImageCount = 0;
++    pSurfaceCapabilities->currentExtent = (VkExtent2D){0xFFFFFFFFu, 0xFFFFFFFFu};
++    pSurfaceCapabilities->minImageExtent = (VkExtent2D){1, 1};
++    pSurfaceCapabilities->maxImageExtent = (VkExtent2D){4096, 4096};
++    pSurfaceCapabilities->maxImageArrayLayers = 1;
++    pSurfaceCapabilities->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++    pSurfaceCapabilities->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++    pSurfaceCapabilities->supportedCompositeAlpha =
++        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
++    pSurfaceCapabilities->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++                                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++    return VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfaceCapabilities2KHR(
++    VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
++    VkSurfaceCapabilities2KHR* pSurfaceCapabilities) {
++    return gfxstream_vk_GetPhysicalDeviceSurfaceCapabilitiesKHR(
++        physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfaceFormatsKHR(
++    VkPhysicalDevice /*physicalDevice*/, VkSurfaceKHR /*_surface*/, uint32_t* pSurfaceFormatCount,
++    VkSurfaceFormatKHR* pSurfaceFormats) {
++    const uint32_t format_count = sizeof(kSupportedFormats) / sizeof(kSupportedFormats[0]);
++    if (!pSurfaceFormats) {
++        *pSurfaceFormatCount = format_count;
++        return VK_SUCCESS;
++    }
++    const uint32_t to_write = std::min(*pSurfaceFormatCount, format_count);
++    for (uint32_t i = 0; i < to_write; i++) {
++        pSurfaceFormats[i].format = kSupportedFormats[i];
++        pSurfaceFormats[i].colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++    }
++    *pSurfaceFormatCount = to_write;
++    return to_write < format_count ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfaceFormats2KHR(
++    VkPhysicalDevice /*physicalDevice*/, const VkPhysicalDeviceSurfaceInfo2KHR* /*pSurfaceInfo*/,
++    uint32_t* pSurfaceFormatCount, VkSurfaceFormat2KHR* pSurfaceFormats) {
++    const uint32_t format_count = sizeof(kSupportedFormats) / sizeof(kSupportedFormats[0]);
++    if (!pSurfaceFormats) {
++        *pSurfaceFormatCount = format_count;
++        return VK_SUCCESS;
++    }
++    const uint32_t to_write = std::min(*pSurfaceFormatCount, format_count);
++    for (uint32_t i = 0; i < to_write; i++) {
++        pSurfaceFormats[i].surfaceFormat.format = kSupportedFormats[i];
++        pSurfaceFormats[i].surfaceFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++    }
++    *pSurfaceFormatCount = to_write;
++    return to_write < format_count ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetPhysicalDeviceSurfacePresentModesKHR(
++    VkPhysicalDevice /*physicalDevice*/, VkSurfaceKHR /*_surface*/, uint32_t* pPresentModeCount,
++    VkPresentModeKHR* pPresentModes) {
++    static const VkPresentModeKHR kModes[] = {VK_PRESENT_MODE_FIFO_KHR,
++                                              VK_PRESENT_MODE_MAILBOX_KHR};
++    const uint32_t mode_count = sizeof(kModes) / sizeof(kModes[0]);
++    if (!pPresentModes) {
++        *pPresentModeCount = mode_count;
++        return VK_SUCCESS;
++    }
++    const uint32_t to_write = std::min(*pPresentModeCount, mode_count);
++    for (uint32_t i = 0; i < to_write; i++) pPresentModes[i] = kModes[i];
++    *pPresentModeCount = to_write;
++    return to_write < mode_count ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++// ---------------------------------------------------------------------------
++// Wayland binding: registry walk to find tawc_gfxstream
++// ---------------------------------------------------------------------------
++
++namespace {
++
++struct registry_state {
++    struct tawc_gfxstream* tawc = nullptr;
++};
++
++void registry_global(void* data, struct wl_registry* registry, uint32_t name,
++                     const char* interface, uint32_t /*version*/) {
++    auto* st = static_cast<registry_state*>(data);
++    if (!std::strcmp(interface, "tawc_gfxstream")) {
++        st->tawc = static_cast<struct tawc_gfxstream*>(
++            wl_registry_bind(registry, name, &tawc_gfxstream_interface, 1));
++    }
++}
++
++void registry_global_remove(void* /*data*/, struct wl_registry* /*registry*/,
++                            uint32_t /*name*/) {}
++
++const struct wl_registry_listener kRegistryListener = {
++    registry_global,
++    registry_global_remove,
++};
++
++}  // anonymous namespace
++
++// ---------------------------------------------------------------------------
++// Swapchain
++// ---------------------------------------------------------------------------
++
++struct gfxstream_vk_swapchain_image {
++    VkImage image = VK_NULL_HANDLE;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    uint32_t colorbuffer_id = 0;
++    bool acquired = false;
++    struct wl_buffer* wl_buffer = nullptr;
++};
++
++struct gfxstream_vk_swapchain {
++    struct vk_object_base base;
++
++    gfxstream_vk_device* device = nullptr;
++    VkAllocationCallbacks alloc = {};
++
++    VkExtent2D extent = {0, 0};
++    VkFormat format = VK_FORMAT_UNDEFINED;
++    VkImageUsageFlags usage = 0;
++    VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
++
++    // Wayland connection state. We share the app's wl_display (one
++    // socket per process is the canonical pattern) but keep a dedicated
++    // wl_event_queue for our registry, tawc_gfxstream proxy, and
++    // wl_buffer proxies -- so dispatching releases doesn't steal frame
++    // callbacks from the app's default queue.
++    struct wl_display* display = nullptr;          // shared with the app -- borrowed
++    struct wl_surface* surface = nullptr;          // ditto
++    struct wl_event_queue* queue = nullptr;        // owned
++    struct wl_display* display_wrapper = nullptr;  // proxy on `queue`
++    struct wl_registry* registry = nullptr;        // owned
++    struct tawc_gfxstream* tawc = nullptr;         // owned
++
++    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
++
++    std::vector<gfxstream_vk_swapchain_image> images;
++};
++
++VK_DEFINE_NONDISP_HANDLE_CASTS(gfxstream_vk_swapchain, base, VkSwapchainKHR,
++                               VK_OBJECT_TYPE_SWAPCHAIN_KHR)
++
++namespace {
++
++// Per-swapchain-image alloc primitive. NOT IMPLEMENTED -- see the
++// STATUS comment at the top of this file. Returns failure rather than
++// hanging so vkCreateSwapchainKHR gives a clean error to the app.
++VkResult allocate_swapchain_image(gfxstream_vk_device* /*device*/,
++                                  const VkSwapchainCreateInfoKHR* /*createInfo*/,
++                                  gfxstream_vk_swapchain_image* out) {
++    out->image = VK_NULL_HANDLE;
++    out->memory = VK_NULL_HANDLE;
++    out->colorbuffer_id = 0;
++    mesa_loge(
++        "tawc_wsi: allocate_swapchain_image() is not implemented yet -- see "
++        "issues/gfxstream-wsi-swapchain-alloc-blocker.md and the STATUS "
++        "comment at the top of gfxstream_vk_tawc_wsi.cpp.");
++    return VK_ERROR_INITIALIZATION_FAILED;
++}
++
++void free_swapchain_image(gfxstream_vk_device* device, gfxstream_vk_swapchain_image* img) {
++    if (img->wl_buffer) {
++        wl_buffer_destroy(img->wl_buffer);
++        img->wl_buffer = nullptr;
++    }
++    if (img->memory) {
++        gfxstream_vk_FreeMemory(gfxstream_vk_device_to_handle(device), img->memory, nullptr);
++        img->memory = VK_NULL_HANDLE;
++    }
++    if (img->image) {
++        gfxstream_vk_DestroyImage(gfxstream_vk_device_to_handle(device), img->image, nullptr);
++        img->image = VK_NULL_HANDLE;
++    }
++    img->colorbuffer_id = 0;
++    img->acquired = false;
++}
++
++}  // anonymous namespace
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_CreateSwapchainKHR(
++    VkDevice _device, const VkSwapchainCreateInfoKHR* pCreateInfo,
++    const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) {
++    VK_FROM_HANDLE(gfxstream_vk_device, device, _device);
++    gfxstream_vk_surface* surface = (gfxstream_vk_surface*)(uintptr_t)pCreateInfo->surface;
++
++    gfxstream_vk_swapchain* sc = (gfxstream_vk_swapchain*)vk_object_zalloc(
++        &device->vk, pAllocator, sizeof(*sc), VK_OBJECT_TYPE_SWAPCHAIN_KHR);
++    if (!sc) return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++    new (sc) gfxstream_vk_swapchain();
++    sc->device = device;
++    sc->alloc = pAllocator ? *pAllocator : device->vk.alloc;
++    sc->extent = pCreateInfo->imageExtent;
++    sc->format = pCreateInfo->imageFormat;
++    sc->usage = pCreateInfo->imageUsage;
++    sc->present_mode = pCreateInfo->presentMode;
++    sc->display = surface->icd.display;
++    sc->surface = surface->icd.surface;
++    pthread_mutex_init(&sc->mutex, nullptr);
++
++    sc->queue = wl_display_create_queue(sc->display);
++    if (!sc->queue) {
++        mesa_loge("tawc_wsi: failed to create wl_event_queue");
++        sc->~gfxstream_vk_swapchain();
++        vk_object_free(&device->vk, pAllocator, sc);
++        return VK_ERROR_INITIALIZATION_FAILED;
++    }
++    sc->display_wrapper =
++        static_cast<struct wl_display*>(wl_proxy_create_wrapper(sc->display));
++    if (!sc->display_wrapper) {
++        wl_event_queue_destroy(sc->queue);
++        sc->~gfxstream_vk_swapchain();
++        vk_object_free(&device->vk, pAllocator, sc);
++        return VK_ERROR_INITIALIZATION_FAILED;
++    }
++    wl_proxy_set_queue((struct wl_proxy*)sc->display_wrapper, sc->queue);
++
++    sc->registry = wl_display_get_registry(sc->display_wrapper);
++    if (!sc->registry) {
++        wl_proxy_wrapper_destroy(sc->display_wrapper);
++        wl_event_queue_destroy(sc->queue);
++        sc->~gfxstream_vk_swapchain();
++        vk_object_free(&device->vk, pAllocator, sc);
++        return VK_ERROR_INITIALIZATION_FAILED;
++    }
++
++    registry_state regst;
++    wl_registry_add_listener(sc->registry, &kRegistryListener, &regst);
++    wl_display_roundtrip_queue(sc->display, sc->queue);
++    sc->tawc = regst.tawc;
++    if (!sc->tawc) {
++        mesa_loge(
++            "tawc_wsi: compositor doesn't advertise tawc_gfxstream. "
++            "This bridge build needs the tawc compositor.");
++        wl_registry_destroy(sc->registry);
++        wl_proxy_wrapper_destroy(sc->display_wrapper);
++        wl_event_queue_destroy(sc->queue);
++        sc->~gfxstream_vk_swapchain();
++        vk_object_free(&device->vk, pAllocator, sc);
++        return VK_ERROR_INITIALIZATION_FAILED;
++    }
++
++    uint32_t image_count = pCreateInfo->minImageCount;
++    if (image_count < 2) image_count = 2;
++    if (image_count > 8) image_count = 8;
++
++    sc->images.resize(image_count);
++    for (uint32_t i = 0; i < image_count; i++) {
++        VkResult res = allocate_swapchain_image(device, pCreateInfo, &sc->images[i]);
++        if (res != VK_SUCCESS) {
++            for (uint32_t j = 0; j < i; j++) free_swapchain_image(device, &sc->images[j]);
++            sc->images.clear();
++            tawc_gfxstream_destroy(sc->tawc);
++            wl_registry_destroy(sc->registry);
++            wl_proxy_wrapper_destroy(sc->display_wrapper);
++            wl_event_queue_destroy(sc->queue);
++            sc->~gfxstream_vk_swapchain();
++            vk_object_free(&device->vk, pAllocator, sc);
++            return res;
++        }
++    }
++
++    *pSwapchain = gfxstream_vk_swapchain_to_handle(sc);
++    return VK_SUCCESS;
++}
++
++extern "C" VKAPI_ATTR void VKAPI_CALL gfxstream_vk_DestroySwapchainKHR(
++    VkDevice _device, VkSwapchainKHR _swapchain, const VkAllocationCallbacks* pAllocator) {
++    VK_FROM_HANDLE(gfxstream_vk_device, device, _device);
++    if (!_swapchain) return;
++    gfxstream_vk_swapchain* sc = gfxstream_vk_swapchain_from_handle(_swapchain);
++
++    for (auto& img : sc->images) free_swapchain_image(device, &img);
++    sc->images.clear();
++
++    if (sc->tawc) tawc_gfxstream_destroy(sc->tawc);
++    if (sc->registry) wl_registry_destroy(sc->registry);
++    if (sc->display_wrapper) wl_proxy_wrapper_destroy(sc->display_wrapper);
++    if (sc->queue) wl_event_queue_destroy(sc->queue);
++
++    pthread_mutex_destroy(&sc->mutex);
++
++    sc->~gfxstream_vk_swapchain();
++    vk_object_free(&device->vk, pAllocator, sc);
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_GetSwapchainImagesKHR(
++    VkDevice /*device*/, VkSwapchainKHR _swapchain, uint32_t* pSwapchainImageCount,
++    VkImage* pSwapchainImages) {
++    gfxstream_vk_swapchain* sc = gfxstream_vk_swapchain_from_handle(_swapchain);
++    const uint32_t avail = sc->images.size();
++    if (!pSwapchainImages) {
++        *pSwapchainImageCount = avail;
++        return VK_SUCCESS;
++    }
++    const uint32_t to_write = std::min(*pSwapchainImageCount, avail);
++    for (uint32_t i = 0; i < to_write; i++) pSwapchainImages[i] = sc->images[i].image;
++    *pSwapchainImageCount = to_write;
++    return to_write < avail ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++namespace {
++
++void drain_releases(gfxstream_vk_swapchain* sc) {
++    wl_display_dispatch_queue_pending(sc->display, sc->queue);
++}
++
++uint32_t pick_free_image(gfxstream_vk_swapchain* sc) {
++    for (uint32_t i = 0; i < sc->images.size(); i++) {
++        if (!sc->images[i].acquired) return i;
++    }
++    return UINT32_MAX;
++}
++
++VkResult signal_acquire(gfxstream_vk_device* device, VkSemaphore semaphore, VkFence fence) {
++    if (semaphore == VK_NULL_HANDLE && fence == VK_NULL_HANDLE) return VK_SUCCESS;
++    VkQueue queue = VK_NULL_HANDLE;
++    if (device->queue_count > 0) queue = gfxstream_vk_queue_to_handle(&device->queues[0]);
++    if (queue == VK_NULL_HANDLE) {
++        mesa_logw("tawc_wsi: no queue to signal acquire on");
++        return VK_SUCCESS;
++    }
++    const VkSubmitInfo submit = {
++        VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 0, nullptr,
++        semaphore != VK_NULL_HANDLE ? 1u : 0u,
++        semaphore != VK_NULL_HANDLE ? &semaphore : nullptr,
++    };
++    return gfxstream_vk_QueueSubmit(queue, 1, &submit, fence);
++}
++
++}  // anonymous namespace
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_AcquireNextImageKHR(
++    VkDevice _device, VkSwapchainKHR _swapchain, uint64_t timeout, VkSemaphore semaphore,
++    VkFence fence, uint32_t* pImageIndex) {
++    VK_FROM_HANDLE(gfxstream_vk_device, device, _device);
++    gfxstream_vk_swapchain* sc = gfxstream_vk_swapchain_from_handle(_swapchain);
++
++    drain_releases(sc);
++
++    pthread_mutex_lock(&sc->mutex);
++    uint32_t idx = pick_free_image(sc);
++    if (idx == UINT32_MAX && timeout != 0) {
++        pthread_mutex_unlock(&sc->mutex);
++        wl_display_roundtrip_queue(sc->display, sc->queue);
++        pthread_mutex_lock(&sc->mutex);
++        idx = pick_free_image(sc);
++    }
++    if (idx == UINT32_MAX) {
++        pthread_mutex_unlock(&sc->mutex);
++        return VK_NOT_READY;
++    }
++    sc->images[idx].acquired = true;
++    pthread_mutex_unlock(&sc->mutex);
++
++    *pImageIndex = idx;
++    return signal_acquire(device, semaphore, fence);
++}
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_AcquireNextImage2KHR(
++    VkDevice _device, const VkAcquireNextImageInfoKHR* pAcquireInfo, uint32_t* pImageIndex) {
++    return gfxstream_vk_AcquireNextImageKHR(_device, pAcquireInfo->swapchain, pAcquireInfo->timeout,
++                                            pAcquireInfo->semaphore, pAcquireInfo->fence,
++                                            pImageIndex);
++}
++
++namespace {
++
++void buffer_release(void* data, struct wl_buffer* /*wl_buffer*/) {
++    auto* img = static_cast<gfxstream_vk_swapchain_image*>(data);
++    img->acquired = false;
++}
++
++const struct wl_buffer_listener kBufferListener = {
++    buffer_release,
++};
++
++uint32_t drm_fourcc_from_vk(VkFormat fmt) {
++    switch (fmt) {
++        case VK_FORMAT_B8G8R8A8_UNORM:
++        case VK_FORMAT_B8G8R8A8_SRGB:
++            return 0x34324241;  // DRM_FORMAT_ARGB8888
++        case VK_FORMAT_R8G8B8A8_UNORM:
++        case VK_FORMAT_R8G8B8A8_SRGB:
++            return 0x34324152;  // DRM_FORMAT_ABGR8888
++        default:
++            return 0;
++    }
++}
++
++}  // anonymous namespace
++
++extern "C" VKAPI_ATTR VkResult VKAPI_CALL gfxstream_vk_QueuePresentKHR(
++    VkQueue _queue, const VkPresentInfoKHR* pPresentInfo) {
++    if (pPresentInfo->waitSemaphoreCount > 0) {
++        std::vector<VkPipelineStageFlags> stages(pPresentInfo->waitSemaphoreCount,
++                                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++        const VkSubmitInfo submit = {
++            VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr,
++            pPresentInfo->waitSemaphoreCount, pPresentInfo->pWaitSemaphores, stages.data(),
++            0, nullptr, 0, nullptr,
++        };
++        VkResult res = gfxstream_vk_QueueSubmit(_queue, 1, &submit, VK_NULL_HANDLE);
++        if (res != VK_SUCCESS) return res;
++    }
++
++    VkResult overall = VK_SUCCESS;
++    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
++        gfxstream_vk_swapchain* sc =
++            gfxstream_vk_swapchain_from_handle(pPresentInfo->pSwapchains[i]);
++        const uint32_t idx = pPresentInfo->pImageIndices[i];
++        if (idx >= sc->images.size()) {
++            overall = VK_ERROR_OUT_OF_DATE_KHR;
++            if (pPresentInfo->pResults) pPresentInfo->pResults[i] = VK_ERROR_OUT_OF_DATE_KHR;
++            continue;
++        }
++        gfxstream_vk_swapchain_image& img = sc->images[idx];
++
++        if (img.wl_buffer) {
++            wl_buffer_destroy(img.wl_buffer);
++            img.wl_buffer = nullptr;
++        }
++        img.wl_buffer = tawc_gfxstream_create_buffer(
++            sc->tawc, img.colorbuffer_id, sc->extent.width, sc->extent.height,
++            drm_fourcc_from_vk(sc->format));
++        if (!img.wl_buffer) {
++            overall = VK_ERROR_OUT_OF_HOST_MEMORY;
++            if (pPresentInfo->pResults) pPresentInfo->pResults[i] = VK_ERROR_OUT_OF_HOST_MEMORY;
++            continue;
++        }
++        wl_buffer_add_listener(img.wl_buffer, &kBufferListener, &img);
++
++        wl_surface_attach(sc->surface, img.wl_buffer, 0, 0);
++        wl_surface_damage_buffer(sc->surface, 0, 0, sc->extent.width, sc->extent.height);
++        wl_surface_commit(sc->surface);
++
++        wl_display_flush(sc->display);
++
++        if (pPresentInfo->pResults) pPresentInfo->pResults[i] = VK_SUCCESS;
++    }
++
++    return overall;
++}
++
++}  // namespace vk
++}  // namespace gfxstream
+diff --git a/src/gfxstream/guest/vulkan/meson.build b/src/gfxstream/guest/vulkan/meson.build
+index b00d5e3..ad49086 100644
+--- a/src/gfxstream/guest/vulkan/meson.build
++++ b/src/gfxstream/guest/vulkan/meson.build
+@@ -9,6 +9,20 @@ files_lib_vulkan_gfxstream = files(
+   'gfxstream_vk_wsi.cpp'
+ )
+ 
++# tawc-fork: client-side bindings for the custom Vulkan WSI's
++# `tawc_gfxstream` Wayland protocol. Generates `tawc-gfxstream-client-protocol.h`
++# + `tawc-gfxstream-protocol.c` from the in-tree XML and adds the
++# WSI implementation TU.
++gfxstream_vk_tawc_wsi_files = []
++gfxstream_vk_tawc_wsi_deps = []
++if with_platform_wayland
++  tawc_gfxstream_xml = files('tawc_gfxstream.xml')
++  files_lib_vulkan_gfxstream += files('gfxstream_vk_tawc_wsi.cpp')
++  gfxstream_vk_tawc_wsi_files += mod_wl.scan_xml(tawc_gfxstream_xml,
++                                                 include_core_only: false)
++  gfxstream_vk_tawc_wsi_deps += [dep_wayland_client]
++endif
++
+ gfxstream_vk_wsi_args = []
+ if with_platform_x11
+    gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_X11'
+@@ -20,7 +34,7 @@ endif
+ 
+ gfxstream_deps = [dep_libdrm, idep_vulkan_wsi_headers,
+                   idep_vulkan_lite_runtime, idep_vulkan_util_headers,
+-                  idep_vulkan_wsi, dep_valgrind]
++                  idep_vulkan_wsi, dep_valgrind] + gfxstream_vk_tawc_wsi_deps
+ 
+ if with_perfetto
+   gfxstream_deps += dep_perfetto
+@@ -29,7 +43,8 @@ endif
+ lib_vulkan_gfxstream = shared_library(
+    'vulkan_gfxstream',
+    files_lib_vulkan_gfxstream + files_lib_vulkan_enc + gfxstream_vk_entrypoints +
+-   gfxstream_guest_vk_autogen + vulkan_gfxstream_h,
++   gfxstream_guest_vk_autogen + vulkan_gfxstream_h +
++   gfxstream_vk_tawc_wsi_files,
+    cpp_args: gfxstream_guest_args + gfxstream_vk_wsi_args,
+    include_directories: [inc_vulkan_headers, inc_guest_iostream,
+                          inc_vulkan_enc, inc_platform_virtgpu,
+diff --git a/src/gfxstream/guest/vulkan/tawc_gfxstream.xml b/src/gfxstream/guest/vulkan/tawc_gfxstream.xml
+new file mode 100644
+index 0000000..29ccc78
+--- /dev/null
++++ b/src/gfxstream/guest/vulkan/tawc_gfxstream.xml
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="tawc_gfxstream">
++
++  <copyright>
++    Copyright (c) tawc authors.
++
++    SPDX-License-Identifier: MIT
++  </copyright>
++
++  <description summary="tawc gfxstream-bridge present protocol (chroot/client side)">
++    This file mirrors `compositor/protocols/tawc_gfxstream.xml` from the
++    tawc compositor source tree. It is duplicated here so the Mesa build
++    is self-contained — `mod_wl.scan_xml` runs on this file at Mesa
++    build time to generate the client-side bindings used by
++    `gfxstream_vk_tawc_wsi.cpp`. Keep the two copies in sync; the
++    compositor's copy is the source of truth.
++  </description>
++
++  <interface name="tawc_gfxstream" version="1">
++    <description summary="bind gfxstream ColorBuffer resources as wl_buffers"/>
++
++    <enum name="error">
++      <entry name="unknown_colorbuffer" value="0"/>
++      <entry name="not_ahb_backed" value="1"/>
++    </enum>
++
++    <request name="create_buffer">
++      <arg name="id" type="new_id" interface="wl_buffer"/>
++      <arg name="colorbuffer_id" type="uint"/>
++      <arg name="width" type="int"/>
++      <arg name="height" type="int"/>
++      <arg name="format" type="uint"/>
++    </request>
++
++    <request name="destroy" type="destructor"/>
++  </interface>
++
++</protocol>

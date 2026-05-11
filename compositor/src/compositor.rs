@@ -44,6 +44,7 @@ use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
 
 use crate::host::{ActivityId, OutputHost};
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
+use crate::protocol::tawc_gfxstream::server::tawc_gfxstream::TawcGfxstream;
 use crate::text_input::TextInputState;
 use crate::wlegl;
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
@@ -279,6 +280,13 @@ impl TawcState {
 
         dh.create_global::<Self, AndroidWlegl, ()>(2, ());
         dh.create_global::<Self, ZwpTextInputManagerV3, ()>(1, ());
+        // gfxstream-bridge custom Vulkan WSI: bind unconditionally
+        // (libhybris-backend clients ignore it; gfxstream-backend
+        // clients use it instead of `zwp_linux_dmabuf_v1`). See
+        // `crate::gfxstream_present` and notes/gfxstream-bridge.md
+        // "WSI plan: custom Vulkan WSI".
+        dh.create_global::<Self, TawcGfxstream, ()>(1, ());
+
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
 
         Self {
@@ -389,7 +397,16 @@ pub struct HostAssignment {
 // ---------------------------------------------------------------------------
 
 impl BufferHandler for TawcState {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {
+        // Both backends (libhybris/android_wlegl and gfxstream-bridge/
+        // tawc_gfxstream) attach `WleglBufferData` to the wl_buffer's
+        // user-data slot, which Smithay drops automatically when the
+        // resource dies — including the AHardwareBuffer ref the
+        // userdata holds. SHM buffers don't carry compositor-side
+        // state outside `surface_shm`, which is keyed by `WlSurface`
+        // and cleaned up at surface destruction time. So nothing to
+        // do here.
+    }
 }
 
 impl ShmHandler for TawcState {
@@ -448,6 +465,10 @@ impl CompositorHandler for TawcState {
             commit_buffer_scale = attrs.buffer_scale.max(1);
             match &attrs.buffer {
                 Some(BufferAssignment::NewBuffer(buf)) => {
+                    // Both AHB-backed paths (libhybris/android_wlegl
+                    // and gfxstream-bridge/tawc_gfxstream) attach
+                    // `WleglBufferData` to the wl_buffer's user-data
+                    // slot, so a single lookup covers both.
                     if let Some(data) = wlegl::wlegl_buffer_data(buf) {
                         new_buf_info = Some((buf.clone(), data.width, data.height));
                     }

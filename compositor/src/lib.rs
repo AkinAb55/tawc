@@ -14,8 +14,10 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::Transform;
 use wayland_server::Display;
 
+mod ahb_export;
 mod bridge;
 mod egl_android;
+mod gfxstream_present;
 mod gl_import;
 mod host;
 mod protocol;
@@ -145,6 +147,15 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     // calloop event loop. Always-on, no broker handshake — clients
     // connect lazily when a chroot process loads gfxstream-vk. See
     // notes/gfxstream-bridge.md.
+    //
+    // The AHB export hook must be installed BEFORE the kumquat
+    // thread can serve a RESOURCE_CREATE_BLOB — the hook is what
+    // dispatches an AHB into a dmabuf fd the chroot can mmap (for
+    // host-visible memory) or ignore (for swapchain images, where
+    // the protocol still wants an fd but the chroot doesn't read it).
+    // Sequencing as (install hook, then spawn thread) makes the race
+    // impossible.
+    ahb_export::install_hook();
     bridge::spawn();
 
     // Create the channels here, BEFORE the compositor thread starts,

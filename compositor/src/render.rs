@@ -254,17 +254,16 @@ pub fn import_wlegl_buffers(state: &mut TawcState) -> bool {
 
     let mut imported = false;
     for buf in buffers {
-        let Some(data) = buf.data::<WleglBufferData>() else {
-            continue;
-        };
-        {
-            let tex_guard = data.texture.lock().unwrap();
-            if tex_guard.is_some() {
-                continue; // already imported
+        // Both AHB-backed paths (libhybris/android_wlegl and
+        // gfxstream-bridge/tawc_gfxstream) attach `WleglBufferData`
+        // to the wl_buffer's user-data, so one lookup covers both.
+        if let Some(data) = buf.data::<WleglBufferData>() {
+            if data.texture.lock().unwrap().is_some() {
+                continue;
             }
-        }
-        if ensure_wlegl_texture(&state.render, data) {
-            imported = true;
+            if ensure_wlegl_texture(&state.render, data) {
+                imported = true;
+            }
         }
     }
     imported
@@ -652,6 +651,9 @@ pub fn render_frame(
     let wlegl_draws = collect_surface_draws(state, &host_id, |surf| {
         let ws = state.surface_wlegl.get(surf)?;
         let buf = ws.current_buffer.as_ref()?;
+        // WleglBufferData is in the wl_buffer user-data regardless of
+        // which protocol minted the buffer (android_wlegl for
+        // libhybris, tawc_gfxstream for the bridge backend).
         let data = buf.data::<WleglBufferData>()?;
         let tex = data.texture.lock().unwrap().clone()?;
         let (lw, lh) = logical_size(

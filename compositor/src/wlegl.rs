@@ -99,6 +99,24 @@ impl WleglBufferData {
     pub fn ahb_raw(&self) -> *mut ndk_sys::AHardwareBuffer {
         self.ahb
     }
+
+    /// Wrap an externally-acquired AHardwareBuffer. Caller transfers
+    /// **one** ref to us — `Drop` releases it. Used by the
+    /// gfxstream-bridge custom Vulkan WSI path
+    /// (`crate::gfxstream_present`) to adopt an AHB allocated by the
+    /// kumquat-side gfxstream renderer and resolved by colorbuffer
+    /// id via `tawc_gfxstream_lookup_ahb`.
+    ///
+    /// Not used by the android_wlegl path, which has its own
+    /// gralloc1-import construction via `tawc_wlegl_import`.
+    pub fn from_ahb(ahb: *mut ndk_sys::AHardwareBuffer, width: i32, height: i32) -> Self {
+        Self {
+            ahb,
+            width,
+            height,
+            texture: Mutex::new(None),
+        }
+    }
 }
 
 impl Drop for WleglBufferData {

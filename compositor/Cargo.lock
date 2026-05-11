@@ -253,6 +253,7 @@ dependencies = [
  "freedesktop-desktop-entry",
  "jni",
  "kumquat_virtio",
+ "libc",
  "libloading",
  "log",
  "ndk",

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="tawc_gfxstream">
+
+  <copyright>
+    Copyright (c) tawc authors.
+
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <description summary="tawc gfxstream-bridge present protocol">
+    Custom Vulkan WSI hand-off between a chroot client using
+    libvulkan_gfxstream.so (kumquat-backed) and the tawc compositor.
+
+    The chroot's custom Vulkan WSI allocates swapchain images as gfxstream
+    ColorBuffers via the kumquat protocol's RESOURCE_CREATE_BLOB; the
+    resulting u32 resource_id is the same `HandleType` that gfxstream's
+    host-side FrameBuffer uses to index its color-buffer table.
+
+    On vkQueuePresentKHR the chroot ships only that id to the compositor
+    here. The compositor (same process as the gfxstream host renderer)
+    looks the id up via FrameBuffer::exportColorBuffer to obtain the
+    backing AHardwareBuffer*, then drives it through the existing
+    AHB-to-GLES-texture import path (the same path the libhybris
+    android_wlegl backend uses).
+
+    No fds are exchanged: the AHB already lives in the compositor's
+    address space, and swapchain images are DEVICE_LOCAL so the chroot
+    never needs CPU access. See notes/gfxstream-bridge.md "WSI plan:
+    custom Vulkan WSI".
+  </description>
+
+  <interface name="tawc_gfxstream" version="1">
+    <description summary="bind gfxstream ColorBuffer resources as wl_buffers">
+      Singleton global. Bound by the chroot's custom Vulkan WSI; not used
+      by the libhybris path (which goes via android_wlegl instead).
+    </description>
+
+    <enum name="error">
+      <entry name="unknown_colorbuffer" value="0"
+             summary="colorbuffer_id is not present in gfxstream's FrameBuffer"/>
+      <entry name="not_ahb_backed" value="1"
+             summary="colorbuffer_id resolved, but no AHardwareBuffer is attached
+                      (this should not happen for swapchain-image allocations on
+                      Android — gfxstream's external-memory path always uses AHBs)"/>
+    </enum>
+
+    <request name="create_buffer">
+      <description summary="bind a gfxstream ColorBuffer as a wl_buffer">
+        Create a wl_buffer backed by an existing gfxstream ColorBuffer
+        identified by `colorbuffer_id`. The compositor acquires the
+        underlying AHardwareBuffer and releases it on wl_buffer
+        destruction.
+
+        Width, height, and format are advisory metadata used to size and
+        configure the GLES texture import. They must match the
+        ColorBuffer's actual dimensions and DRM_FOURCC encoding — a
+        mismatch is a client bug.
+
+        Errors:
+          unknown_colorbuffer — `colorbuffer_id` is not currently registered
+            with gfxstream's FrameBuffer. The client failed to allocate it,
+            or already destroyed it.
+          not_ahb_backed — the ColorBuffer exists but has no AHB backing.
+            Shouldn't happen on Android with our build of gfxstream.
+      </description>
+
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="colorbuffer_id" type="uint"
+           summary="gfxstream FrameBuffer color-buffer handle"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint" summary="DRM_FOURCC; advisory"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="release the global binding">
+        The global itself is stateless; existing wl_buffers stay alive
+        until they are destroyed.
+      </description>
+    </request>
+  </interface>
+
+</protocol>
