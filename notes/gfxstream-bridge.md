@@ -51,6 +51,24 @@ Some context that trips up first-time readers:
   (libhybris/android_wlegl and gfxstream-bridge/tawc_gfxstream) attach
   it to the wl_buffer's user-data, so the renderer's lookup is one
   branch instead of two.
+- **`VulkanAllocateHostVisibleAsUdmabuf` is force-disabled.**
+  Gfxstream auto-enables this feature when the host kernel is ≥ 6.6
+  *and* `/dev/udmabuf` exists, then `VkEmulation::create`
+  unconditionally opens the device O_RDWR and calls
+  `GFXSTREAM_FATAL("udmabuf failed to initialize")` if that fails.
+  On Android the device exists on 6.6+ kernels (Pixel 10 Pro Fold and
+  newer) but SELinux denies `untrusted_app` access to
+  `udmabuf_device`, so the open fails and the FATAL crashes the
+  whole tawc process at startup — before any client connects, and
+  regardless of which graphics backend the user picked, because
+  `bridge::spawn()` runs unconditionally. We don't use the udmabuf
+  path (our AHB-export hook handles host-visible memory), so
+  `bridge.rs` pins `VulkanAllocateHostVisibleAsUdmabuf:disabled` in
+  the renderer-features string passed through
+  `STREAM_RENDERER_PARAM_RENDERER_FEATURES`. Watch for similar
+  pattern in future gfxstream bumps — any new feature that
+  auto-enables on a kernel/device-presence check and FATALs on
+  init-fail will reproduce the same class of bug.
 
 ## The idea in one paragraph
 

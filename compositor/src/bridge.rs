@@ -68,9 +68,12 @@ fn run() {
     // KumquatBuilder::build() already removes a stale socket file
     // before binding, so we don't need to.
 
+    // Force-disable udmabuf backing — auto-enables on kernel >= 6.6 and
+    // FATALs when SELinux denies the open on Android. See
+    // notes/gfxstream-bridge.md Orientation.
     let mut kumquat = match KumquatBuilder::new()
         .set_capset_names("gfxstream-vulkan".into())
-        .set_renderer_features(String::new())
+        .set_renderer_features("VulkanAllocateHostVisibleAsUdmabuf:disabled".into())
         .set_gpu_socket(Some(KUMQUAT_SOCKET_PATH.into()))
         .build()
     {
