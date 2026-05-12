@@ -105,6 +105,44 @@ to `tls_hooks[]`, but slot -1 maps to `tls_hooks[-1]` which is NULL -> SIGSEGV.
 **Result:** EGL 1.5 initializes on Pixel 4a (Adreno 618), Android 16, stock LineageOS.
 TLS patching is always active (no env var needed).
 
+### libhybris on Pixel 10 Pro Fold (Tensor G5 + PowerVR) — slot 1 fix (SOLVED 2026-05-11)
+
+Same shape as the slot -1 problem above, on a different slot.
+
+**Problem:** Bionic libc reads `TLS_SLOT_THREAD_ID` (slot 1, at `TPIDR_EL0 + 8`)
+as a `pthread_internal_t*` in every syscall wrapper's errno-set path
+(`__set_errno_internal` does `str w9, [x8, #776]` where 776 is the
+`errno_value` field). Even with the TLS thunk patcher correctly redirecting
+`tpidr_el0` reads to `tls_static_tls`, slot 1 sat zero-initialised, so any
+libc-mediated syscall failure wrote through NULL + 0x308 and SIGSEGV'd.
+
+Hit by Pixel 10 Pro Fold (Tensor G5 + Imagination PowerVR DXT) because
+`mapper.pixel.so` (Pixel's gralloc HAL) goes through bionic libc syscall
+wrappers on every `wl_egl_window`-backed surface creation. Adreno and Mali
+gralloc HALs don't take that path, so this bug went unnoticed on every
+previously-tested device. `weston-simple-egl` was the minimal reproducer;
+lxterminal hit it via GTK's GL renderer too.
+
+**Fix (in our libhybris fork's `hooks.c`):** alongside the existing
+bionic_tls allocation in `_hybris_hook___get_tls_hooks`, calloc an 8 KiB
+zero-filled `pthread_internal_t` shadow and write its pointer to
+`tls_static_tls + BIONIC_THREAD_ID_PTR_OFFSET`. Reaped by a second
+`pthread_key_t` destructor on thread exit.
+
+**Audit of every `mrs tpidr_el0; ldr [..., #N]` pattern in stock apex
+libc.so** found three other in-use slots:
+- `#40` (slot 5, stack canary) — read-as-value, benign at zero.
+- `#0` (slot 0, `__tls_get_addr` DTV + gwp_asan PRNG) — not reached today.
+- `#48` (slot 6, scudo thread-local cache) — not reached because libhybris
+  funnels every visible malloc symbol through glibc, bypassing scudo.
+
+If any of those start crashing on a future device, the same fix shape
+(populate the slot in `_hybris_hook___get_tls_hooks`) applies.
+
+**Result:** `weston-simple-egl` and `lxterminal` render correctly on Pixel
+10 Pro Fold, and the existing Pixel 4a / Adreno 618 hybris integration
+tests stay green.
+
 ### libhybris + libwayland-client Compatibility
 
 TLS patching is always active. When linking libhybris-common.so at compile time
