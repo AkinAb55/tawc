@@ -5,6 +5,7 @@
 //! turns that protocol state into pixels.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{error, info};
 
@@ -28,7 +29,7 @@ use crate::compositor::TawcState;
 use crate::egl_android::AndroidNativeSurface;
 use crate::gl_import::AhbTextureImporter;
 use crate::host::OutputHost;
-use crate::wlegl::WleglBufferData;
+use crate::wlegl::{BufferOrigin, WleglBufferData};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 
 /// Tawc dark window surface (#1F1B22) — matches the home/install/distro-info
@@ -36,6 +37,59 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 /// Mirror any change here in `app/src/main/res/values-night/colors.xml`'s
 /// `tawc_window_bg`.
 const BACKGROUND_COLOR: Color32F = Color32F::new(0.1216, 0.1059, 0.1333, 1.0);
+
+/// Whether to wash each surface in a debug colour identifying its
+/// buffer source (libhybris-AHB → lime, gfxstream-AHB → cyan,
+/// SHM → magenta). Driven by the in-app "Tint buffers based on type"
+/// checkbox via `nativeSetTintBuffersByType`. Read on every frame so a
+/// toggle takes effect on the next paint without restarting any client.
+/// Defaults to `true` so a fresh process matches the historical
+/// behaviour before any setting has been pushed in.
+pub static TINT_BUFFERS_BY_TYPE: AtomicBool = AtomicBool::new(true);
+
+/// Width (in framebuffer pixels) of the band along each screen edge
+/// over which the buffer-type tint fades from full strength at the
+/// very edge to zero. Picked to be large enough to read the colour
+/// at a glance but narrow enough that the centre of every window
+/// renders untinted.
+const TINT_EDGE_FADE_PX: f32 = 150.0;
+
+/// What kind of buffer is backing a surface for this frame. Drives the
+/// renderer's per-surface choice of tint colour and `force_opaque`.
+/// SHM is its own variant rather than a `BufferOrigin` because SHM
+/// buffers don't carry a `WleglBufferData`.
+#[derive(Clone, Copy, Debug)]
+enum SurfaceKind {
+    Shm,
+    Wlegl(BufferOrigin),
+}
+
+impl SurfaceKind {
+    /// Per-source debug tint colour applied when `TINT_BUFFERS_BY_TYPE`
+    /// is on. Picked to be saturated and easy to tell apart at a glance
+    /// even through arbitrary content.
+    fn tint_color(self) -> [f32; 3] {
+        match self {
+            SurfaceKind::Shm => [1.0, 0.0, 1.0], // magenta — software fallback path
+            SurfaceKind::Wlegl(BufferOrigin::Hybris) => [0.5, 1.0, 0.0], // lime — libhybris/AHB
+            SurfaceKind::Wlegl(BufferOrigin::Gfxstream) => [0.0, 1.0, 1.0], // cyan — gfxstream/AHB
+        }
+    }
+
+    /// Whether the renderer should overwrite the texture's alpha
+    /// channel with `1.0` before blending. Only libhybris needs this:
+    /// GTK assumes its toplevel is opaque and never writes alpha into
+    /// the AHB, and smithay's stock EXTERNAL_OES shader has no
+    /// `NO_ALPHA` variant for external textures (see `variant_for_format`
+    /// in `deps/smithay/src/backend/renderer/gles/shaders/implicit/mod.rs`),
+    /// so without the override every libhybris surface would render
+    /// fully transparent. Gfxstream's Vulkan WSI writes proper alpha
+    /// and SHM has its own format-driven opacity handling — both stay
+    /// `false`.
+    fn force_opaque(self) -> bool {
+        matches!(self, SurfaceKind::Wlegl(BufferOrigin::Hybris))
+    }
+}
 
 /// GPU-side rendering state, separate from Wayland protocol state.
 ///
@@ -50,15 +104,17 @@ const BACKGROUND_COLOR: Color32F = Color32F::new(0.1216, 0.1059, 0.1333, 1.0);
 pub struct RenderState {
     pub renderer: GlesRenderer,
     pub importer: AhbTextureImporter,
-    pub shm_tint_shader: Option<GlesTexProgram>,
-    /// Custom shader used for wlegl (EXTERNAL_OES AHB-backed) textures that
-    /// forces alpha=1 regardless of the texture's alpha channel. Smithay's
-    /// built-in EXTERNAL variant is compiled without NO_ALPHA and so
-    /// multiplies by the texture alpha; GTK/libhybris render RGB content
-    /// with alpha=0 (GTK assumes its surfaces are opaque and never writes
-    /// alpha), which makes the output fully transparent. See
-    /// `variant_for_format` in deps/smithay/src/backend/renderer/gles/shaders/implicit/mod.rs.
-    pub wlegl_opaque_shader: Option<GlesTexProgram>,
+    /// Texture shader with a `force_opaque` uniform but no tinting.
+    /// Used for every surface when `TINT_BUFFERS_BY_TYPE` is off, so
+    /// libhybris-AHB still gets the alpha override it needs (otherwise
+    /// smithay's stock EXTERNAL_OES shader would render GTK windows
+    /// fully transparent — see notes on [`SurfaceKind::force_opaque`]).
+    pub plain_shader: Option<GlesTexProgram>,
+    /// Texture shader that washes the sampled colour toward a per-call
+    /// `tint_color` and respects the same `force_opaque` flag. Used
+    /// for every surface when `TINT_BUFFERS_BY_TYPE` is on; the caller
+    /// picks the tint colour from [`SurfaceKind::tint_color`].
+    pub tint_shader: Option<GlesTexProgram>,
     pub raw_egl_display: *const c_void,
     pub raw_egl_context: *const c_void,
     /// EGL config + display handles needed to create per-host EGLSurfaces
@@ -116,17 +172,66 @@ impl RenderState {
 // though it never actually moves data across threads.
 unsafe impl Send for RenderState {}
 
-/// Compile a texture shader that always forces alpha=1.
+/// Compile the plain texture shader. One uniform: `force_opaque`
+/// (`1.0` rewrites the texture's alpha channel to `1.0` before
+/// blending; `0.0` leaves it as-is). Used when `TINT_BUFFERS_BY_TYPE`
+/// is off, but kept distinct from smithay's stock EXTERNAL_OES shader
+/// because libhybris-AHB still needs the alpha override regardless of
+/// whether the user wants debug tinting.
+pub fn compile_plain_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
+    match renderer.compile_custom_texture_shader(
+        SHADER_SOURCE_PLAIN,
+        &[UniformName::new("force_opaque", UniformType::_1f)],
+    ) {
+        Ok(program) => {
+            info!("plain texture shader compiled");
+            Some(program)
+        }
+        Err(e) => {
+            error!("Failed to compile plain texture shader: {:?}", e);
+            None
+        }
+    }
+}
+
+/// Compile the tinting texture shader. Uniforms:
+///  - `force_opaque` (`1.0`/`0.0`): same as the plain shader.
+///  - `tint_color` (`vec3`): hue to wash the sampled colour toward.
+///    Channels at `1.0` get boosted, channels at `0.0` get suppressed.
+///  - `screen_size` (`vec2`, framebuffer pixels): used together with
+///    `gl_FragCoord` to compute distance to the nearest screen edge.
+///  - `edge_fade_px` (`float`): the tint is at full strength on the
+///    very edge of the framebuffer and fades linearly to zero `edge_fade_px`
+///    pixels in. Set to `0` (or below) to skip the fade and tint the
+///    whole frame.
 ///
-/// smithay's built-in EXTERNAL shader variant samples the texture's alpha
-/// channel (no NO_ALPHA define for external textures). GTK/libhybris render
-/// into AHB-backed EGLImages without writing alpha, so texels end up
-/// (R,G,B,0) and smithay outputs fully-transparent pixels. This shader
-/// discards the texture's alpha and writes 1.0 instead, making the
-/// client-provided RGB content actually visible.
-pub fn compile_wlegl_opaque_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
+/// The tint formula generalises the original SHM-only magenta wash:
+/// each channel is multiplied by `mix(0.4, 1.0, tint_color[c])` and
+/// then `tint_color * 0.3` is added. With `tint_color = (1, 0, 1)`
+/// this collapses back to the previous `(r * 1.0 + 0.3, g * 0.4, b *
+/// 1.0 + 0.3)` magenta formula.
+pub fn compile_tint_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
     match renderer.compile_custom_texture_shader(
-        r#"
+        SHADER_SOURCE_TINT,
+        &[
+            UniformName::new("force_opaque", UniformType::_1f),
+            UniformName::new("tint_color", UniformType::_3f),
+            UniformName::new("screen_size", UniformType::_2f),
+            UniformName::new("edge_fade_px", UniformType::_1f),
+        ],
+    ) {
+        Ok(program) => {
+            info!("tinting texture shader compiled");
+            Some(program)
+        }
+        Err(e) => {
+            error!("Failed to compile tinting texture shader: {:?}", e);
+            None
+        }
+    }
+}
+
+const SHADER_SOURCE_PLAIN: &str = r#"
 #version 100
 
 //_DEFINES_
@@ -143,6 +248,7 @@ uniform sampler2D tex;
 #endif
 
 uniform float alpha;
+uniform float force_opaque;
 varying vec2 v_coords;
 
 #if defined(DEBUG_FLAGS)
@@ -151,35 +257,20 @@ uniform float tint;
 
 void main() {
     vec4 color = texture2D(tex, v_coords);
-    // Always ignore the texture's alpha channel — GTK on libhybris paints
-    // RGB only and leaves alpha at 0, which would otherwise render the
-    // surface fully transparent.
-    color = vec4(color.rgb, 1.0) * alpha;
+    if (force_opaque == 1.0) {
+        color = vec4(color.rgb, 1.0) * alpha;
+    } else {
+        color = color * alpha;
+    }
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
     gl_FragColor = color;
 }
-"#,
-        &[],
-    ) {
-        Ok(program) => {
-            info!("wlegl opaque shader compiled");
-            Some(program)
-        }
-        Err(e) => {
-            error!("Failed to compile wlegl opaque shader: {:?}", e);
-            None
-        }
-    }
-}
+"#;
 
-/// Compile the magenta tint shader used for SHM buffer rendering.
-/// Must be called after the EGL context is current.
-pub fn compile_shm_tint_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
-    match renderer.compile_custom_texture_shader(
-        r#"
+const SHADER_SOURCE_TINT: &str = r#"
 #version 100
 
 //_DEFINES_
@@ -196,8 +287,11 @@ uniform sampler2D tex;
 #endif
 
 uniform float alpha;
+uniform float force_opaque;
+uniform vec3 tint_color;
+uniform vec2 screen_size;
+uniform float edge_fade_px;
 varying vec2 v_coords;
-uniform float magenta_mix;
 
 #if defined(DEBUG_FLAGS)
 uniform float tint;
@@ -205,37 +299,33 @@ uniform float tint;
 
 void main() {
     vec4 color = texture2D(tex, v_coords);
+    if (force_opaque == 1.0) {
+        color = vec4(color.rgb, 1.0) * alpha;
+    } else {
+        color = color * alpha;
+    }
 
-#if defined(NO_ALPHA)
-    color = vec4(color.rgb, 1.0) * alpha;
-#else
-    color = color * alpha;
-#endif
+    // Distance (in framebuffer pixels) to the nearest screen edge.
+    // gl_FragCoord shares the framebuffer's coordinate system with
+    // screen_size, so this works regardless of the surface's position.
+    vec2 d2 = min(gl_FragCoord.xy, screen_size - gl_FragCoord.xy);
+    float d = min(d2.x, d2.y);
+    // 1.0 right at the edge → 0.0 once we're edge_fade_px in. A
+    // non-positive edge_fade_px collapses to "tint the whole frame".
+    float edge_strength = edge_fade_px > 0.0
+        ? clamp(1.0 - d / edge_fade_px, 0.0, 1.0)
+        : 1.0;
 
-    // Apply magenta tint: boost red and blue, reduce green
-    vec3 magenta = vec3(color.r * 1.0 + 0.3, color.g * 0.4, color.b * 1.0 + 0.3);
-    color.rgb = mix(color.rgb, magenta, magenta_mix);
+    vec3 tinted = color.rgb * mix(vec3(0.4), vec3(1.0), tint_color) + tint_color * 0.3;
+    color.rgb = mix(color.rgb, tinted, edge_strength);
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
-
     gl_FragColor = color;
 }
-"#,
-        &[UniformName::new("magenta_mix", UniformType::_1f)],
-    ) {
-        Ok(program) => {
-            info!("SHM magenta tint shader compiled");
-            Some(program)
-        }
-        Err(e) => {
-            error!("Failed to compile SHM tint shader: {:?}", e);
-            None
-        }
-    }
-}
+"#;
 
 // ---------------------------------------------------------------------------
 // Buffer import
@@ -451,7 +541,8 @@ pub fn import_shm_buffers(state: &mut TawcState) -> bool {
 /// rectangle). `logical_w`/`logical_h` is the surface's logical size (from
 /// `wp_viewport.set_destination` if set, else `buffer / buffer_scale`).
 /// `logical_x`/`logical_y` is the surface's absolute position in logical
-/// (surface-local) coordinates.
+/// (surface-local) coordinates. `kind` carries the buffer source so the
+/// draw loop can pick the right shader and uniforms per surface.
 struct SurfaceDraw {
     texture: GlesTexture,
     logical_x: i32,
@@ -460,6 +551,7 @@ struct SurfaceDraw {
     logical_h: i32,
     buf_w: i32,
     buf_h: i32,
+    kind: SurfaceKind,
 }
 
 /// Compute a surface's logical (on-screen, surface-local) size:
@@ -483,6 +575,19 @@ fn logical_size(
     }
 }
 
+/// What `surface_fn` returns for a single surface that has something to
+/// draw this frame. The walker stitches in the absolute on-screen
+/// position (`logical_x`/`logical_y`) afterward — those depend on the
+/// tree traversal, not on the per-surface lookup.
+struct SurfaceDrawSpec {
+    texture: GlesTexture,
+    buf_w: i32,
+    buf_h: i32,
+    logical_w: i32,
+    logical_h: i32,
+    kind: SurfaceKind,
+}
+
 /// Walk a single surface tree, collecting drawable surfaces at their absolute
 /// logical positions. `offset_x`/`offset_y` is the root's position (0,0 for
 /// toplevels, popup geometry origin for popups).
@@ -490,7 +595,7 @@ fn collect_tree_draws(
     root: &WlSurface,
     offset_x: i32,
     offset_y: i32,
-    surface_fn: &impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32, i32, i32)>,
+    surface_fn: &impl Fn(&WlSurface) -> Option<SurfaceDrawSpec>,
     out: &mut Vec<SurfaceDraw>,
 ) {
     with_surface_tree_downward(
@@ -505,15 +610,16 @@ fn collect_tree_draws(
             TraversalAction::DoChildren((px + loc.x, py + loc.y))
         },
         |surf, _states, &(abs_x, abs_y)| {
-            if let Some((tex, buf_w, buf_h, lw, lh)) = surface_fn(surf) {
+            if let Some(spec) = surface_fn(surf) {
                 out.push(SurfaceDraw {
-                    texture: tex,
+                    texture: spec.texture,
                     logical_x: abs_x,
                     logical_y: abs_y,
-                    logical_w: lw,
-                    logical_h: lh,
-                    buf_w,
-                    buf_h,
+                    logical_w: spec.logical_w,
+                    logical_h: spec.logical_h,
+                    buf_w: spec.buf_w,
+                    buf_h: spec.buf_h,
+                    kind: spec.kind,
                 });
             }
         },
@@ -535,7 +641,7 @@ fn collect_tree_draws(
 fn collect_surface_draws(
     state: &TawcState,
     host_id: &crate::host::ActivityId,
-    surface_fn: impl Fn(&WlSurface) -> Option<(GlesTexture, i32, i32, i32, i32)>,
+    surface_fn: impl Fn(&WlSurface) -> Option<SurfaceDrawSpec>,
 ) -> Vec<SurfaceDraw> {
     let mut draws = Vec::new();
 
@@ -599,9 +705,11 @@ fn draw_surfaces(
     draws: &[SurfaceDraw],
     frame: &mut GlesFrame<'_, '_>,
     scale: i32,
+    screen_w: i32,
     screen_h: i32,
-    shader: Option<&GlesTexProgram>,
-    uniforms: &[Uniform],
+    plain_shader: Option<&GlesTexProgram>,
+    tint_shader: Option<&GlesTexProgram>,
+    tint_enabled: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for draw in draws {
         let dst_w = draw.logical_w * scale;
@@ -618,9 +726,31 @@ fn draw_surfaces(
         );
         let damage = Rectangle::from_size(Size::from((dst_w, dst_h)));
 
+        let force_opaque = if draw.kind.force_opaque() { 1.0 } else { 0.0 };
+        let (shader, uniforms): (Option<&GlesTexProgram>, Vec<Uniform>) = if tint_enabled {
+            let [r, g, b] = draw.kind.tint_color();
+            (
+                tint_shader,
+                vec![
+                    Uniform::new("force_opaque", UniformValue::_1f(force_opaque)),
+                    Uniform::new("tint_color", UniformValue::_3f(r, g, b)),
+                    Uniform::new(
+                        "screen_size",
+                        UniformValue::_2f(screen_w as f32, screen_h as f32),
+                    ),
+                    Uniform::new("edge_fade_px", UniformValue::_1f(TINT_EDGE_FADE_PX)),
+                ],
+            )
+        } else {
+            (
+                plain_shader,
+                vec![Uniform::new("force_opaque", UniformValue::_1f(force_opaque))],
+            )
+        };
+
         frame.render_texture_from_to(
             &draw.texture, src, dst, &[damage], &[], Transform::Flipped180, 1.0,
-            shader, uniforms,
+            shader, &uniforms,
         )?;
     }
     Ok(())
@@ -640,6 +770,7 @@ pub fn render_frame(
 
     let output_size = host.physical_size;
     let scale = state.output_scale;
+    let screen_w = output_size.w;
     let screen_h = output_size.h;
     let host_id = host.activity_id.clone();
 
@@ -648,37 +779,56 @@ pub fn render_frame(
     // `collect_surface_draws` takes `&TawcState` — which would re-borrow
     // the whole struct (including `render`) and clash. Done up front this
     // ordering is fine.
-    let wlegl_draws = collect_surface_draws(state, &host_id, |surf| {
-        let ws = state.surface_wlegl.get(surf)?;
-        let buf = ws.current_buffer.as_ref()?;
-        // WleglBufferData is in the wl_buffer user-data regardless of
-        // which protocol minted the buffer (android_wlegl for
-        // libhybris, tawc_gfxstream for the bridge backend).
-        let data = buf.data::<WleglBufferData>()?;
-        let tex = data.texture.lock().unwrap().clone()?;
-        let (lw, lh) = logical_size(
-            ws.committed_width, ws.committed_height,
-            ws.buffer_scale, ws.viewport_dst,
-        );
-        Some((tex, ws.committed_width, ws.committed_height, lw, lh))
-    });
-    let shm_draws = collect_surface_draws(state, &host_id, |surf| {
-        if state.surface_wlegl.contains_key(surf) { return None; }
+    //
+    // Walk every surface in tree order: wlegl wins over SHM when both
+    // are attached (an in-flight handoff between paths), and the kind
+    // tag carried on each [`SurfaceDraw`] tells the draw loop which
+    // shader/uniforms to use.
+    let draws = collect_surface_draws(state, &host_id, |surf| {
+        if let Some(ws) = state.surface_wlegl.get(surf) {
+            let buf = ws.current_buffer.as_ref()?;
+            // WleglBufferData lives in the wl_buffer user-data regardless
+            // of which protocol minted the buffer (android_wlegl for
+            // libhybris, tawc_gfxstream for the bridge backend); its
+            // `origin` field tells the renderer which it was.
+            let data = buf.data::<WleglBufferData>()?;
+            let tex = data.texture.lock().unwrap().clone()?;
+            let (lw, lh) = logical_size(
+                ws.committed_width, ws.committed_height,
+                ws.buffer_scale, ws.viewport_dst,
+            );
+            return Some(SurfaceDrawSpec {
+                texture: tex,
+                buf_w: ws.committed_width,
+                buf_h: ws.committed_height,
+                logical_w: lw,
+                logical_h: lh,
+                kind: SurfaceKind::Wlegl(data.origin),
+            });
+        }
         let ss = state.surface_shm.get(surf)?;
         let tex = ss.texture.as_ref()?.clone();
         let (lw, lh) = logical_size(
             ss.committed_width, ss.committed_height,
             ss.buffer_scale, ss.viewport_dst,
         );
-        Some((tex, ss.committed_width, ss.committed_height, lw, lh))
+        Some(SurfaceDrawSpec {
+            texture: tex,
+            buf_w: ss.committed_width,
+            buf_h: ss.committed_height,
+            logical_w: lw,
+            logical_h: lh,
+            kind: SurfaceKind::Shm,
+        })
     });
 
     // Now bind the renderer. Disjoint-field-borrow on TawcState lets us
     // reach into `state.render` for the rest of the function without
     // re-borrowing `state` as a whole.
     let render = &mut state.render;
-    let wlegl_shader = render.wlegl_opaque_shader.clone();
-    let shm_shader = render.shm_tint_shader.clone();
+    let plain_shader = render.plain_shader.clone();
+    let tint_shader = render.tint_shader.clone();
+    let tint_enabled = TINT_BUFFERS_BY_TYPE.load(Ordering::Relaxed);
     let mut target = render.renderer.bind(egl_surface)?;
     let mut frame = render.renderer.render(&mut target, output_size, Transform::Normal)?;
 
@@ -686,12 +836,14 @@ pub fn render_frame(
     // of the app (home / install / distro-info screens).
     frame.clear(BACKGROUND_COLOR, &[Rectangle::from_size(output_size)])?;
 
-    // Draw wlegl (AHB-backed GPU) surfaces.
-    draw_surfaces(&wlegl_draws, &mut frame, scale, screen_h, wlegl_shader.as_ref(), &[])?;
-
-    // Draw SHM fallback surfaces (magenta-tinted to make the fallback obvious)
-    draw_surfaces(&shm_draws, &mut frame, scale, screen_h, shm_shader.as_ref(),
-        &[Uniform::new("magenta_mix", UniformValue::_1f(1.0))])?;
+    // One draw pass over all surfaces in tree order. Per-surface
+    // shader + uniforms come from `draw.kind` and the `tint_enabled`
+    // flag — see [`SurfaceKind::tint_color`] /
+    // [`SurfaceKind::force_opaque`].
+    draw_surfaces(
+        &draws, &mut frame, scale, screen_w, screen_h,
+        plain_shader.as_ref(), tint_shader.as_ref(), tint_enabled,
+    )?;
 
     let _ = frame.finish()?;
     drop(target);

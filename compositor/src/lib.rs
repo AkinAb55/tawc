@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use jni::sys::{jint, jobject};
+use jni::sys::{jboolean, jint, jobject};
 use jni::JavaVM;
 use log::info;
 
@@ -402,6 +402,15 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeQueryStat
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetTintBuffersByType(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    render::TINT_BUFFERS_BY_TYPE.store(enabled != 0, Ordering::Relaxed);
+}
+
 // ---------------------------------------------------------------------------
 // JNI: Launcher (LauncherActivity)
 // ---------------------------------------------------------------------------
@@ -593,14 +602,14 @@ fn run_compositor(
         .map_err(|e| format!("Failed to load AHB importer: {}", e))?;
     info!("EGL + GlesRenderer + AHB importer ready");
 
-    let shm_tint_shader = render::compile_shm_tint_shader(&mut renderer);
-    let wlegl_opaque_shader = render::compile_wlegl_opaque_shader(&mut renderer);
+    let plain_shader = render::compile_plain_shader(&mut renderer);
+    let tint_shader = render::compile_tint_shader(&mut renderer);
 
     let render_state = RenderState {
         renderer,
         importer,
-        shm_tint_shader,
-        wlegl_opaque_shader,
+        plain_shader,
+        tint_shader,
         raw_egl_display: raw_display,
         raw_egl_context: raw_context,
         egl_display,

@@ -4,11 +4,13 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.EnabledGraphicsBackends
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.tawcCard
@@ -16,14 +18,17 @@ import me.phie.tawc.ui.verticalLp
 
 /**
  * App settings screen. Reachable from the home screen tonal "Settings"
- * button. Today: a single section, the graphics-driver picker. New
- * sections should follow the same pattern (header `TextView` + a card
- * with the controls).
+ * button. Each section is its own card with a bold title at the top
+ * followed by the section's controls. Add a new section by building a
+ * card via [buildSectionCard] and adding it to `scaffold.content`.
  *
  * Picks are saved immediately on selection — no Save button to
- * accidentally forget. The new value lands in [Settings] and is read
- * by [me.phie.tawc.install.RootfsEnv] on the **next** rootfs spawn,
- * so already-running clients keep their existing env until restart.
+ * accidentally forget. Graphics-driver picks land in [Settings] and
+ * are read by [me.phie.tawc.install.RootfsEnv] on the **next** rootfs
+ * spawn, so already-running clients keep their existing env until
+ * restart. Render-time toggles (e.g. [Settings.tintBuffersByType])
+ * are also pushed straight into the compositor via [NativeBridge] so
+ * the live frame reflects the change immediately.
  */
 class SettingsActivity : AppCompatActivity() {
 
@@ -31,22 +36,41 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val scaffold = buildChildScreen("Settings")
         val pad = (16 * resources.displayMetrics.density).toInt()
-        val cardPad = (12 * resources.displayMetrics.density).toInt()
 
         scaffold.content.addView(
-            TextView(this).apply {
-                text = "Graphics driver"
-                textSize = 16f
-                setTypeface(typeface, Typeface.BOLD)
-            },
-            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+            buildSectionCard("Graphics driver", buildGraphicsBackendGroup()),
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
+        )
+        scaffold.content.addView(
+            buildSectionCard("Debug rendering", buildTintBuffersCheckbox()),
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
 
+        setContentView(scaffold.root)
+    }
+
+    private fun buildSectionCard(title: String, body: android.view.View): android.view.View {
+        val cardPad = (12 * resources.displayMetrics.density).toInt()
         val card = tawcCard()
-        val cardColumn = LinearLayout(this).apply {
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(cardPad, cardPad, cardPad, cardPad)
         }
+        column.addView(
+            TextView(this).apply {
+                text = title
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
+        column.addView(body, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        card.addView(column)
+        return card
+    }
+
+    private fun buildGraphicsBackendGroup(): RadioGroup {
+        val cardPad = (12 * resources.displayMetrics.density).toInt()
         val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
         val current = Settings.graphicsBackend
         for (backend in EnabledGraphicsBackends.enabled) {
@@ -59,9 +83,6 @@ class SettingsActivity : AppCompatActivity() {
                     text = backend.displayName
                     textSize = 15f
                     isChecked = backend == current
-                    // Vertical breathing room between options without a
-                    // separator line — keeps the card visually a single
-                    // surface like the rest of the app's cards.
                     setPadding(0, cardPad / 2, 0, cardPad / 2)
                 },
                 LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
@@ -71,10 +92,20 @@ class SettingsActivity : AppCompatActivity() {
             val picked = EnabledGraphicsBackends.enabled.firstOrNull { it.ordinal + 1 == checkedId }
             if (picked != null) Settings.graphicsBackend = picked
         }
-        cardColumn.addView(group, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        card.addView(cardColumn)
-        scaffold.content.addView(card, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+        return group
+    }
 
-        setContentView(scaffold.root)
+    private fun buildTintBuffersCheckbox(): CheckBox {
+        val cardPad = (12 * resources.displayMetrics.density).toInt()
+        return CheckBox(this).apply {
+            text = "Tint buffers based on type"
+            textSize = 15f
+            isChecked = Settings.tintBuffersByType
+            setPadding(0, cardPad / 2, 0, cardPad / 2)
+            setOnCheckedChangeListener { _, checked ->
+                Settings.tintBuffersByType = checked
+                NativeBridge.nativeSetTintBuffersByType(checked)
+            }
+        }
     }
 }

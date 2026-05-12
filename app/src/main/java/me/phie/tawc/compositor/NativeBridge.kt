@@ -193,6 +193,11 @@ object NativeBridge {
     /** Query compositor state (logs COMPOSITOR_STATE line to logcat). */
     external fun nativeQueryState()
 
+    /** Toggle the renderer's per-buffer-type tint (today: magenta SHM
+     *  wash). Read live by every frame, so the change is visible on the
+     *  next paint. */
+    external fun nativeSetTintBuffersByType(enabled: Boolean)
+
     /**
      * Scan a rootfs for installed `.desktop` apps. Returns a JSON array
      * string: `[{id, name, comment, exec, terminal}, …]` (sorted by name,

@@ -82,6 +82,21 @@ impl WleglHandleData {
     }
 }
 
+/// Which Wayland protocol minted the wl_buffer holding the AHB. The
+/// renderer reads this to pick a debug tint colour and to decide
+/// whether to force `alpha=1` — libhybris/GTK never writes alpha so its
+/// AHBs need force-opaque, gfxstream-Vulkan writes proper alpha so its
+/// AHBs don't.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferOrigin {
+    /// `android_wlegl` — libhybris's Wayland EGL platform (chroot
+    /// client renders with vendor GLES into a gralloc1 AHB).
+    Hybris,
+    /// `tawc_gfxstream` — gfxstream-bridge custom Vulkan WSI (chroot
+    /// client renders with mesa+gfxstream into a kumquat-allocated AHB).
+    Gfxstream,
+}
+
 /// Per-wl_buffer state: an AHardwareBuffer + lazily-imported GlesTexture.
 ///
 /// The AHB is kept alive for as long as the wl_buffer exists; Drop triggers
@@ -91,6 +106,7 @@ pub struct WleglBufferData {
     ahb: *mut ndk_sys::AHardwareBuffer,
     pub width: i32,
     pub height: i32,
+    pub origin: BufferOrigin,
     /// Imported on first render; reused thereafter.
     pub texture: Mutex<Option<GlesTexture>>,
 }
@@ -108,12 +124,14 @@ impl WleglBufferData {
     /// id via `tawc_gfxstream_lookup_ahb`.
     ///
     /// Not used by the android_wlegl path, which has its own
-    /// gralloc1-import construction via `tawc_wlegl_import`.
+    /// gralloc1-import construction via `tawc_wlegl_import` and tags
+    /// the resulting buffer with [`BufferOrigin::Hybris`] inline.
     pub fn from_ahb(ahb: *mut ndk_sys::AHardwareBuffer, width: i32, height: i32) -> Self {
         Self {
             ahb,
             width,
             height,
+            origin: BufferOrigin::Gfxstream,
             texture: Mutex::new(None),
         }
     }
@@ -265,6 +283,7 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                     ahb,
                     width,
                     height,
+                    origin: BufferOrigin::Hybris,
                     texture: Mutex::new(None),
                 };
                 data_init.init(id, data);

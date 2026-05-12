@@ -72,7 +72,8 @@ internal object RootfsEnv {
                 // plugin tree. Build-time bake > per-entry env override.
                 put("HYBRIS_EGLPLATFORM", "wayland")
                 // GTK uses libhybris GLES (→ AHB) instead of falling back to
-                // its software/cairo path (→ wl_shm, magenta-tinted). See
+                // its software/cairo path (→ wl_shm, optionally magenta-tinted —
+                // see Settings.tintBuffersByType). See
                 // notes/firefox.md "Why GDK_GL=gles:always". Libhybris-only —
                 // under gfxstream we don't have a working GL path yet, so
                 // GDK auto-pick / software fallback is the right behaviour.

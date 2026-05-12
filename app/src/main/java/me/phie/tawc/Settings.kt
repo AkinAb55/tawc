@@ -20,6 +20,7 @@ import android.os.Build
 object Settings {
     private const val PREFS_NAME = "tawc-settings"
     private const val KEY_GRAPHICS_BACKEND = "graphics_backend"
+    private const val KEY_TINT_BUFFERS_BY_TYPE = "tint_buffers_by_type"
 
     @Volatile private var prefs: SharedPreferences? = null
 
@@ -41,6 +42,19 @@ object Settings {
         }
         set(value) {
             requirePrefs().edit().putString(KEY_GRAPHICS_BACKEND, value.key).apply()
+        }
+
+    /**
+     * Whether the compositor tints surfaces by buffer type so the
+     * fallback path is visually obvious — today this means SHM
+     * surfaces get a magenta wash. Default on; useful to disable when
+     * showing the app off or when the tint clashes with what's being
+     * debugged. Read live by the renderer (no restart required).
+     */
+    var tintBuffersByType: Boolean
+        get() = requirePrefs().getBoolean(KEY_TINT_BUFFERS_BY_TYPE, true)
+        set(value) {
+            requirePrefs().edit().putBoolean(KEY_TINT_BUFFERS_BY_TYPE, value).apply()
         }
 }
 
@@ -89,7 +103,8 @@ enum class GraphicsBackend(val key: String, val displayName: String) {
      * forwarding — Mesa's `llvmpipe` (GL/GLES) and `lavapipe` (Vulkan,
      * if the distro ships `vulkan-swrast`) handle every draw on the
      * CPU. Slow and AHB-less (every client falls back to `wl_shm`,
-     * which the compositor tints magenta), but useful when the GPU
+     * which the compositor optionally tints magenta — see
+     * [Settings.tintBuffersByType]), but useful when the GPU
      * paths are broken or unavailable. No libhybris or gfxstream env
      * is set; the distro's own Mesa picks llvmpipe via
      * `LIBGL_ALWAYS_SOFTWARE=1` + `GALLIUM_DRIVER=llvmpipe`.
