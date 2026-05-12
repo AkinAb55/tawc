@@ -27,7 +27,7 @@ prerequisites are. As of writing the modules are:
 | `hybris`        | `libhybris` | TLS / bionic-linker regressions plus every "X renders via hardware buffers through libhybris" smoke — `weston-simple-egl`, `vkcube`, GTK3/4, Firefox, supertuxkart, plus `vulkaninfo`/`eglinfo` sanity. |
 | `gfxstream`     | `gfxstream` | Same hardware-buffer smokes as `hybris::` but under the bridge backend, plus an `eglinfo` software-fallback guard. Some of these currently fail (phase 4-5 of `notes/gfxstream-bridge.md`); that's by design — when the bridge is finished they pass without rewriting tests. |
 | `cpu_graphics`  | `cpu`       | Backend-agnostic SHM paths under software-only rendering: `weston-simple-shm`, GTK3 with `GDK_GL=disabled`, GTK4 with `GSK_RENDERER=cairo`, plus an `eglinfo` llvmpipe/swrast sanity. |
-| `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, `-tawc-test-pattern`, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. |
+| `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. |
 | `input`         | `cpu`       | gtk4-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). Buffer type is irrelevant for input. |
 | `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
 

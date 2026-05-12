@@ -22,25 +22,24 @@ of the box.
   `xwayland::test_tawc_dri_extension_round_trip` exercises
   `QueryExtension` + `QueryVersion` + `PresentBuffer` from a chroot
   xcb client (`tests/apps/tawc-dri-test/`).
-- **Phase 2 step 2 — done (2026-04-29).** Server-side AHB
-  allocation + shipping over `android_wlegl`. New files:
+- **Phase 2 step 2 — done (2026-04-29).** Server-side AHB shipping
+  over `android_wlegl`. New files:
   `hw/xwayland/xwayland-tawc-libnativewindow.{c,h}` — dlopen wrapper
-  around `AHardwareBuffer_allocate` / `_describe` / `_lock` /
-  `_unlock` / `_release` / `_getNativeHandle` /
+  around `AHardwareBuffer_release` / `_getNativeHandle` /
   `_createFromHandle`. `hw/xwayland/xwayland-tawc.c` implements
-  `xwl_tawc_buffer_alloc` + `_get_wl_buffer`, which send a buffer
-  through `android_wlegl.create_handle` + `add_fd` × N +
-  `create_buffer` — the same shape libhybris's wayland-platform
-  plugin uses. The compositor reuses its existing `wlegl_import.c`
-  path on the receive side. Compositor side: dropped `libhybris/lib`
-  from the Xwayland process's `LD_LIBRARY_PATH` — libnativewindow.so
+  `xwl_tawc_buffer_get_wl_buffer`, which sends a buffer through
+  `android_wlegl.create_handle` + `add_fd` × N + `create_buffer` —
+  the same shape libhybris's wayland-platform plugin uses. The
+  compositor reuses its existing `wlegl_import.c` path on the
+  receive side. Compositor side: dropped `libhybris/lib` from the
+  Xwayland process's `LD_LIBRARY_PATH` — libnativewindow.so
   DT_NEEDS libui.so, and the libhybris stub libui ahead of
   `/system/lib64` collapses the load with
-  `library libc.so.6 not found`. Verification:
-  `xwayland::test_xwayland_test_pattern_ahb_round_trip` enables the
-  `debug.tawc.xwl_test_pattern` prop, restarts the compositor, and
-  asserts the standalone test pattern path round-trips a 512x512
-  AHB through `android_wlegl`.
+  `library libc.so.6 not found`. Originally verified by a
+  server-side `-tawc-test-pattern` harness; once step 3 landed and
+  TAWC-DRI clients exercised the same shipping path the test
+  harness was retired (it added a 30s compositor restart and lost
+  no coverage).
 - **Phase 2 step 3 — done (2026-04-29).** TAWC-DRI now ships real
   client AHBs end-to-end. Protocol bumped to v0.2: `xTAWCDRIPresentBufferReq`
   carries `numFds`/`numInts`/width/height/stride/format/usage on
@@ -426,21 +425,19 @@ verifies the round-trip. **Verification:** integration test that
 exercises the protocol with no real buffers and no GL anywhere.
 This proves the extension wiring before any AHB code exists.
 
-**2. `xwayland-tawc.c` against a server-allocated test AHB.**
+**2. `xwayland-tawc.c` shipping AHBs over `android_wlegl`.**
 **Done (2026-04-29).** Bound `android_wlegl` on the X server's
 `wl_registry`, added a libnativewindow dlopen wrapper, implemented
-`xwl_tawc_buffer_alloc` + `xwl_tawc_buffer_get_wl_buffer` (the
-standalone helpers — the `xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)`
-overload is still a stub for step 3 to wire into the pixmap router).
-Added `-tawc-test-pattern` argv (and `TAWC_XWL_TEST_PATTERN=1` env
-fallback, since smithay's `XWayland::spawn` doesn't take argv
-extras), exposed to compositor via `debug.tawc.xwl_test_pattern`
-prop. **Verification (passing):** `xwayland::test_xwayland_test_pattern_ahb_round_trip`
-sets the prop, restarts the compositor, and checks for `wlegl:
-create_buffer 512x512 stride=... fmt=1 usage=0x...` in compositor
-logcat. The on-screen attach (and the `present_check_flip()`
-instrumentation hook) lives with step 3 — for step 2 we only
-verified the protocol round-trip.
+`xwl_tawc_buffer_get_wl_buffer` (the
+`xwl_tawc_pixmap_get_wl_buffer(PixmapPtr)` overload is a stub —
+step 3's direct-attach path obviated the pixmap-router integration).
+The original verification was a server-side `-tawc-test-pattern`
+harness that allocated a fixed gradient AHB at Xwayland startup,
+gated by the `debug.tawc.xwl_test_pattern` prop. It was retired
+once step 3 landed and TAWC-DRI tests exercised the same shipping
+path — the prop required a compositor restart per run, and TAWC-DRI
+covered identical regressions (android_wlegl bind, native_handle
+serialization, compositor wlegl import, libnativewindow link).
 
 **3. Glue step 1 to step 2. Done (2026-04-29).** Took a more direct
 shape than originally sketched: rather than route through
@@ -1075,15 +1072,19 @@ patcher script alongside the existing four.
   ("Glibc alternative") in case we ever need a glibc binary in the
   APK for some other reason.
 - **2026-04-29** — Phase 2 step 2 landed: server-side
-  libnativewindow dlopen, AHB allocation, native-handle ship via
-  `android_wlegl`, end-to-end round-trip verified by
-  `xwayland::test_xwayland_test_pattern_ahb_round_trip`. Caught one
-  load-order trap on first device run: `libnativewindow.so`
-  DT_NEEDS `libui.so`, and libhybris's chroot-side `libui.so.1.0.0`
-  stub was on the X server's `LD_LIBRARY_PATH`, so the bionic linker
-  took it first and failed on glibc `libc.so.6`. Fix: drop
-  `libhybris/lib` from the X server's library path entirely. Step-1
-  patch `02-tawc-extension-step1.patch` was rolled into a single
+  libnativewindow dlopen, native-handle ship via `android_wlegl`,
+  end-to-end round-trip verified by a server-side
+  `-tawc-test-pattern` harness gated on the
+  `debug.tawc.xwl_test_pattern` prop. (Harness retired 2026-05-11
+  once step 3's TAWC-DRI tests covered the same plumbing without
+  the per-test compositor restart — see "Phase 2 step 2" above.)
+  Caught one load-order trap on first device run:
+  `libnativewindow.so` DT_NEEDS `libui.so`, and libhybris's
+  chroot-side `libui.so.1.0.0` stub was on the X server's
+  `LD_LIBRARY_PATH`, so the bionic linker took it first and failed
+  on glibc `libc.so.6`. Fix: drop `libhybris/lib` from the X
+  server's library path entirely. Step-1 patch
+  `02-tawc-extension-step1.patch` was rolled into a single
   consolidated `02-tawc-step2-buffer-shipping.patch` since
   `xwayland-tawc.{c,h}` evolved between the steps.
 - **2026-04-29** — Phase 2 step 3 landed: TAWC-DRI v0.2 ships a

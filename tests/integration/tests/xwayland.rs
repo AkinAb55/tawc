@@ -1,22 +1,22 @@
 //! Xwayland tests. Anything that exercises the bionic-built Xwayland the
-//! compositor spawns at startup — pure-X11 clients, the `-tawc-test-pattern`
-//! debug hook, the TAWC-DRI AHB-shipping pipe, and EGL-on-X11 via the
-//! libhybris X11 platform plugin. Buffer-type assertions inside these tests
-//! stay here (rather than moving to `cpu_graphics::` / `hybris::` /
-//! `gfxstream::`) because what's under test is the Xwayland integration,
-//! not the buffer plumbing in isolation.
+//! compositor spawns at startup — pure-X11 clients, the TAWC-DRI
+//! AHB-shipping pipe, and EGL-on-X11 via the libhybris X11 platform
+//! plugin. Buffer-type assertions inside these tests stay here (rather
+//! than moving to `cpu_graphics::` / `hybris::` / `gfxstream::`) because
+//! what's under test is the Xwayland integration, not the buffer
+//! plumbing in isolation.
 //!
 //! Every spawn pins [`GraphicsBackend::Libhybris`]: TAWC-DRI / `xwl_tawc`
-//! / Xwayland's `-tawc-test-pattern` and the X11 EGL platform plugin
-//! are all libhybris-native — no analogue under gfxstream (and under
-//! CPU the AHB asserts here would never fire). Requires libhybris + a
-//! real Android GPU driver, so these still fail on the emulator.
+//! and the X11 EGL platform plugin are all libhybris-native — no
+//! analogue under gfxstream (and under CPU the AHB asserts here would
+//! never fire). Requires libhybris + a real Android GPU driver, so
+//! these still fail on the emulator.
 
 use std::time::Duration;
 
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::helpers::{assert_compositor_clean, require_compositor};
-use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
+use tawc_integration::{adb, rootfs, GraphicsBackend};
 
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
@@ -80,113 +80,6 @@ fn test_xwayland_xclock_renders_via_shm() {
 
     app.stop().expect("xclock failed to stop cleanly");
     assert_compositor_clean();
-}
-
-/// TAWC-DRI Phase 2 step 2: opt the compositor into Xwayland's
-/// `-tawc-test-pattern` path via `debug.tawc.xwl_test_pattern`,
-/// restart, and verify a server-allocated AHB ships through
-/// `android_wlegl` to the compositor. This proves the buffer-shipping
-/// plumbing (server-side libnativewindow allocate → AHB native_handle
-/// → android_wlegl create_buffer → compositor gralloc1 import) end-to-
-/// end without any X clients existing. Visibility (attaching the AHB
-/// to a wl_surface) is deferred to step 3 alongside TAWC-DRI buffer
-/// presentation. See notes/xwayland.md.
-///
-/// The test takes ownership of the compositor lifecycle (force-stop +
-/// start) twice: once to enable the test pattern, once to clean up.
-/// `assert_compositor_clean` at the end leaves the suite in the same
-/// shape every other test expects.
-#[test]
-fn test_xwayland_test_pattern_ahb_round_trip() {
-    require_compositor();
-
-    // Enable opt-in flag.
-    adb::shell("setprop debug.tawc.xwl_test_pattern 1")
-        .expect("setprop debug.tawc.xwl_test_pattern");
-
-    // Defer-style cleanup that runs even if the test panics, so the
-    // prop doesn't leak into subsequent tests in the same suite run.
-    struct PropGuard;
-    impl Drop for PropGuard {
-        fn drop(&mut self) {
-            // `setprop` clears via empty quoted string.
-            let _ = adb::shell(r#"setprop debug.tawc.xwl_test_pattern """#);
-            let _ = adb::shell("am force-stop me.phie.tawc");
-            std::thread::sleep(Duration::from_millis(300));
-            let _ = adb::shell("am start -n me.phie.tawc/.MainActivity");
-            // Wait for compositor to come back so the next test sees it ready.
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
-            while std::time::Instant::now() < deadline {
-                if let Ok(true) = compositor::is_running() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(150));
-            }
-        }
-    }
-    let _guard = PropGuard;
-
-    // Fresh logcat so we can read the bring-up cleanly.
-    adb::logcat_clear().expect("logcat clear");
-
-    adb::shell("am force-stop me.phie.tawc").expect("force-stop");
-    std::thread::sleep(Duration::from_millis(400));
-    adb::shell("am start -n me.phie.tawc/.MainActivity").expect("am start");
-
-    // Wait for the compositor to come back AND for Xwayland to spawn,
-    // since the test-pattern path runs during Xwayland's screen init.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let mut compositor_up = false;
-    while std::time::Instant::now() < deadline {
-        if let Ok(true) = compositor::is_running() {
-            compositor_up = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    assert!(
-        compositor_up,
-        "compositor did not come back up after restart; \
-         debug.tawc.xwl_test_pattern flow likely broken Xwayland startup"
-    );
-
-    // Compositor logs `wlegl: create_buffer ...` on a successful AHB
-    // import via android_wlegl. The test-pattern allocates one
-    // 512x512 R8G8B8A8 (format=1) AHB at startup; that should be the
-    // first such log line.
-    let log_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let mut saw_log = false;
-    let mut last_logs = String::new();
-    while std::time::Instant::now() < log_deadline {
-        let logs = adb::logcat_dump_tawc().expect("logcat dump");
-        if logs.contains("wlegl: create_buffer 512x512 stride=") {
-            saw_log = true;
-            last_logs = logs;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    assert!(
-        saw_log,
-        "compositor never logged `wlegl: create_buffer 512x512` after \
-         enabling debug.tawc.xwl_test_pattern + restarting. Likely the \
-         android_wlegl bind is missing on Xwayland's side, or libnativewindow \
-         dlopen failed (check /data/data/me.phie.tawc/share/xtmp/xwayland.log).\n\
-         last logs:\n{}",
-         &last_logs[last_logs.len().saturating_sub(4096)..],
-    );
-
-    // Sanity-check: format=1 (R8G8B8A8_UNORM) and a non-magenta route.
-    // The compositor doesn't log "magenta" but the SHM-import path uses
-    // a different code path entirely, so a hit on `wlegl: create_buffer`
-    // implies the AHB path fired (not the SHM fallback).
-    assert!(
-        last_logs.contains("fmt=1 usage=0x"),
-        "wlegl: create_buffer matched but format/usage payload differs from \
-         what the test pattern allocates (R8G8B8A8 = fmt 1). Filling code \
-         in xwayland-tawc.c may have drifted.\nlogs:\n{}",
-         &last_logs[last_logs.len().saturating_sub(4096)..],
-    );
 }
 
 /// TAWC-DRI Phase 2 step 3: a chroot-side client allocates a real

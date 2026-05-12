@@ -794,9 +794,9 @@ another:
   GPU backend at all — they exist to keep the SHM plumbing covered
   while the GL/Vulkan paths are still being wired up.
 
-`xwayland::` always pins libhybris (TAWC-DRI / `xwl_tawc` /
-`-tawc-test-pattern` are libhybris-native — no analogue under
-gfxstream until a bridge-side AHB-shipping pipe gets built). `apps::`
+`xwayland::` always pins libhybris (TAWC-DRI / `xwl_tawc` are
+libhybris-native — no analogue under gfxstream until a bridge-side
+AHB-shipping pipe gets built). `apps::`
 and `input::` pin CPU: their launch / input-dispatch logic is
 buffer-path-independent, and CPU is the most portable spawn (no GPU
 required), so they can run unattended on the emulator too.

@@ -1,5 +1,5 @@
 diff --git a/Xext/meson.build b/Xext/meson.build
-index bb90e19..311485b 100644
+index bb90e195d..311485b2c 100644
 --- a/Xext/meson.build
 +++ b/Xext/meson.build
 @@ -62,6 +62,11 @@ if build_xv
@@ -16,7 +16,7 @@ index bb90e19..311485b 100644
      include_directories: inc,
 diff --git a/Xext/tawc-dri.c b/Xext/tawc-dri.c
 new file mode 100644
-index 0000000..2e364b9
+index 000000000..2e364b946
 --- /dev/null
 +++ b/Xext/tawc-dri.c
 @@ -0,0 +1,241 @@
@@ -263,7 +263,7 @@ index 0000000..2e364b9
 +}
 diff --git a/Xext/tawcdriproto.h b/Xext/tawcdriproto.h
 new file mode 100644
-index 0000000..49bf6e8
+index 000000000..49bf6e8d1
 --- /dev/null
 +++ b/Xext/tawcdriproto.h
 @@ -0,0 +1,84 @@
@@ -353,7 +353,7 @@ index 0000000..49bf6e8
 +#endif /* _TAWCDRIPROTO_H_ */
 diff --git a/hw/xwayland/android_wlegl.xml b/hw/xwayland/android_wlegl.xml
 new file mode 100644
-index 0000000..24ef780
+index 000000000..24ef7805a
 --- /dev/null
 +++ b/hw/xwayland/android_wlegl.xml
 @@ -0,0 +1,127 @@
@@ -485,7 +485,7 @@ index 0000000..24ef780
 +
 +</protocol>
 diff --git a/hw/xwayland/meson.build b/hw/xwayland/meson.build
-index 9fff644..950c9a5 100644
+index 9fff6445d..950c9a57d 100644
 --- a/hw/xwayland/meson.build
 +++ b/hw/xwayland/meson.build
 @@ -127,6 +127,17 @@ if build_xwayland_glamor
@@ -507,7 +507,7 @@ index 9fff644..950c9a5 100644
  if build_glx
      wayland_inc += glx_inc
 diff --git a/hw/xwayland/xwayland-screen.c b/hw/xwayland/xwayland-screen.c
-index c83adda..4ebab27 100644
+index c83adda9f..383947d23 100644
 --- a/hw/xwayland/xwayland-screen.c
 +++ b/hw/xwayland/xwayland-screen.c
 @@ -71,6 +71,11 @@
@@ -539,42 +539,16 @@ index c83adda..4ebab27 100644
  #ifdef XWL_HAS_GLAMOR
      else if (xwl_screen->glamor) {
          xwl_glamor_init_wl_registry(xwl_screen, registry, id, interface,
-@@ -971,7 +986,19 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
-         else if (strcmp(argv[i], "-hidpi") == 0) {
-             xwl_screen->hidpi = 1;
-         }
-+#ifdef TAWC
-+        else if (strcmp(argv[i], "-tawc-test-pattern") == 0) {
-+            xwl_screen->tawc_test_pattern = 1;
-+        }
-+#endif
-     }
-+#ifdef TAWC
-+    /* Smithay's XWayland::spawn doesn't take argv extras, but does
-+     * forward env. Mirror the argv flag so the compositor can opt in
-+     * by setting TAWC_XWL_TEST_PATTERN=1 via its envs vector. */
-+    if (getenv("TAWC_XWL_TEST_PATTERN"))
-+        xwl_screen->tawc_test_pattern = 1;
-+#endif
- 
-     if (!xwl_screen->rootless) {
-         use_fixed_size = 1;
-@@ -1030,6 +1057,13 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
+@@ -1030,7 +1045,6 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
                               &registry_listener, xwl_screen);
      xwl_screen_roundtrip(xwl_screen);
  
-+#ifdef TAWC
-+    /* The roundtrip above completes the registry; tawc_wlegl is bound
-+     * (or absent) by the time we get here, so the test-pattern path
-+     * can rely on its presence. Runs before fb/screen init so a
-+     * compositor protocol error stops the boot deterministically. */
-+    xwl_tawc_test_pattern_run(xwl_screen);
-+#endif
- 
+-
      if (xwl_screen->fullscreen && xwl_screen->rootless) {
          ErrorF("error, cannot set fullscreen when running rootless\n");
+         return FALSE;
 diff --git a/hw/xwayland/xwayland-screen.h b/hw/xwayland/xwayland-screen.h
-index 9751bd2..5b94380 100644
+index 9751bd25d..8aadce761 100644
 --- a/hw/xwayland/xwayland-screen.h
 +++ b/hw/xwayland/xwayland-screen.h
 @@ -44,6 +44,10 @@
@@ -588,7 +562,7 @@ index 9751bd2..5b94380 100644
  struct xwl_screen {
      double width;
      double height;
-@@ -150,6 +154,18 @@ struct xwl_screen {
+@@ -150,6 +154,12 @@ struct xwl_screen {
      const char *output_name;
  
      uint32_t present_capabilities;
@@ -597,22 +571,16 @@ index 9751bd2..5b94380 100644
 +    /* android_wlegl global, used to ship AHB-backed buffers from this
 +     * X server to the compositor. See hw/xwayland/xwayland-tawc.c. */
 +    struct android_wlegl *tawc_wlegl;
-+
-+    /* -tawc-test-pattern argv flag: at startup, allocate an AHB,
-+     * CPU-fill it with a known gradient, and ship it via tawc_wlegl
-+     * to a dedicated Wayland surface. Phase-2 step-2 verification
-+     * harness (notes/xwayland.md). */
-+    int tawc_test_pattern;
 +#endif
  };
  
  /* Apps which use randr/vidmode to change the mode when going fullscreen,
 diff --git a/hw/xwayland/xwayland-tawc-libnativewindow.c b/hw/xwayland/xwayland-tawc-libnativewindow.c
 new file mode 100644
-index 0000000..7e31b87
+index 000000000..993feac9f
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc-libnativewindow.c
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,117 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -646,12 +614,7 @@ index 0000000..7e31b87
 +#include "os.h"
 +
 +/* Function-pointer typedefs — match libnativewindow's NDK shape. */
-+typedef int  (*pfn_alloc_t)(const struct tawc_ahb_desc *, struct AHardwareBuffer **);
 +typedef void (*pfn_release_t)(struct AHardwareBuffer *);
-+typedef void (*pfn_describe_t)(struct AHardwareBuffer *, struct tawc_ahb_desc *);
-+typedef int  (*pfn_lock_t)(struct AHardwareBuffer *, uint64_t, int32_t,
-+                           const void *, void **);
-+typedef int  (*pfn_unlock_t)(struct AHardwareBuffer *, int32_t *);
 +typedef const struct tawc_native_handle *
 +             (*pfn_get_handle_t)(const struct AHardwareBuffer *);
 +typedef int  (*pfn_from_handle_t)(const struct tawc_ahb_desc *,
@@ -664,11 +627,7 @@ index 0000000..7e31b87
 + * of the handle's fds. */
 +#define TAWC_AHB_METHOD_REGISTER 2
 +
-+static pfn_alloc_t       g_alloc;
 +static pfn_release_t     g_release;
-+static pfn_describe_t    g_describe;
-+static pfn_lock_t        g_lock;
-+static pfn_unlock_t      g_unlock;
 +static pfn_get_handle_t  g_get_handle;
 +static pfn_from_handle_t g_from_handle;
 +static int               g_loaded;
@@ -684,22 +643,14 @@ index 0000000..7e31b87
 +               dlerror());
 +        return;
 +    }
-+    g_alloc       = (pfn_alloc_t)      dlsym(lib, "AHardwareBuffer_allocate");
 +    g_release     = (pfn_release_t)    dlsym(lib, "AHardwareBuffer_release");
-+    g_describe    = (pfn_describe_t)   dlsym(lib, "AHardwareBuffer_describe");
-+    g_lock        = (pfn_lock_t)       dlsym(lib, "AHardwareBuffer_lock");
-+    g_unlock      = (pfn_unlock_t)     dlsym(lib, "AHardwareBuffer_unlock");
 +    g_get_handle  = (pfn_get_handle_t) dlsym(lib, "AHardwareBuffer_getNativeHandle");
 +    g_from_handle = (pfn_from_handle_t) dlsym(lib, "AHardwareBuffer_createFromHandle");
 +
-+    if (!g_alloc || !g_release || !g_describe || !g_lock || !g_unlock
-+        || !g_get_handle || !g_from_handle) {
++    if (!g_release || !g_get_handle || !g_from_handle) {
 +        ErrorF("xwl_tawc: dlsym AHardwareBuffer_* failed "
-+               "(alloc=%p release=%p describe=%p lock=%p unlock=%p "
-+               "get_handle=%p from_handle=%p)\n",
-+               (void *)g_alloc, (void *)g_release, (void *)g_describe,
-+               (void *)g_lock, (void *)g_unlock, (void *)g_get_handle,
-+               (void *)g_from_handle);
++               "(release=%p get_handle=%p from_handle=%p)\n",
++               (void *)g_release, (void *)g_get_handle, (void *)g_from_handle);
 +        return;
 +    }
 +    g_loaded = 1;
@@ -712,59 +663,12 @@ index 0000000..7e31b87
 +    return g_loaded;
 +}
 +
-+int
-+xwl_tawc_ahb_allocate(const struct tawc_ahb_desc *desc,
-+                      struct AHardwareBuffer **out)
-+{
-+    if (!xwl_tawc_libnativewindow_load() || !desc || !out)
-+        return -1;
-+    *out = NULL;
-+    int rc = g_alloc(desc, out);
-+    if (rc != 0 || !*out) {
-+        ErrorF("xwl_tawc: AHardwareBuffer_allocate failed rc=%d "
-+               "(%ux%u fmt=%u usage=0x%llx)\n",
-+               rc, desc->width, desc->height, desc->format,
-+               (unsigned long long)desc->usage);
-+        return rc != 0 ? rc : -1;
-+    }
-+    return 0;
-+}
-+
 +void
 +xwl_tawc_ahb_release(struct AHardwareBuffer *ahb)
 +{
 +    if (!ahb || !xwl_tawc_libnativewindow_load())
 +        return;
 +    g_release(ahb);
-+}
-+
-+void
-+xwl_tawc_ahb_describe(struct AHardwareBuffer *ahb,
-+                      struct tawc_ahb_desc *out)
-+{
-+    if (!ahb || !out || !xwl_tawc_libnativewindow_load()) {
-+        if (out) memset(out, 0, sizeof(*out));
-+        return;
-+    }
-+    g_describe(ahb, out);
-+}
-+
-+int
-+xwl_tawc_ahb_lock(struct AHardwareBuffer *ahb, uint64_t usage, void **out)
-+{
-+    if (!ahb || !out || !xwl_tawc_libnativewindow_load())
-+        return -1;
-+    /* fence=-1 (no fence), rect=NULL (whole buffer). */
-+    return g_lock(ahb, usage, -1, NULL, out);
-+}
-+
-+int
-+xwl_tawc_ahb_unlock(struct AHardwareBuffer *ahb)
-+{
-+    if (!ahb || !xwl_tawc_libnativewindow_load())
-+        return -1;
-+    /* fence_fd=NULL: synchronous unlock. */
-+    return g_unlock(ahb, NULL);
 +}
 +
 +const struct tawc_native_handle *
@@ -796,10 +700,10 @@ index 0000000..7e31b87
 +}
 diff --git a/hw/xwayland/xwayland-tawc-libnativewindow.h b/hw/xwayland/xwayland-tawc-libnativewindow.h
 new file mode 100644
-index 0000000..8ef44a8
+index 000000000..763f23827
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc-libnativewindow.h
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,66 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -838,28 +742,18 @@ index 0000000..8ef44a8
 +    uint64_t rfu1;
 +};
 +
-+/* Format / usage constants we actually use, mirrored so callers
-+ * don't need <android/hardware_buffer.h>. */
++/* Format constants we actually use, mirrored so callers don't need
++ * <android/hardware_buffer.h>. */
 +#define TAWC_AHB_FORMAT_R8G8B8A8_UNORM      1
 +#define TAWC_AHB_FORMAT_R8G8B8X8_UNORM      2
 +#define TAWC_AHB_FORMAT_B8G8R8A8_UNORM      5
-+
-+#define TAWC_AHB_USAGE_CPU_READ_OFTEN       0x3ULL
-+#define TAWC_AHB_USAGE_CPU_WRITE_OFTEN      0x30ULL
-+#define TAWC_AHB_USAGE_GPU_SAMPLED_IMAGE    0x100ULL
-+#define TAWC_AHB_USAGE_GPU_FRAMEBUFFER      0x200ULL
-+#define TAWC_AHB_USAGE_COMPOSER_OVERLAY     0x800ULL
 +
 +/* Resolve symbols from libnativewindow.so. Returns 1 on success, 0 on
 + * failure. Idempotent; safe to call repeatedly. */
 +int xwl_tawc_libnativewindow_load(void);
 +
-+/* AHardwareBuffer_allocate / _release / _describe. */
-+int xwl_tawc_ahb_allocate(const struct tawc_ahb_desc *desc,
-+                          struct AHardwareBuffer **out);
++/* AHardwareBuffer_release. */
 +void xwl_tawc_ahb_release(struct AHardwareBuffer *ahb);
-+void xwl_tawc_ahb_describe(struct AHardwareBuffer *ahb,
-+                           struct tawc_ahb_desc *out);
 +
 +/* AHardwareBuffer_createFromHandle: rebuild an AHB from a wire-format
 + * native_handle (numFds, numInts, fds, ints). Mirrors what
@@ -870,13 +764,6 @@ index 0000000..8ef44a8
 +                                    const struct tawc_native_handle *handle,
 +                                    struct AHardwareBuffer **out);
 +
-+/* AHardwareBuffer_lock / _unlock — CPU access for filling test patterns
-+ * and for tracker tooling. usage is TAWC_AHB_USAGE_CPU_*. Returns 0 on
-+ * success. */
-+int xwl_tawc_ahb_lock(struct AHardwareBuffer *ahb, uint64_t usage,
-+                      void **out);
-+int xwl_tawc_ahb_unlock(struct AHardwareBuffer *ahb);
-+
 +/* Borrow the AHB's underlying native_handle_t. Lifetime bound to the
 + * AHB; do not free. The pointer becomes invalid after _release(). */
 +const struct tawc_native_handle *
@@ -885,14 +772,14 @@ index 0000000..8ef44a8
 +#endif /* XWAYLAND_TAWC_LIBNATIVEWINDOW_H */
 diff --git a/hw/xwayland/xwayland-tawc.c b/hw/xwayland/xwayland-tawc.c
 new file mode 100644
-index 0000000..e0c6905
+index 000000000..efb462eb0
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.c
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,286 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
-+ * TAWC AHB buffer transport for Xwayland — Phase 2 step 2.
++ * TAWC AHB buffer transport for Xwayland.
 + *
 + * The protocol shape we send is identical to libhybris's wayland
 + * platform plugin (libhybris/hybris/platforms/wayland/
@@ -930,40 +817,6 @@ index 0000000..e0c6905
 +#include "xwayland-tawc-libnativewindow.h"
 +
 +#include "android_wlegl-client-protocol.h"
-+
-+struct xwl_tawc_buffer *
-+xwl_tawc_buffer_alloc(struct xwl_screen *xwl_screen,
-+                      int width, int height,
-+                      int format, uint64_t usage)
-+{
-+    (void) xwl_screen;
-+    struct xwl_tawc_buffer *buf;
-+    struct tawc_ahb_desc desc = {
-+        .width  = (uint32_t)width,
-+        .height = (uint32_t)height,
-+        .layers = 1,
-+        .format = (uint32_t)format,
-+        .usage  = usage,
-+    };
-+    struct tawc_ahb_desc actual;
-+
-+    buf = calloc(1, sizeof(*buf));
-+    if (!buf)
-+        return NULL;
-+
-+    if (xwl_tawc_ahb_allocate(&desc, &buf->ahb) != 0 || !buf->ahb) {
-+        free(buf);
-+        return NULL;
-+    }
-+
-+    xwl_tawc_ahb_describe(buf->ahb, &actual);
-+    buf->width  = (int)actual.width;
-+    buf->height = (int)actual.height;
-+    buf->stride = (int)actual.stride;
-+    buf->format = (int)actual.format;
-+    buf->usage  = actual.usage;
-+    return buf;
-+}
 +
 +void
 +xwl_tawc_buffer_destroy(struct xwl_tawc_buffer *buf)
@@ -1209,119 +1062,16 @@ index 0000000..e0c6905
 +        if (fds[i] >= 0) close(fds[i]);
 +    return rc;
 +}
-+
-+/* ──────────────────────────────────────────────────────────────────
-+ * -tawc-test-pattern: standalone harness for Phase 2 step 2.
-+ *
-+ * Allocates an AHB, fills it with a gradient via AHardwareBuffer_lock,
-+ * and ships it through android_wlegl. Verifies the protocol round-trip
-+ * against the compositor without any X clients existing.
-+ *
-+ * Visibility (attaching to a wl_surface so the gradient actually
-+ * appears on screen) is deferred to step 3 — at that point TAWC-DRI
-+ * wires the same shipping path to a real X11 toplevel.
-+ *
-+ * The gradient is deliberately distinct from the magenta tint the
-+ * compositor applies to wl_shm buffers: an on-screen image that looks
-+ * magenta means the SHM fallback fired and AHB import failed silently.
-+ * ────────────────────────────────────────────────────────────────── */
-+
-+#define TEST_PATTERN_W 512
-+#define TEST_PATTERN_H 512
-+
-+static void
-+fill_gradient(uint32_t *pixels, int w, int h, int stride_pixels)
-+{
-+    /* AHB format R8G8B8A8_UNORM stores bytes in memory order R,G,B,A.
-+     * On little-endian aarch64 that's an in-memory uint32_t of
-+     * (A << 24) | (B << 16) | (G << 8) | R. Red across X, blue across Y. */
-+    for (int y = 0; y < h; y++) {
-+        for (int x = 0; x < w; x++) {
-+            uint8_t r = (uint8_t)((x * 255) / (w - 1));
-+            uint8_t g = 0x40;
-+            uint8_t b = (uint8_t)((y * 255) / (h - 1));
-+            uint8_t a = 0xff;
-+            pixels[y * stride_pixels + x] =
-+                (uint32_t)a << 24 |
-+                (uint32_t)b << 16 |
-+                (uint32_t)g << 8  |
-+                (uint32_t)r;
-+        }
-+    }
-+}
-+
-+void
-+xwl_tawc_test_pattern_run(struct xwl_screen *xwl_screen)
-+{
-+    struct xwl_tawc_buffer *buf;
-+    struct wl_buffer *wlbuf;
-+    void *cpu;
-+
-+    if (!xwl_screen->tawc_test_pattern)
-+        return;
-+
-+    if (!xwl_screen->tawc_wlegl) {
-+        ErrorF("xwl_tawc test-pattern: android_wlegl not bound\n");
-+        return;
-+    }
-+
-+    /* CPU usage flags so AHardwareBuffer_lock returns a writable mapping;
-+     * GPU_SAMPLED_IMAGE so the compositor can bind it as a texture. */
-+    buf = xwl_tawc_buffer_alloc(xwl_screen,
-+                                TEST_PATTERN_W, TEST_PATTERN_H,
-+                                TAWC_AHB_FORMAT_R8G8B8A8_UNORM,
-+                                TAWC_AHB_USAGE_CPU_WRITE_OFTEN |
-+                                TAWC_AHB_USAGE_CPU_READ_OFTEN |
-+                                TAWC_AHB_USAGE_GPU_SAMPLED_IMAGE);
-+    if (!buf) {
-+        ErrorF("xwl_tawc test-pattern: AHB allocation failed\n");
-+        return;
-+    }
-+
-+    if (xwl_tawc_ahb_lock(buf->ahb,
-+                          TAWC_AHB_USAGE_CPU_WRITE_OFTEN, &cpu) != 0
-+        || !cpu) {
-+        ErrorF("xwl_tawc test-pattern: AHB lock failed\n");
-+        xwl_tawc_buffer_destroy(buf);
-+        return;
-+    }
-+
-+    fill_gradient((uint32_t *)cpu,
-+                  buf->width, buf->height, buf->stride);
-+
-+    if (xwl_tawc_ahb_unlock(buf->ahb) != 0)
-+        ErrorF("xwl_tawc test-pattern: AHB unlock failed (continuing)\n");
-+
-+    wlbuf = xwl_tawc_buffer_get_wl_buffer(xwl_screen, buf);
-+    if (!wlbuf) {
-+        ErrorF("xwl_tawc test-pattern: failed to ship via android_wlegl\n");
-+        xwl_tawc_buffer_destroy(buf);
-+        return;
-+    }
-+
-+    /* Round-trip so any compositor protocol error surfaces here, not
-+     * later under the dispatch loop where it'd be harder to localize. */
-+    wl_display_roundtrip(xwl_screen->display);
-+
-+    ErrorF("xwl_tawc test-pattern: %dx%d AHB shipped via android_wlegl "
-+           "(stride=%d format=%d usage=0x%llx)\n",
-+           buf->width, buf->height, buf->stride, buf->format,
-+           (unsigned long long)buf->usage);
-+
-+    /* xwl_tawc_buffer + AHB + wl_buffer leak for the lifetime of the X
-+     * server. Visibility is wired up in step 3 alongside the TAWC-DRI
-+     * path. */
-+}
 diff --git a/hw/xwayland/xwayland-tawc.h b/hw/xwayland/xwayland-tawc.h
 new file mode 100644
-index 0000000..4f3dd93
+index 000000000..6342e5950
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,73 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
-+ * TAWC AHB buffer transport for Xwayland — Phase 2 step 2.
++ * TAWC AHB buffer transport for Xwayland.
 + *
 + * Wraps an AHardwareBuffer as a wl_buffer via the android_wlegl
 + * protocol so the compositor can import it through its existing
@@ -1344,11 +1094,9 @@ index 0000000..4f3dd93
 +struct wl_buffer;
 +struct xwl_screen;
 +
-+/* Standalone AHB-backed buffer + lazily-created wl_buffer. Step 2's
-+ * test pattern allocates one of these directly, without going through
-+ * the X server's PixmapPtr machinery. Step 3 (TAWC-DRI) will allocate
-+ * one of these per X11Pixmap and route via xwl_tawc_pixmap_get_wl_buffer
-+ * below. */
++/* AHB-backed buffer + lazily-created wl_buffer. xwl_tawc_present_native_handle
++ * allocates one per TAWC-DRI present and ties its lifetime to the
++ * compositor's wl_buffer.release event. */
 +struct xwl_tawc_buffer {
 +    struct AHardwareBuffer *ahb;   /* Owned. */
 +    struct wl_buffer *buffer;      /* Lazy; created on first
@@ -1359,15 +1107,6 @@ index 0000000..4f3dd93
 +    int format;     /* Android pixel format (AHARDWAREBUFFER_FORMAT_*). */
 +    uint64_t usage; /* AHB usage flags. */
 +};
-+
-+/* Allocate an AHB sized w*h with the given format and usage, and wrap
-+ * it in a fresh xwl_tawc_buffer. Returns NULL on failure. The buffer
-+ * has no wl_buffer yet — call xwl_tawc_buffer_get_wl_buffer once the
-+ * AHB content is filled in. */
-+struct xwl_tawc_buffer *
-+xwl_tawc_buffer_alloc(struct xwl_screen *xwl_screen,
-+                      int width, int height,
-+                      int format, uint64_t usage);
 +
 +/* Tear down: destroys the wl_buffer (if any), releases the AHB, frees
 + * the xwl_tawc_buffer struct. */
@@ -1380,19 +1119,12 @@ index 0000000..4f3dd93
 +xwl_tawc_buffer_get_wl_buffer(struct xwl_screen *xwl_screen,
 +                              struct xwl_tawc_buffer *buf);
 +
-+/* Step-3 entry point: routes an AHB-backed PixmapPtr through the same
-+ * shipping path. Step 2 leaves this as a stub returning NULL — until
-+ * the TAWC-DRI extension stashes an xwl_tawc_buffer on PixmapPtrs,
-+ * there are no AHB-backed pixmaps for it to find. */
++/* Stub: routes an AHB-backed PixmapPtr through the same shipping path.
++ * Returns NULL because TAWC-DRI bypasses the pixmap router and attaches
++ * its wl_buffer directly to the X11 window's wl_surface. */
 +struct wl_buffer *xwl_tawc_pixmap_get_wl_buffer(PixmapPtr pixmap);
 +
-+/* If -tawc-test-pattern was passed (or TAWC_XWL_TEST_PATTERN env var
-+ * is set), allocate a gradient AHB and ship it via android_wlegl. No
-+ * surface attach yet — visibility lands in step 3 alongside TAWC-DRI.
-+ * No-op if the flag wasn't set. */
-+void xwl_tawc_test_pattern_run(struct xwl_screen *xwl_screen);
-+
-+/* TAWC-DRI step 3 entry point. Reconstructs an AHardwareBuffer from a
++/* TAWC-DRI entry point. Reconstructs an AHardwareBuffer from a
 + * client-shipped native_handle (numFds fds + numInts ints), wraps it
 + * as an xwl_tawc_buffer, attaches the resulting wl_buffer directly to
 + * the X11 window's wl_surface, and commits. Takes ownership of the
@@ -1409,24 +1141,8 @@ index 0000000..4f3dd93
 +                                   int format, uint64_t usage);
 +
 +#endif /* XWAYLAND_TAWC_H */
-diff --git a/hw/xwayland/xwayland.c b/hw/xwayland/xwayland.c
-index 81b8a7e..5c5c75e 100644
---- a/hw/xwayland/xwayland.c
-+++ b/hw/xwayland/xwayland.c
-@@ -273,6 +273,11 @@ ddxProcessArgument(int argc, char *argv[], int i)
-     else if (strcmp(argv[i], "-hidpi") == 0) {
-         return 1;
-     }
-+#ifdef TAWC
-+    else if (strcmp(argv[i], "-tawc-test-pattern") == 0) {
-+        return 1;
-+    }
-+#endif
- 
-     return 0;
- }
 diff --git a/include/extinit.h b/include/extinit.h
-index 59d1896..10863ee 100644
+index 59d18962f..10863ee4d 100644
 --- a/include/extinit.h
 +++ b/include/extinit.h
 @@ -158,6 +158,10 @@ extern void XvMCExtensionInit(void);
@@ -1441,7 +1157,7 @@ index 59d1896..10863ee 100644
  #include "presentext.h"
  #endif
 diff --git a/include/meson.build b/include/meson.build
-index 72e1e5d..b4237fc 100644
+index 72e1e5d5b..b4237fcb4 100644
 --- a/include/meson.build
 +++ b/include/meson.build
 @@ -214,6 +214,7 @@ conf_data.set('RES', build_res ? '1' : false)
@@ -1453,7 +1169,7 @@ index 72e1e5d..b4237fc 100644
  conf_data.set('XCMISC', '1')
  conf_data.set('XCSECURITY', build_xsecurity ? '1' : false)
 diff --git a/meson.build b/meson.build
-index 479b302..b6830f6 100644
+index 479b3025a..b6830f66a 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -360,6 +360,8 @@ endif
@@ -1466,7 +1182,7 @@ index 479b302..b6830f6 100644
  build_screensaver = get_option('screensaver')
  build_res = get_option('xres')
 diff --git a/meson_options.txt b/meson_options.txt
-index 1acc65e..095a89c 100644
+index 1acc65ead..095a89caf 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -86,3 +86,6 @@ option('devel-docs', type: 'combo', choices: ['true', 'false', 'auto'], value: '
@@ -1477,7 +1193,7 @@ index 1acc65e..095a89c 100644
 +option('tawc', type: 'boolean', value: false,
 +       description: 'Enable TAWC AHB-everywhere transport (TAWC-DRI extension + xwayland-tawc.c)')
 diff --git a/mi/miinitext.c b/mi/miinitext.c
-index 1ddcd7f..5471300 100644
+index 1ddcd7fda..547130051 100644
 --- a/mi/miinitext.c
 +++ b/mi/miinitext.c
 @@ -149,6 +149,9 @@ static const ExtensionModule staticExtensions[] = {
@@ -1491,7 +1207,7 @@ index 1ddcd7f..5471300 100644
      {ResExtensionInit, "X-Resource", &noResExtension},
  #endif
 diff --git a/present/present_scmd.c b/present/present_scmd.c
-index ba7d7cb..a8b10ed 100644
+index ba7d7cb65..a8b10eddf 100644
 --- a/present/present_scmd.c
 +++ b/present/present_scmd.c
 @@ -57,6 +57,29 @@ present_flip_pending_pixmap(ScreenPtr screen)

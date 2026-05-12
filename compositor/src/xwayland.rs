@@ -105,32 +105,7 @@ pub fn start_xwayland(
         warn!("xwayland: TAWC_NATIVE_LIB_DIR not set; Xwayland will likely fail to load its .so deps");
         format!("{xwl}/lib", xwl = XWL_INSTALL_DIR)
     });
-    let mut envs: Vec<(String, String)> = vec![("LD_LIBRARY_PATH".to_string(), lib_dir)];
-
-    // Phase-2 step-2 verification harness: opt-in via the Android system
-    // property `debug.tawc.xwl_test_pattern` (or env var fallback for
-    // ad-hoc local use). When set, forward as `TAWC_XWL_TEST_PATTERN=1`
-    // to Xwayland, which reads it alongside the equivalent
-    // `-tawc-test-pattern` argv flag (smithay's spawn doesn't let us
-    // inject argv). On read, Xwayland allocates a known-pattern AHB and
-    // ships it through android_wlegl; the compositor's wlegl handler
-    // logs `wlegl: create_buffer ...` on import success. See
-    // notes/xwayland.md.
-    let test_pattern = std::env::var("TAWC_XWL_TEST_PATTERN")
-        .ok()
-        .filter(|v| !v.is_empty() && v != "0")
-        .or_else(|| {
-            std::process::Command::new("getprop")
-                .arg("debug.tawc.xwl_test_pattern")
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|v| !v.is_empty() && v != "0")
-        });
-    if let Some(v) = test_pattern {
-        info!("xwayland: TAWC_XWL_TEST_PATTERN={} (test pattern enabled)", v);
-        envs.push(("TAWC_XWL_TEST_PATTERN".to_string(), v));
-    }
+    let envs: Vec<(String, String)> = vec![("LD_LIBRARY_PATH".to_string(), lib_dir)];
 
     // Pipe Xwayland's stderr/stdout to a log file under our xtmp dir so
     // we can post-mortem startup failures (Stdio::null() drops them on
