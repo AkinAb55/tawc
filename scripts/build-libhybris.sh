@@ -244,6 +244,7 @@ if [ "$NEED_CONFIGURE" = "1" ]; then
         --enable-x11 \
         --disable-wayland_serverside_buffers \
         --enable-adreno-quirks \
+        --enable-mali-quirks \
         --enable-property-cache \
         --with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64 \
       ) 2>&1 | tail -20
