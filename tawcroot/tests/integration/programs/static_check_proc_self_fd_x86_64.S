@@ -18,7 +18,7 @@
  * sufficient — d_name is NUL-terminated, fds <= 999 are at most 3
  * digits and won't exhibit "1000\0".
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * Exit code key:
  *    42 — dirent buffer does not contain "1000\0" (filter worked)

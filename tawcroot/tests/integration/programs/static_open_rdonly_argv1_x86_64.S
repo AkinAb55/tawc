@@ -7,7 +7,7 @@
  * bug the absolute symlink target is re-rooted at the dirfd of bind A,
  * the open returns ENOENT, and the fixture exits 201.
  *
- * Built `-static -nostdlib -no-pie` so it loads at the default base
+ * Built `-static -nostdlib` so it loads at the default base
  * with no PT_INTERP — same shape as static_open_creat_argv1.
  *
  * Exit code encoding (intentionally distinct from any tawcroot loader

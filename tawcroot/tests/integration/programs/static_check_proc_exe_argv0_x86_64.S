@@ -26,7 +26,7 @@
  * the new process's argv[0] IS the path the fork-child execve'd to,
  * which is what we expect /proc/self/exe to read back as).
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * Exit code key:
  *    42 — readlink == argv[0]

@@ -1,5 +1,5 @@
 /* x86_64 static guest fixture exercising argc / argv / envp / auxv
- * access. Built `-static -nostdlib -no-pie` (ET_EXEC, no PT_INTERP).
+ * access. Built `-static -nostdlib` (ET_EXEC, no PT_INTERP).
  *
  * Exit code encoding:
  *   99   — argc != 3            (argv plumbing broken)

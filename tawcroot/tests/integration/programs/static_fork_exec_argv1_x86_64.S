@@ -16,7 +16,7 @@
  * killed the new tawcroot before its handler ran. None of those bugs
  * surface from a non-fork execve(2) of the original guest.
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * argv: [self_path, child_exec_path]
  *

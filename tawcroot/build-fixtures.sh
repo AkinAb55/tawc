@@ -68,7 +68,7 @@ build_static() {
         return
     fi
     local out="$OUT_DIR/$name"
-    "$CC" -static -nostdlib -no-pie -O2 -Wl,--build-id=none "$src" -o "$out"
+    "$CC" -static -nostdlib -O2 -Wl,--build-id=none "$src" -o "$out"
     echo "  built $name"
 }
 

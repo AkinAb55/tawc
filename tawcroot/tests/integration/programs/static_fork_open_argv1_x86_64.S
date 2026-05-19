@@ -11,7 +11,7 @@
  * VM and surface as -EFAULT. The success path here proves
  * cross-process tid invalidation actually works.
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * argv: [self_path, marker_path]
  *

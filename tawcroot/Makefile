@@ -257,13 +257,13 @@ clean:
 # --- test fixtures (tiny guest binaries the smoke tests load) ---
 
 # static_exit42: minimal x86_64 ET_EXEC that does exit_group(42).
-# Built `-static -nostdlib -no-pie` so it loads at the default base
+# Built `-static -nostdlib` so it loads at the default base
 # (0x400000) with no PT_INTERP. The smoke test in
 # tawcroot/tests/unit/test_loader_smoke.c forks and uses our manual loader
 # to map+jump it; success = the parent waits and sees exit code 42.
 $(OUT)/programs/static_exit42: $(SRC_TS)/integration/programs/static_exit42_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_argc_random: same shape as static_exit42 but actually reads
 # its initial stack — argc, argv[0], envp[0], and the AT_RANDOM auxv
@@ -271,7 +271,7 @@ $(OUT)/programs/static_exit42: $(SRC_TS)/integration/programs/static_exit42_x86_
 # random16[0] & 0x7f + 100). Stronger validation of the stack synth.
 $(OUT)/programs/static_argc_random: $(SRC_TS)/integration/programs/static_argc_random_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # dynamic_exit42: ET_DYN linked against the host's glibc. The phase
 # 2.5 smoke loads both this binary AND its PT_INTERP-pointed ld.so,
@@ -296,7 +296,7 @@ $(OUT)/programs/dynamic_argv_check: $(SRC_TS)/integration/programs/dynamic_argv_
 # target binary.
 $(OUT)/programs/static_execve_exit42: $(SRC_TS)/integration/programs/static_execve_exit42_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_open_creat_argv1: minimal x86_64 fixture that opens argv[1]
 # with O_WRONLY|O_CREAT|O_TRUNC and exits 0. The orphan-bypass test
@@ -305,7 +305,7 @@ $(OUT)/programs/static_execve_exit42: $(SRC_TS)/integration/programs/static_exec
 # success by polling for the file the fixture creates.
 $(OUT)/programs/static_open_creat_argv1: $(SRC_TS)/integration/programs/static_open_creat_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_open_rdonly_argv1: like static_open_creat_argv1 but O_RDONLY.
 # Used by the cross-bind absolute-symlink regression test in
@@ -314,7 +314,7 @@ $(OUT)/programs/static_open_creat_argv1: $(SRC_TS)/integration/programs/static_o
 # of the bind src and into the right place.
 $(OUT)/programs/static_open_rdonly_argv1: $(SRC_TS)/integration/programs/static_open_rdonly_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_sleep_open_creat_argv1: like static_open_creat_argv1 but with a
 # 1 s nanosleep before the open. The PDEATHSIG regression test in
@@ -324,7 +324,7 @@ $(OUT)/programs/static_open_rdonly_argv1: $(SRC_TS)/integration/programs/static_
 # created at t=~1 s.
 $(OUT)/programs/static_sleep_open_creat_argv1: $(SRC_TS)/integration/programs/static_sleep_open_creat_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_fork_open_argv1: clone(SIGCHLD), child opens+creates argv[1],
 # parent waits and forwards the child's exit code. Used by the new
@@ -333,7 +333,7 @@ $(OUT)/programs/static_sleep_open_creat_argv1: $(SRC_TS)/integration/programs/st
 # notes/tawcroot.md ("More phase-5b bugs"; usercopy.c:14-22).
 $(OUT)/programs/static_fork_open_argv1: $(SRC_TS)/integration/programs/static_fork_open_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_fork_exec_argv1: clone(SIGCHLD), child execve(argv[1]), parent
 # waits and forwards. Exercises the full bash-style fork+execve chain
@@ -341,7 +341,7 @@ $(OUT)/programs/static_fork_open_argv1: $(SRC_TS)/integration/programs/static_fo
 # rootfs re-establishment.
 $(OUT)/programs/static_fork_exec_argv1: $(SRC_TS)/integration/programs/static_fork_exec_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_fork_closefrom_exec_argv1: gpgme/glibc-shape pre-exec hygiene
 # regression test — clone(SIGCHLD), child close(1000..1003) +
@@ -351,21 +351,21 @@ $(OUT)/programs/static_fork_exec_argv1: $(SRC_TS)/integration/programs/static_fo
 # re-export from `bind.src[256]`.
 $(OUT)/programs/static_fork_closefrom_exec_argv1: $(SRC_TS)/integration/programs/static_fork_closefrom_exec_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_unix_bind_argv1: socket(AF_UNIX) + bind(sun_path=argv[1]).
 # Validates syscalls_socket.c sun_path translation — the gpg-agent
 # regression where an in-rootfs path was opened on the host fs.
 $(OUT)/programs/static_unix_bind_argv1: $(SRC_TS)/integration/programs/static_unix_bind_argv1_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_check_proc_self_fd: enumerate /proc/self/fd via getdents64
 # and check no d_name == "1000" appears. Validates handle_getdents64's
 # dirent_filter against the closefrom death-spiral regression.
 $(OUT)/programs/static_check_proc_self_fd: $(SRC_TS)/integration/programs/static_check_proc_self_fd_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_check_proc_exe_argv0: readlink(/proc/self/exe) and compare
 # with argv[0]. Run as the exec target of static_fork_exec_argv1 to
@@ -373,7 +373,7 @@ $(OUT)/programs/static_check_proc_self_fd: $(SRC_TS)/integration/programs/static
 # Firefox libxul.so regression.
 $(OUT)/programs/static_check_proc_exe_argv0: $(SRC_TS)/integration/programs/static_check_proc_exe_argv0_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # static_io_uring_deny: probe io_uring_setup, io_uring_enter, and
 # io_uring_register; expect -ENOSYS from each. Validates the
@@ -381,7 +381,7 @@ $(OUT)/programs/static_check_proc_exe_argv0: $(SRC_TS)/integration/programs/stat
 # issues/tawcroot-io-uring-not-fully-intercepted.md.
 $(OUT)/programs/static_io_uring_deny: $(SRC_TS)/integration/programs/static_io_uring_deny_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
-	$(CC) -static -nostdlib -no-pie -O2 -Wl,--build-id=none $< -o $@
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
 # androidfilter/wrap: host glibc binary that installs a synthesized
 # Android-`untrusted_app`-shape seccomp BPF filter and execs its argv

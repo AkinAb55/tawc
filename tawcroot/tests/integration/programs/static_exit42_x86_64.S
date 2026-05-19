@@ -5,7 +5,7 @@
  * specific exit code (42, not 0) so the test fails clearly if the
  * binary never ran or ran the wrong path.
  *
- * Built as `-static -nostdlib -no-pie` ⇒ ET_EXEC at the default base
+ * Built as `-static -nostdlib` => ET_EXEC at the default base
  * (typically 0x400000). One PT_LOAD; no PT_INTERP. Tiny: a few hundred
  * bytes after stripping. Owns its own _start.
  */

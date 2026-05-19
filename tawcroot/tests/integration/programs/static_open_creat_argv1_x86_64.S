@@ -10,7 +10,7 @@
  * the cheapest observable side-effect that doesn't require waiting on
  * an unrelated process (`waitid`/`pidfd` still need parentage).
  *
- * Built `-static -nostdlib -no-pie` so it loads at the default base
+ * Built `-static -nostdlib` so it loads at the default base
  * with no PT_INTERP — same shape as static_exit42 etc.
  *
  * Exit code encoding (intentionally distinct from any tawcroot loader

@@ -20,7 +20,7 @@
  * exit) or the new tawcroot from --exec-child fails to set up rootfs
  * and the child dies with a tawcroot loader code (60..89).
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * argv: [self_path, child_exec_path]
  *

@@ -18,7 +18,7 @@
  * sun_path, NUL-padding via stosb. addrlen passed to bind is the full
  * 110-byte struct size — Linux ignores trailing padding past the NUL.
  *
- * Loaded by tawcroot's manual loader; -static -nostdlib -no-pie.
+ * Loaded by tawcroot's manual loader; -static -nostdlib.
  *
  * Exit code key:
  *    42 — socket+bind+close all succeeded

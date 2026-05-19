@@ -15,7 +15,7 @@
  * slow Android arm cores, so the test is timing-resilient. Cost: every
  * test run pays ~1 s. Acceptable for a once-per-test regression guard.
  *
- * Built `-static -nostdlib -no-pie`; same shape as static_open_creat_argv1.
+ * Built `-static -nostdlib`; same shape as static_open_creat_argv1.
  *
  * Exit codes (distinct from existing fixture codes):
  *   0   — sleep + open both succeeded (success)

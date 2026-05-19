@@ -4,7 +4,7 @@
  *   __NR_execve     = 221
  *   __NR_exit_group = 94
  *
- * Built `-static -nostdlib -no-pie`; we use the assembler literal pool
+ * Built `-static -nostdlib`; we use the assembler literal pool
  * (`ldr xN, =label`) to load absolute addresses so we don't need PIE-style
  * adrp+lo12: relocations against .rodata.
  *
