@@ -1,6 +1,11 @@
 package me.phie.tawc.tasks
 
+import android.app.Dialog
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -11,6 +16,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,12 +52,13 @@ class TaskManagerActivity : AppCompatActivity() {
     private val pad by lazy { (16 * resources.displayMetrics.density).toInt() }
     private val cardMargin by lazy { (8 * resources.displayMetrics.density).toInt() }
     private val cardPad by lazy { (12 * resources.displayMetrics.density).toInt() }
-    private val stopSlotWidth by lazy { (88 * resources.displayMetrics.density).toInt() }
+    private val stopSlotWidth by lazy { (72 * resources.displayMetrics.density).toInt() }
     private val spinnerSize by lazy { (32 * resources.displayMetrics.density).toInt() }
 
     private var scope: CoroutineScope? = null
     private var refreshJob: Job? = null
     private val stoppingPids = mutableSetOf<Int>()
+    private val openDetailButtons = mutableMapOf<Int, View>()
     private var lastInstalls: List<Installation> = emptyList()
     private var lastResult = ProcessScanner.ScanResult(emptyList())
 
@@ -99,6 +106,7 @@ class TaskManagerActivity : AppCompatActivity() {
         scope = null
         refreshJob = null
         stoppingPids.clear()
+        openDetailButtons.clear()
     }
 
     /**
@@ -123,6 +131,7 @@ class TaskManagerActivity : AppCompatActivity() {
     private fun render(installs: List<Installation>, result: ProcessScanner.ScanResult) {
         lastInstalls = installs
         lastResult = result
+        updateOpenDetailButtons()
         listContainer.removeAllViews()
 
         val byInstall = result.groupedByInstall()
@@ -184,6 +193,16 @@ class TaskManagerActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, cardPad / 2, 0, cardPad / 2)
+            isClickable = true
+            isFocusable = true
+            val attrs = intArrayOf(android.R.attr.selectableItemBackground)
+            val ta = obtainStyledAttributes(attrs)
+            try {
+                background = ta.getDrawable(0)
+            } finally {
+                ta.recycle()
+            }
+            setOnClickListener { showProcessDetails(p) }
         }
         val labelColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -193,7 +212,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 text = p.displayCommand.ifBlank { "unknown command" }
                 textSize = 15f
                 maxLines = 2
-                ellipsize = android.text.TextUtils.TruncateAt.END
+                ellipsize = TextUtils.TruncateAt.END
             },
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
         )
@@ -215,6 +234,134 @@ class TaskManagerActivity : AppCompatActivity() {
             },
         )
         return row
+    }
+
+    private fun showProcessDetails(p: ProcessInfo) {
+        val details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(cardPad * 2, cardPad * 2, cardPad * 2, cardPad)
+        }
+        details.addView(TextView(this).apply {
+            text = p.displayCommand.ifBlank { "Process ${p.pid}" }
+            textSize = 28f
+        }, verticalLp(MATCH_PARENT, WRAP_CONTENT, cardPad))
+        for ((label, value) in detailRows(p)) {
+            details.addView(
+                buildDetailRow(label, value),
+                verticalLp(MATCH_PARENT, WRAP_CONTENT, cardPad / 2),
+            )
+        }
+
+        val dialog = Dialog(this).apply {
+            setCanceledOnTouchOutside(true)
+        }
+        val stop = dialogStopButton(p).apply {
+            setOnClickListener {
+                dialog.dismiss()
+                stopProcess(p)
+            }
+        }
+        openDetailButtons[p.pid] = stop
+        details.addView(
+            stop,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                gravity = Gravity.END
+                topMargin = cardPad
+            },
+        )
+
+        val card = tawcCard().apply {
+            radius = 28f * resources.displayMetrics.density
+            addView(details)
+        }
+        dialog.setContentView(card)
+        dialog.setOnDismissListener {
+            if (openDetailButtons[p.pid] === stop) {
+                openDetailButtons.remove(p.pid)
+            }
+        }
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.show()
+        dialog.window?.setLayout(
+            resources.displayMetrics.widthPixels - (64 * resources.displayMetrics.density).toInt(),
+            WRAP_CONTENT,
+        )
+    }
+
+    private fun dialogStopButton(p: ProcessInfo): View {
+        val label = if (p.pid in stoppingPids) "Stopping..." else "Stop"
+        return destructiveButton(label) {}.apply {
+            minWidth = stopSlotWidth
+            setDetailStopButtonState(this, p.pid)
+        }
+    }
+
+    private fun canStop(pid: Int): Boolean =
+        pid !in stoppingPids && lastResult.processes.any { it.pid == pid }
+
+    private fun updateOpenDetailButtons() {
+        for ((pid, button) in openDetailButtons) {
+            if (button is MaterialButton) {
+                setDetailStopButtonState(button, pid)
+            } else {
+                button.isEnabled = canStop(pid)
+            }
+        }
+    }
+
+    private fun setDetailStopButtonState(button: MaterialButton, pid: Int) {
+        val enabled = canStop(pid)
+        button.isEnabled = enabled
+        button.backgroundTintList = ColorStateList.valueOf(
+            getColor(
+                if (enabled) me.phie.tawc.R.color.tawc_danger
+                else me.phie.tawc.R.color.tawc_tonal_bg,
+            ),
+        )
+        button.setTextColor(
+            getColor(
+                if (enabled) me.phie.tawc.R.color.tawc_on_danger
+                else me.phie.tawc.R.color.tawc_on_tonal,
+            ),
+        )
+    }
+
+    private fun buildDetailRow(label: String, value: String): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@TaskManagerActivity).apply {
+                text = label
+                textSize = 12f
+                alpha = 0.65f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(this@TaskManagerActivity).apply {
+                text = value.ifBlank { "unknown" }
+                textSize = 14f
+                setTextIsSelectable(true)
+            })
+        }
+    }
+
+    private fun detailRows(p: ProcessInfo): List<Pair<String, String>> {
+        val owner = when {
+            p.ownerInstallId != null -> installNameForId(p.ownerInstallId)
+            p.orphanRootfsId != null -> "uninstalled rootfs ${p.orphanRootfsId}"
+            else -> "unknown rootfs"
+        }
+        return listOf(
+            "Distro" to owner,
+            "PID" to p.pid.toString(),
+            "Guest command" to p.guestCommand,
+            "CWD" to p.cwd,
+            "Android command line" to p.cmdline,
+        )
+    }
+
+    private fun installNameForId(id: String): String {
+        val inst = lastInstalls.firstOrNull { it.id == id }
+            ?: return id
+        return "${installLabel(inst)} ($id)"
     }
 
     private fun buildStopControl(p: ProcessInfo): View {

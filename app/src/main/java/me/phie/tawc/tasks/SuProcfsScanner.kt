@@ -131,7 +131,8 @@ $cases
                 [ -z "${'$'}id" ] && continue
                 comm=${'$'}(cat "${'$'}entry/comm" 2>/dev/null | tr -d '\n\t')
                 cmdline=${'$'}(tr '\0\t\r' '   ' < "${'$'}entry/cmdline" 2>/dev/null)
-                printf '%s\t%s\t%s\t%s\n' "${'$'}pid" "${'$'}id" "${'$'}comm" "${'$'}cmdline"
+                cwd=${'$'}(readlink "${'$'}entry/cwd" 2>/dev/null | tr -d '\n\t')
+                printf '%s\t%s\t%s\t%s\t%s\n' "${'$'}pid" "${'$'}id" "${'$'}comm" "${'$'}cmdline" "${'$'}cwd"
             done
         """.trimIndent()
     }
@@ -140,20 +141,23 @@ $cases
         val out = mutableListOf<ProcessInfo>()
         for (line in text.lineSequence()) {
             if (line.isEmpty()) continue
-            val parts = line.split('\t', limit = 4)
+            val parts = line.split('\t', limit = 5)
             if (parts.size < 4) continue
             val pid = parts[0].toIntOrNull() ?: continue
             val rawId = parts[1]
             val ownerId = if (rawId == "__cmdline__") extraCmdlineId else rawId
+            val guestCommand = parts[3].trimEnd().ifBlank {
+                parts[2].trim().ifBlank { "unknown command" }
+            }
             out += ProcessInfo(
                 pid = pid,
                 ownerInstallId = ownerId,
                 orphanRootfsId = null,
                 comm = parts[2].trim(),
                 cmdline = parts[3].trimEnd(),
-                displayCommand = binaryName(parts[3].trimEnd().ifBlank {
-                    parts[2].trim().ifBlank { "unknown command" }
-                }),
+                cwd = parts.getOrNull(4)?.trim().orEmpty(),
+                guestCommand = guestCommand,
+                displayCommand = binaryName(guestCommand),
                 requiresSu = true,
             )
         }

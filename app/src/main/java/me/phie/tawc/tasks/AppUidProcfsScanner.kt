@@ -101,17 +101,26 @@ internal object AppUidProcfsScanner {
             if (matchedInstall == null && matchedOrphan == null) continue
 
             val comm = readSmall("$procEntry/comm")?.trim().orEmpty()
+            val guestCommand = guestCommand(cmdline, comm, match?.commandPath)
+            val cwd = guestCwd(procEntry, classifier)
             out += ProcessInfo(
                 pid = pid,
                 ownerInstallId = matchedInstall,
                 orphanRootfsId = matchedOrphan,
                 comm = comm,
                 cmdline = cmdline,
-                displayCommand = displayCommand(cmdline, comm, match?.commandPath),
+                cwd = cwd,
+                guestCommand = guestCommand,
+                displayCommand = binaryName(guestCommand),
                 requiresSu = false,
             )
         }
         return out
+    }
+
+    private fun guestCwd(procEntry: String, classifier: RootfsClassifier): String {
+        val cwd = readlinkOrNull("$procEntry/cwd") ?: return ""
+        return classifier.match(cwd)?.commandPath ?: cwd
     }
 
     /**
@@ -170,18 +179,17 @@ internal object AppUidProcfsScanner {
         return raw.trimEnd('\u0000').replace('\u0000', ' ')
     }
 
-    private fun displayCommand(
+    private fun guestCommand(
         cmdline: String,
         comm: String,
         mappedGuestPath: String?,
     ): String {
         val cleanWrapper = strippedTawcrootCommand(cmdline)
-        val command = when {
+        return when {
             cleanWrapper.isNotBlank() -> cleanWrapper
             isTawcrootExecChild(cmdline) -> mappedGuestPath ?: UNKNOWN_COMMAND
             else -> cmdline.ifBlank { mappedGuestPath ?: comm.ifBlank { UNKNOWN_COMMAND } }
         }
-        return binaryName(command)
     }
 
     private fun isTawcrootExecChild(cmdline: String): Boolean {
