@@ -163,8 +163,8 @@ of the box.
     strictly faster and zero-copy by construction. Verification:
     `xwayland::test_es2gears_x11_renders_via_ahb` runs es2gears for 4s
     and asserts ≥100 AHB imports, zero `createFromHandle` failures,
-    no `Xwayland disconnected: Protocol error`. mesa-demos added to
-    `scripts/install-test-deps.sh`.
+    no `Xwayland disconnected: Protocol error`. mesa-demos is part of
+    the integration runner's rootfs package set.
 
   **Wine-game shakedown remains future work** — left for when a
   specific Wine workload becomes interesting.

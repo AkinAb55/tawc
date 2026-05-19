@@ -61,7 +61,7 @@ const FIREFOX_CMD: &str = "firefox --no-remote";
 ///
 /// Repro binary at tests/apps/libhybris-tls-repro/. The glibc-side
 /// executable and bionic-side tls_lib.so (a tiny .so with `__thread int
-/// g_tls_var = 42;`) are host-cross-built by scripts/install-test-deps.sh.
+/// g_tls_var = 42;`) are host-cross-built by scripts/run-integration-tests.sh.
 /// Drives a full hybris_dlopen + hybris_dlsym +
 /// hybris_dlclose round-trip plus thread isolation, post-dlclose replay,
 /// and an assert that get_tls() returns the declared initialiser.

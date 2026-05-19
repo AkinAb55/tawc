@@ -6,6 +6,11 @@
 #   dep_dir <name>     -- echo absolute checkout path for <name>
 #   dep_ensure <name>  -- clone if missing, verify HEAD == pinned commit.
 #                         Errors on commit mismatch (uncommitted edits OK).
+#   dep_apply_patches <name> <patch-dir> [sed-expr]
+#                      -- ensure <name>, reset/clean it if the patch hash
+#                         changed, then apply *.patch from <patch-dir>.
+#                         Optional sed expression transforms patch contents
+#                         before hashing/applying.
 #   dep_reset <name>   -- fetch + `git reset --hard <commit>`. Wipes any
 #                         per-dep `.tawc-patches-applied-*` sentinel so
 #                         the build's apply_patches stage re-runs. Used
@@ -170,6 +175,43 @@ _dep_ensure_inner() {
 dep_ensure() {
     _dep_lookup "$1" || return 1
     _dep_with_lock _dep_ensure_inner
+}
+
+_dep_apply_patches_inner() {
+    local patch_dir="$1" sed_expr="${2:-}"
+    _dep_ensure_inner || return 1
+    shopt -s nullglob
+    local patch_files=("$patch_dir"/*.patch)
+    shopt -u nullglob
+    [ "${#patch_files[@]}" -gt 0 ] || return 0
+
+    local hash sentinel
+    if [ -n "$sed_expr" ]; then
+        hash="$(sed "$sed_expr" "${patch_files[@]}" | sha1sum | cut -c1-12)"
+    else
+        hash="$(cat "${patch_files[@]}" | sha1sum | cut -c1-12)"
+    fi
+    sentinel="$DEP_DEST/.tawc-patches-applied-$hash"
+    [ -f "$sentinel" ] && return 0
+
+    rm -f "$DEP_DEST"/.tawc-patches-applied-*
+    git -C "$DEP_DEST" reset --hard --quiet HEAD
+    git -C "$DEP_DEST" clean -fdx --quiet
+    local p
+    for p in "${patch_files[@]}"; do
+        echo "==> patch $DEP_NAME: $(basename "$p")"
+        if [ -n "$sed_expr" ]; then
+            sed "$sed_expr" "$p" | ( cd "$DEP_DEST" && patch -p1 --no-backup-if-mismatch )
+        else
+            ( cd "$DEP_DEST" && patch -p1 --no-backup-if-mismatch < "$p" >/dev/null )
+        fi
+    done
+    touch "$sentinel"
+}
+
+dep_apply_patches() {
+    _dep_lookup "$1" || return 1
+    _dep_with_lock _dep_apply_patches_inner "$2" "${3:-}"
 }
 
 _dep_reset_inner() {

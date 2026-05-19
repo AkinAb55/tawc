@@ -27,8 +27,8 @@ use std::sync::OnceLock;
 use crate::GraphicsBackend;
 
 /// Path to the host-side tawc-exec helper. Absolute path lets tests
-/// invoke it without needing it on $PATH. Built by
-/// `scripts/build-tawc-exec.sh`. Override via `TAWC_EXEC_BIN`.
+/// invoke it without needing it on $PATH. Built by `scripts/tawc-exec.sh`.
+/// Override via `TAWC_EXEC_BIN`.
 fn tawc_exec_bin() -> &'static str {
     static B: OnceLock<String> = OnceLock::new();
     B.get_or_init(|| {

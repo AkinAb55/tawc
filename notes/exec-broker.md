@@ -102,7 +102,7 @@ ARG mirrorProxy=http://127.0.0.1:8080/proxy/
 broker reads the install's recorded method from `metadata.json` and
 calls `InstallationMethod.startInside`, the single Kotlin entry point
 for "enter the chroot" (notes/rootfs-sessions.md). Used by
-`rootfs-run.sh`, `install-test-deps.sh`, and the integration
+`rootfs-run.sh`, `run-integration-tests.sh`, and the integration
 test crate. Omit `CMD` for interactive `bash -l`. `OP_TITLE` is
 optional and behaves the same as on ARGV form. `GRAPHICS` is
 optional and overrides the in-rootfs `GraphicsBackend` for this one
@@ -373,11 +373,10 @@ the UID-wide kill is the actual safety net for orphaned descendants.
 
 ## Host helper
 
-`tawc-exec` is a small Rust binary at `tools/tawc-exec/`. Build it once
-with `scripts/build-tawc-exec.sh`; the output binary is cached at
-`build/tawc-exec/tawc-exec`. Most host scripts call
-`scripts/tawc-exec.sh`, which rebuilds the helper when sources are newer
-and then execs the cached binary.
+`tawc-exec` is a small Rust binary at `tools/tawc-exec/`. Host scripts
+call `scripts/tawc-exec.sh`, which rebuilds the helper when sources are
+newer, caches it at `build/tawc-exec/tawc-exec`, and then execs the
+cached binary. Use `scripts/tawc-exec.sh --clean` to force a rebuild.
 
 Usage:
 

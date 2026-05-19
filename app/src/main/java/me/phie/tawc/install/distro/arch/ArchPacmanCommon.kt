@@ -116,7 +116,7 @@ internal object ArchPacmanCommon {
         // Static archives for the same multi-language runtimes and
         // sanitizers, plus a few large standalone static libs we never
         // statically link against. We build gtk4-debug-app dynamically
-        // (see `tests/apps/gtk4-debug-app/build.sh`), so the ld(1) `-l`
+        // (see `tests/apps/Makefile`), so the ld(1) `-l`
         // search of these is dead weight on disk.
         //
         // Listed by exact path on purpose. A blanket `usr/lib/*.a`
@@ -557,7 +557,7 @@ PACMAN_EOF
      * just `lxterminal` as a sanity-check launcher (gives a fresh
      * install one usable app to open from the launcher).
      * Test/dev subsystems install their own deps via
-     * `scripts/install-test-deps.sh`.
+     * `scripts/run-integration-tests.sh`.
      */
     val DEFAULT_BASE_PACKAGES: List<String> = listOf("lxterminal")
 }

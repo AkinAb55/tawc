@@ -24,7 +24,7 @@ pub fn require_compositor() {
     compositor::assert_running();
 }
 
-/// Return the gtk4-debug-app path, verifying that install-test-deps copied
+/// Return the gtk4-debug-app path, verifying that the integration runner copied
 /// the host-built binary into the rootfs. Memoized per test binary.
 pub fn ensure_gtk4_debug_app() -> String {
     require_compositor();
@@ -34,7 +34,7 @@ pub fn ensure_gtk4_debug_app() -> String {
 }
 
 /// Return the toolkitless Wayland debug app path, verifying that
-/// install-test-deps copied it into the rootfs. Memoized per test binary.
+/// the integration runner copied it into the rootfs. Memoized per test binary.
 pub fn ensure_wayland_debug_app() -> String {
     require_compositor();
     static BIN: OnceLock<String> = OnceLock::new();

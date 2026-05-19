@@ -3,7 +3,6 @@
 #
 # Usage: scripts/run-integration-tests.sh [--no-build] [filter]
 # Requires an installed distro; set TAWC_INSTALL_ID when more than one exists.
-# Install test packages first with scripts/install-test-deps.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -59,12 +58,219 @@ source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 # test harness reads the same env var via tawc_integration::install_id.
 INSTALL_ID="$TAWC_INSTALL_ID"
 INSTALL_DIR="/data/data/me.phie.tawc/distros/$INSTALL_ID"
+TAWC_DISTROS_DIR="$INSTALL_DIR"
+ROOTFS_DIR="$INSTALL_DIR/rootfs"
 
 echo "=== Using install id: $INSTALL_ID ==="
 
+read_distro_key() {
+    local distro_key
+    distro_key=$("$TAWC_EXEC" /system/bin/cat "$TAWC_DISTROS_DIR/metadata.json" \
+        | tr -d '\r' \
+        | sed -n 's/.*"distro"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n1)
+    if [ -z "$distro_key" ]; then
+        echo "ERROR: could not read distro key from $TAWC_DISTROS_DIR/metadata.json" >&2
+        exit 1
+    fi
+    echo "$distro_key"
+}
+
+detect_rootfs_abi() {
+    local host_arch
+    host_arch=$("$TAWC_EXEC" /system/bin/uname -m | tr -d '\r\n')
+    case "$host_arch" in
+        aarch64) echo aarch64 ;;
+        x86_64)  echo x86_64 ;;
+        *) echo "ERROR: unsupported rootfs arch '$host_arch'" >&2; exit 1 ;;
+    esac
+}
+
+set_required_packages() {
+    local distro_key="$1"
+    case "$distro_key" in
+        arch|manjaro)
+            REQUIRED_PKGS=(
+                gtk4 cairo wayland libx11 libxcb libglvnd
+                gtk3 gtk3-demos gtk4-demos firefox supertuxkart
+                mesa-utils weston vulkan-tools
+                xorg-xclock
+                mesa-demos
+            )
+            PACKAGE_CHECK_CMD="pacman -Q ${REQUIRED_PKGS[*]} >/dev/null 2>&1"
+            INSTALL_CMD="pacman -Syu --noconfirm --needed ${REQUIRED_PKGS[*]}"
+            ;;
+        void)
+            REQUIRED_PKGS=(
+                gtk4 cairo wayland libX11 libxcb libglvnd
+                gtk+3 gtk+3-demo gtk4-demo firefox supertuxkart
+                glxinfo weston Vulkan-Tools
+                xclock
+                mesa-demos mesa-dri
+                dejavu-fonts-ttf
+            )
+            PACKAGE_CHECK_CMD="for p in ${REQUIRED_PKGS[*]}; do xbps-query -p pkgver \"\$p\" >/dev/null 2>&1 || exit 1; done"
+            INSTALL_CMD="xbps-install -Suy && xbps-install -y ${REQUIRED_PKGS[*]}"
+            ;;
+        *)
+            echo "ERROR: unsupported distro '$distro_key' (expected arch / manjaro / void)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+ensure_runtime_packages() {
+    local distro_key="$1"
+    set_required_packages "$distro_key"
+    echo "=== Checking rootfs test packages ($distro_key) ==="
+    if TAWC_OP_TITLE= "$ROOT_DIR/scripts/rootfs-run.sh" "$PACKAGE_CHECK_CMD" >/dev/null 2>&1; then
+        echo "=== Rootfs test packages already installed ==="
+        return
+    fi
+    echo "=== Installing rootfs test packages: ${REQUIRED_PKGS[*]} ==="
+    TAWC_OP_TITLE="install integration test deps ($distro_key)" \
+        "$ROOT_DIR/scripts/rootfs-run.sh" "$INSTALL_CMD"
+}
+
+host_file_sha() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+device_file_sha() {
+    local path="$1"
+    "$TAWC_EXEC" /system/bin/sh -c "test -f $path && sha256sum $path 2>/dev/null | awk '{print \$1}'" \
+        | tr -d '\r' \
+        | head -n1
+}
+
+deploy_pidfile_helper() {
+    # shellcheck source=../scripts/lib/tawc-scratch.sh
+    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+    local src="$ROOT_DIR/tests/apps/tawc-pidfile-exec.sh"
+    local dst="$ROOTFS_DIR/tmp/tawc-pidfile-exec.sh"
+    if [ "$(host_file_sha "$src")" = "$(device_file_sha "$dst" || true)" ]; then
+        echo "=== pidfile helper already deployed ==="
+        return
+    fi
+    echo "=== Deploying pidfile helper ==="
+    adb push "$src" "$TAWC_SCRATCH/tawc-pidfile-exec.sh" >/dev/null
+    "$TAWC_EXEC" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec.sh $dst && chmod +x $dst"
+}
+
+copy_test_app() {
+    local name="$1"
+    local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
+    local staging="$TAWC_SCRATCH/$name-out"
+    local bin_dir="$ROOTFS_DIR/usr/local/bin"
+    local lib_dir="$ROOTFS_DIR/usr/local/lib"
+    local srcs=("$out_dir/$name")
+    local dsts=("$bin_dir/$name")
+
+    if [ "$name" = "libhybris-tls-repro" ]; then
+        srcs+=("$out_dir/tls_lib.so" "$out_dir/weak_lib.so")
+        dsts+=("$lib_dir/tls_lib.so" "$lib_dir/weak_lib.so")
+    fi
+
+    local changed=0
+    local i
+    for i in "${!srcs[@]}"; do
+        [ -f "${srcs[$i]}" ] || { echo "ERROR: missing ${srcs[$i]}" >&2; exit 1; }
+        if [ "$(host_file_sha "${srcs[$i]}")" != "$(device_file_sha "${dsts[$i]}" || true)" ]; then
+            changed=1
+        fi
+    done
+
+    if [ "$changed" = "0" ]; then
+        echo "=== $name already deployed ==="
+        return
+    fi
+
+    echo "=== Deploying $name ==="
+    "$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"
+    adb shell rm -rf "$staging" >/dev/null
+    adb push "$out_dir" "$staging" >/dev/null
+    if [ "$name" = "libhybris-tls-repro" ]; then
+        "$TAWC_EXEC" /system/bin/sh -c "\
+            mkdir -p $bin_dir $lib_dir && \
+            cp $staging/$name $bin_dir/$name && \
+            cp $staging/tls_lib.so $staging/weak_lib.so $lib_dir/ && \
+            chmod a+rx $bin_dir/$name $lib_dir/tls_lib.so $lib_dir/weak_lib.so"
+    else
+        "$TAWC_EXEC" /system/bin/sh -c "\
+            mkdir -p $bin_dir && \
+            cp $staging/$name $bin_dir/$name && \
+            chmod a+rx $bin_dir/$name"
+    fi
+}
+
+build_and_deploy_test_apps() {
+    local distro_key="$1"
+    BUILD_ABI="$(detect_rootfs_abi)"
+    BUILD_DISTRO="${TAWC_SYSROOT_DISTRO:-$distro_key}"
+
+    echo "=== Building test apps if needed ($BUILD_DISTRO/$BUILD_ABI) ==="
+    make -C "$ROOT_DIR/tests/apps" -j"$(nproc)" "DISTRO=$BUILD_DISTRO" "ABI=$BUILD_ABI" all
+
+    # shellcheck source=../scripts/lib/tawc-scratch.sh
+    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
+    APPS=(gtk4-debug-app wayland-debug-app eglx11-test)
+    if [ "$BUILD_ABI" = "aarch64" ]; then
+        APPS+=(tawc-dri-test libhybris-tls-repro)
+    else
+        echo "=== Skipping tawc-dri-test, libhybris-tls-repro on $BUILD_ABI (need libhybris, aarch64-only) ==="
+    fi
+    for app in "${APPS[@]}"; do
+        copy_test_app "$app"
+    done
+}
+
+ensure_tawcroot_device_tests() {
+    case "$ANDROID_SERIAL" in
+        emulator-*) TAWCROOT_ABI=x86_64 ;;
+        *)          TAWCROOT_ABI=aarch64 ;;
+    esac
+    local out_dir="$ROOT_DIR/build/tawcroot-$TAWCROOT_ABI"
+    local stamp="$out_dir/.device-tests.stamp"
+    local required=(
+        "$out_dir/libtawcroot-testhost.so"
+        "$out_dir/libtawcroot.so"
+        "$out_dir/tests"
+        "$out_dir/programs"
+    )
+    local need=0
+    local f
+    for f in "${required[@]}"; do
+        [ -e "$f" ] || need=1
+    done
+    if [ "$need" = "0" ] && [ -f "$stamp" ]; then
+        if find "$ROOT_DIR/tawcroot/src" \
+                "$ROOT_DIR/tawcroot/include" \
+                "$ROOT_DIR/tawcroot/tests" \
+                "$ROOT_DIR/tawcroot/build.sh" \
+                "$ROOT_DIR/tawcroot/build-fixtures.sh" \
+                "$ROOT_DIR/deps/deps.list" \
+                "$ROOT_DIR/scripts/lib/deps.sh" \
+                -newer "$stamp" -print -quit | grep -q .; then
+            need=1
+        fi
+    else
+        need=1
+    fi
+
+    if [ "$need" = "0" ]; then
+        echo "=== tawcroot device tests already built ($TAWCROOT_ABI) ==="
+        return
+    fi
+
+    echo "=== Building tawcroot device tests ($TAWCROOT_ABI) ==="
+    "$ROOT_DIR/tawcroot/build.sh" "--abi=$TAWCROOT_ABI" --testhost --tests
+    "$ROOT_DIR/tawcroot/build-fixtures.sh" "$TAWCROOT_ABI"
+    touch "$stamp"
+}
+
 if [ "$DO_BUILD" -eq 1 ]; then
     echo "=== Verifying in-app install is present at $INSTALL_DIR ==="
-    if ! "$TAWC_EXEC" /system/bin/sh -c "test -d $INSTALL_DIR/rootfs" >/dev/null 2>&1; then
+    if ! "$TAWC_EXEC" /system/bin/sh -c "test -d $ROOTFS_DIR" >/dev/null 2>&1; then
         cat >&2 <<EOF
 ERROR: in-app install not found at $INSTALL_DIR/.
 
@@ -77,25 +283,12 @@ EOF
         exit 1
     fi
 
-    echo "=== Pushing pidfile helper ==="
-    # shellcheck source=../scripts/lib/tawc-scratch.sh
-    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
-    adb push tests/apps/tawc-pidfile-exec.sh "$TAWC_SCRATCH/tawc-pidfile-exec.sh"
-    # `cp` + chmod via the broker — runs as the app uid, which owns the
-    # rootfs tree. No su required.
-    "$TAWC_EXEC" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec.sh $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec.sh && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec.sh"
-
-    # Pre-build the tawcroot device test bundle so the
-    # `tawcroot::test_tawcroot_device_suite` integration case can run
-    # `tawcroot/test.sh --device --no-build` and skip a redundant
-    # cross-compile.
-    case "$ANDROID_SERIAL" in
-        emulator-*) TAWCROOT_ABI=x86_64 ;;
-        *)          TAWCROOT_ABI=aarch64 ;;
-    esac
-    echo "=== Building tawcroot device tests ($TAWCROOT_ABI) ==="
-    tawcroot/build.sh "--abi=$TAWCROOT_ABI" --testhost --tests
-    tawcroot/build-fixtures.sh "$TAWCROOT_ABI"
+    DISTRO_KEY="$(read_distro_key)"
+    echo "=== Detected distro: $DISTRO_KEY ==="
+    ensure_runtime_packages "$DISTRO_KEY"
+    deploy_pidfile_helper
+    build_and_deploy_test_apps "$DISTRO_KEY"
+    ensure_tawcroot_device_tests
 fi
 
 # Launch the compositor once for the whole suite. Tests assert it is
@@ -142,12 +335,6 @@ if [ -n "$TEST_FILTER" ]; then
 else
     echo "=== Running integration tests ==="
 fi
-# Note: the test programs (gtk4-debug-app, tawc-dri-test, eglx11-test)
-# are host-cross-built/copied by `scripts/install-test-deps.sh`, not by
-# the Rust harness.
-# The harness checks that `/usr/local/bin/<name>` exists in the rootfs and
-# fails fast with a pointer back to install-test-deps if not. Re-run
-# install-test-deps after editing any source under `tests/apps/`.
 cd "$ROOT_DIR/tests/integration"
 set +e
 cargo test -- "${LIBTEST_ARGS[@]}"

@@ -1,8 +1,7 @@
 #!/bin/bash
 # Build the GTK4 debug app on the host and copy it into the rootfs.
 #
-# Runtime deps are expected to already be installed in the rootfs — run
-# `scripts/install-test-deps.sh` once per rootfs install.
+# Runtime deps are normally installed by scripts/run-integration-tests.sh.
 #
 # Usage:
 #   scripts/build-debug-app.sh
@@ -35,7 +34,7 @@ distro_key=$("$TAWC_EXEC" /system/bin/cat "/data/data/me.phie.tawc/distros/$TAWC
 build_distro="${TAWC_SYSROOT_DISTRO:-$distro_key}"
 
 echo "=== $app_name: cross-building ($build_distro/$build_abi) ==="
-"$ROOT_DIR/scripts/build-test-apps.sh" "--distro=$build_distro" "--abi=$build_abi" "--app=$app_name"
+make -C "$ROOT_DIR/tests/apps" -j"$(nproc)" "DISTRO=$build_distro" "ABI=$build_abi" "$app_name"
 
 echo "=== $app_name: copying ==="
 "$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"

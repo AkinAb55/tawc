@@ -744,7 +744,7 @@ cost) and runs in three pieces:
    run anyway).
 
 Plus `pacman -Scc --noconfirm` after every install transaction
-(`installBasePackages`, `scripts/install-test-deps.sh`) to drop the
+(`installBasePackages`, integration-test package setup) to drop the
 fetched `.pkg.tar.xz` files — we never reinstall in place, so caching
 costs only disk.
 
@@ -762,15 +762,13 @@ Two consequences of where each piece lives:
   only path. (Acceptable because the rootfs is cheap to rebuild and
   the gate refuses install on a non-empty slot, so there's no
   in-place "policy update" to worry about.)
-- **`scripts/install-test-deps.sh` does a full system upgrade every
-  run.** It uses `pacman -Syu --needed <pkgs>` (matching the install
-  policy in `installBasePackages`) so the local DB is fresh in the
-  same transaction the new packages come down — closes the
-  version-skew window that bricked the install pipeline at one point.
-  The trade-off is that running test-deps weeks apart can pull in
-  glibc/gtk/weston upgrades that the test suite hasn't seen, so a
-  test flake right after a long gap is more likely a real upstream
-  change than a code regression.
+- **Integration-test package setup upgrades only when packages are
+  missing.** `scripts/run-integration-tests.sh` first queries the
+  package manager for the required runtime set. If anything is absent,
+  Arch/Manjaro use `pacman -Syu --needed <pkgs>` so the local DB is
+  fresh in the same transaction the new packages come down — closes
+  the version-skew window that bricked the install pipeline at one
+  point.
 
 ## ALARM mirror failover
 
@@ -946,5 +944,5 @@ where mount setup, env injection (via [RootfsEnv]'s `env -i` wrapper),
 and chroot exec live (see
 [rootfs-sessions.md](rootfs-sessions.md) and
 [exec-broker.md](exec-broker.md)). Used by the integration tests
-(`tests/integration/src/adb.rs`), `scripts/install-test-deps.sh`,
+(`tests/integration/src/adb.rs`), `scripts/run-integration-tests.sh`,
 and `scripts/build-debug-app.sh`.

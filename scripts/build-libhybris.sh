@@ -130,6 +130,11 @@ HOST_WAYLAND_DATADIR="$(pkg-config --variable=pkgdatadir wayland-client 2>/dev/n
 HOST_WAYLAND_PROTOCOLS_DATADIR="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || echo /usr/share/wayland-protocols)"
 HOST_WAYLAND_SCANNER="$(command -v wayland-scanner)"
 HOST_VULKAN_INCLUDE="$(pkg-config --variable=includedir vulkan 2>/dev/null || echo /usr/include)"
+[ -f "$HOST_VULKAN_INCLUDE/vulkan/vulkan.h" ] || {
+    echo "ERROR: missing Vulkan headers at $HOST_VULKAN_INCLUDE/vulkan/vulkan.h" >&2
+    echo "       Install vulkan-headers (Arch) or libvulkan-dev (Debian). See notes/building.md." >&2
+    exit 1
+}
 # X11 / xcb headers — plain C, ABI-portable across glibc-aarch64 and host.
 HOST_X11_INCLUDE="$(pkg-config --variable=includedir x11 2>/dev/null || echo /usr/include)"
 HOST_XCB_INCLUDE="$(pkg-config --variable=includedir xcb 2>/dev/null || echo /usr/include)"

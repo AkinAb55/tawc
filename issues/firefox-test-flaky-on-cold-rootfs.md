@@ -17,7 +17,7 @@ original symptom for archaeology.
 ---
 
 The Firefox integration test reliably **fails on the first run**
-following a fresh proot install + `install-test-deps.sh`, then
+following a fresh proot install + integration-test package setup, then
 **passes on every subsequent run** within the same chroot lifetime.
 
 ## Repro
@@ -25,8 +25,7 @@ following a fresh proot install + `install-test-deps.sh`, then
 ```
 TAWC_TARGET=physical scripts/tawc-exec.sh --foreground-app --action uninstall --arg id=arch
 TAWC_TARGET=physical scripts/tawc-exec.sh --foreground-app --action install --arg id=arch --arg method=proot
-TAWC_TARGET=physical scripts/install-test-deps.sh
-TAWC_TARGET=physical scripts/run-integration-tests.sh --no-build
+TAWC_TARGET=physical scripts/run-integration-tests.sh
 # -> hybris::test_firefox_renders_via_ahb FAILS
 
 TAWC_TARGET=physical scripts/run-integration-tests.sh --no-build
@@ -47,7 +46,7 @@ for a warm-cache Firefox start (~5-10s) and doesn't accommodate the
 
 - **Detect cold-start and lengthen the timeout once.** Add a "if
   `~/.mozilla/firefox/*` is empty, expect first-run latency" branch.
-- **Pre-warm in `install-test-deps.sh`.** Run `firefox --headless
+- **Pre-warm in `run-integration-tests.sh`.** Run `firefox --headless
   --screenshot /tmp/_warm.png about:blank` once after the pacman
   install so test runs always hit a warm profile. Cleaner for the
   test, costs ~30s of one-time setup. Cleanest fix and the one I'd
@@ -65,4 +64,4 @@ red herring.
 ## References
 
 - `tests/integration/tests/hybris.rs::test_firefox_renders_via_ahb`
-- `scripts/install-test-deps.sh` (where a pre-warm step would land)
+- `scripts/run-integration-tests.sh` (where a pre-warm step would land)

@@ -47,7 +47,7 @@ cc = "1.0"
 
 # Pin smithay to our patched fork. The checkout lives at deps/smithay/,
 # auto-cloned by scripts/lib/deps.sh — gradle's setupSmithay task does it
-# automatically, or run `scripts/update-deps.sh smithay` standalone.
+# automatically, or run `scripts/ensure-deps.sh smithay` standalone.
 # The actual repo + commit pin lives in deps/deps.list.
 [patch.crates-io]
 smithay = { path = "../deps/smithay" }

@@ -2,11 +2,10 @@ use std::io;
 
 use crate::adb;
 
-/// Verify a test app binary copied by `scripts/install-test-deps.sh`
+/// Verify a test app binary deployed by `scripts/run-integration-tests.sh`
 /// exists in the rootfs and return its path. The binary is cross-built
-/// on the host at install-test-deps time — tests never compile on the
-/// device. If you edited the source under `tests/apps/<name>/`, re-run
-/// install-test-deps to pick up the change.
+/// on the host before the Rust harness starts; tests never compile on
+/// the device.
 fn check_rootfs_app(name: &str) -> io::Result<String> {
     let binary_rootfs = format!("/usr/local/bin/{name}");
     let probe = format!(
@@ -22,8 +21,8 @@ fn check_rootfs_app(name: &str) -> io::Result<String> {
         io::ErrorKind::NotFound,
         format!(
             "{name} not found at {binary_rootfs}. Run \
-             `scripts/install-test-deps.sh` (re-run after editing \
-             tests/apps/{name}/* to pick up the new source)."
+             `scripts/run-integration-tests.sh` so test apps are built \
+             and deployed before cargo starts."
         ),
     ))
 }
@@ -46,8 +45,8 @@ pub fn ensure_wayland_debug_app() -> io::Result<String> {
         io::ErrorKind::NotFound,
         format!(
             "{bin} is stale and does not include the `touch` mode. Run \
-             `scripts/install-test-deps.sh` (re-run after editing \
-             tests/apps/wayland-debug-app/* to pick up the new source)."
+             `scripts/run-integration-tests.sh` so the changed test app \
+             is rebuilt and deployed."
         ),
     ))
 }
@@ -70,8 +69,8 @@ pub fn ensure_eglx11_test() -> io::Result<String> {
 /// `/usr/local/lib/`.
 pub fn ensure_libhybris_tls_repro() -> io::Result<String> {
     let bin = check_rootfs_app("libhybris-tls-repro")?;
-    // Also confirm the bionic-side .so landed — install-test-deps cross-
-    // builds it via NDK; if missing, the binary check above passes but
+    // Also confirm the bionic-side .so landed — the integration runner
+    // cross-builds it via NDK; if missing, the binary check above passes but
     // the test would fail with a confusing dlopen error.
     let so_dir = "/usr/local/lib";
     let so = format!("{so_dir}/tls_lib.so");
@@ -83,7 +82,7 @@ pub fn ensure_libhybris_tls_repro() -> io::Result<String> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{so} or {weak} not found. Run `scripts/install-test-deps.sh` \
+                "{so} or {weak} not found. Run `scripts/run-integration-tests.sh` \
                  (which cross-builds the bionic-ABI tls_lib.so via the \
                  Android NDK on the host)."
             ),

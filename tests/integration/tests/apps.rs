@@ -92,7 +92,7 @@ fn test_supertuxkart_launches() {
 ///     toplevel/client).
 ///
 /// `lxterminal` ships in the distro's [DEFAULT_BASE_PACKAGES], so a
-/// fresh install already has it — no `scripts/install-test-deps.sh`
+/// fresh install already has it — no extra test package install
 /// rerun needed.
 #[test]
 fn test_lxterminal_input_and_exit() {

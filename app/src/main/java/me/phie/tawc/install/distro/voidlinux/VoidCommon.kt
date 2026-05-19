@@ -258,7 +258,7 @@ internal object VoidCommon {
      * fresh `.xbps` files on later upgrades, which the user can sweep
      * separately if they care.
      *
-     * (`scripts/install-test-deps.sh` deliberately does NOT wipe its
+     * (`scripts/run-integration-tests.sh` deliberately does NOT wipe its
      * cache because partial-failure retries of *that* script DO benefit
      * from the same-version cache hit — it's the install-time pass
      * that has nothing to retry.)

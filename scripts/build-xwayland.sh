@@ -121,48 +121,8 @@ LDFLAGS_CROSS="-L$PREFIX/lib -Wl,-rpath-link,$PREFIX/lib"
 # so the next build re-patches when the manifest moves too.
 clone_pinned() {
     local name="$1"
-    dep_ensure "$name"
-    apply_patches "$name"
-}
-
-# Hash the substituted patch contents — covers both patch-file edits and
-# changes to TAWC_TMP_PREFIX. Cheap (sha1 over a few kB).
-_patches_hash() {
-    local patch_dir="$1"
-    cat "$patch_dir"/*.patch 2>/dev/null \
-        | sed "s|@TAWC_TMP_PREFIX@|$TAWC_TMP_PREFIX|g" \
-        | sha1sum | cut -c1-12
-}
-
-apply_patches() {
-    local name="$1"
     local patch_dir="$PATCH_ROOT/$name"
-    [ -d "$patch_dir" ] || return 0
-    local dst hash sentinel
-    dst="$(dep_dir "$name")"
-    hash="$(_patches_hash "$patch_dir")"
-    sentinel="$dst/.tawc-patches-applied-$hash"
-    [ -f "$sentinel" ] && return 0
-    # Revert any prior patch state before applying. dep_ensure has
-    # confirmed HEAD == pinned commit, so a full reset is safe: it's
-    # a no-op on a clean tree, and on a previously-patched tree it
-    # undoes both modifications (`reset --hard`) and added files
-    # (`clean -fdx`). This handles stale sentinels and pre-refactor
-    # patched trees (no sentinel of any kind).
-    #
-    # Build artefacts under $OUT_DIR aren't affected — only sources
-    # / autotools-generated files inside the dep tree itself, which
-    # the build_autotools / build_meson stages regenerate.
-    rm -f "$dst"/.tawc-patches-applied-*
-    git -C "$dst" reset --hard --quiet HEAD
-    git -C "$dst" clean -fdx --quiet
-    for p in "$patch_dir"/*.patch; do
-        [ -f "$p" ] || continue
-        echo "==> patch $name: $(basename "$p")"
-        sed "s|@TAWC_TMP_PREFIX@|$TAWC_TMP_PREFIX|g" "$p" \
-            | ( cd "$dst" && patch -p1 --no-backup-if-mismatch )
-    done
-    touch "$sentinel"
+    dep_apply_patches "$name" "$patch_dir" "s|@TAWC_TMP_PREFIX@|$TAWC_TMP_PREFIX|g"
 }
 
 # Generate a meson cross-file targeting the NDK toolchain. Regenerated

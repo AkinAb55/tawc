@@ -20,7 +20,7 @@
  *   - TAWC_DRI_LOOP_FRAMES=N            : double-buffered animated
  *                                          loop for N frames at ~60fps
  *
- * Built by scripts/build-test-apps.sh for integration tests.
+ * Built by tests/apps/Makefile for integration tests.
  *
  * Exit codes:
  *   0  success — all configured presents ran clean

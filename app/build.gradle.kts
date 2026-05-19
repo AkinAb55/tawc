@@ -197,12 +197,11 @@ val smithayCargoToml = "$tawcRootForSmithay/deps/smithay/Cargo.toml"
 // Ensure the smithay checkout exists before cargo runs. Cargo's
 // `[patch.crates-io] smithay = { path = "../deps/smithay" }` errors
 // up front if the dir is missing — so this has to come before the
-// per-ABI `buildRustLibrary*` tasks. Pin lives in deps/deps.list;
-// the script is just `dep_ensure smithay`.
+// per-ABI `buildRustLibrary*` tasks. Pin lives in deps/deps.list.
 val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
     workingDir = tawcRootForSmithay
-    commandLine("scripts/setup-smithay.sh")
-    inputs.file("$tawcRootForSmithay/scripts/setup-smithay.sh")
+    commandLine("scripts/ensure-deps.sh", "smithay")
+    inputs.file("$tawcRootForSmithay/scripts/ensure-deps.sh")
     inputs.file("$tawcRootForSmithay/deps/deps.list")
     inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
     outputs.file(smithayCargoToml)
@@ -218,8 +217,8 @@ val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
 val rutabagaPatchSentinel = "$tawcRootForSmithay/deps/rutabaga_gfx/kumquat/server/src/lib.rs"
 val setupRutabagaTask = tasks.register<Exec>("setupRutabaga") {
     workingDir = tawcRootForSmithay
-    commandLine("scripts/setup-rutabaga.sh")
-    inputs.file("$tawcRootForSmithay/scripts/setup-rutabaga.sh")
+    commandLine("scripts/ensure-deps.sh", "--patches", "rutabaga_gfx", "deps/rutabaga-patches/rutabaga_gfx")
+    inputs.file("$tawcRootForSmithay/scripts/ensure-deps.sh")
     inputs.dir("$tawcRootForSmithay/deps/rutabaga-patches")
     inputs.file("$tawcRootForSmithay/deps/deps.list")
     inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
@@ -264,6 +263,23 @@ tawcAbis.forEach { abi ->
             "--",
             "build", "--release"
         )
+        inputs.files(
+            "${rootProject.projectDir}/compositor/Cargo.toml",
+            "${rootProject.projectDir}/compositor/Cargo.lock",
+            "${rootProject.projectDir}/compositor/build.rs",
+            "$tawcRoot/deps/deps.list",
+            xkbStaticLib,
+        )
+        inputs.dir("${rootProject.projectDir}/compositor/src")
+        inputs.dir("${rootProject.projectDir}/compositor/protocols")
+        inputs.dir("${rootProject.projectDir}/compositor/native")
+        inputs.files(fileTree("$tawcRoot/deps/smithay") {
+            exclude(".git/**", "target/**")
+        })
+        inputs.files(fileTree("$tawcRoot/deps/rutabaga_gfx") {
+            exclude(".git/**", "build/**", "target/**")
+        })
+        outputs.file("${rootProject.projectDir}/compositor/target/$triple/release/libcompositor.so")
     }
 
     val copyTask = tasks.register<Copy>("copyRustLibrary$capAbi") {
@@ -375,6 +391,7 @@ tawcAbis.forEach { abi ->
     tasks.named<Exec>("buildRustLibrary$capAbi") {
         dependsOn(buildGfxstreamBackendTask)
         environment("GFXSTREAM_PATH_RELEASE", gfxstreamOutDir)
+        inputs.file("$gfxstreamOutDir/libgfxstream_backend.so")
     }
 }
 

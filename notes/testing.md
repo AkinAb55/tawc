@@ -86,12 +86,12 @@ TAWC_DEBUG:VULKAN_LOADED:yes|no     Whether libvulkan was mapped at READY time
 scripts/build-debug-app.sh
 
 # Build all test clients without copying:
-scripts/build-test-apps.sh --abi=aarch64 --distro=arch
+make -C tests/apps ABI=aarch64 DISTRO=arch all
 ```
 
-The Rust harness also calls `chroot::ensure_debug_app()` automatically with
-freshness caching, so the explicit build step is only needed for ad-hoc
-manual runs.
+`scripts/run-integration-tests.sh` builds and deploys all integration
+clients before cargo starts, so the explicit build step is only needed
+for ad-hoc manual runs.
 
 ### Running Manually
 
@@ -128,20 +128,16 @@ Direct `cargo test` invocations work too — they just need
 so a stale `cargo test` from a `.tawctarget=none` checkout fails fast
 instead of attaching to the wrong target.
 
-Prerequisites: a phone (or emulator) connected via adb, the tawc app
-installed, an in-app distro installed (see [installation.md](installation.md)),
-and the test suite's rootfs packages **and binaries** installed by
-`scripts/install-test-deps.sh`. That script installs the runtime
-package set (gtk3/gtk4/wayland/cairo/weston/mesa-utils/vulkan-tools/…),
+Prerequisites: a phone (or emulator) connected via adb and an in-app
+distro installed (see [installation.md](installation.md)). The runner
+builds the APK, skips reinstalling it when the installed APK hash
+matches, installs missing rootfs runtime packages, incrementally
 cross-builds every test program from `tests/apps/<name>/` on the host,
-and installs executables into `/usr/local/bin/` inside the rootfs.
-**Re-run install-test-deps after editing any `tests/apps/<name>/*`
-source** — tests check the binaries exist and refuse to run if not,
-they do not compile anything at runtime. The suite auto-targets the
-unique install if there's only one, otherwise pin via
-`TAWC_INSTALL_ID=<id>`. Some modules have additional prerequisites (e.g.
-libhybris on a real device for the GPU-rendering tests); see each
-module's docstring.
+and deploys only changed executables into `/usr/local/bin/` inside the
+rootfs. The suite auto-targets the unique install if there's only one,
+otherwise pin via `TAWC_INSTALL_ID=<id>`. Some modules have additional
+prerequisites (e.g. libhybris on a real device for the GPU-rendering
+tests); see each module's docstring.
 `wayland-debug-app` is deliberately fail-fast test code: unsupported
 protocol state, missing globals, truncation, and internal invariant
 failures abort the process instead of being tolerated.
@@ -170,7 +166,7 @@ Broker actions connect to an already-running `LocalServerSocket` and complete in
 ```
 Host (cargo test)                    Phone
   │                                    │ (test programs already compiled
-  │                                    │  by install-test-deps; the
+  │                                    │  and deployed by the runner; the
   │                                    │  harness only checks they exist)
   ├─ adb shell (start client) ─────────┤──→ gtk4-debug-app  /  wayland-debug-app  /  …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
@@ -197,10 +193,9 @@ Host (cargo test)                    Phone
 - **`adb.rs`**: Shell commands, chroot execution, broker-action-based input injection (`input_text`, `ic_commit_text`, `enable_test_input`, …; all routed through `tawc-exec --action`)
 - **`rootfs.rs`**: `ensure_debug_app` / `ensure_wayland_debug_app` /
   `ensure_tawc_dri_test` / `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
-  inside the rootfs and returns its path, errorring with a pointer at
-  `scripts/install-test-deps.sh` if the binary is missing. Tests do
-  **not** compile anything; they also do not install chroot packages.
-  Both happen up-front in `scripts/install-test-deps.sh`.
+  inside the rootfs and returns its path. Tests do **not** compile
+  anything; package install, host builds, and changed-artifact deploys
+  happen up-front in `scripts/run-integration-tests.sh`.
 - **`debug_app.rs`**: Start/stop lifecycle, stdout reader thread, `wait_for()` with timeout
 - **`compositor.rs`**: Check whether the compositor is running (`is_running`,
   `assert_running`) and query its state via the broker `query-state` action. The compositor itself

@@ -9,7 +9,7 @@
 // abort would fire on libhybris before the lazy-promote-to-static fix.
 //
 // Cross-built with the Android NDK (target aarch64-linux-android) by
-// scripts/install-test-deps.sh. Plain dlopen would reject this on
+// scripts/run-integration-tests.sh. Plain dlopen would reject this on
 // glibc; libhybris is what makes it loadable.
 #include <stdio.h>
 

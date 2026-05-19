@@ -86,24 +86,8 @@ for tool in meson ninja pkg-config cargo rustc wayland-scanner; do
     }
 done
 
-# ── Vendored Mesa ──
-dep_ensure mesa
-
-# ── Apply patches (xwayland-style) ──
-# Sentinel encodes the patch hash; if the patch set changes we re-apply.
-PATCH_HASH="$(cat "$PATCH_DIR"/*.patch 2>/dev/null | sha1sum | cut -c1-12)"
-PATCH_SENTINEL="$MESA_DIR/.tawc-patches-applied-$PATCH_HASH"
-if [ ! -f "$PATCH_SENTINEL" ]; then
-    rm -f "$MESA_DIR"/.tawc-patches-applied-*
-    git -C "$MESA_DIR" reset --hard --quiet HEAD
-    git -C "$MESA_DIR" clean -fdx --quiet
-    for p in "$PATCH_DIR"/*.patch; do
-        [ -f "$p" ] || continue
-        echo "==> patch mesa: $(basename "$p")"
-        ( cd "$MESA_DIR" && patch -p1 --no-backup-if-mismatch < "$p" >/dev/null )
-    done
-    touch "$PATCH_SENTINEL"
-fi
+# ── Vendored Mesa + patches ──
+dep_apply_patches mesa "$PATCH_DIR"
 
 build_one() {
     local abi="$1"

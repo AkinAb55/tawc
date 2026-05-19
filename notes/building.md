@@ -98,8 +98,8 @@ scripts/build-host-sysroot.sh --abi=x86_64 --distro=arch --profile=prod
 ```
 
 `build-mesa-gfxstream.sh` runs this automatically when its production
-sysroot is missing. `scripts/build-test-apps.sh` uses the same script
-with `--profile=full`, which pulls the GTK/Cairo/Wayland/X11 header and
+sysroot is missing. `tests/apps/Makefile` uses the same script with
+`--profile=full`, which pulls the GTK/Cairo/Wayland/X11 header and
 pkg-config closure needed to build test clients on the host. There is no
 device-rootfs sysroot pull path anymore.
 
@@ -140,10 +140,10 @@ silently tolerated as long as HEAD matches the pin).
 | `./deps/proot/` (+ `./deps/proot-deps/talloc-*` tarball) | `scripts/build-proot.sh`                |
 | `./deps/cleat/`                            | `tawcroot/build.sh` (host + device test runners) |
 | `./deps/xwayland-src/<lib>/` (~22 repos)   | `scripts/build-xwayland.sh`               |
-| `./deps/smithay/`                     | Rust compositor (`scripts/setup-smithay.sh`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
+| `./deps/smithay/`                     | Rust compositor (`scripts/ensure-deps.sh smithay`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
 | `./deps/mesa/`                             | `scripts/build-mesa-gfxstream.sh` (gfxstream-vk and Mesa-Zink assets) |
 | `./deps/gfxstream/`                        | `scripts/build-gfxstream-backend.sh`      |
-| `./deps/rutabaga_gfx/`                     | `scripts/setup-rutabaga.sh`; Rust compositor kumquat server dep |
+| `./deps/rutabaga_gfx/`                     | `scripts/ensure-deps.sh --patches rutabaga_gfx deps/rutabaga-patches/rutabaga_gfx`; Rust compositor kumquat server dep |
 
 Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — their
 version is baked into the URL inside the build script, so a version
@@ -442,5 +442,5 @@ See [testing.md](testing.md) for full details.
 
 ```bash
 scripts/build-debug-app.sh                 # cross-build + copy debug app
-cd tests/integration && cargo test -- --nocapture --test-threads=1
+scripts/run-integration-tests.sh           # package setup, deploy, cargo test
 ```

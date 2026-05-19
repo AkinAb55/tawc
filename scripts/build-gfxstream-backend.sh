@@ -57,29 +57,8 @@ for tool in meson ninja pkg-config; do
     command -v "$tool" >/dev/null || { echo "ERROR: '$tool' not on PATH" >&2; exit 1; }
 done
 
-# ── Vendored gfxstream ──
-dep_ensure gfxstream
-
-# ── Patches (xwayland/mesa-style sentinel) ──
-shopt -s nullglob
-PATCH_FILES=("$PATCH_DIR"/*.patch)
-shopt -u nullglob
-if [ "${#PATCH_FILES[@]}" -gt 0 ]; then
-    PATCH_HASH="$(cat "${PATCH_FILES[@]}" | sha1sum | cut -c1-12)"
-    PATCH_SENTINEL="$GFXSTREAM_DIR/.tawc-patches-applied-$PATCH_HASH"
-    if [ ! -f "$PATCH_SENTINEL" ]; then
-        rm -f "$GFXSTREAM_DIR"/.tawc-patches-applied-*
-        git -C "$GFXSTREAM_DIR" reset --hard --quiet HEAD
-        git -C "$GFXSTREAM_DIR" clean -fdx --quiet
-        for p in "${PATCH_FILES[@]}"; do
-            echo "==> patch gfxstream: $(basename "$p")"
-            ( cd "$GFXSTREAM_DIR" && patch -p1 --no-backup-if-mismatch < "$p" >/dev/null )
-        done
-        touch "$PATCH_SENTINEL"
-    fi
-else
-    echo "==> no patches in $PATCH_DIR (using working tree as-is)"
-fi
+# ── Vendored gfxstream + patches ──
+dep_apply_patches gfxstream "$PATCH_DIR"
 
 build_one() {
     local abi="$1"
