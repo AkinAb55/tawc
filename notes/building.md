@@ -110,7 +110,9 @@ compatibility link at `build/<arch>-sysroot` for older build consumers.
 For non-production profiles (`--profile=full`, used by test apps), distro
 package downloads go through the dev mirror cache by default
 (`http://127.0.0.1:8080/proxy/`); run `scripts/cache-proxy.sh run` first
-or set `TAWC_MIRROR_PROXY` explicitly.
+or set `TAWC_MIRROR_PROXY` explicitly. Pacman repo databases are fetched
+directly on each sysroot build so stale cached metadata cannot reference
+package archives that have already rolled off the mirror.
 
 ## Environment variables
 

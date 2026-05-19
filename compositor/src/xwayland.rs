@@ -38,6 +38,11 @@ use smithay::xwayland::{
     xwm::{Reorder, ResizeEdge, XwmId},
     X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
 };
+use smithay::reexports::wayland_server::Resource;
+use smithay::wayland::selection::data_device::{
+    clear_data_device_selection, current_data_device_selection_userdata,
+    set_data_device_selection,
+};
 use smithay::wayland::selection::SelectionTarget;
 
 use crate::compositor::TawcState;
@@ -322,27 +327,103 @@ impl XwmHandler for TawcState {
     }
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
 
-    // Selection (clipboard / primary) bridging — left as no-ops; tawc
-    // doesn't currently bridge wayland↔X11 clipboards.
-    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
-        false
+    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return false;
+        };
+        let Some(focus) = keyboard.current_focus() else {
+            return false;
+        };
+        self.x11_surfaces.iter().any(|surface| {
+            surface.xwm_id() == Some(xwm)
+                && surface
+                    .wl_surface()
+                    .as_ref()
+                    .is_some_and(|wl| wl.id().same_client_as(&focus.id()))
+        })
     }
     fn send_selection(
         &mut self,
         _xwm: XwmId,
-        _selection: SelectionTarget,
-        _mime_type: String,
-        _fd: std::os::unix::io::OwnedFd,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: std::os::unix::io::OwnedFd,
     ) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                let user_data = current_data_device_selection_userdata(&self.seat)
+                    .as_deref()
+                    .cloned();
+                if let Some(crate::clipboard::SelectionUserData::AndroidText(text)) = user_data {
+                    if crate::clipboard::is_supported_text_mime(&mime_type) {
+                        crate::clipboard::write_text_to_fd(fd, text);
+                    } else {
+                        warn!("xwayland: refusing unsupported Android clipboard MIME {}", mime_type);
+                    }
+                    return;
+                }
+                if let Err(e) = smithay::wayland::selection::data_device::request_data_device_client_selection(
+                    &self.seat,
+                    mime_type,
+                    fd,
+                ) {
+                    warn!("xwayland: failed to request Wayland clipboard for X11: {:?}", e);
+                }
+            }
+            SelectionTarget::Primary => {}
+        }
     }
     fn new_selection(
         &mut self,
         _xwm: XwmId,
-        _selection: SelectionTarget,
-        _mime_types: Vec<String>,
+        selection: SelectionTarget,
+        mime_types: Vec<String>,
     ) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                let preferred_mime = crate::clipboard::preferred_text_mime(&mime_types);
+                set_data_device_selection(
+                    &self.display_handle,
+                    &self.seat,
+                    mime_types,
+                    crate::clipboard::SelectionUserData::X11(selection),
+                );
+                if let Some(mime_type) = preferred_mime {
+                    if let Some(xwm) = self.xwm.as_mut() {
+                        match crate::clipboard::pipe() {
+                            Ok((read_fd, write_fd)) => {
+                                if let Err(e) = xwm.send_selection(selection, mime_type, write_fd) {
+                                    warn!("xwayland: failed to request X11 clipboard for Android: {:?}", e);
+                                } else {
+                                    crate::clipboard::read_fd_for_android(read_fd, "x11");
+                                }
+                            }
+                            Err(e) => warn!("xwayland: clipboard pipe failed: {}", e),
+                        }
+                    }
+                }
+            }
+            SelectionTarget::Primary => {}
+        }
     }
-    fn cleared_selection(&mut self, _xwm: XwmId, _selection: SelectionTarget) {}
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                let clear = current_data_device_selection_userdata(&self.seat)
+                    .as_deref()
+                    .is_some_and(|user_data| {
+                        matches!(
+                            user_data,
+                            crate::clipboard::SelectionUserData::X11(SelectionTarget::Clipboard)
+                        )
+                    });
+                if clear {
+                    clear_data_device_selection(&self.display_handle, &self.seat);
+                }
+            }
+            SelectionTarget::Primary => {}
+        }
+    }
 }
 
 /// `PendingHost` is the host an X11Surface was assigned to at
@@ -470,4 +551,3 @@ pub fn associate_pending_x11_surfaces(state: &mut TawcState) {
         }
     }
 }
-

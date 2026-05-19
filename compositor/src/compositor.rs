@@ -32,9 +32,10 @@ use smithay::wayland::fractional_scale::{
 };
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::data_device::{
-    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
 };
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
+use std::os::fd::OwnedFd;
 use smithay::desktop::PopupManager;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -365,6 +366,8 @@ impl TawcState {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             keyboard.set_focus(self, target_owned, serial);
         }
+        let target_client = target.and_then(|surface| surface.client());
+        set_data_device_focus(&self.display_handle, &self.seat, target_client);
         self.text_input_state.update_focus(target);
     }
 
@@ -749,7 +752,53 @@ impl WaylandDndGrabHandler for TawcState {}
 impl DndGrabHandler for TawcState {}
 
 impl SelectionHandler for TawcState {
-    type SelectionUserData = ();
+    type SelectionUserData = crate::clipboard::SelectionUserData;
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let mime_types = source.as_ref().map(|source| source.mime_types());
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(ty, mime_types.clone()) {
+                log::warn!("clipboard: failed to notify XWayland of Wayland selection: {:?}", e);
+            }
+        }
+
+        if ty == SelectionTarget::Clipboard {
+            if let Some(mime_types) = mime_types {
+                log::debug!("clipboard: Wayland client offered clipboard mimes: {:?}", mime_types);
+                crate::clipboard::queue_wayland_pull(mime_types);
+            }
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &Self::SelectionUserData,
+    ) {
+        match user_data {
+            crate::clipboard::SelectionUserData::AndroidText(text) => {
+                if ty != SelectionTarget::Clipboard {
+                    return;
+                }
+                crate::clipboard::write_text_to_fd(fd, text.clone());
+            }
+            crate::clipboard::SelectionUserData::X11(selection) => {
+                if let Some(xwm) = self.xwm.as_mut() {
+                    if let Err(e) = xwm.send_selection(*selection, mime_type, fd) {
+                        log::warn!("clipboard: failed to send X11 selection to Wayland: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
 }
 
 delegate_dispatch2!(TawcState);

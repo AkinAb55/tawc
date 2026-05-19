@@ -6,6 +6,7 @@ import android.util.Log
 import android.view.KeyEvent
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import me.phie.tawc.compositor.ClipboardBridge
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.compositor.RealImeOutput
 import me.phie.tawc.compositor.RecordingImeOutput
@@ -89,6 +90,8 @@ internal object InputActions {
         ActionRegistry.register("inject-touch", InjectTouchAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
+        ActionRegistry.register("clipboard-set-text", ClipboardSetTextAction)
+        ActionRegistry.register("clipboard-get-text", ClipboardGetTextAction)
         ActionRegistry.register("enable-test-input", EnableTestInputAction)
         ActionRegistry.register("disable-test-input", DisableTestInputAction)
     }
@@ -279,6 +282,21 @@ internal object InputActions {
     private object QueryStateAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             NativeBridge.nativeQueryState()
+            return 0
+        }
+    }
+
+    private object ClipboardSetTextAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val text = args["text"] ?: return ctx.fail("clipboard-set-text: --arg text=... required")
+            ClipboardBridge.setTextFromDevAction(text)
+            return 0
+        }
+    }
+
+    private object ClipboardGetTextAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            ctx.out(ClipboardBridge.getTextForDevAction())
             return 0
         }
     }

@@ -153,6 +153,35 @@ pub fn start_wayland_debug_text_input_no_surrounding(
     app
 }
 
+pub fn start_wayland_debug_clipboard_copy(
+    backend: GraphicsBackend,
+    env: &str,
+    text: &str,
+) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let subcommand = format!("clipboard-copy '{}'", text.replace('\'', "'\\''"));
+    let app = DebugApp::start(backend, &binary, &subcommand, env)
+        .expect("Failed to start wayland clipboard-copy debug app");
+    app.wait_ready()
+        .expect("Wayland clipboard-copy debug app did not become ready");
+    app.wait_for("CLIPBOARD_SET", TIMEOUT)
+        .expect("Wayland clipboard-copy debug app did not set clipboard");
+    app.wait_for("CLIPBOARD_SEND", TIMEOUT)
+        .expect("Wayland clipboard-copy debug app did not receive clipboard send request");
+    app
+}
+
+pub fn start_wayland_debug_clipboard_paste(backend: GraphicsBackend, env: &str) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(backend, &binary, "clipboard-paste", env)
+        .expect("Failed to start wayland clipboard-paste debug app");
+    app.wait_ready()
+        .expect("Wayland clipboard-paste debug app did not become ready");
+    app
+}
+
 /// Start wayland-debug-app's fullscreen touch visualizer. It does not
 /// enable text-input; tests drive touch through the focused SurfaceView and
 /// assert on the client's wl_touch events.

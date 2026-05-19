@@ -88,9 +88,11 @@ object NativeBridge {
     fun attachService(service: CompositorService) {
         appContext = service.applicationContext
         serviceRef = WeakReference(service)
+        ClipboardBridge.attach(service.applicationContext)
     }
 
     fun detachService() {
+        ClipboardBridge.detach()
         appContext = null
         serviceRef = null
     }
@@ -201,6 +203,9 @@ object NativeBridge {
     /** Update the compositor output scale live. The compositor propagates
      *  this through wl_output, fractional-scale, and xdg configure events. */
     external fun nativeSetOutputScale(scale: Float)
+
+    /** Forward Android ClipboardManager text changes into the compositor. */
+    external fun nativeOnAndroidClipboardText(text: String)
 
     /**
      * Scan a rootfs for installed `.desktop` apps. Returns a JSON array
@@ -322,6 +327,16 @@ object NativeBridge {
         mainHandler.post {
             val ic = activeInputConnection ?: return@post
             ic.updateFromCompositor(text, selStart, selEnd)
+        }
+    }
+
+    /** Called from native when a Wayland/X11 client selection should become
+     * Android's system clipboard text. */
+    @JvmStatic
+    fun onSetAndroidClipboardText(text: String) {
+        Log.d(TAG, "onSetAndroidClipboardText (from compositor): ${text.length} chars")
+        mainHandler.post {
+            ClipboardBridge.setTextFromCompositor(text)
         }
     }
 }

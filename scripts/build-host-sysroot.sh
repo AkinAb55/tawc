@@ -64,9 +64,9 @@ need_tool() {
 }
 
 fetch_url() {
-    local url="$1" out="$2" fetch
+    local url="$1" out="$2" mode="${3:-cached}" fetch
     fetch="$url"
-    if [ -n "$MIRROR_PROXY" ]; then
+    if [ -n "$MIRROR_PROXY" ] && [ "$mode" != "direct" ]; then
         if [[ "$url" =~ ^(https?)://([^/]+)/(.*)$ ]]; then
             fetch="${MIRROR_PROXY%/}/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
         else
@@ -83,6 +83,15 @@ fetch_url() {
         fi
         return 1
     fi
+}
+
+fetch_repo_db() {
+    # Package databases point at mutable package filenames. The dev mirror
+    # cache intentionally keeps successful responses for a long time, so a
+    # cached pacman .db can outlive the package files it references and make
+    # fresh sysroot builds fail with 404s. Keep package archives cached, but
+    # fetch repo metadata directly each run.
+    fetch_url "$1" "$2" direct
 }
 
 arch_packages_for_profile() {
@@ -181,7 +190,7 @@ build_arch_sysroot() {
         db_file="$sync/$repo.db"
         db_dir="$db_extract/$repo"
         mkdir -p "$db_dir"
-        fetch_url "$base/$repo.db" "$db_file"
+        fetch_repo_db "$base/$repo.db" "$db_file"
         rm -rf "$db_dir"
         mkdir -p "$db_dir"
         bsdtar -xf "$db_file" -C "$db_dir"

@@ -22,6 +22,7 @@ mod gl_import;
 mod host;
 mod protocol;
 mod wlegl;
+mod clipboard;
 mod compositor;
 mod render;
 mod scale;
@@ -171,6 +172,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     // drop.
     let touch_channel = input::create_touch_channel();
     let text_input_channel = text_input::create_text_input_channel();
+    let clipboard_channel = clipboard::create_clipboard_channel();
     let surface_event_channel = host::create_surface_event_channel();
     let (state_query_sender, state_query_channel) =
         smithay::reexports::calloop::channel::channel();
@@ -182,6 +184,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
         if let Err(e) = run_compositor(
             touch_channel,
             text_input_channel,
+            clipboard_channel,
             surface_event_channel,
             state_query_channel,
             initial_size,
@@ -190,6 +193,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
             log::error!("Compositor failed: {}", e);
         }
         *STATE_QUERY_SENDER.lock().unwrap() = None;
+        clipboard::clear_clipboard_sender();
         host::clear_surface_event_sender();
         COMPOSITOR_RUNNING.store(false, Ordering::SeqCst);
         info!("Compositor thread exited");
@@ -428,6 +432,22 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetOutput
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnAndroidClipboardText(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: JString,
+) {
+    let text: String = match env.get_string(&text) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("nativeOnAndroidClipboardText: bad text string: {}", e);
+            return;
+        }
+    };
+    clipboard::send_android_text(text);
+}
+
 // ---------------------------------------------------------------------------
 // JNI: Launcher (LauncherActivity)
 // ---------------------------------------------------------------------------
@@ -526,6 +546,44 @@ pub fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
     }
 }
 
+/// Reverse-JNI: push compositor/Wayland-owned text into Android's real
+/// ClipboardManager. Kotlin suppresses the resulting clipboard listener
+/// bounce so the Wayland owner is not immediately replaced by our own
+/// Android mirror.
+pub fn set_android_clipboard_text(text: &str) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => return,
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => {
+            log::error!("attach_current_thread failed: {}", e);
+            return;
+        }
+    };
+    let text_jstr = match env.new_string(text) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("new_string for clipboard text failed: {}", e);
+            return;
+        }
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(
+        class,
+        "onSetAndroidClipboardText",
+        "(Ljava/lang/String;)V",
+        &[(&text_jstr).into()],
+    ) {
+        log::error!("onSetAndroidClipboardText reverse-JNI failed: {}", e);
+    }
+}
+
 /// Reverse-JNI: ask Kotlin to start a new `CompositorActivity` for the
 /// given activity_id. The Activity will eventually call back via
 /// `nativeRegisterActivitySurface` once its `SurfaceView` is laid out.
@@ -610,6 +668,7 @@ fn sanitize_output_scale(scale: f64) -> Option<f64> {
 fn run_compositor(
     touch_channel: smithay::reexports::calloop::channel::Channel<input::TouchEvent>,
     text_input_channel: smithay::reexports::calloop::channel::Channel<text_input::TextInputEvent>,
+    clipboard_channel: smithay::reexports::calloop::channel::Channel<clipboard::ClipboardEvent>,
     surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
     state_query_channel: smithay::reexports::calloop::channel::Channel<()>,
     initial_physical_size: (i32, i32),
@@ -707,7 +766,7 @@ fn run_compositor(
     }
     event_loop::run(
         wl_display, state, WAYLAND_SOCKET_PATH,
-        touch_channel, text_input_channel, state_query_channel, surface_event_channel,
+        touch_channel, text_input_channel, clipboard_channel, state_query_channel, surface_event_channel,
         &RUNNING,
     )
 }

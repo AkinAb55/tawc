@@ -109,6 +109,7 @@ class CompositorService : Service() {
         // from that and the cube hangs after committing two buffers.
         val (w, h) = currentDisplaySize()
         NativeBridge.nativeStartCompositor(w, h, me.phie.tawc.Settings.outputScale)
+        ClipboardBridge.syncCurrentTextToNative()
         // Push the saved render-time settings into the compositor. The
         // Rust side defaults match the Settings defaults, so this is
         // only strictly needed when the user has flipped a toggle, but

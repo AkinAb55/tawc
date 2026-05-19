@@ -14,6 +14,8 @@
  * Commands:
  *   text-input                  Minimal editable text-input-v3 surface
  *   text-input-no-surrounding   Text-input surface that never sends surrounding
+ *   clipboard-copy <text>       Set wl_data_device clipboard text
+ *   clipboard-paste             Read focused wl_data_device clipboard text
  *   touch                       Fullscreen touch visualizer
  *   subsurface                  Fullscreen toplevel with a touchable subsurface
  *   popup                       Fullscreen toplevel with a touchable xdg_popup
@@ -32,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -200,6 +203,10 @@ struct app {
     struct wl_keyboard *keyboard;
     struct wl_pointer *pointer;
     struct wl_touch *touch;
+    struct wl_data_device_manager *data_device_manager;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *clipboard_offer;
+    struct wl_data_source *clipboard_source;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
@@ -224,6 +231,10 @@ struct app {
     int fullscreen;
     int dynamic_size;
     int report_scale;
+    int use_data_device;
+    int copy_clipboard_on_focus;
+    int paste_clipboard_on_selection;
+    int clipboard_set;
     int scene_kind;
     int scene_child_input_empty;
     int scene_child_created;
@@ -238,8 +249,11 @@ struct app {
     int win_w;
     int win_h;
     wl_fixed_t pointer_x;
+    uint32_t keyboard_enter_serial;
 
     char text[MAX_TEXT];
+    char clipboard_copy_text[MAX_TEXT];
+    char clipboard_offer_mime[64];
     size_t text_len;
     size_t cursor;
     char preedit[MAX_TEXT];
@@ -263,6 +277,9 @@ struct wayland_mode {
     int fullscreen;
     int dynamic_size;
     int report_scale;
+    int use_data_device;
+    const char *clipboard_copy_text;
+    int clipboard_paste;
     int scene_kind;
     int scene_child_input_empty;
 };
@@ -457,6 +474,246 @@ static void apply_surroundingless_text_input_transaction(struct app *app)
     }
 
     memset(pending, 0, sizeof(*pending));
+}
+
+/* --- Clipboard / wl_data_device --------------------------------------- */
+
+static int clipboard_mime_rank(const char *mime)
+{
+    if (strcmp(mime, "text/plain;charset=utf-8") == 0)
+        return 0;
+    if (strcmp(mime, "text/plain") == 0)
+        return 1;
+    if (strcmp(mime, "UTF8_STRING") == 0)
+        return 2;
+    if (strcmp(mime, "STRING") == 0)
+        return 3;
+    return 100;
+}
+
+static void data_offer_offer(void *data, struct wl_data_offer *offer,
+                             const char *mime_type)
+{
+    struct app *app = data;
+    int new_rank;
+    int old_rank;
+    (void)offer;
+
+    new_rank = clipboard_mime_rank(mime_type);
+    old_rank = app->clipboard_offer_mime[0]
+                   ? clipboard_mime_rank(app->clipboard_offer_mime)
+                   : 100;
+    if (new_rank < old_rank)
+        checked_copy(app->clipboard_offer_mime,
+                     sizeof(app->clipboard_offer_mime), mime_type,
+                     "clipboard mime");
+}
+
+static const struct wl_data_offer_listener data_offer_listener = {
+    .offer = data_offer_offer,
+};
+
+static void read_clipboard_offer(struct app *app)
+{
+    int fds[2];
+    char buf[MAX_TEXT];
+    size_t off = 0;
+
+    if (!app->clipboard_offer || !app->clipboard_offer_mime[0])
+        return;
+    if (pipe(fds) < 0)
+        fatal("clipboard pipe failed: %s", strerror(errno));
+
+    wl_data_offer_receive(app->clipboard_offer, app->clipboard_offer_mime,
+                          fds[1]);
+    close(fds[1]);
+    checked_flush(app->display);
+
+    for (;;) {
+        struct pollfd pfd = {
+            .fd = fds[0],
+            .events = POLLIN | POLLHUP | POLLERR,
+        };
+        int pr = poll(&pfd, 1, 5000);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            fatal("clipboard poll failed: %s", strerror(errno));
+        }
+        if (pr == 0)
+            fatal("clipboard receive timed out");
+        if (pfd.revents & (POLLIN | POLLHUP)) {
+            ssize_t n = read(fds[0], buf + off, sizeof(buf) - off - 1);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                fatal("clipboard read failed: %s", strerror(errno));
+            }
+            if (n == 0)
+                break;
+            off += (size_t)n;
+            if (off >= sizeof(buf) - 1)
+                fatal("clipboard text too large for debug app");
+        }
+    }
+    close(fds[0]);
+    buf[off] = '\0';
+    debug_emit("CLIPBOARD_PASTE", buf);
+}
+
+static void data_device_data_offer(void *data, struct wl_data_device *device,
+                                   struct wl_data_offer *offer)
+{
+    struct app *app = data;
+    (void)device;
+    if (app->clipboard_offer)
+        wl_data_offer_destroy(app->clipboard_offer);
+    app->clipboard_offer = offer;
+    app->clipboard_offer_mime[0] = '\0';
+    wl_data_offer_add_listener(offer, &data_offer_listener, app);
+}
+
+static void data_device_enter(void *data, struct wl_data_device *device,
+                              uint32_t serial, struct wl_surface *surface,
+                              wl_fixed_t x, wl_fixed_t y,
+                              struct wl_data_offer *offer)
+{
+    (void)data;
+    (void)device;
+    (void)serial;
+    (void)surface;
+    (void)x;
+    (void)y;
+    (void)offer;
+}
+
+static void data_device_leave(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+}
+
+static void data_device_motion(void *data, struct wl_data_device *device,
+                               uint32_t time, wl_fixed_t x, wl_fixed_t y)
+{
+    (void)data;
+    (void)device;
+    (void)time;
+    (void)x;
+    (void)y;
+}
+
+static void data_device_drop(void *data, struct wl_data_device *device)
+{
+    (void)data;
+    (void)device;
+}
+
+static void data_device_selection(void *data, struct wl_data_device *device,
+                                  struct wl_data_offer *offer)
+{
+    struct app *app = data;
+    (void)device;
+    if (!offer) {
+        debug_emit("CLIPBOARD_SELECTION", "");
+        return;
+    }
+    if (!app->paste_clipboard_on_selection)
+        return;
+    if (offer == app->clipboard_offer)
+        read_clipboard_offer(app);
+}
+
+static const struct wl_data_device_listener data_device_listener = {
+    .data_offer = data_device_data_offer,
+    .enter = data_device_enter,
+    .leave = data_device_leave,
+    .motion = data_device_motion,
+    .drop = data_device_drop,
+    .selection = data_device_selection,
+};
+
+static void data_source_target(void *data, struct wl_data_source *source,
+                               const char *mime_type)
+{
+    (void)data;
+    (void)source;
+    (void)mime_type;
+}
+
+static void data_source_send(void *data, struct wl_data_source *source,
+                             const char *mime_type, int32_t fd)
+{
+    struct app *app = data;
+    size_t len = strlen(app->clipboard_copy_text);
+    (void)source;
+    (void)mime_type;
+    debug_emit("CLIPBOARD_SEND", mime_type);
+    if (write(fd, app->clipboard_copy_text, len) < 0)
+        debug_emit("CLIPBOARD_SEND_ERROR", strerror(errno));
+    close(fd);
+}
+
+static void data_source_cancelled(void *data, struct wl_data_source *source)
+{
+    struct app *app = data;
+    if (app->clipboard_source == source)
+        app->clipboard_source = NULL;
+    wl_data_source_destroy(source);
+}
+
+static void data_source_dnd_drop_performed(void *data,
+                                           struct wl_data_source *source)
+{
+    (void)data;
+    (void)source;
+}
+
+static void data_source_dnd_finished(void *data, struct wl_data_source *source)
+{
+    (void)data;
+    (void)source;
+}
+
+static void data_source_action(void *data, struct wl_data_source *source,
+                               uint32_t dnd_action)
+{
+    (void)data;
+    (void)source;
+    (void)dnd_action;
+}
+
+static const struct wl_data_source_listener data_source_listener = {
+    .target = data_source_target,
+    .send = data_source_send,
+    .cancelled = data_source_cancelled,
+    .dnd_drop_performed = data_source_dnd_drop_performed,
+    .dnd_finished = data_source_dnd_finished,
+    .action = data_source_action,
+};
+
+static void maybe_set_clipboard_selection(struct app *app)
+{
+    if (!app->copy_clipboard_on_focus || app->clipboard_set ||
+        !app->data_device_manager || !app->data_device ||
+        app->keyboard_enter_serial == 0)
+        return;
+
+    app->clipboard_source =
+        wl_data_device_manager_create_data_source(app->data_device_manager);
+    require_true(app->clipboard_source != NULL,
+                 "create_data_source returned NULL");
+    wl_data_source_add_listener(app->clipboard_source, &data_source_listener,
+                                app);
+    wl_data_source_offer(app->clipboard_source, "text/plain;charset=utf-8");
+    wl_data_source_offer(app->clipboard_source, "text/plain");
+    wl_data_source_offer(app->clipboard_source, "UTF8_STRING");
+    wl_data_source_offer(app->clipboard_source, "STRING");
+    wl_data_device_set_selection(app->data_device, app->clipboard_source,
+                                 app->keyboard_enter_serial);
+    checked_flush(app->display);
+    app->clipboard_set = 1;
+    debug_emit("CLIPBOARD_SET", app->clipboard_copy_text);
 }
 
 /* --- Drawing ------------------------------------------------------------ */
@@ -1199,10 +1456,11 @@ static void keyboard_enter(void *data, struct wl_keyboard *keyboard,
 {
     struct app *app = data;
     (void)keyboard;
-    (void)serial;
     (void)keys;
     require_true(surface_label_for_touch(app, surface) != NULL,
                  "keyboard enter for unexpected surface %p", (void *)surface);
+    app->keyboard_enter_serial = serial;
+    maybe_set_clipboard_selection(app);
 }
 
 static void keyboard_leave(void *data, struct wl_keyboard *keyboard,
@@ -1573,6 +1831,14 @@ static void registry_global(void *data, struct wl_registry *registry,
                                      version >= 5 ? 5 : version);
         require_true(app->seat != NULL, "bind wl_seat failed");
         wl_seat_add_listener(app->seat, &seat_listener, app);
+    } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+        require_true(app->data_device_manager == NULL,
+                     "duplicate wl_data_device_manager global");
+        app->data_device_manager = wl_registry_bind(
+            registry, name, &wl_data_device_manager_interface,
+            version >= 3 ? 3 : version);
+        require_true(app->data_device_manager != NULL,
+                     "bind wl_data_device_manager failed");
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         require_true(app->wm_base == NULL, "duplicate xdg_wm_base global");
         app->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface,
@@ -1627,8 +1893,16 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->fullscreen = mode->fullscreen;
     app->dynamic_size = mode->dynamic_size;
     app->report_scale = mode->report_scale;
+    app->use_data_device = mode->use_data_device;
+    app->paste_clipboard_on_selection = mode->clipboard_paste;
     app->scene_kind = mode->scene_kind;
     app->scene_child_input_empty = mode->scene_child_input_empty;
+    if (mode->clipboard_copy_text) {
+        checked_copy(app->clipboard_copy_text,
+                     sizeof(app->clipboard_copy_text),
+                     mode->clipboard_copy_text, "clipboard copy text");
+        app->copy_clipboard_on_focus = 1;
+    }
     app->win_w = WIN_W;
     app->win_h = WIN_H;
     app->display = wl_display_connect(NULL);
@@ -1658,6 +1932,9 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     if (mode->report_scale)
         require_true(app->fractional_scale_manager != NULL,
                      "missing wp_fractional_scale_manager_v1");
+    if (mode->use_data_device)
+        require_true(app->data_device_manager != NULL,
+                     "missing wl_data_device_manager");
 
     app->surface = wl_compositor_create_surface(app->compositor);
     require_true(app->surface != NULL,
@@ -1696,6 +1973,16 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
                                             &fractional_scale_listener, app);
     }
 
+    if (mode->use_data_device) {
+        app->data_device =
+            wl_data_device_manager_get_data_device(app->data_device_manager,
+                                                   app->seat);
+        require_true(app->data_device != NULL,
+                     "wl_data_device_manager_get_data_device returned NULL");
+        wl_data_device_add_listener(app->data_device, &data_device_listener,
+                                    app);
+    }
+
     wl_surface_commit(app->surface);
     checked_flush(app->display);
 }
@@ -1706,6 +1993,12 @@ static void teardown_wayland(struct app *app)
         zwp_text_input_v3_destroy(app->text_input);
     if (app->fractional_scale)
         wp_fractional_scale_v1_destroy(app->fractional_scale);
+    if (app->clipboard_source)
+        wl_data_source_destroy(app->clipboard_source);
+    if (app->clipboard_offer)
+        wl_data_offer_destroy(app->clipboard_offer);
+    if (app->data_device)
+        wl_data_device_destroy(app->data_device);
     if (app->pointer)
         wl_pointer_destroy(app->pointer);
     if (app->touch)
@@ -1732,6 +2025,8 @@ static void teardown_wayland(struct app *app)
         zwp_text_input_manager_v3_destroy(app->text_input_manager);
     if (app->fractional_scale_manager)
         wp_fractional_scale_manager_v1_destroy(app->fractional_scale_manager);
+    if (app->data_device_manager)
+        wl_data_device_manager_destroy(app->data_device_manager);
     if (app->wm_base)
         xdg_wm_base_destroy(app->wm_base);
     if (app->seat)
@@ -1814,6 +2109,52 @@ static int cmd_text_input_no_surrounding(int argc, char **argv)
 
     teardown_wayland(&app);
     return 0;
+}
+
+static int run_scene_command(const struct wayland_mode *mode);
+
+static int cmd_clipboard_copy(int argc, char **argv)
+{
+    char text[MAX_TEXT];
+    struct wayland_mode mode = {
+        .title = "tawc wayland clipboard copy debug",
+        .app_id = "wayland-debug-app-clipboard-copy",
+        .use_data_device = 1,
+        .editable = 0,
+        .provide_surrounding = 0,
+    };
+
+    if (argc < 2)
+        fatal("clipboard-copy requires text argument");
+    text[0] = '\0';
+    for (int i = 1; i < argc; i++) {
+        size_t used = strlen(text);
+        size_t arg_len = strlen(argv[i]);
+        size_t sep = used > 0 ? 1 : 0;
+        if (used + sep + arg_len >= sizeof(text))
+            fatal("clipboard-copy text too long");
+        if (sep)
+            text[used++] = ' ';
+        memcpy(text + used, argv[i], arg_len + 1);
+    }
+    mode.clipboard_copy_text = text;
+    return run_scene_command(&mode);
+}
+
+static int cmd_clipboard_paste(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland clipboard paste debug",
+        .app_id = "wayland-debug-app-clipboard-paste",
+        .use_data_device = 1,
+        .clipboard_paste = 1,
+        .editable = 0,
+        .provide_surrounding = 0,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
 }
 
 static int cmd_touch(int argc, char **argv)
@@ -1977,6 +2318,10 @@ static const struct command commands[] = {
     { "text-input-no-surrounding",
       "Text-input surface that never sends surrounding",
       cmd_text_input_no_surrounding },
+    { "clipboard-copy", "Set wl_data_device clipboard text",
+      cmd_clipboard_copy },
+    { "clipboard-paste", "Read focused wl_data_device clipboard text",
+      cmd_clipboard_paste },
     { "touch", "Fullscreen touch visualizer", cmd_touch },
     { "scale", "Report fractional scale changes", cmd_scale },
     { "subsurface", "Fullscreen toplevel with a touchable subsurface",

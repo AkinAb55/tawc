@@ -36,6 +36,7 @@ use crate::host::{ActivityId, OutputHost, SurfaceEvent};
 use crate::input::TouchEvent;
 use crate::scale::OutputScale;
 use crate::text_input::TextInputEvent;
+use crate::clipboard::ClipboardEvent;
 
 use crate::compositor::{ClientState, TawcState};
 use crate::render;
@@ -213,6 +214,7 @@ pub fn run(
     socket_path: &str,
     touch_channel: Channel<TouchEvent>,
     text_input_channel: Channel<TextInputEvent>,
+    clipboard_channel: Channel<ClipboardEvent>,
     state_query_channel: Channel<()>,
     surface_event_channel: Channel<SurfaceEvent>,
     running: &std::sync::atomic::AtomicBool,
@@ -355,7 +357,66 @@ pub fn run(
         }
     })?;
 
-    // --- Source 4: Text input channel ---
+    // --- Source 4: Android clipboard channel ---
+    //
+    // Kotlin listens to Android's real ClipboardManager and forwards text
+    // changes here. Client-owned Wayland selections are pulled eagerly only
+    // after Smithay has installed them in seat state; the SelectionHandler
+    // queues PullWaylandSelection for this source to perform that deferred
+    // request.
+    loop_handle.insert_source(clipboard_channel, |event, _, data: &mut TawcState| {
+        let evt = match event {
+            ChannelEvent::Msg(e) => e,
+            ChannelEvent::Closed => return,
+        };
+
+        match evt {
+            ClipboardEvent::AndroidText(text) => {
+                smithay::wayland::selection::data_device::set_data_device_selection(
+                    &data.display_handle,
+                    &data.seat,
+                    crate::clipboard::text_mime_types(),
+                    crate::clipboard::SelectionUserData::AndroidText(text),
+                );
+                if let Some(xwm) = data.xwm.as_mut() {
+                    if let Err(e) = xwm.new_selection(
+                        smithay::wayland::selection::SelectionTarget::Clipboard,
+                        Some(crate::clipboard::text_mime_types()),
+                    ) {
+                        log::warn!("clipboard: failed to notify XWayland of Android selection: {:?}", e);
+                    }
+                }
+                if let Err(e) = data.display_handle.flush_clients() {
+                    error!("flush_clients error after Android clipboard update: {}", e);
+                }
+            }
+            ClipboardEvent::PullWaylandSelection { mime_type } => {
+                log::debug!("clipboard: requesting Wayland clipboard as {}", mime_type);
+                let (read_fd, write_fd) = match crate::clipboard::pipe() {
+                    Ok(fds) => fds,
+                    Err(e) => {
+                        log::warn!("clipboard: pipe failed for Wayland pull: {}", e);
+                        return;
+                    }
+                };
+                match smithay::wayland::selection::data_device::request_data_device_client_selection(
+                    &data.seat,
+                    mime_type,
+                    write_fd,
+                ) {
+                    Ok(()) => {
+                        if let Err(e) = data.display_handle.flush_clients() {
+                            error!("flush_clients error after Wayland clipboard request: {}", e);
+                        }
+                        crate::clipboard::read_fd_for_android(read_fd, "wayland");
+                    }
+                    Err(e) => log::debug!("clipboard: Wayland pull skipped: {:?}", e),
+                }
+            }
+        }
+    })?;
+
+    // --- Source 5: Text input channel ---
     // Receives text input events from Android IME via JNI.
     loop_handle.insert_source(text_input_channel, move |event, _, data: &mut TawcState| {
         let evt = match event {

@@ -239,6 +239,22 @@ pub fn ic_send_key_event(keycode: u32) -> io::Result<Output> {
     broker_action("ic-send-key-event", &[("keycode", &kc)])
 }
 
+/// Set Android's real ClipboardManager text through tawc's debug broker.
+/// This is intentionally app-side rather than `adb shell` clipboard poking:
+/// Android exposes clipboard APIs to the foreground app, while shell access
+/// varies across OS versions and device builds.
+pub fn clipboard_set_text(text: &str) -> io::Result<Output> {
+    broker_action("clipboard-set-text", &[("text", text)])
+}
+
+/// Read Android's real ClipboardManager text through tawc's debug broker.
+pub fn clipboard_get_text() -> io::Result<String> {
+    let output = broker_action("clipboard-get-text", &[])?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches(['\r', '\n'])
+        .to_string())
+}
+
 // ---- Touch / observation -------------------------------------------------
 
 /// Send a tap at physical screen coordinates (x, y) via the OS-level
