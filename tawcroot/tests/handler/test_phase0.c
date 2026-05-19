@@ -10,7 +10,7 @@
  * verifies pid is preserved across exec.
  *
  * Each individual check inside testhost (~30+) becomes its own cleat
- * test. Failure attribution is per-check, and `tawcroot/test
+ * test. Failure attribution is per-check, and `tawcroot/test.sh
  * '.*PR_SET_NO_NEW_PRIVS.*'` runs just that one. See tawcroot/tests/handler/steps.h.
  */
 

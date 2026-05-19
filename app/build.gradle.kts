@@ -201,7 +201,7 @@ val smithayCargoToml = "$tawcRootForSmithay/deps/smithay/Cargo.toml"
 // the script is just `dep_ensure smithay`.
 val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
     workingDir = tawcRootForSmithay
-    commandLine("bash", "scripts/setup-smithay.sh")
+    commandLine("scripts/setup-smithay.sh")
     inputs.file("$tawcRootForSmithay/scripts/setup-smithay.sh")
     inputs.file("$tawcRootForSmithay/deps/deps.list")
     inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
@@ -218,7 +218,7 @@ val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
 val rutabagaPatchSentinel = "$tawcRootForSmithay/deps/rutabaga_gfx/kumquat/server/src/lib.rs"
 val setupRutabagaTask = tasks.register<Exec>("setupRutabaga") {
     workingDir = tawcRootForSmithay
-    commandLine("bash", "scripts/setup-rutabaga.sh")
+    commandLine("scripts/setup-rutabaga.sh")
     inputs.file("$tawcRootForSmithay/scripts/setup-rutabaga.sh")
     inputs.dir("$tawcRootForSmithay/deps/rutabaga-patches")
     inputs.file("$tawcRootForSmithay/deps/deps.list")
@@ -243,7 +243,7 @@ tawcAbis.forEach { abi ->
     val buildLibxkbcommonTask = tasks.register<Exec>("buildLibxkbcommon$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "scripts/build-libxkbcommon.sh", "--abi=$xkbAbiFlag")
+        commandLine("scripts/build-libxkbcommon.sh", "--abi=$xkbAbiFlag")
         inputs.file("$tawcRoot/scripts/build-libxkbcommon.sh")
         // Manifest + helper changes must invalidate the cache — otherwise a
         // bumped pin in deps/deps.list silently no-ops while the .a stays
@@ -280,7 +280,7 @@ tawcAbis.forEach { abi ->
     // libproot-loader.so under jniLibs. Same shape as buildLibhybris:
     // invokes the host script, skipped when the output binaries
     // already exist. The script is itself incremental, so iteration
-    // is `bash scripts/build-proot.sh --abi=...` direct; Gradle just
+    // is `scripts/build-proot.sh --abi=...` direct; Gradle just
     // makes a fresh checkout's `assembleDebug` self-contained.
     //
     // Skipped entirely when no enabled variant ships the proot method
@@ -296,7 +296,7 @@ tawcAbis.forEach { abi ->
         val buildProotTask = tasks.register<Exec>("buildProot$capAbi") {
             workingDir = tawcRoot
             environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-            commandLine("bash", "scripts/build-proot.sh", "--abi=$scriptAbi")
+            commandLine("scripts/build-proot.sh", "--abi=$scriptAbi")
             inputs.file("$tawcRoot/scripts/build-proot.sh")
             // Pin bumps in deps/deps.list must invalidate the cache.
             inputs.file("$tawcRoot/deps/deps.list")
@@ -314,10 +314,10 @@ tawcAbis.forEach { abi ->
     val buildTawcrootTask = tasks.register<Exec>("buildTawcroot$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "tawcroot/build", "--abi=$scriptAbi")
-        inputs.file("$tawcRoot/tawcroot/build")
+        commandLine("tawcroot/build.sh", "--abi=$scriptAbi")
+        inputs.file("$tawcRoot/tawcroot/build.sh")
         // Source + header changes must invalidate the cache. Without this,
-        // adding a new .c file (and listing it in `tawcroot/build`) is the
+        // adding a new .c file (and listing it in `tawcroot/build.sh`) is the
         // only kind of edit that gets noticed — pure source/header edits
         // are silently dropped, leaving a stale binary in jniLibs. The
         // chroot.c regression (added in commit 4244bbb but not rebuilt
@@ -358,7 +358,7 @@ tawcAbis.forEach { abi ->
     val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("bash", "scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
+        commandLine("scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
         inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
         inputs.dir("$tawcRoot/deps/gfxstream-patches")
         // Pin bumps in deps/deps.list (gfxstream) must invalidate.
@@ -381,7 +381,7 @@ tawcAbis.forEach { abi ->
 // Cross-compile libhybris for aarch64 glibc on the host and pack it
 // (with symlinks preserved) as an APK asset. Extracted at runtime by
 // CompositorService.ensureLibhybrisExtracted into the app's filesDir
-// and symlinked into each chroot rootfs at install time.
+// and copied into each rootfs as real files by LibhybrisInstallProvider.
 //
 // Only aarch64 — libhybris is unsupported on the x86_64 emulator
 // (notes/emulator.md). If the user runs with `-PtawcAbis=x86_64`
@@ -405,7 +405,7 @@ if ("arm64-v8a" in tawcAbis) {
 
     val buildLibhybrisTask = tasks.register<Exec>("buildLibhybris") {
         workingDir = tawcRoot
-        commandLine("bash", "scripts/build-libhybris.sh")
+        commandLine("scripts/build-libhybris.sh")
         // The cross-compile script is itself incremental, but Gradle
         // still has to know when to invoke it. Tracked inputs:
         //   - the build script itself
@@ -567,7 +567,7 @@ if ("arm64-v8a" in tawcAbis) {
 
     val buildXwaylandTask = tasks.register<Exec>("buildXwayland") {
         workingDir = tawcRoot
-        commandLine("bash", "scripts/build-xwayland.sh")
+        commandLine("scripts/build-xwayland.sh")
         // Same incremental story as `buildLibhybris`. Tracked inputs:
         //   - build script
         //   - patches dir (a patch edit must rebuild)

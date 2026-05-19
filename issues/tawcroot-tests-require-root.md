@@ -1,15 +1,15 @@
 # tawcroot test suite requires root on device
 
-`bash tawcroot/test --device` (and therefore the
+`tawcroot/test.sh --device` (and therefore the
 `tawcroot::test_tawcroot_device_suite` integration test) shells the
 on-device test orchestrator via `su -c`, twice
-(`tawcroot/test:172` and `tawcroot/test:190`). Every other on-device
+(`tawcroot/test.sh:172` and `tawcroot/test.sh:190`). Every other on-device
 action in the integration suite goes through the dev-exec broker as
 the app uid — this is the lone path that still needs root.
 
 Background. The cleat-driven orchestrator forks production tawcroot
 and the testhost twin, then drives them through the four-layer suite.
-The blockers, per the comment block at `tawcroot/test:163-171`:
+The blockers, per the comment block at `tawcroot/test.sh:163-171`:
 
 1. **`mknod`/`mknodat` privilege** — some handler tests create FIFOs
    to verify production tawcroot intercepts the syscall correctly.

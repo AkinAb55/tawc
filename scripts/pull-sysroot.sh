@@ -17,9 +17,9 @@
 # replace it. Until then, this script is the One Way to do it.
 #
 # Usage:
-#   bash scripts/pull-sysroot.sh                # auto-pick ABI + install
-#   TAWC_TARGET=emulator bash scripts/pull-sysroot.sh
-#   TAWC_INSTALL_ID=arch bash scripts/pull-sysroot.sh
+#   scripts/pull-sysroot.sh                # auto-pick ABI + install
+#   TAWC_TARGET=emulator scripts/pull-sysroot.sh
+#   TAWC_INSTALL_ID=arch scripts/pull-sysroot.sh
 
 set -euo pipefail
 
@@ -69,7 +69,7 @@ set +e
         2>/dev/null
     exit 0
 " | tar -xzf - -C "$DEST"
-set -e
+set -euo pipefail
 
 echo "==> sysroot pulled:"
 du -sh "$DEST"

@@ -6,7 +6,7 @@
 # cargo refuses to build until the checkout exists. Gradle's
 # `setupSmithay` task invokes this script ahead of `buildRustLibrary`;
 # for standalone `cd compositor && cargo build` use, run this once
-# yourself or via `bash scripts/update-deps.sh smithay`.
+# yourself or via `scripts/update-deps.sh smithay`.
 #
 # Idempotent: dep_ensure clones if missing and verifies HEAD against
 # the pin in deps/deps.list otherwise.

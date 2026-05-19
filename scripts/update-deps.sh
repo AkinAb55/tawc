@@ -5,12 +5,12 @@
 #
 # This is the only command that mutates dep checkouts behind your back —
 # build scripts verify the pin and refuse to silently update. To ratchet
-# a dep forward: edit deps/deps.list, then run `bash scripts/update-deps.sh`
+# a dep forward: edit deps/deps.list, then run `scripts/update-deps.sh`
 # on every checkout that needs to follow.
 #
 # Usage:
-#   bash scripts/update-deps.sh              # reset every dep to its pin
-#   bash scripts/update-deps.sh libhybris    # reset just one (or a few) by name
+#   scripts/update-deps.sh              # reset every dep to its pin
+#   scripts/update-deps.sh libhybris    # reset just one (or a few) by name
 #
 # `git reset --hard` discards uncommitted edits in the dep tree. The
 # build helper (`dep_ensure`) silently tolerates dirty trees as long as

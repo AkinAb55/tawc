@@ -346,7 +346,7 @@ fn test_es2gears_x11_renders_via_ahb() {
         "es2gears_x11 wrapper exited non-zero ({:?}). The wrapper ends \
          with `; true` so timeout's 124 doesn't fail the assertion — \
          non-zero here means the chroot couldn't even spawn the binary \
-         (missing mesa-demos? run `bash scripts/install-test-deps.sh`).",
+         (missing mesa-demos? run `scripts/install-test-deps.sh`).",
         output.status.code()
     );
 

@@ -11,9 +11,9 @@
 # new .c into tawcroot/tests/{unit,handler,integration}/ Just Works on
 # the next make.
 #
-# Cross-ABI NDK builds (aarch64/x86_64) live in tawcroot/build's bash flow;
+# Cross-ABI NDK builds (aarch64/x86_64) live in tawcroot/build.sh's bash flow;
 # this Makefile is host-only. cleat must already be cloned at $(CLEAT) —
-# tawcroot/build --abi=host handles that before invoking make.
+# tawcroot/build.sh --abi=host handles that before invoking make.
 #
 # Usage:
 #   make                    # everything
@@ -41,7 +41,7 @@ HOST_BASE := 0x10000000
 # --- flags ---
 
 # tawcroot production / testhost: freestanding, no libc, fixed-base non-PIE.
-# See tawcroot/build's COMMON_CFLAGS for the full reasoning.
+# See tawcroot/build.sh's COMMON_CFLAGS for the full reasoning.
 TAWC_CFLAGS := \
     -O2 -fno-strict-aliasing -fno-stack-protector -fvisibility=hidden \
     -fno-exceptions -fno-asynchronous-unwind-tables -ffreestanding \
@@ -62,7 +62,7 @@ TESTHOST_EXTRA_CFLAGS := -DTAWCROOT_TESTHOST=1 -I$(SRC_TH)/include
 # line; comments (#) and blank lines are ignored. We derive both:
 #   PROGRAMS_NAMES   — for the `fixtures` target dependency list
 #   PROGRAMS_DEFINES — -DTAWCROOT_<UPPER>_BIN="<path>" for the cleat
-#                      orchestrator. tawcroot/build reads the same
+#                      orchestrator. tawcroot/build.sh reads the same
 #                      list with its own on-device prefix.
 #
 # Per-fixture build rules and the build-fixtures cross-build script

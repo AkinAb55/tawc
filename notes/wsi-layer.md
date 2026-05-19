@@ -236,4 +236,4 @@ Prior to migration we carried:
 
 Both are gone. The tiny GL shims (libgl-shim, libglesv2-shim) are
 all that's left (`deps/libhybris-shims/libgl-shim.c`, `deps/libhybris-shims/libglesv2-shim.c`,
-built as part of `bash scripts/build-libhybris.sh`).
+built as part of `scripts/build-libhybris.sh`).

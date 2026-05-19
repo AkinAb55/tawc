@@ -1,6 +1,6 @@
 //! Wraps the cleat-driven tawcroot device test suite as a single
 //! integration-test case. The cleat orchestrator (built by
-//! `tawcroot/build --abi=<abi> --testhost --tests`) runs all four
+//! `tawcroot/build.sh --abi=<abi> --testhost --tests`) runs all four
 //! tawcroot test layers (unit / handler / integration / future diff)
 //! on-device under `su -c`, so plumbing the entire suite through one
 //! `#[test]` keeps `run-integration-tests.sh` as the single command
@@ -29,15 +29,14 @@ fn test_tawcroot_device_suite() {
     // when ANDROID_SERIAL is already set — `run-integration-tests.sh`
     // has already selected and exported it, so we inherit that here.
     // `--no-build` skips the cross-compile: run-integration-tests.sh is
-    // expected to have built `tawcroot --abi=<abi> --testhost --tests`
+    // expected to have built `tawcroot/build.sh --abi=<abi> --testhost --tests`
     // and the fixtures already.
-    let output = Command::new("bash")
-        .arg("tawcroot/test")
+    let output = Command::new("tawcroot/test.sh")
         .arg("--device")
         .arg("--no-build")
         .current_dir(&repo_root)
         .output()
-        .expect("failed to spawn `bash tawcroot/test --device --no-build`");
+        .expect("failed to spawn `tawcroot/test.sh --device --no-build`");
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);

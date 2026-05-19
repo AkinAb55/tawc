@@ -22,7 +22,7 @@ fn check_rootfs_app(name: &str) -> io::Result<String> {
         io::ErrorKind::NotFound,
         format!(
             "{name} not found at {binary_rootfs}. Run \
-             `bash scripts/install-test-deps.sh` (re-run after editing \
+             `scripts/install-test-deps.sh` (re-run after editing \
              tests/apps/{name}/* to pick up the new source)."
         ),
     ))
@@ -62,7 +62,7 @@ pub fn ensure_libhybris_tls_repro() -> io::Result<String> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{so} not found. Run `bash scripts/install-test-deps.sh` \
+                "{so} not found. Run `scripts/install-test-deps.sh` \
                  (which cross-builds the bionic-ABI tls_lib.so via the \
                  Android NDK on the host)."
             ),

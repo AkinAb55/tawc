@@ -15,8 +15,8 @@ correctly` in pacman because tmpfiles exits non-zero overall.
 
 ## Repro
 
-    bash scripts/uninstall-distro.sh manjaro
-    bash scripts/install-distro.sh manjaro tawcroot \
+    scripts/uninstall-distro.sh manjaro
+    scripts/install-distro.sh manjaro tawcroot \
         mirrorProxy=http://127.0.0.1:8080/proxy/ distro=manjaro
 
 Search for `Cannot set file attributes for '/var/log/journal'`.

@@ -30,5 +30,7 @@
 # Requires: adb on PATH, ANDROID_SERIAL already selected (e.g. by
 # sourcing scripts/lib/select-device.sh first).
 
+set -euo pipefail
+
 export TAWC_SCRATCH=/data/local/tmp/tawc-dev
 adb shell "mkdir -p $TAWC_SCRATCH" >/dev/null

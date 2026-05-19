@@ -41,7 +41,7 @@ int main(void) {
 ```
 
 ```
-bash scripts/rootfs-run.sh 'gcc -o /tmp/repro /tmp/repro.c && /tmp/repro'
+scripts/rootfs-run.sh 'gcc -o /tmp/repro /tmp/repro.c && /tmp/repro'
 # read /tmp/repro.pid, then in the app: MainActivity → Task manager.
 # Screen says "No Linux processes running." despite the daemon being
 # alive (verifiable with `test -d /proc/<pid>` from another rootfs-run).

@@ -19,15 +19,14 @@ untested.
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
 ```
 
-Vendored repos (`./deps/libxkbcommon/`, `./deps/libhybris/`, `./deps/android-headers/`)
-are auto-cloned by their respective build scripts on first invocation —
-no manual clone step is needed. Gradle drives those scripts ahead of the
-Rust compositor build, so a fresh clone goes straight to `assembleDebug`.
-To force a rebuild by hand, run `bash scripts/build-libxkbcommon.sh` or
-`bash scripts/build-libhybris.sh`.
+Vendored git repos listed in `deps/deps.list` are auto-cloned by their
+respective build/setup scripts on first invocation - no manual clone step
+is needed. Gradle drives those scripts ahead of APK assembly, so a fresh
+clone goes straight to `assembleDebug`. To force a component rebuild by
+hand, use the matching script under `scripts/` or `tawcroot/build.sh`.
 
 The result is `app/build/outputs/apk/debug/app-debug.apk`. Install
-and launch as documented in AGENTS.md's Quick Reference.
+and launch as documented in AGENTS.md's Common Commands.
 
 ## Host packages
 
@@ -47,6 +46,7 @@ and launch as documented in AGENTS.md's Quick Reference.
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev wayland-protocols`                   |
 | Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool`                          |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
+| `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |
 | nginx (dev-time mirror cache, optional) | `nginx`                       | `nginx`                                              |
 
 JDK 26 is **not** supported — it crashes the Kotlin Gradle plugin (2.1.20).
@@ -90,7 +90,7 @@ Both `--abi=aarch64` and `--abi=x86_64` cross-builds of
 `build-mesa-gfxstream.sh` link `libvulkan_gfxstream.so` against a
 curated set of distro `.so`s + headers (wayland, libdrm, libudev,
 libffi) sitting in `build/<arch>-sysroot/`. Populate via
-`bash scripts/pull-sysroot.sh` — uses the standard
+`scripts/pull-sysroot.sh` — uses the standard
 `.tawctarget`/`TAWC_TARGET` device selection, picks ABI from the
 connected device, and tars the relevant subset out of the installed
 chroot.
@@ -105,7 +105,7 @@ patch error (`patch: **** malformed patch at line 598`). It isn't —
 that's a downstream Mesa link step failing with
 `undefined reference to wl_buffer_interface` /
 `wl_surface_interface` / `wl_output_interface`, surfaced through the
-patch-applying task chain. Fix is always `bash scripts/pull-sysroot.sh`
+patch-applying task chain. Fix is always `scripts/pull-sysroot.sh`
 followed by a rebuild — the empty stub `libwayland-client.so.0`
 `build-mesa-gfxstream.sh` falls back to when the sysroot is absent
 doesn't carry those wayland-scanner interface symbols, so Mesa's WSI
@@ -138,9 +138,12 @@ silently tolerated as long as HEAD matches the pin).
 | `./deps/android-headers/`                  | `scripts/build-libhybris.sh`              |
 | `./deps/libxkbcommon/`                     | `scripts/build-libxkbcommon.sh`                   |
 | `./deps/proot/` (+ `./deps/proot-deps/talloc-*` tarball) | `scripts/build-proot.sh`                |
-| `./deps/cleat/`                            | `tawcroot/build` (host + device test runners) |
+| `./deps/cleat/`                            | `tawcroot/build.sh` (host + device test runners) |
 | `./deps/xwayland-src/<lib>/` (~22 repos)   | `scripts/build-xwayland.sh`               |
 | `./deps/smithay/`                     | Rust compositor (`scripts/setup-smithay.sh`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
+| `./deps/mesa/`                             | `scripts/build-mesa-gfxstream.sh` (gfxstream-vk and Mesa-Zink assets) |
+| `./deps/gfxstream/`                        | `scripts/build-gfxstream-backend.sh`      |
+| `./deps/rutabaga_gfx/`                     | `scripts/setup-rutabaga.sh`; Rust compositor kumquat server dep |
 
 Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — their
 version is baked into the URL inside the build script, so a version
@@ -150,8 +153,8 @@ bump auto-fetches a fresh extract.
 
 1. `cd <dep>; git checkout <new commit>; iterate; (push if needed)`
 2. Edit `deps/deps.list` — bump the commit column.
-3. On every checkout that needs to follow: `bash scripts/update-deps.sh`
-   (or `bash scripts/update-deps.sh <name>` for a subset). This is the only
+3. On every checkout that needs to follow: `scripts/update-deps.sh`
+   (or `scripts/update-deps.sh <name>` for a subset). This is the only
    command that mutates dep checkouts behind your back.
 
 If you bumped commits but forgot to update `deps.list` (or the other
@@ -175,33 +178,34 @@ Run the standalone scripts only when iterating on the component itself
 Cross-built once per ABI. NDK clang against bionic.
 
 ```bash
-bash scripts/build-libxkbcommon.sh                  # aarch64 (default)
-bash scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
-bash scripts/build-libxkbcommon.sh --abi=both
-bash scripts/build-libxkbcommon.sh --clean          # wipe builddir(s)
+scripts/build-libxkbcommon.sh                  # aarch64 (default)
+scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
+scripts/build-libxkbcommon.sh --abi=both
+scripts/build-libxkbcommon.sh --clean          # wipe builddir(s)
 ```
 
 Output: `deps/libxkbcommon/builddir{,-x86_64}/libxkbcommon.a`. Linked into
 `libcompositor.so` via `compositor/build.rs`.
 
-### libhybris (shared .so set → ships in APK as asset, future)
+### libhybris (shared .so set → ships in APK as asset)
 
 Cross-built once. aarch64-linux-gnu-gcc against glibc.
 
 ```bash
-bash scripts/build-libhybris.sh           # incremental
-bash scripts/build-libhybris.sh --clean   # distclean + rebuild
+scripts/build-libhybris.sh           # incremental
+scripts/build-libhybris.sh --clean   # distclean + rebuild
 ```
 
-Output: `build/libhybris-aarch64/install/usr/local/lib/`, the
-autotools install layout (`libhybris-common.so{,.1,.1.0.0}`,
+Output: `build/libhybris-aarch64/install/usr/lib/hybris/`, the
+on-device install layout (`libhybris-common.so{,.1,.1.0.0}`,
 `libEGL.so{,.1,.1.0.0}`, `libGLESv2.so{,.2,.2.0.0}`,
 `libGLESv1_CM.so{,.1,.1.0.1}`, `libvulkan.so{,.1,.1.2.183}`,
 `libsync.so{,.2,.2.0.0}`, plus the `libhybris/` plugin tree and
-`libhybris/linker/q.so` for the Android 10+ bionic linker). On-device
-this lands at `/usr/lib/hybris/` instead — see "/usr/lib/hybris" in
-notes/installation.md and notes/wsi-layer.md for the env-var
-overrides that paper over the build-time `/usr/local/lib` baking.
+`libhybris/linker/q.so` for the Android 10+ bionic linker, and the
+generated `gl-shims/` directory). `scripts/build-libhybris.sh` configures
+`--prefix=/usr/lib/hybris --libdir=/usr/lib/hybris`, so libhybris's
+RUNPATH, plugin dirs, and linker plugin dir already match the rootfs
+copy location. No `HYBRIS_*_DIR` env overrides are needed.
 
 The build is in-tree (`builddir == sourcedir`) because some libhybris
 subdirs reference wayland-scanner-generated headers via `-I`s that
@@ -250,38 +254,31 @@ The build script invokes `make` per-subdir to control this.
 
 ### libvulkan_gfxstream.so (Mesa gfxstream-vk → ships in APK as asset, gfxstream-bridge GPU path)
 
-Cross-built once with the same `aarch64-linux-gnu` toolchain as
-libhybris. Builds with `-Dvirtgpu_kumquat=true` enabled — Mesa
+Cross-built once per enabled ABI. `aarch64` uses the same
+`aarch64-linux-gnu` toolchain as libhybris; `x86_64` uses the host
+glibc compiler. Builds with `-Dvirtgpu_kumquat=true` enabled — Mesa
 patches in `deps/mesa-patches/mesa/` add a meson option that
 sidesteps the in-tree Rust subproject build (which doesn't
 cross-compile cleanly) by linking to a separately-cargo-built
 `libvirtgpu_kumquat_ffi.a` via pkg-config. Output .so is ~7MB.
 
-Pre-req: extract a sysroot from the device's installed rootfs into
-`build/aarch64-sysroot/` (one-time; manual until automated).
+Pre-req: pull a small ABI-specific sysroot from the installed rootfs
+into `build/<arch>-sysroot/` using the supported script:
 
 ```bash
-# Sysroot extraction (run once after the rootfs is installed)
-mkdir -p build/aarch64-sysroot && cd build/aarch64-sysroot
-. ../../scripts/lib/select-device.sh
-. ../../scripts/lib/tawc-exec.sh
-"$TAWC_EXEC_BIN" -- /system/bin/sh -c "cd /data/data/me.phie.tawc/distros/arch/rootfs && \
-  tar -czf - usr/include usr/lib/pkgconfig usr/share/pkgconfig \
-  usr/lib/libwayland-* usr/lib/libdrm* usr/lib/libudev* usr/lib/libffi* \
-  usr/lib/libstdc++.so.6 usr/lib/libgcc_s.so.1 \
-  usr/lib/libdisplay-info* usr/lib/libvulkan.so.1 usr/lib/libxkbcommon* 2>/dev/null" | tar -xzf -
-cd ../..
-
-# Build (incremental)
-bash scripts/build-mesa-gfxstream.sh
-bash scripts/build-mesa-gfxstream.sh --clean   # wipe builddir
+scripts/pull-sysroot.sh
+scripts/build-mesa-gfxstream.sh
+scripts/build-mesa-gfxstream.sh --abi=x86_64
+scripts/build-mesa-gfxstream.sh --clean   # wipe builddir
 ```
 
-Output: `build/mesa-aarch64/install/usr/lib/gfxstream/libvulkan_gfxstream.so`
-+ `…/gfxstream_vk_icd.aarch64.json` (co-located, no separate
-`share/vulkan/icd.d/` — `VK_ICD_FILENAMES` points at it explicitly).
-Bundled into the APK by Gradle's `packMesaGfxstream` and laid into
-every rootfs by `BridgeInstallProvider`.
+Output: `build/mesa-<arch>/install/usr/lib/gfxstream/libvulkan_gfxstream.so`
++ `.../gfxstream_vk_icd.<arch>.json` (co-located, no separate
+`share/vulkan/icd.d/` - `VK_ICD_FILENAMES` points at it explicitly).
+Bundled into the APK by Gradle's `packMesaGfxstream<Abi>` and laid into
+every rootfs by `BridgeInstallProvider`. The same script also builds
+the optional Mesa-Zink tarball consumed by `libhybris-zink` unless
+Gradle passes `--no-zink` via `-PtawcGraphics=...`.
 
 ### Xwayland (binary + libs → ships in APK as asset)
 
@@ -289,9 +286,9 @@ Cross-built once. NDK clang against bionic — same toolchain as the
 Rust compositor. Aarch64-only.
 
 ```bash
-bash scripts/build-xwayland.sh           # incremental
-bash scripts/build-xwayland.sh --clean   # wipe install + builddirs
-bash scripts/build-xwayland.sh --only=libx11   # rebuild one stage
+scripts/build-xwayland.sh           # incremental
+scripts/build-xwayland.sh --clean   # wipe install + builddirs
+scripts/build-xwayland.sh --only=libx11   # rebuild one stage
 ```
 
 Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`.
@@ -335,9 +332,9 @@ Cross-built once per ABI. NDK clang against bionic. Output:
 Auto-invoked by Gradle's `buildProot<Abi>` task; standalone:
 
 ```bash
-bash scripts/build-proot.sh                # current host's primary ABI
-bash scripts/build-proot.sh --abi=both     # both Android ABIs
-bash scripts/build-proot.sh --clean        # wipe and rebuild
+scripts/build-proot.sh                # current host's primary ABI
+scripts/build-proot.sh --abi=both     # both Android ABIs
+scripts/build-proot.sh --clean        # wipe and rebuild
 ```
 
 See [proot.md](proot.md) for why we use Termux's fork.
@@ -350,11 +347,11 @@ ET_EXEC, `-nostdlib` freestanding. Output:
 Gradle's `buildTawcroot<Abi>` task; standalone:
 
 ```bash
-bash tawcroot/build --abi=aarch64      # explicit Android ABI
-bash tawcroot/build --abi=both         # both Android ABIs
-bash tawcroot/build --abi=host         # native glibc, runs on dev box
-bash tawcroot/build --testhost         # also build testhost twin
-bash tawcroot/build --tests            # also build cleat orchestrator
+tawcroot/build.sh --abi=aarch64      # explicit Android ABI
+tawcroot/build.sh --abi=both         # both Android ABIs
+tawcroot/build.sh --abi=host         # native glibc, runs on dev box
+tawcroot/build.sh --testhost         # also build testhost twin
+tawcroot/build.sh --tests            # also build cleat orchestrator
 ```
 
 See [tawcroot.md](tawcroot.md) for the design.
@@ -366,19 +363,18 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
 ```
 
 Invokes the Rust compositor build, copies its output into
-`jniLibs/<abi>/`; cross-builds proot and tawcroot and stages the
-result alongside; runs `scripts/build-libhybris.sh` and packs the
-result into `assets/libhybris/arm64-v8a.tar`; runs
-`scripts/build-xwayland.sh`, stages binaries + `.so` deps as
-`jniLibs/arm64-v8a/lib*.so` and the XKB data tree as
-`assets/xwayland/share.tar`; produces
-`app/build/outputs/apk/debug/app-debug.apk`. Everything libhybris,
-proot, tawcroot, and Xwayland need ships inside this APK.
+`jniLibs/<abi>/`; applies Smithay/rutabaga setup; cross-builds proot
+(when enabled) and tawcroot; builds the gfxstream host backend for each
+enabled ABI; builds/packs Mesa gfxstream-vk and optional Mesa-Zink
+assets; builds/packs libhybris for arm64; builds/packs Xwayland for
+arm64; then produces `app/build/outputs/apk/debug/app-debug.apk`.
+Everything the supported install/runtime paths need ships inside this
+APK.
 
 ## Install and launch
 
 ```bash
-bash scripts/app-build-install.sh
+scripts/app-build-install.sh
 ```
 
 Builds, installs, force-stops, and launches `MainActivity` (which
@@ -394,11 +390,12 @@ After reinstalling, the compositor restarts with a new Wayland socket.
 Any running chroot clients (Firefox, etc.) will be connected to the
 old socket and show black screens — kill and relaunch them.
 
-Installing or upgrading the APK causes the next compositor start to
-re-extract `assets/libhybris/<abi>.tar` into `filesDir/libhybris/`
-(versioned by `longVersionCode`). Existing chroots' symlinks already
-point at that path, so they automatically pick up the new libhybris
-tree without re-running the chroot installer.
+Installing or upgrading the APK causes the next app start to re-extract
+bundled runtime assets and re-run `TawcInstaller` against existing
+rootfs metadata when the `tawcStamp` changes. Libhybris is copied as
+real files into each rootfs at `/usr/lib/hybris/`; gfxstream and
+Mesa-Zink use the same provider/manifest mechanism under their own
+`/usr/lib/...` namespaces.
 
 ## Device setup
 
@@ -444,6 +441,6 @@ adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 See [testing.md](testing.md) for full details.
 
 ```bash
-bash scripts/build-debug-app.sh                 # debug app on phone
+scripts/build-debug-app.sh                 # debug app on phone
 cd tests/integration && cargo test -- --nocapture --test-threads=1
 ```

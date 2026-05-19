@@ -29,10 +29,10 @@ build_dir="$chroot_root/tmp/$app_name"
 echo "=== $app_name: pushing source ==="
 adb push "$src_dir/$app_name.c" "$TAWC_SCRATCH/$app_name.c" >/dev/null
 adb push "$src_dir/build.sh" "$TAWC_SCRATCH/$app_name-build.sh" >/dev/null
-"$TAWC_EXEC_BIN" /system/bin/sh -c "mkdir -p $build_dir && cp $TAWC_SCRATCH/$app_name.c $build_dir/$app_name.c && cp $TAWC_SCRATCH/$app_name-build.sh $build_dir/build.sh"
+"$TAWC_EXEC_BIN" /system/bin/sh -c "mkdir -p $build_dir && cp $TAWC_SCRATCH/$app_name.c $build_dir/$app_name.c && cp $TAWC_SCRATCH/$app_name-build.sh $build_dir/build.sh && chmod +x $build_dir/build.sh"
 
 echo "=== $app_name: building ==="
-"$ROOT_DIR/scripts/rootfs-run.sh" "/bin/bash /tmp/$app_name/build.sh"
+"$ROOT_DIR/scripts/rootfs-run.sh" "/tmp/$app_name/build.sh"
 
 echo "=== $app_name: done ==="
 echo "Binary (inside chroot): /tmp/$app_name/$app_name"

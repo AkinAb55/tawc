@@ -1,11 +1,11 @@
 # Pinned third-party deps. Single source of truth — every build script
 # resolves through scripts/lib/deps.sh, which clones the named repo and
-# verifies HEAD matches the commit below. See CLAUDE.md "Vendored deps".
+# verifies HEAD matches the commit below. See AGENTS.md "Vendored Deps".
 #
 # When updating a dep:
 #   1. cd <dest>; git checkout <new commit>; iterate; commit upstream
 #   2. update the commit column here
-#   3. run `bash scripts/update-deps.sh` on every checkout
+#   3. run `scripts/update-deps.sh` on every checkout
 #
 # An out-of-band update (HEAD moved without bumping this file, or this
 # file moved without running update-deps) is a build-time error.

@@ -17,9 +17,9 @@
 #   build/xwayland-aarch64/install/share/X11/xkb/   # XKB data (subset)
 #
 # Usage:
-#   bash scripts/build-xwayland.sh           # incremental
-#   bash scripts/build-xwayland.sh --clean   # wipe install + builddirs
-#   bash scripts/build-xwayland.sh --only=<lib>   # build just one stage
+#   scripts/build-xwayland.sh           # incremental
+#   scripts/build-xwayland.sh --clean   # wipe install + builddirs
+#   scripts/build-xwayland.sh --only=<lib>   # build just one stage
 #
 # Build-time deps (host packages): meson, ninja, pkg-config, python3,
 # python3-libxml2, xsltproc, autoconf, automake, libtool, perl. The NDK

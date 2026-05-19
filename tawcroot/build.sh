@@ -55,22 +55,22 @@
 #   build/tawcroot-host/tests                                     (cleat orchestrator)
 #
 # Usage:
-#   bash tawcroot/build                  # build current host's primary ABI
-#   bash tawcroot/build --abi=aarch64    # explicit
-#   bash tawcroot/build --abi=x86_64     # emulator
-#   bash tawcroot/build --abi=both       # both Android ABIs
-#   bash tawcroot/build --abi=host       # native glibc, runs directly on the dev box
+#   tawcroot/build.sh                  # build current host's primary ABI
+#   tawcroot/build.sh --abi=aarch64    # explicit
+#   tawcroot/build.sh --abi=x86_64     # emulator
+#   tawcroot/build.sh --abi=both       # both Android ABIs
+#   tawcroot/build.sh --abi=host       # native glibc, runs directly on the dev box
 #                                          (also builds tawcroot-testhost + tests runner;
 #                                           driven by tawcroot/Makefile for incremental
 #                                           compilation — header deps via gcc -MMD -MP)
-#   bash tawcroot/build --clean          # wipe build dirs first
-#   bash tawcroot/build --testhost       # also build tawcroot-testhost for non-host ABIs
-#                                          (used by tawcroot/test --device)
-#   bash tawcroot/build --tests          # also build the cleat-driven `tests`
+#   tawcroot/build.sh --clean          # wipe build dirs first
+#   tawcroot/build.sh --testhost       # also build tawcroot-testhost for non-host ABIs
+#                                        (used by tawcroot/test.sh --device)
+#   tawcroot/build.sh --tests          # also build the cleat-driven `tests`
 #                                          orchestrator binary for non-host ABIs
 #                                          (cross-compiles cleat + STC + tawcroot
 #                                           test sources against bionic; used by
-#                                           tawcroot/test --device)
+#                                           tawcroot/test.sh --device)
 
 set -euo pipefail
 
@@ -363,7 +363,7 @@ build_binary() {
 # `$BUILD_ROOT/tawcroot-<abi>/tests`. Fixture / testhost / prod paths are
 # baked in via -D as on-device absolute paths under the canonical scratch
 # dir (`/data/local/tmp/tawc-dev/`, also defined in `scripts/lib/tawc-scratch.sh`)
-# — tawcroot/test --device pushes them there.
+# — tawcroot/test.sh --device pushes them there.
 #
 # Cleat is hosted (it uses fork/exec/stdio); links bionic dynamically.
 # tawcroot's PROD_C_FOR_TESTS sources are recompiled here as well so the
@@ -385,7 +385,7 @@ build_tests() {
     mkdir -p "$obj_dir"
 
     # On-device paths the orchestrator will exec at runtime. Must match
-    # what tawcroot/test --device pushes (and the TAWC_SCRATCH constant
+    # what tawcroot/test.sh --device pushes (and the TAWC_SCRATCH constant
     # in scripts/lib/tawc-scratch.sh).
     local on_device="/data/local/tmp/tawc-dev"
 

@@ -3,7 +3,7 @@
 #
 # Replaces the old in-chroot autotools build (build-libhybris-chroot.sh)
 # so libhybris can ship inside the APK as an asset rather than be built
-# on each device. See issues/ship-libhybris-in-apk.md.
+# on each device. See notes/building.md.
 #
 # libhybris MUST be glibc-linked: it is loaded by glibc Wayland clients
 # inside the chroot, and its `hooks.c` calls glibc-internal symbols.
@@ -11,12 +11,12 @@
 # the Android NDK (which targets bionic).
 #
 # Output:
-#   build/libhybris-aarch64/install/usr/local/{lib,share}/...
-# matching the layout of the existing on-device install.
+#   build/libhybris-aarch64/install/usr/lib/hybris/...
+# matching the rootfs path LibhybrisInstallProvider copies into.
 #
 # Usage:
-#   bash scripts/build-libhybris.sh           # incremental
-#   bash scripts/build-libhybris.sh --clean   # wipe build tree first
+#   scripts/build-libhybris.sh           # incremental
+#   scripts/build-libhybris.sh --clean   # wipe build tree first
 #
 # Build-time deps documented in notes/building.md ("Building libhybris").
 # Keep that doc in sync with this script.

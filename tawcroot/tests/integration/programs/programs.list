@@ -1,5 +1,5 @@
 # Test fixture binary names. One per line; lines starting with '#' and
-# blank lines are ignored. Read by tawcroot/Makefile and tawcroot/build
+# blank lines are ignored. Read by tawcroot/Makefile and tawcroot/build.sh
 # as the single source of truth for:
 #
 #   - the `fixtures` Makefile target's dependency list
@@ -11,7 +11,7 @@
 #
 # Adding a new fixture: append the name here, then add a build rule to
 # tawcroot/Makefile and a `build_static`/`build_dynamic` line to
-# tawcroot/build-fixtures (those vary per-fixture so they're not derived).
+# tawcroot/build-fixtures.sh (those vary per-fixture so they're not derived).
 static_exit42
 static_argc_random
 static_execve_exit42

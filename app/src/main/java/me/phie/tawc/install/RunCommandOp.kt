@@ -21,7 +21,7 @@ import kotlin.concurrent.thread
  * in-app [LogScreenActivity] shows live log output.
  *
  * Used by the "Run" button on [DistroInfoActivity]. Equivalent to
- * `bash scripts/rootfs-run.sh '<cmd>'` from the host, but routed through
+ * `scripts/rootfs-run.sh '<cmd>'` from the host, but routed through
  * the same [InstallationMethod.startInside] entry point in-process — no
  * broker hop required.
  *

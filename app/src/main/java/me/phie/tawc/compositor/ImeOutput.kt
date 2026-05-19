@@ -17,9 +17,8 @@ import android.view.inputmethod.InputMethodManager
  * preedit the test just set — racing the next test step. Driving tests
  * through a recording impl removes the system IME from the loop entirely.
  *
- * See also: `notes/text-input.md` and the
- * `input-tests-skip-ic-and-race-system-ime.md` issue for the failure mode
- * this interface guards against.
+ * See also: `notes/text-input.md` and `notes/testing.md` for the failure
+ * mode this interface guards against.
  */
 interface ImeOutput {
     /** Notify the IME of new selection / composing region. */

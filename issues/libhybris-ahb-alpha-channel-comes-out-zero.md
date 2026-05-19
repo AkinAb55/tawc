@@ -56,7 +56,7 @@ cause is unclear and worth investigating.
 1. Edit `compositor/src/render.rs`'s `SurfaceKind::force_opaque` to
    return `false` for every variant.
 2. Build, install, launch any GTK app under the libhybris backend
-   (e.g. `bash scripts/rootfs-run.sh 'gtk4-demo'`).
+   (e.g. `scripts/rootfs-run.sh 'gtk4-demo'`).
 3. Observe the GTK window rendering as the dark `tawc_window_bg`
    background — toplevel content is fully transparent.
 4. Revert the edit; the window renders normally.

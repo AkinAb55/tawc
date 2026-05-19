@@ -21,13 +21,13 @@ This is the current development approach.
 Install (once, via the dev exec broker; progress streams to your TTY
 and the in-app log screen opens automatically):
 ```bash
-bash scripts/install-distro.sh arch tawcroot
+scripts/install-distro.sh arch tawcroot
 ```
 
 Then drive the chroot from the host with:
 ```bash
-bash scripts/rootfs-run.sh                    # interactive shell
-bash scripts/rootfs-run.sh '<command>'        # run a command and exit
+scripts/rootfs-run.sh                    # interactive shell
+scripts/rootfs-run.sh '<command>'        # run a command and exit
 ```
 
 `rootfs-run` routes through the dev exec broker's `RUNINSIDE` request
@@ -54,11 +54,11 @@ commands via adb, the outer shell (mksh) parses `&&` and `||` BEFORE `su` sees
 them. This silently runs the second command as shell (uid 2000), not root:
 
 ```bash
-# BROKEN: mksh splits at &&. cp runs as root, bash runs as shell user.
-adb shell su -c "cp /tmp/foo /chroot/tmp/ && bash /chroot/build.sh"
+# BROKEN: mksh splits at &&. cp runs as root, build runs as shell user.
+adb shell su -c "cp /tmp/foo /chroot/tmp/ && /chroot/build.sh"
 
 # CORRECT: inner quotes protect && from mksh.
-adb shell "su -c 'cp /tmp/foo /chroot/tmp/ && bash /chroot/build.sh'"
+adb shell "su -c 'cp /tmp/foo /chroot/tmp/ && /chroot/build.sh'"
 ```
 
 Variable expansion like `$0` or `$KSH_VERSION` at any intermediate layer can

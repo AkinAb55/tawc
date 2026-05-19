@@ -17,7 +17,7 @@ fixed by the in-handler `/dev/shm` memfd emulation in `tawcroot/src/shm.c`.
 ## Launching
 
 ```bash
-bash scripts/rootfs-run.sh 'firefox --no-remote'
+scripts/rootfs-run.sh 'firefox --no-remote'
 ```
 
 No Firefox-specific env vars or autoconfig prefs. `GDK_GL=gles:always` is
@@ -109,9 +109,10 @@ libGLESv2_hybris.so -- actual libhybris GLES (soname patched to break cycle)
 The real libhybris library is renamed to `libGLESv2_hybris.so` (with `patchelf --set-soname`)
 to prevent circular DT_NEEDED resolution.
 
-Built host-side by `bash scripts/build-libhybris.sh` and bundled in the APK as
-`assets/libhybris/<abi>.tar`; symlinked into the chroot at install time. Source:
-`deps/libhybris-shims/libgl-shim.c`, `deps/libhybris-shims/libglesv2-shim.c`.
+Built host-side by `scripts/build-libhybris.sh` and bundled in the APK as
+`assets/libhybris/<abi>.tar`; copied into each rootfs at `/usr/lib/hybris/` as
+real files by `LibhybrisInstallProvider`. Source: `deps/libhybris-shims/libgl-shim.c`,
+`deps/libhybris-shims/libglesv2-shim.c`.
 
 ## libhybris fixes for Firefox
 

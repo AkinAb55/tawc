@@ -3,7 +3,8 @@
 The compositor can run against an Android Studio AVD as well as a real
 device. Useful for iterating on non-GPU work (Wayland protocol logic,
 input, text-input/IME, window management) without needing the phone
-plugged in. GPU/AHB/libhybris work still has to run on a real device.
+plugged in. libhybris work still has to run on a real aarch64 device;
+the emulator's GPU path is the experimental gfxstream bridge.
 
 ## What works
 - `adb` / `su` / chroot (Magisk grants `su` to adb shell, same SELinux
@@ -22,11 +23,13 @@ plugged in. GPU/AHB/libhybris work still has to run on a real device.
   The blocker is **not** missing GPU vendor blobs (the emulator
   does ship `libEGL_emulation.so`, `vulkan.ranchu.so`, gralloc/
   mapper) — see "libhybris on x86_64" below.
-  The **gfxstream bridge** does work on x86_64 and is the default
-  `GraphicsBackend` there; see [gfxstream-bridge.md](gfxstream-bridge.md).
-  Vulkan enumeration is the bring-up milestone; presentation needs
-  Phases 4/5 (AHB handoff + `VK_KHR_wayland_surface`) which are
-  ABI-agnostic and still TODO. The GL path needs Phase 6
+  The **gfxstream bridge** is the default `GraphicsBackend` on x86_64
+  only because libhybris is unsupported there; it is experimental, not
+  production-ready. See [gfxstream-bridge.md](gfxstream-bridge.md). The
+  bridge build path is symmetric across aarch64/x86_64, and Vulkan
+  enumeration works on the AVD. End-to-end AHB presentation has passed
+  on physical hardware; AVD presentation still has open
+  host-gfxstream/driver blockers, and the GL path still needs Phase 6
   (Zink-on-gfxstream-vk).
 - Architecture is x86_64 (real device is aarch64). Most code doesn't
   care, but anything arch-specific won't transfer.
@@ -194,8 +197,9 @@ the only sound option if the audit fails, and it's strictly more
 code but has no soundness assumption to verify. (B) is a tempting
 trap; don't.
 
-Until somebody picks one up, libhybris stays aarch64-only and the
-emulator stays SHM-only for GPU.
+Until somebody picks one up, libhybris stays aarch64-only. Emulator GPU
+work should use the gfxstream bridge instead of trying to port
+libhybris.
 
 **(D) Skip libhybris on the emulator entirely.** If we don't insist
 on libhybris-in-chroot, the entire (A)/(B)/(C) tree is moot: forward
@@ -204,8 +208,9 @@ that uses the AVD's native EGL/Vulkan. See
 [gfxstream-bridge.md](gfxstream-bridge.md). Same architecture works
 on physical aarch64 devices too, so this isn't an emulator-only
 escape hatch — it's a possible replacement for libhybris across the
-board. Not implemented; documented for the day we want to spend the
-engineering on it.
+board. This is now implemented as the `gfxstream` backend for Vulkan;
+GL/Zink and AVD presentation validation are tracked in
+[gfxstream-bridge.md](gfxstream-bridge.md).
 
 ## One-time setup
 
@@ -276,7 +281,7 @@ Patch a per-AVD copy instead. rootAVD treats its argv as
     # `ramdisk.img.backup` next to the patched file (in the AVD
     # dir, *not* the system image dir).
     ANDROID_HOME="$HOME" ANDROID_SERIAL=emulator-5554 \
-        bash ./deps/rootAVD/rootAVD.sh \
+        ./deps/rootAVD/rootAVD.sh \
             .android/avd/tawc-rooted.avd/ramdisk.img
 
 This patches the AVD-local `ramdisk.img` with Magisk init,
@@ -306,7 +311,7 @@ matching a real Magisk-rooted device.
 
 ### 6. Bootstrap the chroot
     adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
-    TAWC_TARGET=emulator bash scripts/install-distro.sh arch tawcroot
+    TAWC_TARGET=emulator scripts/install-distro.sh arch tawcroot
 
 This installs the tawc app and triggers its in-app installer, which
 downloads the Arch x86_64 bootstrap tarball, extracts it to
@@ -343,13 +348,13 @@ note.
 
 Launch / shut down:
 
-    bash scripts/emulator.sh start                 # current default (rooted)
-    bash scripts/emulator.sh start rooted          # explicit rooted
-    bash scripts/emulator.sh start rootless        # stock AVD
-    bash scripts/emulator.sh start rooted --cold   # skip snapshot, full cold boot
-    bash scripts/emulator.sh stop                  # stops every running tawc AVD
-    bash scripts/emulator.sh stop rootless         # only stop the rootless one
-    bash scripts/emulator.sh stop rooted           # only stop the rooted one
+    scripts/emulator.sh start                 # current default (rooted)
+    scripts/emulator.sh start rooted          # explicit rooted
+    scripts/emulator.sh start rootless        # stock AVD
+    scripts/emulator.sh start rooted --cold   # skip snapshot, full cold boot
+    scripts/emulator.sh stop                  # stops every running tawc AVD
+    scripts/emulator.sh stop rootless         # only stop the rootless one
+    scripts/emulator.sh stop rooted           # only stop the rooted one
 
 The variant is positional so callers (test scripts, CI, etc.) can name
 exactly which AVD they want; if the default rotates later, scripts that
@@ -447,7 +452,7 @@ target up, or override `TAWC_TARGET` for that one command.
 
 Run something in the chroot:
 
-    TAWC_TARGET=emulator bash scripts/rootfs-run.sh "uname -m"
+    TAWC_TARGET=emulator scripts/rootfs-run.sh "uname -m"
 
 `rootfs-run` routes through the dev exec broker
 (`tawc-exec --in-rootfs <id>`) and is the only host-side chroot

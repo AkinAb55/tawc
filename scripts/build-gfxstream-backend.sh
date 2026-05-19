@@ -17,10 +17,10 @@
 # See notes/gfxstream-bridge.md.
 #
 # Usage:
-#   bash scripts/build-gfxstream-backend.sh                   # default --abi=aarch64
-#   bash scripts/build-gfxstream-backend.sh --abi=x86_64
-#   bash scripts/build-gfxstream-backend.sh --abi=both
-#   bash scripts/build-gfxstream-backend.sh --clean
+#   scripts/build-gfxstream-backend.sh                   # default --abi=aarch64
+#   scripts/build-gfxstream-backend.sh --abi=x86_64
+#   scripts/build-gfxstream-backend.sh --abi=both
+#   scripts/build-gfxstream-backend.sh --clean
 
 set -euo pipefail
 

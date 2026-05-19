@@ -9,7 +9,7 @@ import java.io.IOException
 
 /**
  * Rootless implementation of [InstallationMethod] using the
- * tawcroot binary (built by `tawcroot/build`, shipped in the
+ * tawcroot binary (built by `tawcroot/build.sh`, shipped in the
  * APK as `jniLibs/<abi>/libtawcroot.so` despite being a static
  * non-PIE ET_EXEC executable — Android's jniLib extractor matches on
  * filename only).

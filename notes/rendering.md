@@ -1,5 +1,9 @@
 # Rendering, Window Management, and Coordinate System
 
+## Background Color
+
+The compositor clears every frame to a flat color matching the rest of the app UI. Keep Rust `BACKGROUND_COLOR` in `render.rs` and Android resource `tawc_window_bg` (`#1F1B22` in dark mode) in sync.
+
 ## Window Management
 
 All toplevels are configured as maximized at the full logical output size (physical pixels /

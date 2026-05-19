@@ -176,7 +176,7 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * AT_EMPTY_PATH. Going through the path namespace would require
 	 * us to know our own filesystem path, which depends on how
 	 * tawcroot was invoked (in production, the APK's nativeLibraryDir
-	 * libtawcroot.so; under tawcroot/test --device, the test scratch
+	 * libtawcroot.so; under tawcroot/test.sh --device, the test scratch
 	 * dir). /proc/self/exe is always a working symlink to the
 	 * current executable. */
 	long exe_fd = tawc_openat(AT_FDCWD, "/proc/self/exe",

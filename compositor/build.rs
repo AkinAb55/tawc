@@ -20,7 +20,7 @@ fn main() {
         let xkb_dir = repo_root.join("deps").join("libxkbcommon").join(builddir_name);
         if !xkb_dir.join("libxkbcommon.a").is_file() {
             panic!(
-                "libxkbcommon static lib missing at {} — run `bash scripts/build-libxkbcommon.sh{}` first",
+                "libxkbcommon static lib missing at {} — run `scripts/build-libxkbcommon.sh{}` first",
                 xkb_dir.display(),
                 if target_arch == "x86_64" { " --abi=x86_64" } else { "" },
             );

@@ -127,7 +127,7 @@ _dep_verify_head() {
 ERROR: dep '$DEP_NAME' is at the wrong commit.
        expected: $DEP_COMMIT  (from deps/deps.list)
        got:      $actual      (HEAD of ${DEP_DEST#$DEPS_REPO_DIR/})
-       Run \`bash scripts/update-deps.sh $DEP_NAME\` to align, OR — if you
+        Run \`scripts/update-deps.sh $DEP_NAME\` to align, OR — if you
        deliberately moved the dep — bump the commit in deps/deps.list
        to $actual and re-run.
 EOF

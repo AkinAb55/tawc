@@ -274,11 +274,11 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
      installs — same pattern for `/usr/lib/gfxstream/` shipped by
      [BridgeInstallProvider] and `/usr/lib/mesa-zink/` shipped by
      [MesaZinkInstallProvider]) plus `/usr/share/glvnd/egl_vendor.d/00_libhybris.json`.
-     `LD_LIBRARY_PATH` (set by [RootfsEnv]) is
-     `/usr/lib/hybris/gl-shims:/usr/lib/hybris`. The source tree at
-     `<filesDir>/libhybris/lib/` is extracted from
-     `assets/libhybris/<abi>.tar` by `CompositorService.ensureLibhybris‐
-     Extracted` (called from both compositor service start and here).
+      `LD_LIBRARY_PATH` (set by [RootfsEnv]) is
+      `/usr/lib/hybris/gl-shims:/usr/lib/hybris`. The source tree at
+      `<filesDir>/libhybris/` is extracted from
+      `assets/libhybris/<abi>.tar` by `CompositorService.ensureLibhybris‐
+      Extracted` (called from both compositor service start and here).
      The set of files written into the rootfs is recorded in
      `metadata.json` (`tawcInstalls` array, `tawcStamp` matching
      `CompositorService.currentExtractStamp`); `TawcInstaller` is
@@ -503,17 +503,17 @@ opening any in-app screen never side-effects.
 ```sh
 # Kick off a fresh install. Streams progress + log to your TTY and
 # opens the in-app log screen. Ctrl-C cancels.
-bash scripts/install-distro.sh arch tawcroot
+scripts/install-distro.sh arch tawcroot
 
 # Or pick a different distro / pass extras forwarded as broker --arg
 # flags:
-bash scripts/install-distro.sh arch proot \
+scripts/install-distro.sh arch proot \
     distro=archlinuxarm \
     mirrorProxy=http://127.0.0.1:8080/proxy/
 
 # Tear down. Same channel; the uninstall is also the only way to
 # clear a `FAILED` install before trying again.
-bash scripts/uninstall-distro.sh arch
+scripts/uninstall-distro.sh arch
 ```
 
 The wrappers ensure `MainActivity` is foreground first (the broker
@@ -556,7 +556,7 @@ directly via the broker (no su / run-as needed).
   declared in the manifest, no runtime grant.
 
 On the emulator the first two grants are applied automatically by
-`bash scripts/emulator.sh start` after boot — see [emulator.md](emulator.md)
+`scripts/emulator.sh start` after boot — see [emulator.md](emulator.md)
 for details. Re-run the script after `adb install -r ...` to refresh
 them. To do it by hand:
 

@@ -1,10 +1,12 @@
 #!/bin/bash
 # Helper for RootfsProcess: writes PID to a file then exec's the command.
-# Usage: tawc-pidfile-exec PIDFILE COMMAND...
+# Usage: tawc-pidfile-exec.sh PIDFILE COMMAND...
 # The PID written is this script's bash interpreter PID. exec bash -c
 # replaces this process (bash optimizes single-command bash -c into exec),
 # so the PID stays the same. The PGID (readable from /proc/PID/stat) is
 # what RootfsProcess uses for cleanup.
+set -euo pipefail
+
 PIDFILE="$1"
 shift
 echo $$ > "$PIDFILE"

@@ -50,10 +50,10 @@
 #     plus supporting Mesa-Zink runtime libs
 #
 # Usage:
-#   bash scripts/build-mesa-gfxstream.sh                 # default --abi=aarch64
-#   bash scripts/build-mesa-gfxstream.sh --abi=x86_64
-#   bash scripts/build-mesa-gfxstream.sh --abi=both
-#   bash scripts/build-mesa-gfxstream.sh --clean
+#   scripts/build-mesa-gfxstream.sh                 # default --abi=aarch64
+#   scripts/build-mesa-gfxstream.sh --abi=x86_64
+#   scripts/build-mesa-gfxstream.sh --abi=both
+#   scripts/build-mesa-gfxstream.sh --clean
 
 set -euo pipefail
 

@@ -26,4 +26,4 @@ The same pre-emptive commit runs on `leave` (text-input focus change). Same prob
 
 - `compositor/src/text_input.rs` — touch-down interception and `cause=other` handling
 - `notes/text-input.md` "Click during preedit" section — documents the current workaround
-- `input-tests-skip-ic-and-race-system-ime.md` — related: the open decision about where state lives is affected by whether Rust needs `current_preedit` for these paths
+- `notes/testing.md` "Test Input Mechanism" — related test-input path that should not bypass the real IME/IC state machine

@@ -26,9 +26,11 @@
 #
 # To use a target other than the .tawctarget default for one command,
 # set TAWC_TARGET on the command line (e.g.
-# `TAWC_TARGET=emulator bash scripts/run-integration-tests.sh`). Don't
+# `TAWC_TARGET=emulator scripts/run-integration-tests.sh`). Don't
 # rewrite .tawctarget for this -- it represents the user's standing
 # choice, not a per-command override.
+
+set -euo pipefail
 
 if [ -n "${ANDROID_SERIAL:-}" ]; then
     return 0 2>/dev/null || exit 0
@@ -60,7 +62,7 @@ case "$_target" in
         _emu=$(adb devices | awk 'NR>1 && $2=="device" && $1 ~ /^emulator-/ {print $1; exit}')
         if [ -z "$_emu" ]; then
             echo "ERROR: target is 'emulator' but no emulator is connected." >&2
-            echo "       Start one with: bash scripts/emulator.sh start" >&2
+            echo "       Start one with: scripts/emulator.sh start" >&2
             echo "       (See notes/emulator.md for one-time AVD setup.)" >&2
             return 1 2>/dev/null || exit 1
         fi

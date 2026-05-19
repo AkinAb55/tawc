@@ -13,16 +13,16 @@
 #     connected target). The tawcroot path needs no `su`; only the
 #     `chroot` install method does (and that's debug-only).
 #   - tawc app installed (this script reinstalls it during build).
-#     libhybris ships inside the APK as an asset and is symlinked into
-#     each rootfs at install time — no on-device libhybris build step.
+#     libhybris ships inside the APK as an asset and is copied into each
+#     rootfs at install time — no on-device libhybris build step.
 #   - At least one in-app install present at
 #     /data/data/me.phie.tawc/distros/<id>/. The suite auto-targets it
 #     when there's exactly one; with multiple, set TAWC_INSTALL_ID=<id>
 #     explicitly. Install via:
-#       bash scripts/install-distro.sh <id> [tawcroot|proot|chroot] \
+#       scripts/install-distro.sh <id> [tawcroot|proot|chroot] \
 #           [distro=<distro>]
 #   - Test-suite chroot packages installed (run
-#     `bash scripts/install-test-deps.sh` once per chroot install)
+#     `scripts/install-test-deps.sh` once per chroot install)
 #   - JAVA_HOME set or java-21-openjdk installed at default path
 #
 # Each test pins its own in-rootfs graphics backend per spawn via the
@@ -34,10 +34,10 @@
 # libhybris-native). See `notes/testing.md`.
 #
 # Usage:
-#   bash scripts/run-integration-tests.sh                       # everything
-#   bash scripts/run-integration-tests.sh <filter>              # libtest substring filter,
+#   scripts/run-integration-tests.sh                       # everything
+#   scripts/run-integration-tests.sh <filter>              # libtest substring filter,
 #                                                                 e.g. `<module>::` or `<module>::test_foo`
-#   bash scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
+#   scripts/run-integration-tests.sh --no-build [filter]   # skip rebuild/redeploy
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -89,7 +89,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
     # Build + install the APK. We skip the launch — this script does its
     # own force-stop + am start + readiness wait below, so the
     # compositor lifetime brackets the cargo run cleanly.
-    bash "$ROOT_DIR/scripts/app-build-install.sh" --no-launch
+    "$ROOT_DIR/scripts/app-build-install.sh" --no-launch
 
     echo "=== Verifying in-app install is present at $INSTALL_DIR ==="
     if ! "$TAWC_EXEC_BIN" /system/bin/sh -c "test -d $INSTALL_DIR/rootfs" >/dev/null 2>&1; then
@@ -97,7 +97,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
 ERROR: in-app install not found at $INSTALL_DIR/.
 
 Install it from the host:
-  bash scripts/install-distro.sh $INSTALL_ID [tawcroot|proot|chroot] \\
+  scripts/install-distro.sh $INSTALL_ID [tawcroot|proot|chroot] \\
       [distro=<distro>]
 
 Progress streams to your TTY; the in-app log screen also opens.
@@ -106,22 +106,22 @@ EOF
     fi
 
     echo "=== Pushing pidfile helper ==="
-    adb push tests/apps/tawc-pidfile-exec "$TAWC_SCRATCH/tawc-pidfile-exec"
+    adb push tests/apps/tawc-pidfile-exec.sh "$TAWC_SCRATCH/tawc-pidfile-exec.sh"
     # `cp` + chmod via the broker — runs as the app uid, which owns the
     # rootfs tree. No su required.
-    "$TAWC_EXEC_BIN" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec"
+    "$TAWC_EXEC_BIN" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec.sh $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec.sh && chmod +x $INSTALL_DIR/rootfs/tmp/tawc-pidfile-exec.sh"
 
     # Pre-build the tawcroot device test bundle so the
     # `tawcroot::test_tawcroot_device_suite` integration case can run
-    # `tawcroot/test --device --no-build` and skip a redundant
+    # `tawcroot/test.sh --device --no-build` and skip a redundant
     # cross-compile.
     case "$ANDROID_SERIAL" in
         emulator-*) TAWCROOT_ABI=x86_64 ;;
         *)          TAWCROOT_ABI=aarch64 ;;
     esac
     echo "=== Building tawcroot device tests ($TAWCROOT_ABI) ==="
-    bash tawcroot/build "--abi=$TAWCROOT_ABI" --testhost --tests
-    bash tawcroot/build-fixtures "$TAWCROOT_ABI"
+    tawcroot/build.sh "--abi=$TAWCROOT_ABI" --testhost --tests
+    tawcroot/build-fixtures.sh "$TAWCROOT_ABI"
 fi
 
 # Launch the compositor once for the whole suite. Tests assert it is
@@ -177,7 +177,7 @@ cd "$ROOT_DIR/tests/integration"
 set +e
 cargo test -- "${LIBTEST_ARGS[@]}"
 TEST_EXIT=$?
-set -e
+set -euo pipefail
 
 echo "=== Stopping compositor ==="
 adb shell am force-stop me.phie.tawc

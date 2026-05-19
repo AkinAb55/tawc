@@ -21,8 +21,8 @@ and the call returns 0. The well-behaved client response is to print an error
 and bail; some clients (kitty's vendored GLFW) ignore the failure return and
 crash on a NULL function pointer downstream.
 
-The `LD_LIBRARY_PATH=/usr/local/lib/gl-shims:/usr/local/lib` we set in
-`RootfsEnv.kt` deliberately prefers libhybris's libEGL over the distro's mesa
+The `LD_LIBRARY_PATH=/usr/lib/hybris/gl-shims:/usr/lib/hybris` we set in
+`RootfsEnv.kt` deliberately prefers libhybris's libEGL over the distro's Mesa
 libEGL because libhybris is the hardware path. There is currently no way for an
 app to opt into mesa without a wrapper that clears `LD_LIBRARY_PATH`.
 

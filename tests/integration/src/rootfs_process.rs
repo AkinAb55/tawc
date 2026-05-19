@@ -12,7 +12,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const PID_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Path for the pidfile helper script inside the chroot.
-const PIDFILE_HELPER_CHROOT: &str = "/tmp/tawc-pidfile-exec";
+const PIDFILE_HELPER_CHROOT: &str = "/tmp/tawc-pidfile-exec.sh";
 
 /// Filesystem root of the in-app install, as seen from outside.
 /// Driven by [`crate::install_id`]; see [`adb`].
@@ -77,7 +77,7 @@ impl RootfsProcess {
         let pidfile_device = format!("{}{}", chroot_rootfs(), pidfile_chroot);
 
         // Wrap the command through the pidfile helper:
-        // /tmp/tawc-pidfile-exec PIDFILE COMMAND...
+        // /tmp/tawc-pidfile-exec.sh PIDFILE COMMAND...
         // The helper writes its PID to PIDFILE then exec's the command.
         let wrapped = format!(
             "{} {} {}",
@@ -243,8 +243,8 @@ fn ensure_pidfile_helper() -> io::Result<()> {
         .parent()
         .unwrap()
         .join("apps")
-        .join("tawc-pidfile-exec");
-    let staging = format!("{}/tawc-pidfile-exec", crate::TAWC_SCRATCH);
+        .join("tawc-pidfile-exec.sh");
+    let staging = format!("{}/tawc-pidfile-exec.sh", crate::TAWC_SCRATCH);
     adb::shell(&format!("mkdir -p {}", crate::TAWC_SCRATCH))?;
     std::process::Command::new("adb")
         .args(["push", &helper_src.to_string_lossy(), &staging])

@@ -21,6 +21,8 @@
 #     scripts/lib/select-device.sh first).
 #   - Read the resolved id back from $TAWC_INSTALL_ID.
 
+set -euo pipefail
+
 if [ -n "${TAWC_INSTALL_ID:-}" ]; then
     export TAWC_INSTALL_ID
     return 0 2>/dev/null || exit 0
@@ -51,7 +53,7 @@ case "$_count" in
         cat >&2 <<EOF
 ERROR: no in-app install found at $_distros/*/.
        Install one with:
-         bash scripts/install-distro.sh <id> [tawcroot|proot|chroot]
+          scripts/install-distro.sh <id> [tawcroot|proot|chroot]
 EOF
         return 1 2>/dev/null || exit 1
         ;;

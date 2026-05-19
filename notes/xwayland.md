@@ -777,13 +777,13 @@ software-only Xwayland on the emulator without the GPU stack.
 
 ```sh
 # Build everything from a fresh clone (idempotent re-runs)
-bash scripts/build-xwayland.sh
+scripts/build-xwayland.sh
 
 # Rebuild a single stage (after editing a stage_<name>() function)
-bash scripts/build-xwayland.sh --only=libx11
+scripts/build-xwayland.sh --only=libx11
 
 # Wipe install + builddirs (forces fresh)
-bash scripts/build-xwayland.sh --clean
+scripts/build-xwayland.sh --clean
 ```
 
 Add new stages by appending a `stage_<name>()` function and listing

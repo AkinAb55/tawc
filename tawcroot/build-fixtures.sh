@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the loader test fixtures (tawcroot/tests/integration/programs/) for an
-# Android ABI via NDK. Used by `tawcroot/test --device` to push
+# Android ABI via NDK. Used by `tawcroot/test.sh --device` to push
 # guest binaries to the device and exercise `tawcroot --exec` against
 # them.
 #
@@ -8,7 +8,7 @@
 # host build's fixtures (`build/tawcroot-host/programs/`).
 #
 # Usage:
-#   bash tawcroot/build-fixtures <x86_64|aarch64>
+#   tawcroot/build-fixtures.sh <x86_64|aarch64>
 
 set -euo pipefail
 

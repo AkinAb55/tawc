@@ -58,7 +58,7 @@ pub fn wait_for_keyboard_shown(timeout: Duration) {
 /// Also swaps the compositor's [me.phie.tawc.compositor.ImeOutput] to a
 /// recording impl via the broker `enable-test-input` action so the
 /// system IME doesn't react to `updateSelection` and race the test
-/// (`issues/input-tests-skip-ic-and-race-system-ime.md`). The recorder
+/// (see notes/text-input.md and notes/testing.md). The recorder
 /// is process-global; tests don't need to reset it between scenes.
 pub fn start_text_input(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_gtk4_debug_app();

@@ -13,8 +13,8 @@ because `untrusted_app` can't open it.
 
 ## Repro
 
-    bash scripts/uninstall-distro.sh manjaro
-    bash scripts/install-distro.sh manjaro tawcroot \
+    scripts/uninstall-distro.sh manjaro
+    scripts/install-distro.sh manjaro tawcroot \
         mirrorProxy=http://127.0.0.1:8080/proxy/ distro=manjaro
 
 Search for `Failed to open path /dev/net/tun`.

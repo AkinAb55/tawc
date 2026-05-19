@@ -13,7 +13,7 @@ import java.io.File
  * inside the rootfs).
  *
  * Two kinds of entries:
- *   - Every regular file under `<filesDir>/libhybris/lib/` (ie. the
+ *   - Every regular file under `<filesDir>/libhybris/` (ie. the
  *     `.so` files plus the `gl-shims/` and `libhybris/` subdir
  *     contents) is a [TawcInstall.Type.COPY].
  *   - Symlinks in the source tree become [TawcInstall.Type.LINK]s

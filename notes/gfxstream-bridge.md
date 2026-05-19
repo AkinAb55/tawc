@@ -1,13 +1,16 @@
 # gfxstream bridge: a libhybris-free GPU path
 
-**Status:** Phase 4 done. End-to-end Vulkan-via-AHB works:
+**Status:** experimental and not production-ready. Phase 4 is done, so
+end-to-end Vulkan-via-AHB works:
 `gfxstream::test_vkcube_renders_via_ahb` passes against the Adreno
 660 — chroot's gfxstream-vk WSI allocates an AHB-backed ColorBuffer
 via kumquat blob create + `VkImportColorBufferGOOGLE`, presents the
 ColorBuffer id over the `tawc_gfxstream` Wayland protocol, and the
 compositor imports the resolved AHB through the existing
-android_wlegl texture path. Phase 5 (real-world AVD validation),
-Phase 6 (Zink-on-gfxstream-vk for GL/GLES) still TODO — see
+android_wlegl texture path. The production/default physical-device GPU
+path is still libhybris, which works on all tested devices. Phase 5
+(real-world AVD validation) and Phase 6 (Zink-on-gfxstream-vk for
+GL/GLES) still TODO — see
 §"WSI plan: custom Vulkan WSI" for design and §"GL/GLES under custom
 WSI" for the GL gap.
 
@@ -762,7 +765,7 @@ x86_64 since libhybris is a non-starter there
 Tests pin their backend per spawn via the broker `GRAPHICS` header on
 RUNINSIDE (`tawc-exec --in-rootfs … --graphics gfxstream`, or
 `RootfsProcess::spawn_with` from the Rust harness), so a single
-`bash scripts/run-integration-tests.sh` exercises libhybris, gfxstream
+`scripts/run-integration-tests.sh` exercises libhybris, gfxstream
 and CPU side by side without flipping the user's persisted
 `Settings.graphicsBackend` pick. The kumquat server is part of
 `libcompositor.so` and starts when the compositor thread starts (see
@@ -782,13 +785,11 @@ another:
   hardware buffers through libhybris" smoke (weston-simple-egl,
   vkcube, GTK3/4, Firefox, supertuxkart).
 - **`gfxstream::`** — the same hardware-buffer smokes under the
-  bridge backend, plus an `eglinfo` software-fallback guard. The
-  vkcube case and the Mesa-EGL cases will turn green when the
-  chroot-side custom Vulkan WSI lands (compositor side already does
-  — see §"WSI plan: custom Vulkan WSI"). Until then the chroot's
-  gfxstream-vk falls through to Mesa wsi which doesn't fit our
-  deployment; that's the gating piece. Phase 6 (Zink-on-gfxstream-vk)
-  is downstream.
+  bridge backend, plus an `eglinfo` software-fallback guard.
+  Vulkan-native `vkcube` is green through the custom WSI. The Mesa-EGL
+  cases (gtk3/gtk4/firefox/supertuxkart/weston-simple-egl/eglinfo)
+  remain gated on Phase 6: route GL/GLES through Zink-on-gfxstream-vk
+  so `eglSwapBuffers` ultimately presents through the Vulkan WSI.
 - **`cpu_graphics::`** — backend-agnostic SHM paths plus an
   `eglinfo` llvmpipe/swrast sanity. These don't care about the
   GPU backend at all — they exist to keep the SHM plumbing covered
@@ -805,11 +806,11 @@ required), so they can run unattended on the emulator too.
 
 - **gfxstream host renderer cross-builds for Android NDK** (`scripts/build-gfxstream-backend.sh`) — 8.7MB libgfxstream_backend.so, ELF aarch64, dynamically linked against `libdl/libnativewindow/libandroid/liblog/libc++_shared`. Patches in `deps/gfxstream-patches/gfxstream/01-android-host-build.patch` add `host_machine.system() == 'android'` cases to the ~6 meson.build files that switch on platform, fix two case-insensitive include typos (`GlesCompat.h` → `gles_compat.h`), swap one VNDK header for its NDK equivalent (`<vndk/hardware_buffer.h>` → `<android/hardware_buffer.h>`), and add `-DANDROID=1` (NDK clang defines `__ANDROID__` but not bare `ANDROID`, which several files check). The full GLES+Vulkan+Composer surface is built — it was less work than patching for vulkan-only because frame_buffer.cpp / color_buffer.cpp use a lot of unguarded GL constants.
 - **kumquat runs as a thread of the compositor process** (`compositor/src/bridge.rs`), bound at `/data/data/me.phie.tawc/share/kumquat-gpu-0` which the existing share bind exposes to every rootfs at `/usr/share/tawc/kumquat-gpu-0`. The chroot client picks up that path through our Mesa patch's `VIRTGPU_KUMQUAT_GPU_SOCKET` env var (`RootfsEnv` sets it on the gfxstream branch). The compositor crate pulls in `kumquat_virtio` from the rutabaga_gfx workspace with the `gfxstream` feature, so cargo cross-compiles the server into `libcompositor.so` and emits a `DT_NEEDED` for `libgfxstream_backend.so`. Four rutabaga patches support this: AHB fd export hook, keep-server-alive fixes, server-as-library packaging, and the `GfxStreamVulkanMapper` bypass.
-- **`libgfxstream_backend.so` + `libc++_shared.so` ride along as jniLibs.** `scripts/build-gfxstream-backend.sh` cross-builds the gfxstream host renderer with the NDK and stages both into `app/src/main/jniLibs/arm64-v8a/`. PackageManager extracts them to `nativeLibraryDir` (with the `apk_data_file` SELinux label that's also where `libcompositor.so` lands), so the dynamic linker resolves the `DT_NEEDED` chain at app startup with no extra plumbing. Same trick the libhybris path uses for its private dirs.
+- **`libgfxstream_backend.so` + `libc++_shared.so` ride along as jniLibs.** `scripts/build-gfxstream-backend.sh` cross-builds the gfxstream host renderer with the NDK and stages both into `app/src/main/jniLibs/<abi>/` for `arm64-v8a` and `x86_64`. PackageManager extracts them to `nativeLibraryDir` (with the `apk_data_file` SELinux label that's also where `libcompositor.so` lands), so the dynamic linker resolves the `DT_NEEDED` chain at app startup with no extra plumbing.
 - **End-to-end Vulkan works on the device.** `libvulkan_gfxstream.so` + ICD JSON ride in the APK as `assets/mesa-gfxstream/`, and `BridgeInstallProvider` (sibling of `LibhybrisInstallProvider` in `TawcInstaller.providers`) lays them into every rootfs at `/usr/lib/gfxstream/` (a tawc-owned namespace, matching `/usr/lib/hybris/`) at install time. With the gfxstream backend selected, `vulkaninfo --summary` from the chroot reports `Virtio-GPU GFXStream (Adreno (TM) 660), driverID=DRIVER_ID_QUALCOMM_PROPRIETARY`. No daemon spawn, no pidfile, no broker action lifecycle.
 - **gfxstream host renderer also builds on x86_64 Linux** (`meson setup -Dgfxstream-build=host` on `deps/gfxstream`) — the original validation milestone, now superseded by the NDK cross.
 - **`libvulkan_gfxstream.so` + `libvirtgpu_kumquat_ffi.a` cross-build for glibc**, advertise `VK_KHR_wayland_surface`, and load under the chroot's stock vulkan-icd-loader for both supported ABIs.
-- **Build script: `scripts/build-mesa-gfxstream.sh`.** Mirrors the `build-libhybris.sh` "stub .so + synthetic .pc + cross gcc, no sysroot" pattern. Copies real aarch64 `libwayland-{client,server}.so.0` and `libdrm.so.2` from `build/aarch64-sysroot/` (extracted from the device's installed rootfs) because empty stubs lose the `wl_*_interface` / `drmIoctl` symbols that wayland-scanner-generated protocol files and gfxstream's DRM platform code reference at link time. Pure stubs are fine for libudev / libffi (only DT_NEEDED matters).
+- **Build script: `scripts/build-mesa-gfxstream.sh`.** Mirrors the `build-libhybris.sh` "stub .so + synthetic .pc + cross gcc" pattern, with a small pulled sysroot for libraries whose real symbols are referenced at link time. It reads `build/<arch>-sysroot/`, populated by `scripts/pull-sysroot.sh`, because empty stubs lose the `wl_*_interface` / `drmIoctl` symbols that wayland-scanner-generated protocol files and gfxstream's DRM platform code reference. Pure stubs are fine for libudev / libffi (only DT_NEEDED matters).
 - **Mesa patches at `deps/mesa-patches/mesa/`** (xwayland-patches style — sentinel-based idempotent re-apply on patch hash change):
   - `01-add-cargo-toml.patch`: drops `Cargo.toml` files into the four Mesa-internal Rust crates (`mesa3d_util`, `mesa3d_protocols`, `virtgpu_kumquat`, `virtgpu_kumquat_ffi`) plus a workspace `Cargo.toml`, so cargo can build them directly. Templates copied from the matching crates in magma-gpu/rutabaga_gfx (which Cargo-builds the same source). Differences: thiserror 2.0 (Mesa floor; rutabaga ships 1.0), zerocopy 0.8.13.
   - `02-meson-external-kumquat-ffi.patch`: adds a meson option `virtgpu_kumquat_external_ffi=true` that, when set, skips the four `subdir(...)` calls that build the Rust pieces via meson and instead resolves `dep_virtgpu_kumquat_ffi` via plain pkg-config. Also gates the `add_languages('rust')` block on the same condition, so meson never spins up the Rust subproject machinery at all.
@@ -817,7 +818,7 @@ required), so they can run unattended on the emulator too.
   - `05-tawc-vulkan-wsi.patch`: custom Wayland WSI for the gfxstream bridge — surface entrypoints, swapchain shell + per-image alloc (kumquat blob create + `VkImportColorBufferGOOGLE`), present loop with `wl_surface.frame()` throttling for FIFO mode. End-to-end with `gfxstream::test_vkcube_renders_via_ahb`.
 - **The cargo + meson-external split** is what unblocked kumquat. Mesa's `subprojects/packagefiles/*/meson.build` hard-code `native: true` on every Rust crate's `static_library()`. The proc-macro chain (cfg-if/syn/quote/proc-macro2/unicode-ident) and the regular host-machine crates (cfg-if as `mesa3d_util` dep) can't both satisfy meson in a cross-build context — see git history for the dead-end attempts. Cargo handles cross-builds + proc-macros transparently and produces a static lib that's just linked in like any other dep.
 - **`deps/deps.list` pins:** `mesa` (mesa-25.3.6), `gfxstream` (current main), `rutabaga_gfx` (magma-gpu fork with the kumquat server source).
-- **Cross-build sysroot pull:** the script reads `build/aarch64-sysroot/usr/lib`, which the operator pre-populates with `tar -C /data/data/me.phie.tawc/distros/<id>/rootfs -czf - usr/include usr/lib/pkgconfig usr/lib/libwayland-* usr/lib/libdrm* usr/lib/libudev* …` over `tawc-exec`. **Not yet automated** — TODO is to either bake this into the script (pull from device on demand) or vendor the relevant aarch64 .so files alongside the libhybris assets so it's reproducible without a connected device.
+- **Cross-build sysroot pull:** use `scripts/pull-sysroot.sh`. Pulling from a live rootfs is still fragile and not a permanent reproducibility answer, but the script is the supported path today.
 
 ### Why kumquat must run as untrusted_app (the SELinux trap)
 
@@ -1016,7 +1017,7 @@ GL/EGL apps.
 
 ### Sysroot pull
 
-`bash scripts/pull-sysroot.sh` — hooks into the standard
+`scripts/pull-sysroot.sh` — hooks into the standard
 `.tawctarget` / `TAWC_TARGET` device-selection mechanism, picks ABI
 from `ro.product.cpu.abi`, and tars a curated subset of the
 installed rootfs into `build/<arch>-sysroot/`. Run once after every
@@ -1365,11 +1366,9 @@ aliasing). Not blocking the libhybris-native physical path.
 
 ## Relation to existing notes
 
-- `notes/gpu-strategy.md` — current libhybris-based strategy. The
-  bridge is the alternative described there as "out of scope" for
-  cross-driver sharing. It supersedes that out-of-scope-ness by
-  putting both halves on the *same* driver instance via IPC instead
-  of via shared address space.
+- `notes/gpu-strategy.md` — overall graphics strategy. The bridge is
+  now an implemented backend: it puts both halves on the *same* driver
+  instance via IPC instead of via libhybris shared address space.
 - `notes/emulator.md` — "libhybris on x86_64" section enumerates
   three options (A/B/C) for porting the thunk patcher, all expensive.
   The bridge sidesteps that whole tree: the chroot doesn't need

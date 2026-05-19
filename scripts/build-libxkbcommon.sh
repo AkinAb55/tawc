@@ -8,13 +8,13 @@
 # The checkout lives at ./deps/libxkbcommon/ (gitignored via deps/.gitignore,
 # alongside deps/libhybris/, deps/smithay/, etc.). Pin lives in deps/deps.list — bump
 # there, then run
-# `bash scripts/update-deps.sh libxkbcommon`.
+# `scripts/update-deps.sh libxkbcommon`.
 #
 # Usage:
-#   bash scripts/build-libxkbcommon.sh                  # build aarch64 (default)
-#   bash scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
-#   bash scripts/build-libxkbcommon.sh --abi=both       # both arches
-#   bash scripts/build-libxkbcommon.sh --clean          # wipe builddir(s) first
+#   scripts/build-libxkbcommon.sh                  # build aarch64 (default)
+#   scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
+#   scripts/build-libxkbcommon.sh --abi=both       # both arches
+#   scripts/build-libxkbcommon.sh --clean          # wipe builddir(s) first
 
 set -euo pipefail
 

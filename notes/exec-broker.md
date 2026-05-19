@@ -375,7 +375,7 @@ the UID-wide kill is the actual safety net for orphaned descendants.
 ## Host helper
 
 `tawc-exec` is a small Rust binary at `tools/tawc-exec/`. Build it once
-with `bash scripts/build-tawc-exec.sh`; the output binary is cached at
+with `scripts/build-tawc-exec.sh`; the output binary is cached at
 `build/tawc-exec/tawc-exec`. Scripts source `scripts/lib/tawc-exec.sh`
 to get a `TAWC_EXEC_BIN` env var that auto-builds if missing. The
 sourced lib also defines a `tawc_exec` shell function for ergonomics —
@@ -436,13 +436,13 @@ workflows are:
   `tests/integration/src/adb.rs`). `chroot(2)` requires
   `CAP_SYS_CHROOT` — fundamental, not a workaround. tawcroot and proot
   installs all go through the broker.
-- **`tawcroot/test --device`**. The handler tests call `mknod()` to
+- **`tawcroot/test.sh --device`**. The handler tests call `mknod()` to
   verify the seccomp handler routes mknod correctly, and SELinux
   denies `shell:shell_exec → shell_data_file:file mknod`. App uid
   can mknod in its own data dir, but `untrusted_app` can't `execute`
   files there (W^X policy), so we'd have to ship every freshly-built
   test binary as a jniLib. Easier: the test runner uses `su -c`,
-  while production tawcroot stays rootless. (`tawcroot/test --host`
+  while production tawcroot stays rootless. (`tawcroot/test.sh --host`
   unprivileged covers most iteration anyway.)
 - **`scripts/emulator.sh` setup**: `setenforce 0`, Magisk policy.
   One-time emulator bootstrap, irrelevant once the AVD exists.

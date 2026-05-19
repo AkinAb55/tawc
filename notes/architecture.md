@@ -114,7 +114,7 @@ Using Smithay 0.7 from a custom fork (`wmww/smithay`, branch `tawc-patches`),
 pinned in `deps/deps.list` and consumed via `[patch.crates-io] smithay = { path =
 "../deps/smithay" }` in `compositor/Cargo.toml`. Gradle's `setupSmithay` task
 clones the checkout ahead of `buildRustLibrary*`; standalone `cd compositor &&
-cargo build` requires running `bash scripts/setup-smithay.sh` first.
+cargo build` requires running `scripts/setup-smithay.sh` first.
 
 **Features:** `wayland_frontend`, `renderer_gl`, `desktop`. Avoids all Linux-specific
 backends (DRM, GBM, libinput, udev, libseat).

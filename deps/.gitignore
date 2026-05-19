@@ -1,5 +1,5 @@
 # Vendored third-party checkouts. Cloned on demand by scripts/lib/deps.sh
-# from deps/deps.list — see CLAUDE.md "Vendored deps".
+# from deps/deps.list — see AGENTS.md "Vendored Deps".
 #
 # Anything dropped into deps/ is gitignored by default; the only tracked
 # entries are this file and the explicit allowlist below.

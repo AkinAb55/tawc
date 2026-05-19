@@ -12,9 +12,9 @@
 #                launch + readiness wait)
 #
 # Usage:
-#   bash scripts/app-build-install.sh                   # build, install, launch
-#   bash scripts/app-build-install.sh --no-build        # reuse APK, install, launch
-#   bash scripts/app-build-install.sh --no-launch       # build, install only
+#   scripts/app-build-install.sh                   # build, install, launch
+#   scripts/app-build-install.sh --no-build        # reuse APK, install, launch
+#   scripts/app-build-install.sh --no-launch       # build, install only
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

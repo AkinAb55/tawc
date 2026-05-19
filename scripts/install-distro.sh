@@ -4,7 +4,7 @@
 # conflated opening the activity with triggering the install).
 #
 # Usage:
-#   bash scripts/install-distro.sh <id> [<method>] [extra=value …]
+#   scripts/install-distro.sh <id> [<method>] [extra=value …]
 #     <id>      slot id under /data/data/me.phie.tawc/distros/
 #     <method>  install method (tawcroot|proot|chroot, default tawcroot)
 #     extras    extra key=value args forwarded as --arg, e.g.
@@ -13,8 +13,8 @@
 #                 mirrorProxy=http://127.0.0.1:8080/proxy/
 #
 # Examples:
-#   bash scripts/install-distro.sh arch proot
-#   bash scripts/install-distro.sh test-slot tawcroot label='Test slot'
+#   scripts/install-distro.sh arch proot
+#   scripts/install-distro.sh test-slot tawcroot label='Test slot'
 #
 # The host TTY shows progress + log lines as the install runs; pressing
 # Ctrl-C cancels (the broker socket close → action observes the cancel
@@ -30,7 +30,7 @@ set -euo pipefail
 
 if [ $# -lt 1 ]; then
     cat >&2 <<EOF
-usage: bash scripts/install-distro.sh <id> [<method>] [key=value …]
+usage: scripts/install-distro.sh <id> [<method>] [key=value …]
        <method> defaults to tawcroot. See script header for examples.
 EOF
     exit 2

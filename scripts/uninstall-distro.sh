@@ -2,7 +2,7 @@
 # Trigger an in-app distro uninstall via the dev exec broker.
 #
 # Usage:
-#   bash scripts/uninstall-distro.sh <id>
+#   scripts/uninstall-distro.sh <id>
 #
 # The host TTY shows progress + log lines; Ctrl-C cancels (no confirm
 # — matches the in-app behaviour where the uninstall Cancel button is
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-    echo "usage: bash scripts/uninstall-distro.sh <id>" >&2
+    echo "usage: scripts/uninstall-distro.sh <id>" >&2
     exit 2
 fi
 

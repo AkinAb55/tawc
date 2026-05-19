@@ -68,7 +68,7 @@ Wayland version (run from a host or chroot with libwayland +
 wayland-protocols):
 
 ```sh
-bash build.sh
+./build.sh
 ./adreno-struct-varying --mode=struct
 ./adreno-struct-varying --mode=array
 ```

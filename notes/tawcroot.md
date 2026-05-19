@@ -1778,12 +1778,12 @@ tawcroot/                            # everything tawcroot-specific lives here
 
 The directory is laid out so it could be lifted into its own repo (no
 external paths inside `tawcroot/`). The one tawc-app coupling is in
-`tawcroot/build`, which stages the production binary into
+`tawcroot/build.sh`, which stages the production binary into
 `app/src/main/jniLibs/<abi>/libtawcroot.so` for APK packaging,
-and in `tawcroot/test --device` which sources `scripts/lib/select-device.sh`
+and in `tawcroot/test.sh --device` which sources `scripts/lib/select-device.sh`
 to pick the adb target — strip those if splitting.
 
-Build artifacts (per `tawcroot/build`):
+Build artifacts (per `tawcroot/build.sh`):
 - **Production tawcroot** — one static non-PIE ET_EXEC per ABI:
   `libtawcroot.so` for arm64-v8a / x86_64, `tawcroot` for host.
   Shipped as a jniLib like `libproot-loader.so` for the same
@@ -1795,14 +1795,14 @@ Build artifacts (per `tawcroot/build`):
   packaged into the APK.
 - **`tests`** — cleat orchestrator. Built by default for `--abi=host`
   (hosted glibc); cross-compiled for `aarch64`/`x86_64` against bionic
-  on demand via `bash tawcroot/build --abi=<abi> --tests`. The Android
-  variant is what `tawcroot/test --device` pushes and runs under
+  on demand via `tawcroot/build.sh --abi=<abi> --tests`. The Android
+  variant is what `tawcroot/test.sh --device` pushes and runs under
   `su -c`; same four-layer suite, same filter syntax, same exit code
   as host mode — only the orchestrator binary changes.
 
 ## Build integration
 
-A `tawcroot/build` script alongside `scripts/build-proot.sh`:
+A `tawcroot/build.sh` script alongside `scripts/build-proot.sh`:
 
 - Cross-compile with the NDK's clang for `arm64-v8a` and `x86_64`.
 - Pure C11 + a couple of `.S` files for production sources. No
@@ -1830,7 +1830,7 @@ A `tawcroot/build` script alongside `scripts/build-proot.sh`:
 - Gradle `packTawcroot` task copies the production binary into
   `app/src/main/jniLibs/<abi>/libtawcroot.so`. Testhost is
   never copied — it's only used by the cleat orchestrator on host
-  and by `tawcroot/test --device` via adb push.
+  and by `tawcroot/test.sh --device` via adb push.
 - Clones cleat into `./deps/cleat/` at a pinned commit (gitignored,
   same pattern as `deps/libhybris/`, `deps/libxkbcommon/`, `deps/proot/`) on
   first `--abi=host` run. Pin lives in the build script; bumping
@@ -1841,7 +1841,7 @@ A `tawcroot/build` script alongside `scripts/build-proot.sh`:
   natively with the host toolchain (hosted glibc binary). Also
   cross-builds it for `aarch64`/`x86_64` against bionic when
   `--tests` is passed, landing at `build/tawcroot-<abi>/tests`. The
-  Android variant is what `tawcroot/test --device` runs on the
+  Android variant is what `tawcroot/test.sh --device` runs on the
   device — same source set, same filter syntax, same exit code
   semantics as the host build (cleat is plain POSIX C + vendored
   STC; no glibc-only deps). See §"Testing strategy".
@@ -1851,7 +1851,7 @@ A `tawcroot/build` script alongside `scripts/build-proot.sh`:
   touching one production source rebuilds + relinks both tawcroot
   binaries in ~300 ms; touching a cleat header rebuilds just the
   test files that include it. For tight inner loops you can call
-  `make -C tawcroot` directly — `tawcroot/build --abi=host`
+  `make -C tawcroot` directly — `tawcroot/build.sh --abi=host`
   adds the cleat-clone step on top. Cross-ABI NDK builds stay in
   the bash flow (NDK setup is bash-shaped, and they're not in
   the inner loop).
@@ -1863,17 +1863,17 @@ ships as `libproot.so` + `libproot-loader.so`; tawcroot ships as
 
 ### Source list lives in two places
 
-The production `.c` set is duplicated between `tawcroot/build`
+The production `.c` set is duplicated between `tawcroot/build.sh`
 (`SRC_C_PROD`, used for the NDK cross-builds and on-device tests)
 and `tawcroot/Makefile` (`PROD_C`, used for the host build that
-`tawcroot/test --host` exercises). **Adding a new `.c` file means
+`tawcroot/test.sh --host` exercises). **Adding a new `.c` file means
 editing both.**
 
 The split exists for a reason — the host Makefile uses gcc with
 header-dep tracking for fast incremental builds; the cross-build
 needs NDK-flavoured bash that the Makefile would clutter — but it's
 a correctness trap. The chroot.c regression was exactly this: it
-was added to `PROD_C` but missed in `SRC_C_PROD`, so `tawcroot/test
+was added to `PROD_C` but missed in `SRC_C_PROD`, so `tawcroot/test.sh
 --host` passed (host build was complete) while the device shipped a
 binary that didn't even include the chroot handler. (There would
 have been a linker error if the cross-build had run, but Gradle's
@@ -1884,7 +1884,7 @@ Mitigations: Gradle's `buildTawcroot$abi` now lists `tawcroot/src`
 and `tawcroot/include` as inputs (so source-only edits invalidate
 the cache), and the cross-build *does* fail loudly on link if a
 referenced symbol is missing — once it actually runs. If the two
-lists drift again, `tawcroot/test --device` is the canonical way to
+lists drift again, `tawcroot/test.sh --device` is the canonical way to
 catch it: running the on-device tests forces a cross-build for the
 target ABI and any link error surfaces immediately.
 
@@ -1962,7 +1962,7 @@ The test layer lives in two places:
    `build/tawcroot-{host,aarch64,x86_64}/tests`, built from
    `tawcroot/tests/{unit,handler,integration}/*.c` linked against
    cleat + STC. The host build runs locally; the cross-builds run
-   on the device under `tawcroot/test --device`. This is the *only*
+   on the device under `tawcroot/test.sh --device`. This is the *only*
    place cleat / STC code ever runs in the project. It owns:
    - filter syntax (full-match regexes against `module`, `name`,
      or `module::name`; multiple args OR'd; see cleat
@@ -1979,8 +1979,8 @@ The test layer lives in two places:
    guest). cleat's `test_capture { ... }` is also available for
    self-forking tests when handy.
 
-`tawcroot/test` is a thin wrapper around the cleat
-orchestrator; `bash tawcroot/test` runs everything,
+`tawcroot/test.sh` is a thin wrapper around the cleat
+orchestrator; `tawcroot/test.sh` runs everything,
 positional args become cleat filters. `--device` mode pushes the
 NDK-cross-built orchestrator (plus tawcroot, tawcroot-testhost,
 fixtures, and the androidfilter wrap) to the canonical on-device
@@ -2189,7 +2189,7 @@ coverage.
 - **Phase 1 — MVP path translation (host-side)**: ✓ DONE on x86_64
    emulator (Android 16, kernel 6.6) **and validated on aarch64
    device** (OnePlus 9, Android 14, kernel 5.4.284) under the real
-   `untrusted_app` zygote filter via `tawcroot/test --device`.
+   `untrusted_app` zygote filter via `tawcroot/test.sh --device`.
    Path translation, fd reservation, SIGSYS/sigprocmask shadow,
    seccomp/prctl denial, well-known-symlink memo, fake-root identity,
    `renameat2`, `truncate`, and the mode-aware lstat-vs-stat memo all
@@ -2429,7 +2429,7 @@ coverage.
       let it run far enough that the bootstrap is extracted (PKG_KEYRING
       stage). Even if the install errors out at pacman-key, the rootfs
       under `/data/data/me.phie.tawc/distros/arch/rootfs/` is intact.
-   2. Per-iteration: `bash tawcroot/build --abi=<abi>`
+   2. Per-iteration: `tawcroot/build.sh --abi=<abi>`
       then `adb push app/src/main/jniLibs/<abi>/libtawcroot.so
       /data/local/tmp/tawc-dev/libtawcroot.so` then `adb shell 'su -c "cp
       /data/local/tmp/tawc-dev/libtawcroot.so <apk-lib-path>/libtawcroot.so"'`.
@@ -2443,7 +2443,7 @@ coverage.
 
 - **PHASE 5 COMPLETE on x86_64 emulator.** A full `tawcroot`-method
    Arch install via the in-app `InstallActivity` reaches `state: READY`,
-   and `bash scripts/rootfs-run.sh "uname -a; id; pacman --version"`
+   and `scripts/rootfs-run.sh "uname -a; id; pacman --version"`
    produces clean Arch output (`Linux localhost ...`, `uid=0(root)`,
    `Pacman v7.1.0`) on the host shell. End-to-end app launch through
    the APK + run-as + tawcroot chain works.
@@ -2678,7 +2678,7 @@ coverage.
      to avoid Android's RET_TRAP on faccessat2), so the same
      implementation serves both numbers.
 
-   With those two fixes, `bash scripts/run-integration-tests.sh
+   With those two fixes, `scripts/run-integration-tests.sh
    --no-build test_input_dispatch` against `--es method tawcroot`
    passes all 13 input-dispatch scenarios on the OnePlus 9 in ~22 s.
    This is the first integration-test suite running entirely under
@@ -2725,7 +2725,7 @@ coverage.
    `syscalls_control.c` already strips SIGSYS from any guest-issued
    mask change, so this only matters for the inherited initial mask
    in the post-re-exec process.
-   `tawcroot/build` cross-builds for aarch64 + x86_64 and stages
+   `tawcroot/build.sh` cross-builds for aarch64 + x86_64 and stages
    `libtawcroot.so` into `app/src/main/jniLibs/<abi>/`; the APK
    ships it like `libproot.so`. `TawcrootMethod.kt` mirrors
    `ProotMethod.kt` (rootless, app-uid-owned rootfs, same bind set, same
@@ -3409,7 +3409,7 @@ Android 14, API 34, kernel 5.4.284):
 - The C is ours. Keep it small, idiomatic. **Production has no
   third-party deps** — no libc, no cleat, no STC, nothing. cleat
   (and its vendored STC) lives in the host-side test orchestrator
-  only; bumping the cleat pin in `tawcroot/build` is a
+  only; bumping the cleat pin in `tawcroot/build.sh` is a
   deliberate change that affects tests and tests only.
 - Don't add a libc, runtime, or container library to production.
   If something needs containers, build the structure at init from
@@ -3423,7 +3423,7 @@ Android 14, API 34, kernel 5.4.284):
   drives the syscall through `tawcroot-testhost` against a
   fake rootfs, and (5) a `tawcroot/tests/integration/` test once
   production gains a working ELF-load + jump path.
-  `tawcroot/test` runs all of them; CI runs it on every push.
+  `tawcroot/test.sh` runs all of them; CI runs it on every push.
 - Do NOT add `--run-test`, smoke-driver, or other test argv
   branches to `tawcroot/src/main.c`. Test-only entry code lives
   under `tawcroot/tests/testhost/src/` and is gated behind

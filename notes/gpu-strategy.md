@@ -45,7 +45,10 @@ that can't share buffers.
 The Termux ecosystem has **never achieved zero-copy GPU buffer sharing** between Mesa
 Turnip and the stock Android driver.
 
-## Our Solution: Same Driver on Both Sides via libhybris
+## Production path: same driver on both sides via libhybris
+
+This is the default and release-supported GPU path on physical devices.
+It works on all tested devices.
 
 Instead of fighting cross-driver buffer sharing, we eliminate it. Both client and
 compositor use the **stock Android GPU driver**:
@@ -57,15 +60,17 @@ compositor use the **stock Android GPU driver**:
 
 Same driver = buffer fds are natively compatible. No cross-driver import needed.
 
-### Alternative we haven't taken: gfxstream bridge
+### Experimental backend: gfxstream bridge
 
 Forward GL/Vulkan command streams *out* of the chroot to an Android-side service that
 holds the GPU context, instead of loading vendor blobs *into* the chroot. Same logical
 "one driver, two sides" guarantee, achieved by IPC instead of by shared address space.
 Avoids libhybris entirely — works identically on x86 and ARM, AVD and physical, with no
 TLS / linker / CFI patching. Cost is per-call IPC overhead (Vulkan amortizes it; GL is
-more painful). See [gfxstream-bridge.md](gfxstream-bridge.md) for the full design and
-the open questions to resolve before committing. Not implemented.
+more painful). This is implemented as the `gfxstream` backend, but it is not
+production-ready: Vulkan-native WSI renders through AHB on physical hardware today;
+GL/GLES via Zink and real-world AVD validation remain open. See
+[gfxstream-bridge.md](gfxstream-bridge.md).
 
 ## libhybris
 
@@ -77,7 +82,7 @@ We use [our fork](https://github.com/wmww/libhybris) with stock Android TLS fixe
 Local checkout: `./deps/libhybris`. Host-side cross-build (output ships
 in the APK as an asset; each rootfs gets a real-file copy at
 `/usr/lib/hybris/` from `TawcInstaller`/`LibhybrisInstallProvider`):
-`bash scripts/build-libhybris.sh`.
+`scripts/build-libhybris.sh`.
 
 Loading chain in a client:
 ```
@@ -209,7 +214,7 @@ performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_su
 in `vulkanplatform_wayland.so`, presents via `android_wlegl`. Used in Sailfish OS.
 
 **Status on tawc (OnePlus 9 / Adreno 660 / Android 16 LineageOS):** ✅ working.
-- `bash scripts/build-libhybris.sh` builds the `vulkan` subdir and stages
+- `scripts/build-libhybris.sh` builds the `vulkan` subdir and stages
   `libvulkan.so.1` and `libhybris/vulkanplatform_wayland.so` in the APK asset
   tree; `TawcInstaller`/`LibhybrisInstallProvider` copies them into
   each rootfs at `/usr/lib/hybris/` (a tawc-owned namespace).

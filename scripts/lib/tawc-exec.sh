@@ -37,6 +37,6 @@ _tawc_exec_needs_build() {
               -newer "$TAWC_EXEC_BIN" -print -quit 2>/dev/null)" ]
 }
 if _tawc_exec_needs_build; then
-    bash "$_TAWC_EXEC_REPO_ROOT/scripts/build-tawc-exec.sh" >&2
+    "$_TAWC_EXEC_REPO_ROOT/scripts/build-tawc-exec.sh" >&2
 fi
 unset -f _tawc_exec_needs_build

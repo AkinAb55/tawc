@@ -22,11 +22,11 @@
 # from `nativeLibraryDir` — see install/method/ProotMethod.kt.
 #
 # Usage:
-#   bash scripts/build-proot.sh                  # build current host's primary ABI
-#   bash scripts/build-proot.sh --abi=aarch64    # explicit
-#   bash scripts/build-proot.sh --abi=x86_64     # emulator
-#   bash scripts/build-proot.sh --abi=both
-#   bash scripts/build-proot.sh --clean          # wipe build dirs first
+#   scripts/build-proot.sh                  # build current host's primary ABI
+#   scripts/build-proot.sh --abi=aarch64    # explicit
+#   scripts/build-proot.sh --abi=x86_64     # emulator
+#   scripts/build-proot.sh --abi=both
+#   scripts/build-proot.sh --clean          # wipe build dirs first
 
 set -euo pipefail
 

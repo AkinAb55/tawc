@@ -66,17 +66,15 @@ unconsumed, and nothing reaches the compositor's `wl_keyboard`.
 
 Plug a USB keyboard into the phone (or attach one in the AVD with
 `-keyboard host`), launch a Wayland client (e.g.
-`bash scripts/rootfs-run.sh 'gedit'`), and try to type. No text
+`scripts/rootfs-run.sh 'gedit'`), and try to type. No text
 appears. `WAYLAND_DEBUG=1` on the client confirms no `wl_keyboard.key`
 events arrive.
 
 ## Notes
 
-- This issue surfaced while planning the in-process test-input gate
-  for `input-tests-skip-ic-and-race-system-ime.md`. The gate sits at
-  the top of `TawcInputConnection` overrides; the same gate will not
-  cover hardware keys when they are eventually wired up, because
-  hardware keys go through `View.dispatchKeyEvent` rather than the
-  IC. When this work lands, mirror the gate at the
-  `dispatchKeyEvent` entry point so hardware-key events also respect
-  test-injection mode.
+- The test-input gate described in [notes/testing.md](../notes/testing.md)
+  sits at the top of `TawcInputConnection` overrides; the same gate will
+  not cover hardware keys when they are eventually wired up, because
+  hardware keys go through `View.dispatchKeyEvent` rather than the IC.
+  When this work lands, mirror the gate at the `dispatchKeyEvent` entry
+  point so hardware-key events also respect test-injection mode.

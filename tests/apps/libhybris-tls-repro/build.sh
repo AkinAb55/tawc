@@ -5,7 +5,7 @@
 # cross-compiled with the Android NDK on the host by
 # scripts/install-test-deps.sh and copied into this directory before
 # build.sh runs — see the libhybris-tls-repro hook there.
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 gcc -O0 -g repro.c -o libhybris-tls-repro \
     -L/usr/lib/hybris -lhybris-common -Wl,-rpath,/usr/lib/hybris \

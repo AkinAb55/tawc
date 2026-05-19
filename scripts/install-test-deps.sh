@@ -26,8 +26,8 @@
 #     one install is present; set TAWC_INSTALL_ID=<id> to pin one.
 #
 # Usage:
-#   bash scripts/install-test-deps.sh
-#   TAWC_INSTALL_ID=void bash scripts/install-test-deps.sh
+#   scripts/install-test-deps.sh
+#   TAWC_INSTALL_ID=void scripts/install-test-deps.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -104,13 +104,10 @@ case "$DISTRO_KEY" in
         # Arch's main packages ship them; Void splits them out.
         #
         # `mesa-dri` is the open-source GL stack (DRI drivers). On a
-        # real ARM device it would sit dormant — libhybris hijacks the
-        # GL/EGL entry points via `LD_LIBRARY_PATH=/usr/local/lib/gl-
-        # shims:/usr/local/lib` and the bionic-Mesa wrapped behind it
-        # provides every `libGL.so.1` / `libEGL.so.1` / `libGLESv2.so.2`
-        # symbol. But `tawc-emu` doesn't ship libhybris on x86_64 (no
-        # x86_64 GPU bionic blob to wrap; see notes/emulator.md), so on
-        # the emulator gtk4 falls through to the chroot's real Mesa.
+        # real ARM device it normally sits dormant because libhybris
+        # shadows GL/EGL via `/usr/lib/hybris/gl-shims:/usr/lib/hybris`.
+        # On x86_64 the default GPU path is gfxstream, and CPU fallback
+        # still needs the distro Mesa stack available.
         # Without `mesa-dri` it has no driver to load, the GL init path
         # NULL-branches, and gtk4 segfaults inside libharfbuzz on the
         # first text reshape. Bundling it unconditionally costs ~50 MB
@@ -194,7 +191,7 @@ build_test_app() {
     # rootfs tree (no su / no run-as / no ownership-flip dance).
     "$TAWC_EXEC_BIN" /system/bin/sh -c \
         "mkdir -p $fs_build_dir && cp $staging/* $fs_build_dir && chmod -R a+rwX $fs_build_dir"
-    "$ROOT_DIR/scripts/rootfs-run.sh" "/bin/bash $rootfs_path/build.sh"
+    "$ROOT_DIR/scripts/rootfs-run.sh" "$rootfs_path/build.sh"
 }
 
 # NDK cross-build the bionic side of libhybris-tls-repro. The matching

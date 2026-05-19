@@ -30,11 +30,11 @@
 #                coupling in this script).
 #
 # Usage:
-#   bash tawcroot/test                # everything, host
-#   bash tawcroot/test --device       # everything, device
-#   bash tawcroot/test phase0         # filter (host)
-#   bash tawcroot/test --no-build     # reuse existing build/
-#   bash tawcroot/test --list         # list cleat tests (host)
+#   tawcroot/test.sh                # everything, host
+#   tawcroot/test.sh --device       # everything, device
+#   tawcroot/test.sh phase0         # filter (host)
+#   tawcroot/test.sh --no-build     # reuse existing build/
+#   tawcroot/test.sh --list         # list cleat tests (host)
 
 set -euo pipefail
 
@@ -66,7 +66,7 @@ fi
 # ---- host mode -----------------------------------------------------------
 if [ "$MODE" = "host" ]; then
     if [ "$BUILD" = "1" ]; then
-        bash "$TAWCROOT_DIR/build" --abi=host
+        "$TAWCROOT_DIR/build.sh" --abi=host
     fi
     BIN="$REPO_DIR/build/tawcroot-host/tests"
     [ -x "$BIN" ] || { echo "ERROR: $BIN missing — drop --no-build?" >&2; exit 1; }
@@ -94,8 +94,8 @@ case "$DEVICE_ABI" in
 esac
 
 if [ "$BUILD" = "1" ]; then
-    bash "$TAWCROOT_DIR/build" "--abi=$BUILD_ABI" --testhost --tests
-    bash "$TAWCROOT_DIR/build-fixtures" "$BUILD_ABI"
+    "$TAWCROOT_DIR/build.sh" "--abi=$BUILD_ABI" --testhost --tests
+    "$TAWCROOT_DIR/build-fixtures.sh" "$BUILD_ABI"
 fi
 
 LOCAL_BIN="$REPO_DIR/build/tawcroot-$BUILD_ABI/libtawcroot-testhost.so"
@@ -107,7 +107,7 @@ LOCAL_FIXTURES_DIR="$REPO_DIR/build/tawcroot-$BUILD_ABI/programs"
 [ -f "$LOCAL_TESTS" ] || { echo "ERROR: $LOCAL_TESTS missing — drop --no-build?" >&2; exit 1; }
 
 # On-device layout — must match the -D paths baked into LOCAL_TESTS by
-# build_tests in tawcroot/build (TAWCROOT_TESTHOST_BIN, TAWCROOT_PROD_BIN,
+# build_tests in tawcroot/build.sh (TAWCROOT_TESTHOST_BIN, TAWCROOT_PROD_BIN,
 # TAWCROOT_*_BIN, TAWCROOT_ANDROID_FILTER_WRAP, TAWCROOT_TEST_TMPDIR).
 TESTS=$TAWC_SCRATCH/tests
 TR=$TAWC_SCRATCH/tawcroot-testhost
@@ -150,7 +150,7 @@ if [ "${#MISSING_FIXTURES[@]}" -gt 0 ]; then
     {
         echo "ERROR: ${#MISSING_FIXTURES[@]} fixture(s) missing from $LOCAL_FIXTURES_DIR/:"
         for n in "${MISSING_FIXTURES[@]}"; do echo "  - $n"; done
-        echo "Rebuild with: bash tawcroot/build-fixtures $BUILD_ABI"
+        echo "Rebuild with: tawcroot/build-fixtures.sh $BUILD_ABI"
     } >&2
     exit 1
 fi
