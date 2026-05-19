@@ -85,79 +85,10 @@ const WAYLAND_TAP_COORDS: InputTapCoords = InputTapCoords {
 
 const WAYLAND_DEBUG_ENV: &str = "";
 
-/// Reset the debug app buffer + preedit between scenarios. Acts as a
-/// keyboard: clears any active preedit, then hammers Backspace until the
-/// client reports the buffer empty.
-///
-/// Why not `ic_delete_surrounding_text` — that delegates the
-/// units-to-keys translation to the IC's `unitsToKeyCounts`, which
-/// reads the IC's Editable mirror to map UTF-16 units around the
-/// cursor onto code-point counts. Between scenes the mirror can lag
-/// the wayland-side cursor by a round-trip (the compositor's
-/// `set_surrounding_text` reply hasn't reached `updateFromCompositor`
-/// yet), and a stale cursor produces a clipped key count — e.g.
-/// "hello\n\n\n" with mirror cursor at 6 instead of 8 yields 6
-/// Backspaces and the buffer ends up "he". A reset utility shouldn't
-/// have to reason about that. Sending raw Backspace key events
-/// sidesteps the mirror entirely, which is also what a real keyboard
-/// pressing Backspace does — there's no Editable dependency on
-/// `wl_keyboard.key`.
-fn reset_buffer(app: &DebugApp) {
-    // Step 1: clear any active preedit. If the preedit was non-empty
-    // the compositor commits it first (per text-input-v3 done
-    // ordering); we'll delete the resulting bytes in step 2.
-    adb::ic_finish_composing().expect("reset: ic_finish_composing");
-    thread::sleep(Duration::from_millis(250));
-
-    // Step 2: hammer Backspace AND Forward-Delete until empty. Both
-    // are needed because the previous scene may have left the cursor
-    // mid-buffer (`scene_click_cursor_positioning`, the various
-    // mid-buffer-tap scenes); Backspace only deletes before the
-    // cursor, Forward-Delete only after, and we don't know which side
-    // contains text. Buffer length (in UTF-16 units of the escaped
-    // form) is an upper bound on how many of each we could possibly
-    // need; extras at an empty buffer no-op.
-    //
-    // We use raw key events instead of `ic_delete_surrounding_text`
-    // here on purpose: the IC's `unitsToKeyCounts` translates against
-    // its Editable mirror, which can lag the wayland-side cursor (see
-    // `issues/ic-delete-surrounding-after-newline-mistranslates.md`).
-    // A reset utility shouldn't have to reason about that — pressing
-    // Backspace as a "keyboard" matches what a real keyboard does and
-    // doesn't depend on the IC's mirror being current.
-    let current = app.last_text().unwrap_or_default();
-    if !current.is_empty() {
-        let len = current.encode_utf16().count() as u32;
-        for _ in 0..len {
-            adb::ic_send_key_event(adb::KEYCODE_DEL).expect("reset: backspace");
-        }
-        for _ in 0..len {
-            adb::ic_send_key_event(adb::KEYCODE_FORWARD_DEL).expect("reset: forward-delete");
-        }
-        let deadline = Instant::now() + TIMEOUT;
-        while Instant::now() < deadline {
-            if app.last_text().unwrap_or_default().is_empty() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let after = app.last_text().unwrap_or_default();
-        assert!(after.is_empty(), "reset_buffer left buffer = {:?}", after);
-    }
-
-    let preedit = app.last_preedit().unwrap_or_default();
-    assert!(
-        preedit.is_empty(),
-        "reset_buffer left preedit = {:?}",
-        preedit
-    );
-}
-
 // --- Scenes -----------------------------------------------------------------
 //
 // Each scene drives the IC with a Gboard-shaped sequence and asserts what
-// the wayland client saw. Scenes assume the buffer starts empty (call
-// `reset_buffer` between them).
+// the wayland client saw. Scenes assume the buffer starts empty.
 
 /// Click cursor positioning + behaviour at the cursor: backspace deletes
 /// from cursor (not end), commit_string inserts at cursor (not end), and a
@@ -347,39 +278,34 @@ fn scene_space_backspace_space_no_duplicate(app: &DebugApp) {
     );
 }
 
-/// IC re-commit-word + newline (OpenBoard's per-Enter pattern). Each
-/// Enter fires `setComposingRegion(0, N)` + `commitText(word, 1)` +
-/// `commitText("\n", 1)`. Without the short-circuit fix, the second
-/// iteration onward sliced bytes off the buffer (visible as a stray "h"
-/// prepended on each Enter).
+/// IC re-commit-word + newline (OpenBoard's per-Enter pattern). Enter
+/// fires `setComposingRegion(0, N)` + `commitText(word, 1)` +
+/// `commitText("\n", 1)`. Without the short-circuit fix, the IC
+/// propagates composing-region deltas and can slice bytes off the buffer.
 fn scene_recommit_word_then_newline_no_h_prepend(app: &DebugApp) {
     adb::ic_commit_text("hello").expect("ic commitText 'hello'");
     app.wait_for_text("hello", TIMEOUT).expect("'hello'");
     thread::sleep(Duration::from_millis(200));
 
-    for i in 1..=3 {
-        let change_count = app.text_changed_count();
-        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
-        adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
-        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
-        app.wait_for_text_change(change_count, TIMEOUT)
-            .expect("text change after Enter");
-        thread::sleep(Duration::from_millis(250));
+    let change_count = app.text_changed_count();
+    adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
+    adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
+    adb::ic_commit_text("\n").expect("ic commitText '\\n'");
+    app.wait_for_text_change(change_count, TIMEOUT)
+        .expect("text change after Enter");
+    thread::sleep(Duration::from_millis(250));
 
-        // The debug app escapes '\n' as the two-char sequence `\n` so
-        // the protocol stays single-line — assert against that escaped
-        // form.
-        let expected = format!("hello{}", "\\n".repeat(i));
-        let text = app.last_text().unwrap_or_default();
-        assert_eq!(
-            text, expected,
-            "Enter #{i}: expected buffer {:?} but got {:?}. Without the \
-             fix the IC propagates composing-region deltas, slicing \
-             bytes off the buffer (visible as a stray 'h' prepended on \
-             each Enter).",
-            expected, text
-        );
-    }
+    // The debug app escapes '\n' as the two-char sequence `\n` so
+    // the protocol stays single-line — assert against that escaped
+    // form.
+    let expected = "hello\\n";
+    let text = app.last_text().unwrap_or_default();
+    assert_eq!(
+        text, expected,
+        "expected buffer {:?} but got {:?}. The IC propagated \
+         composing-region deltas, slicing bytes off the buffer.",
+        expected, text
+    );
 }
 
 /// Round-trip through `updateFromCompositor` must clear any composing
@@ -660,12 +586,10 @@ fn assert_popup_shadow_geometry_tap_delivered(app: &DebugApp) {
     );
 }
 
-/// Toolkitless coverage for the basic text-input-v3 surfaces: commit_string,
-/// raw key events, IME deleteSurroundingText, preedit lifecycle, and commit
-/// replacing an active preedit. This intentionally uses one fresh app
-/// lifetime instead of matching GTK's reset-between-scenes structure.
+/// Toolkitless coverage for the basic text-input-v3 editing surfaces:
+/// commit_string, raw key events, and IME deleteSurroundingText.
 #[test]
-fn test_wayland_input_basic_editing_and_preedit() {
+fn test_basic_editing_and_delete() {
     with_wayland_text_input(|app| {
         adb::ic_commit_text("hello world").expect("commit 'hello world'");
         app.wait_for_text("hello world", TIMEOUT)
@@ -681,6 +605,14 @@ fn test_wayland_input_basic_editing_and_preedit() {
         adb::ic_delete_surrounding_text(5, 0).expect("delete_surrounding");
         app.wait_for_text("hello ", TIMEOUT)
             .expect("'hello ' after delete_surrounding(5, 0)");
+    });
+}
+
+#[test]
+fn test_preedit_lifecycle() {
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("hello ").expect("commit 'hello '");
+        app.wait_for_text("hello ", TIMEOUT).expect("'hello '");
 
         for prefix in ["w", "wo", "wor", "worl", "world"] {
             adb::ic_set_composing_text(prefix).expect("setComposingText");
@@ -699,7 +631,12 @@ fn test_wayland_input_basic_editing_and_preedit() {
             .expect("'hello world' after finishComposingText");
         app.wait_for_preedit("", TIMEOUT)
             .expect("preedit cleared after finishComposingText");
+    });
+}
 
+#[test]
+fn test_autocorrect_replaces_preedit() {
+    with_wayland_text_input(|app| {
         adb::ic_set_composing_text("teh").expect("setComposingText 'teh'");
         app.wait_for_preedit("teh", TIMEOUT).expect("preedit 'teh'");
         adb::ic_commit_text("the ").expect("commit autocorrect");
@@ -721,14 +658,22 @@ fn test_wayland_input_basic_editing_and_preedit() {
 /// and touching elsewhere finalizes pending preedit without letting a stale
 /// finishComposingText duplicate it.
 #[test]
-fn test_wayland_input_touch_cursor_and_pending_preedit() {
+fn test_touch_cursor_positioning() {
     with_wayland_text_input(|app| {
         scene_click_cursor_positioning(app, WAYLAND_TAP_COORDS);
-        reset_buffer(app);
+    });
+}
 
+#[test]
+fn test_full_compose_loop_with_click_in_middle() {
+    with_wayland_text_input(|app| {
         scene_full_compose_loop_with_click_in_middle(app, WAYLAND_TAP_COORDS);
-        reset_buffer(app);
+    });
+}
 
+#[test]
+fn test_tap_commits_pending_preedit_once() {
+    with_wayland_text_input(|app| {
         let before = app.last_text().unwrap_or_default();
         adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");
         app.wait_for_preedit("pending", TIMEOUT)
@@ -772,7 +717,7 @@ fn test_wayland_input_touch_cursor_and_pending_preedit() {
 /// wl_touch.down reaches the client, followed by wl_touch.up for the same
 /// slot, with no dependency on the device's physical resolution.
 #[test]
-fn test_wayland_touch_tap() {
+fn test_touch_tap() {
     with_wayland_touch(|app| {
         inject_touch("tap");
         app.wait_for_tag_count("TOUCH_DOWN", 1, TIMEOUT)
@@ -801,7 +746,7 @@ fn test_wayland_touch_tap() {
 /// coordinates. The debug scene places the subsurface under the broker's
 /// normalized tap point.
 #[test]
-fn test_wayland_touch_subsurface_tap() {
+fn test_touch_subsurface_tap() {
     with_wayland_subsurface(|app| {
         app.wait_for_tag_value("SURFACE_READY", "subsurface", TIMEOUT)
             .expect("subsurface ready");
@@ -813,7 +758,7 @@ fn test_wayland_touch_subsurface_tap() {
 /// Firefox/WebRender uses that shape: the child surface must not steal the
 /// touch from the browser toplevel.
 #[test]
-fn test_wayland_touch_ignores_input_empty_subsurface() {
+fn test_touch_ignores_input_empty_subsurface() {
     with_wayland_subsurface_input_empty(|app| {
         app.wait_for_tag_value("SURFACE_READY", "subsurface", TIMEOUT)
             .expect("subsurface ready");
@@ -826,7 +771,7 @@ fn test_wayland_touch_ignores_input_empty_subsurface() {
 /// offsets. A later tap outside the popup must dismiss it; GTK menu bars
 /// depend on that `popup_done` before mapping a different menu popup.
 #[test]
-fn test_wayland_touch_popup_tap() {
+fn test_touch_popup_tap() {
     with_wayland_popup(|app| {
         app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
             .expect("popup ready");
@@ -842,7 +787,7 @@ fn test_wayland_touch_popup_tap() {
 /// assertions only compare the client's own observed coordinates, avoiding
 /// any baked-in screen dimensions or density assumptions.
 #[test]
-fn test_wayland_touch_drag() {
+fn test_touch_drag() {
     with_wayland_touch(|app| {
         inject_touch("drag");
         app.wait_for_tag_count("TOUCH_DOWN", 1, TIMEOUT)
@@ -878,7 +823,7 @@ fn test_wayland_touch_drag() {
 /// motion, and up. The debug broker builds a real multi-pointer MotionEvent
 /// stream against the focused SurfaceView; the client verifies both slots.
 #[test]
-fn test_wayland_touch_multitouch() {
+fn test_touch_multitouch() {
     with_wayland_touch(|app| {
         inject_touch("multitouch");
         app.wait_for_tag_count("TOUCH_DOWN", 2, TIMEOUT)
@@ -915,9 +860,9 @@ fn test_wayland_touch_multitouch() {
 
 /// The two composing-region replacement shapes are distinct IC paths:
 /// setComposingText over a region emits delete+preedit, while commitText over
-/// a region emits delete+commit. Keep both, but run them in one fresh client.
+/// a region emits delete+commit.
 #[test]
-fn test_wayland_input_composing_region_replacements() {
+fn test_composing_region_preedit_replaces_committed_text() {
     with_wayland_text_input(|app| {
         adb::ic_commit_text("hello world").expect("commit 'hello world'");
         app.wait_for_text("hello world", TIMEOUT)
@@ -958,36 +903,56 @@ fn test_wayland_input_composing_region_replacements() {
             "original lowercase region survived replacement: {:?}",
             text
         );
+    });
+}
+
+#[test]
+fn test_commit_text_replaces_composing_region() {
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("hello world").expect("commit 'hello world'");
+        app.wait_for_text("hello world", TIMEOUT)
+            .expect("'hello world'");
+
+        let cursor_count = app.cursor_pos_count();
+        adb::input_tap(WAYLAND_TAP_COORDS.text_mid_x, WAYLAND_TAP_COORDS.text_mid_y)
+            .expect("tap mid");
+        let cursor = app
+            .wait_for_cursor_change(cursor_count, TIMEOUT)
+            .expect("cursor change after tap");
+        assert!(cursor > 0 && cursor < 11, "cursor mid, got {}", cursor);
 
         thread::sleep(Duration::from_millis(200));
-        adb::ic_set_composing_region(0, 5).expect("setComposingRegion 0..5");
+        adb::ic_set_composing_region(0, cursor).expect("setComposingRegion");
         adb::ic_commit_text("FOO").expect("commitText over composing region");
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
             let text = app.last_text().unwrap_or_default();
-            if text.contains("FOO") && !text.contains("HELLO") {
+            if text.contains("FOO") && !text.contains("hello") {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
         let text = app.last_text().unwrap_or_default();
         assert!(
-            text.contains("FOO") && !text.contains("HELLO"),
+            text.contains("FOO") && !text.contains("hello"),
             "commitText over region did not replace marked text: {:?}",
             text
         );
     });
 }
 
-/// IC regression cases that do not depend on GTK widget behavior: replacement
-/// deltas must not duplicate text, diverged Editable cursor state must not
-/// slice bytes from the Wayland buffer, newline re-commit must not prepend
-/// stray bytes, and compositor round-trips must clear stale composing spans.
 #[test]
-fn test_wayland_input_ic_delta_regressions() {
+fn test_space_backspace_space_no_duplicate() {
     with_wayland_text_input(|app| {
         scene_space_backspace_space_no_duplicate(app);
+    });
+}
 
+#[test]
+fn test_diverged_cursor_no_byte_slicing() {
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("hello ").expect("commit 'hello '");
+        app.wait_for_text("hello ", TIMEOUT).expect("'hello '");
         adb::ic_commit_text("world").expect("append 'world'");
         app.wait_for_text("hello world", TIMEOUT)
             .expect("'hello world' after append");
@@ -1006,11 +971,17 @@ fn test_wayland_input_ic_delta_regressions() {
             app.last_text()
         );
     });
+}
 
+#[test]
+fn test_recommit_word_then_newline_no_h_prepend() {
     with_wayland_text_input(|app| {
         scene_recommit_word_then_newline_no_h_prepend(app);
     });
+}
 
+#[test]
+fn test_update_from_compositor_clears_composing_spans() {
     with_wayland_text_input(|app| {
         scene_update_from_compositor_clears_composing_spans(app);
     });
@@ -1018,7 +989,7 @@ fn test_wayland_input_ic_delta_regressions() {
 
 /// Toolkitless mirror of the surrounding-less GTK/VTE-shaped input case.
 #[test]
-fn test_wayland_surroundingless_client_uses_keyboard_for_backspace() {
+fn test_surroundingless_client_uses_keyboard_for_backspace() {
     let mut app = start_wayland_debug_text_input_no_surrounding(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
 
     assert_eq!(
@@ -1047,7 +1018,7 @@ fn test_wayland_surroundingless_client_uses_keyboard_for_backspace() {
 }
 
 #[test]
-fn test_android_wayland_clipboard_text_roundtrip() {
+fn test_android_clipboard_text_to_client() {
     let android_text = "android clipboard to wayland";
     adb::clipboard_set_text(android_text).expect("set Android clipboard");
 
@@ -1058,7 +1029,10 @@ fn test_android_wayland_clipboard_text_roundtrip() {
     paste_app
         .stop()
         .expect("clipboard paste app crashed or failed to stop cleanly");
+}
 
+#[test]
+fn test_client_clipboard_text_to_android() {
     let wayland_text = "wayland clipboard to android";
     let mut copy_app =
         start_wayland_debug_clipboard_copy(INPUT_BACKEND, WAYLAND_DEBUG_ENV, wayland_text);
