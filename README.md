@@ -1,11 +1,15 @@
 # Tess's Android Wayland Compositor
-Work-in-progress Smithay-based Wayland compositor for Android (and the miscellaneous scripts and libraries needed to make Linux apps work). Aside from this README 100% Claudeslop. And yet it works.
+TAWC allows you to run desktop Linux apps on Android without root, and with hardware accelerated graphics. It consists of a Smithay-based Wayland compositor, tawcroot (a higher performance PRoot alternative), android app and everything else needed to install a distro and run apps.
+
+TAWC is a vibecoded project, most of the code is not written or reviewed by humans. It was started with Opus 4.6 and now I use 4.7 and GPT 5.5. Integration tests, automated documentation and automated code review/cleanup are used to try to keep everything in line.
 
 ## High-level design
-- A linux distro such as Arch Linux Arm is installed into a fake chroot run by `tawcroot` (a custom systrap-based syscall emulator built specifically for tawc — rootless, no ptrace overhead). Debug builds also ship `proot` and real-`chroot`-via-`su` paths for comparison; release builds only ship tawcroot
-- Client programs are installed into the rootfs, they are naturally compiled with glibc
-- [libhybris](https://github.com/libhybris/libhybris) loads the system EGL driver (compiled with bionic) and provides a Wayland EGL platform for buffer sharing
-- Libhybris generally requires the Android ROM to be patched, but [our fork](https://github.com/wmww/libhybris) works on stock Android
-- Shared memory also requires some fuckery (an ashmem shim, see notes for details)
-- With all this in place, clients can connect to our [Android app](app/) which contains a [Smithay-based Wayland compositor](compositor/)
-- It doesn't use glibc, and uses the same stock Android EGL driver to composite client surfaces and render them to an Android app window
+- A Linux distro such as Arch Linux Arm is downloaded and extracted
+- Linux programs, including the distro's native package manager, are run "inside" the distro's rootfs using `tawcroot`
+- `tawcroot` emulates syscalls to overcome rootless Android's limitations, it's similar to PRoot but uses gVisor's systrap approach
+- `libhybris` allows glibc Linux programs to load the standard Android graphics drivers
+- Upstream  `libhybris` doesn't work on stock Android, but [our fork](https://github.com/wmww/libhybris) does
+- There's also some work on alternative graphics stacks such as using gfxstream, but that's still in-progress
+- The app contains a Smithay-based Wayland compositor which presents Linux apps alongside Android apps in the app switcher
+- XWayland is included and wired up for hardware accelerated X11 support
+- Various other app features (launcher, task manager, etc) tie it all together

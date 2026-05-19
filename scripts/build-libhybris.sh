@@ -66,7 +66,7 @@ for tool in autoreconf libtool wayland-scanner pkg-config make patchelf; do
 done
 
 # Vendored sources. libhybris is our fork (`wmww/libhybris`), our changes
-# stack as clean commits on top of upstream — see CLAUDE.md "Libhybris
+# stack as clean commits on top of upstream — see AGENTS.md "Libhybris
 # fork" and `libhybris/TAWC_FORK.md`. android-headers is upstream Halium.
 # Both pins live in `deps/deps.list`; `dep_ensure` clones if missing
 # and errors loudly if the existing checkout is at the wrong commit.

@@ -4,7 +4,7 @@
 > Keep this file in sync with the `scripts/build-*.sh` scripts and Gradle config.
 > Whenever you add or change a build-time dep — host package, vendored
 > repo, env var, toolchain version — update this doc in the same change.
-> CLAUDE.md instructs agents to consult and update this file when building.
+> AGENTS.md instructs agents to consult and update this file when building.
 
 This doc describes building on a Linux x86_64 host. macOS/Windows are not
 supported as build hosts; nothing is fundamentally portable-hostile, just
@@ -27,7 +27,7 @@ To force a rebuild by hand, run `bash scripts/build-libxkbcommon.sh` or
 `bash scripts/build-libhybris.sh`.
 
 The result is `app/build/outputs/apk/debug/app-debug.apk`. Install
-and launch as documented in CLAUDE.md's Quick Reference.
+and launch as documented in AGENTS.md's Quick Reference.
 
 ## Host packages
 

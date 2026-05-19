@@ -247,7 +247,7 @@ tawcAbis.forEach { abi ->
         inputs.file("$tawcRoot/scripts/build-libxkbcommon.sh")
         // Manifest + helper changes must invalidate the cache — otherwise a
         // bumped pin in deps/deps.list silently no-ops while the .a stays
-        // built against the old commit. See CLAUDE.md "Vendored deps".
+        // built against the old commit. See AGENTS.md "Vendored deps".
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")
         outputs.file(xkbStaticLib)
@@ -411,7 +411,7 @@ if ("arm64-v8a" in tawcAbis) {
         //   - the build script itself
         //   - the dep manifest + helper (so a pin bump invalidates the
         //     cache — otherwise a moved libhybris commit would silently
-        //     keep shipping the old .so set; see CLAUDE.md "Vendored deps")
+        //     keep shipping the old .so set; see AGENTS.md "Vendored deps")
         // The output dir snapshot covers the rest.
         inputs.file("$tawcRoot/scripts/build-libhybris.sh")
         inputs.file("$tawcRoot/deps/deps.list")

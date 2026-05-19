@@ -50,7 +50,7 @@ The cache is **persistent across runs** — `build/cache-proxy/` is
 gitignored along with the rest of `build/`, but never auto-wiped. To
 sweep it manually: `rm -rf build/cache-proxy/cache/`. For selective
 evict use `bash scripts/cache-proxy.sh wipe <regex>` (URLs are matched
-as extended regex). CLAUDE.md instructs agents not to wipe it without
+as extended regex). AGENTS.md instructs agents not to wipe it without
 explicit user request.
 
 ## Architecture

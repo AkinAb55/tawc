@@ -86,7 +86,7 @@ fn resolve_install_id() -> String {
         [] => panic!(
             "no in-app install found at /data/data/{pkg}/distros/*/ — \
              install one with `bash scripts/install-distro.sh <id> [method]` \
-             (see CLAUDE.md Quick Reference)"
+             (see AGENTS.md Quick Reference)"
         ),
         many => panic!(
             "multiple installs found at /data/data/{pkg}/distros/ ({}); \

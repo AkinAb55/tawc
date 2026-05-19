@@ -1,6 +1,6 @@
 # Shared dep-fetch + verify helper. Sourced by every build script that
 # vendors a third-party repo. Single source of truth for pins lives in
-# `deps/deps.list`. See CLAUDE.md "Vendored deps" for the policy.
+# `deps/deps.list`. See AGENTS.md "Vendored deps" for the policy.
 #
 # Public API (after sourcing):
 #   dep_dir <name>     -- echo absolute checkout path for <name>
