@@ -465,6 +465,7 @@ build_tests() {
     local prod_for_tests=(
         "$TAWCROOT_DIR/src/strings.c"
         "$TAWCROOT_DIR/src/filter_build.c"
+        "$TAWCROOT_DIR/src/path_scratch.c"
         "$TAWCROOT_DIR/src/path_fold.c"
         "$TAWCROOT_DIR/src/path_orchestrate.c"
         "$TAWCROOT_DIR/src/path_resolve.c"
