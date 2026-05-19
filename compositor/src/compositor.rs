@@ -22,6 +22,13 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::Display;
+use smithay::reexports::wayland_server::WEnum;
+use smithay::reexports::wayland_protocols_misc::server_decoration::server::{
+    org_kde_kwin_server_decoration::{
+        Mode as KdeDecorationMode, OrgKdeKwinServerDecoration,
+    },
+    org_kde_kwin_server_decoration_manager::Mode as KdeDefaultDecorationMode,
+};
 use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
@@ -37,6 +44,9 @@ use smithay::wayland::selection::data_device::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use std::os::fd::OwnedFd;
 use smithay::desktop::PopupManager;
+use smithay::wayland::shell::kde::decoration::{
+    KdeDecorationHandler, KdeDecorationState,
+};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
@@ -121,6 +131,11 @@ pub struct TawcState {
     // `XdgDecorationHandler` impl, never through this field.
     #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
+    // Legacy KDE server-decoration protocol used by Qt and older toolkits.
+    // Kept alongside xdg-decoration so clients get a server-side-decorated
+    // answer no matter which common decoration negotiation path they support.
+    #[allow(dead_code)]
+    pub kde_decoration_state: KdeDecorationState,
     // Held to keep wp_fractional_scale_manager_v1 registered.
     #[allow(dead_code)]
     pub fractional_scale_manager_state: FractionalScaleManagerState,
@@ -255,6 +270,8 @@ impl TawcState {
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let kde_decoration_state =
+            KdeDecorationState::new::<Self>(&dh, KdeDefaultDecorationMode::Server);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, []);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -316,6 +333,7 @@ impl TawcState {
             xdg_shell_state,
             output_manager_state,
             xdg_decoration_state,
+            kde_decoration_state,
             fractional_scale_manager_state,
             data_device_state,
             seat_state,
@@ -691,6 +709,29 @@ impl XdgDecorationHandler for TawcState {
             state.decoration_mode = Some(Mode::ServerSide);
         });
         toplevel.send_configure();
+    }
+}
+
+impl KdeDecorationHandler for TawcState {
+    fn kde_decoration_state(&self) -> &KdeDecorationState {
+        &self.kde_decoration_state
+    }
+
+    fn new_decoration(
+        &mut self,
+        _surface: &WlSurface,
+        decoration: &OrgKdeKwinServerDecoration,
+    ) {
+        decoration.mode(KdeDecorationMode::Server);
+    }
+
+    fn request_mode(
+        &mut self,
+        _surface: &WlSurface,
+        decoration: &OrgKdeKwinServerDecoration,
+        _mode: WEnum<KdeDecorationMode>,
+    ) {
+        decoration.mode(KdeDecorationMode::Server);
     }
 }
 
