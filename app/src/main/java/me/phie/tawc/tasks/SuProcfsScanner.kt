@@ -69,13 +69,13 @@ internal object SuProcfsScanner {
     }
 
     /**
-     * `kill -KILL <pid>` via su. Fire-and-forget — caller verifies via
+     * `kill -<signal> <pid>` via su. Fire-and-forget — caller verifies via
      * a re-scan rather than checking the kill exit code.
      */
-    fun kill(pid: Int) {
+    fun kill(pid: Int, signal: Int = 9) {
         if (!Su.rootAvailable()) return
         try {
-            Su.run("kill -KILL $pid 2>/dev/null || true")
+            Su.run("kill -$signal $pid 2>/dev/null || true")
         } catch (_: Throwable) {}
     }
 

@@ -88,23 +88,23 @@ object ProcessScanner {
      * Stop one process. Returns true if it's gone by the end of the
      * call (or was already gone).
      *
-     * Asymmetric by [ProcessInfo.requiresSu]:
-     *  - **app-uid:** SIGTERM, [graceMs] grace, then SIGKILL — polite
-     *    enough that well-behaved guests get a chance to flush.
-     *  - **root (su):** single SIGKILL. Two su invocations doubles the
-     *    (slow) magisk handshake, and chroot daemons that prompted a
-     *    Stop click are usually wedged anyway — the user wants them
-     *    gone, not negotiated with.
+     * Sends SIGTERM, waits [graceMs], then sends SIGKILL if the pid is
+     * still alive. App-uid processes use [Os.kill] directly; root-owned
+     * chroot processes send the same signals via `su`.
      */
     fun stop(proc: ProcessInfo, graceMs: Long = 1000): Boolean {
-        if (proc.requiresSu) {
-            SuProcfsScanner.kill(proc.pid)
-        } else {
-            sendSignal(proc.pid, OsConstants.SIGTERM)
-            if (waitForExit(proc.pid, graceMs)) return true
-            sendSignal(proc.pid, OsConstants.SIGKILL)
-        }
+        sendSignal(proc, OsConstants.SIGTERM)
+        if (waitForExit(proc.pid, graceMs)) return true
+        sendSignal(proc, OsConstants.SIGKILL)
         return waitForExit(proc.pid, graceMs)
+    }
+
+    private fun sendSignal(proc: ProcessInfo, signal: Int) {
+        if (proc.requiresSu) {
+            SuProcfsScanner.kill(proc.pid, signal)
+        } else {
+            sendSignal(proc.pid, signal)
+        }
     }
 
     private fun sendSignal(pid: Int, signal: Int) {
@@ -134,12 +134,9 @@ object ProcessScanner {
                 Os.kill(pid, 0)
                 true
             } catch (e: android.system.ErrnoException) {
-                // ESRCH ⇒ gone; EPERM ⇒ still there but we can't
-                // signal it (root-owned, but the requiresSu branch
-                // handled that — getting EPERM here means we lost the
-                // race and someone else owns the pid now, treat as
-                // gone).
-                e.errno != OsConstants.EPERM
+                // ESRCH means gone. EPERM still means a live pid, just
+                // one this process cannot signal or probe directly.
+                e.errno == OsConstants.EPERM
             } catch (_: Throwable) {
                 false
             }
@@ -152,16 +149,18 @@ object ProcessScanner {
     }
 
     /**
-     * Scan + hard-kill every match for [installId], wait, re-scan,
-     * hard-kill leftovers. Two passes catch fork-on-signal respawns
-     * like `pacman-key`'s detached `gpg-agent`.
+     * Scan + hard-kill every match for [installId] until a scan comes
+     * back empty or [maxSweeps] is reached. Repeated sweeps catch
+     * fork-on-signal respawns like `pacman-key`'s detached `gpg-agent`
+     * and ordinary fork races between scan and kill.
      *
      * Context-free so [me.phie.tawc.install.RootfsCleaner] (which has
      * no [Context]) can call in directly.
      *
-     * **Guests only, not supervisors.** Catches everything running
-     * with `cwd`/`exe`/`root` inside [rootfsPath] — i.e. the actual
-     * programs the user launched inside the chroot/proot/tawcroot.
+     * **Guests only, not supervisors.** Catches everything with
+     * `cwd`/`exe`/`root` or an executable mapped file inside
+     * [rootfsPath] — i.e. the actual programs the user launched inside
+     * the chroot/proot/tawcroot.
      * The host-side supervisor process (proot tracer, tawcroot leader
      * pre-`exec`) is *not* matched: its `exe` is the supervisor binary
      * in `nativeLibraryDir`, not in the rootfs. ProotMethod.wipe pairs
@@ -184,6 +183,8 @@ object ProcessScanner {
         installId: String,
         includeChroot: Boolean,
         extraCmdlinePath: String? = null,
+        maxSweeps: Int = 8,
+        sweepDelayMs: Long = 250,
         log: (String) -> Unit,
     ) {
         val pair = listOf(canonicalize(rootfsPath) to installId)
@@ -192,7 +193,7 @@ object ProcessScanner {
             // Skip the polite SIGTERM — uninstall is forced teardown,
             // the rootfs is about to disappear from under these procs.
             if (p.requiresSu) {
-                SuProcfsScanner.kill(p.pid)
+                SuProcfsScanner.kill(p.pid, OsConstants.SIGKILL)
             } else {
                 sendSignal(p.pid, OsConstants.SIGKILL)
             }
@@ -217,21 +218,29 @@ object ProcessScanner {
             return (app + su).filter { seen.add(it.pid) }
         }
 
-        val first = sweep()
-        if (first.isEmpty()) {
-            log("no guest processes to clean up")
-            return
+        val limit = maxSweeps.coerceAtLeast(1)
+        var killedAny = false
+        for (pass in 1..limit) {
+            val procs = sweep()
+            if (procs.isEmpty()) {
+                if (!killedAny) log("no guest processes to clean up")
+                return
+            }
+            killedAny = true
+            for (p in procs) {
+                val prefix = if (pass == 1) "pid" else "rescan#$pass pid"
+                log("$prefix=${p.pid} (${p.comm})")
+                killOne(p)
+            }
+            try { Thread.sleep(sweepDelayMs) } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
         }
-        for (p in first) {
-            log("pid=${p.pid} (${p.comm})")
-            killOne(p)
-        }
-        try { Thread.sleep(1000) } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        for (p in sweep()) {
-            log("rescan pid=${p.pid} (${p.comm})")
-            killOne(p)
+        val survivors = sweep()
+        if (survivors.isNotEmpty()) {
+            log("warning: guest processes still present after $limit sweeps")
+            for (p in survivors) log("survivor pid=${p.pid} (${p.comm})")
         }
     }
 }

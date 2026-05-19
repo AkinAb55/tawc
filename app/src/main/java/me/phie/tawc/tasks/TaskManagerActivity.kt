@@ -5,7 +5,9 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -44,9 +46,14 @@ class TaskManagerActivity : AppCompatActivity() {
     private val pad by lazy { (16 * resources.displayMetrics.density).toInt() }
     private val cardMargin by lazy { (8 * resources.displayMetrics.density).toInt() }
     private val cardPad by lazy { (12 * resources.displayMetrics.density).toInt() }
+    private val stopSlotWidth by lazy { (88 * resources.displayMetrics.density).toInt() }
+    private val spinnerSize by lazy { (32 * resources.displayMetrics.density).toInt() }
 
     private var scope: CoroutineScope? = null
     private var refreshJob: Job? = null
+    private val stoppingPids = mutableSetOf<Int>()
+    private var lastInstalls: List<Installation> = emptyList()
+    private var lastResult = ProcessScanner.ScanResult(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,6 +98,7 @@ class TaskManagerActivity : AppCompatActivity() {
         scope?.cancel()
         scope = null
         refreshJob = null
+        stoppingPids.clear()
     }
 
     /**
@@ -113,6 +121,8 @@ class TaskManagerActivity : AppCompatActivity() {
     }
 
     private fun render(installs: List<Installation>, result: ProcessScanner.ScanResult) {
+        lastInstalls = installs
+        lastResult = result
         listContainer.removeAllViews()
 
         val byInstall = result.groupedByInstall()
@@ -201,7 +211,7 @@ class TaskManagerActivity : AppCompatActivity() {
         }
         row.addView(labelColumn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        val stop = destructiveButton("Stop") { stopProcess(p) }
+        val stop = buildStopControl(p)
         row.addView(
             stop,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
@@ -211,6 +221,27 @@ class TaskManagerActivity : AppCompatActivity() {
         return row
     }
 
+    private fun buildStopControl(p: ProcessInfo): View {
+        if (p.pid !in stoppingPids) {
+            return destructiveButton("Stop") { stopProcess(p) }.apply {
+                minWidth = stopSlotWidth
+            }
+        }
+        return FrameLayout(this).apply {
+            minimumWidth = stopSlotWidth
+            addView(
+                ProgressBar(
+                    this@TaskManagerActivity,
+                    null,
+                    android.R.attr.progressBarStyleSmall,
+                ).apply {
+                    isIndeterminate = true
+                },
+                FrameLayout.LayoutParams(spinnerSize, spinnerSize, Gravity.CENTER),
+            )
+        }
+    }
+
     /**
      * Fire SIGTERM/SIGKILL off the main thread, then immediately
      * refresh so the row disappears (or stays, if the process
@@ -218,9 +249,15 @@ class TaskManagerActivity : AppCompatActivity() {
      */
     private fun stopProcess(p: ProcessInfo) {
         val s = scope ?: return
+        if (!stoppingPids.add(p.pid)) return
+        render(lastInstalls, lastResult)
         s.launch {
-            withContext(Dispatchers.IO) {
-                runInterruptible { ProcessScanner.stop(p) }
+            try {
+                withContext(Dispatchers.IO) {
+                    runInterruptible { ProcessScanner.stop(p) }
+                }
+            } finally {
+                stoppingPids.remove(p.pid)
             }
             startRefresh()
         }

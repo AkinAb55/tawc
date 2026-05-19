@@ -3,13 +3,14 @@ package me.phie.tawc.tasks
 /**
  * One running guest process discovered by [ProcessScanner].
  *
- * "Owner" is the install whose rootfs the process appears to be running
- * inside, determined by the kernel-side `/proc/<pid>/{root,cwd,exe}`
- * paths (see [AppUidProcfsScanner] / [SuProcfsScanner] for the exact
- * predicate). [ownerInstallId] is `null` for *orphan* processes —
- * processes whose paths point into a `<distros>/<id>/rootfs/` slot
- * that no longer has an installation record (e.g. an `--kill-on-exit`
- * leak that survived an uninstall). The id is preserved as
+ * "Owner" is the install whose rootfs the process appears to be using,
+ * determined from kernel-side `/proc` paths (cheap links first, plus
+ * executable maps for tawcroot; see [AppUidProcfsScanner] /
+ * [SuProcfsScanner] for the exact predicate). [ownerInstallId] is
+ * `null` for *orphan* processes —
+ * processes whose paths point into a `<distros>/<id>/rootfs` tree that
+ * no longer has an installation record (e.g. an `--kill-on-exit` leak
+ * that survived an uninstall). The id is preserved as
  * [orphanRootfsId] so the UI can show "(uninstalled: <id>)" rather
  * than just "orphan".
  *

@@ -159,6 +159,26 @@ launching a job. The Install button, the Delete dialog, and the dev
 exec broker's `install` / `uninstall` actions are all just inputs;
 the service decides.
 
+## Process discovery and cleanup
+
+`ProcessScanner` is the shared process-discovery path for the task
+manager and rootfs cleanup. App-uid methods (`tawcroot`, `proot`) are
+scanned without `su`: `AppUidProcfsScanner` walks `/proc`, checks the
+cheap `/proc/<pid>/{cwd,exe,root}` links first, then falls back to
+executable file mappings in `/proc/<pid>/maps`. The maps fallback is
+needed for tawcroot because the kernel's `exe` / `cmdline` can describe
+the loader handoff rather than the guest ELF, while the loaded guest
+binary still appears as an executable mapping under
+`<distros>/<id>/rootfs`.
+
+The app-uid scanner matches exact rootfs paths and descendants, so a
+guest with `cwd` at the rootfs root is visible. Orphan detection uses
+the same rootfs boundary under `<distros>/<id>/rootfs` and reports a
+missing install record as `(uninstalled: <id>)`. Real `chroot(2)`
+processes are root-owned and hidden by Android procfs policy, so the
+chroot path is isolated in `SuProcfsScanner`, which compares
+`/proc/<pid>/root` dev:inode values via `su`.
+
 `FAILED` is a parking state: it carries a `failure` string and can only
 be cleared by uninstalling the half-installed (or half-uninstalled)
 remains. There is intentionally no "resume" or "repair" — the only
@@ -363,15 +383,16 @@ sweep fires once at process cold start.
 `ArchInstaller.uninstall()`. It does, in order:
 
 1. **(state write)** — `setState(UNINSTALLING)`.
-2. **kill chroot processes** — sweeps `/proc/<pid>/root` and
-   `/proc/<pid>/cwd`, comparing dev:inode against the rootfs (so it
-   matches whether the kernel reports `/data/data/<pkg>/...` or
-   `/data/user/0/<pkg>/...`). Sends SIGKILL twice with a beat between
-   to catch daemons that respawn on signal — the canonical offender is
-   the `gpg-agent --daemon` that `pacman-key --init` detaches; left
-   alive it holds FDs into the rootfs and races the delete, which on
-   Android 14 spins vold's FUSE accounting into a `vdc volume
-   abort_fuse` storm.
+2. **kill rootfs processes** — loops over scan → SIGKILL → short wait
+   until the scan comes back empty or the sweep limit is reached. The
+   app-uid scanner matches rootfs links/maps; the chroot branch compares
+   `/proc/<pid>/root` dev:inode values via `su` (so it matches whether
+   the kernel reports `/data/data/<pkg>/...` or `/data/user/0/<pkg>/...`).
+   Repeated sweeps catch fork races and daemons that respawn on signal —
+   the canonical offender is the `gpg-agent --daemon` that
+   `pacman-key --init` detaches; left alive it holds FDs into the rootfs
+   and races the delete, which on Android 14 spins vold's FUSE accounting
+   into a `vdc volume abort_fuse` storm.
 3. **strict unmount** — `ChrootMounter.unmount` runs via `su -mm`
    (Magisk's mount-master mode) so `umount` actually affects the
    global mount table; refuses with a non-zero exit if any mount

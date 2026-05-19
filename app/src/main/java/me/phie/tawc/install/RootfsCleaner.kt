@@ -17,8 +17,8 @@ import java.io.IOException
  *      alive it holds FDs into the rootfs and races the delete, which
  *      on Android 14 spins vold's FUSE accounting into a `vdc volume
  *      abort_fuse` storm bad enough to ANR system_server. The scanner
- *      sends KILL twice with a beat between to catch fork-on-signal
- *      respawns.
+ *      sends KILL in a bounded scan/kill loop to catch fork-on-signal
+ *      respawns and ordinary fork races.
  *   2. **Strict unmount** via [ChrootMounter.unmount] (mount-master
  *      mode). Refuses with a non-zero exit if any mount remains under
  *      the rootfs — we'd rather leave a `FAILED` install on disk than
