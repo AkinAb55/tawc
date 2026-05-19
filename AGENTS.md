@@ -1,7 +1,7 @@
 Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scripts for running desktop Linux programs on Android.
 
 ## Quick Reference
-- Build APK: `JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=$HOME/Android/Sdk ./gradlew assembleDebug`
+- Build APK: `scripts/build-app.sh`
 - Build/install/launch: `scripts/app-build-install.sh` (`--no-build`, `--no-launch` supported)
 - Run in rootfs: `scripts/rootfs-run.sh '<command>'` or interactive with no command
 - Run Firefox: `scripts/rootfs-run.sh 'firefox --no-remote'`

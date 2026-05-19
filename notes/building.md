@@ -16,13 +16,13 @@ untested.
 # One-time: install host deps (see "Host packages" below)
 
 # Each iteration:
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
+scripts/build-app.sh
 ```
 
 Vendored git repos listed in `deps/deps.list` are auto-cloned by their
 respective build/setup scripts on first invocation - no manual clone step
 is needed. Gradle drives those scripts ahead of APK assembly, so a fresh
-clone goes straight to `assembleDebug`. To force a component rebuild by
+clone goes straight to `scripts/build-app.sh`. To force a component rebuild by
 hand, use the matching script under `scripts/` or `tawcroot/build.sh`.
 
 The result is `app/build/outputs/apk/debug/app-debug.apk`. Install
@@ -122,7 +122,9 @@ export ANDROID_HOME=$HOME/Android/Sdk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
 ```
 
-`ANDROID_NDK_HOME` is auto-detected by `scripts/build-libxkbcommon.sh`
+`scripts/build-app.sh` sets `JAVA_HOME` and `ANDROID_HOME` to the defaults
+above when they are unset. `ANDROID_NDK_HOME` is auto-detected by
+`scripts/build-libxkbcommon.sh`
 (it falls back to `$ANDROID_HOME/ndk/<latest>`). `JAVA_HOME` must be
 set explicitly when invoking `./gradlew` if your default JDK isn't 21.
 
@@ -172,7 +174,7 @@ no surprise tarball changes between runs.
 ## Per-component build instructions
 
 Gradle invokes every cross-build below automatically before assembling
-the APK — `./gradlew assembleDebug` from a fresh clone is enough.
+the APK — `scripts/build-app.sh` from a fresh clone is enough.
 Run the standalone scripts only when iterating on the component itself
 (faster than a full Gradle round-trip).
 
@@ -220,7 +222,7 @@ Bundled into the APK by the Gradle `packLibhybris` task as
 first compositor start by `CompositorService.ensureLibhybrisExtracted`,
 and copied into each rootfs by `TawcInstaller`/`LibhybrisInstallProvider`
 at install time and on first app start after an APK upgrade.
-End-to-end automatic — no manual steps after `./gradlew assembleDebug`.
+End-to-end automatic — no manual steps after `scripts/build-app.sh`.
 
 #### Why the cross-compile and not the NDK
 
@@ -366,8 +368,12 @@ See [tawcroot.md](tawcroot.md) for the design.
 ### APK assembly
 
 ```bash
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew assembleDebug
+scripts/build-app.sh
 ```
+
+Builds `arm64-v8a` by default, or `x86_64` when `ANDROID_SERIAL` or
+`.tawctarget` points at an emulator. Use `--abi=arm64-v8a`,
+`--abi=x86_64`, or `--abi=both` to override.
 
 Invokes the Rust compositor build, copies its output into
 `jniLibs/<abi>/`; applies Smithay/rutabaga setup; cross-builds proot
@@ -384,11 +390,12 @@ APK.
 scripts/app-build-install.sh
 ```
 
-Builds, installs, force-stops, and launches `MainActivity` (which
-starts `CompositorService`). Picks the device from `.tawctarget` /
-`TAWC_TARGET` via `scripts/lib/select-device.sh`. Flags: `--no-build`
-to reuse the existing APK; `--no-launch` to install without starting
-(used by `run-integration-tests.sh`).
+Picks the device from `.tawctarget` / `TAWC_TARGET` via
+`scripts/lib/select-device.sh`, builds through `scripts/build-app.sh`,
+installs, force-stops, and launches `MainActivity` (which starts
+`CompositorService`). Flags: `--no-build` to reuse the existing APK;
+`--no-launch` to install without starting (used by
+`run-integration-tests.sh`).
 
 Note: `am start` directly into `.compositor.CompositorActivity` does
 not work — go through `MainActivity` (the script does this).

@@ -106,7 +106,7 @@ disables this backend at build time. Effect:
 
 - `scripts/build-mesa-gfxstream.sh` skips the Mesa-Zink configure +
   ninja step (still builds the gfxstream-vk Vulkan ICD). Saves the
-  bulk of the Mesa cross-build (~3-5 min on a cold `assembleDebug`).
+  bulk of the Mesa cross-build (~3-5 min on a cold `scripts/build-app.sh`).
 - Gradle's `packMesaZink<Abi>` becomes a `Delete` task that wipes the
   `app/src/main/assets/mesa-zink/<abi>/` dir — so flipping the flag
   back and forth doesn't leave a stale tarball in the source tree.

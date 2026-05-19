@@ -29,17 +29,8 @@ done
 # shellcheck source=lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
 
-# Pick the right native ABI for the target. The Rust compositor links
-# against a locally-built static libxkbcommon per arch; building both
-# only works if both libxkbcommon trees exist.
-case "$ANDROID_SERIAL" in
-    emulator-*) TAWC_ABIS="x86_64" ;;
-    *)          TAWC_ABIS="arm64-v8a" ;;
-esac
-
 if [ "$DO_BUILD" -eq 1 ]; then
-    echo "=== Building APK ($TAWC_ABIS) ==="
-    ( cd "$ROOT_DIR" && ./gradlew "-PtawcAbis=$TAWC_ABIS" assembleDebug --quiet )
+    "$ROOT_DIR/scripts/build-app.sh" --quiet
 fi
 
 APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
