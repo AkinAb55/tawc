@@ -1081,13 +1081,18 @@ fn test_wayland_input_basic_editing_and_preedit() {
 
 /// Cursor movement is the part GTK used to hide for us. The toolkitless app
 /// validates the compositor's touch delivery directly: tap moves the cursor,
-/// Backspace and composing insertion happen at that cursor, and touching
-/// elsewhere finalizes pending preedit without letting a stale
+/// Backspace and composing insertion happen at that cursor, a full
+/// compose-click-compose loop inserts the second word at the tapped cursor,
+/// and touching elsewhere finalizes pending preedit without letting a stale
 /// finishComposingText duplicate it.
 #[test]
 fn test_wayland_input_touch_cursor_and_pending_preedit() {
     with_wayland_text_input(|app| {
         scene_click_cursor_positioning(app, WAYLAND_TAP_COORDS);
+        reset_buffer(app);
+
+        scene_full_compose_loop_with_click_in_middle(app, WAYLAND_TAP_COORDS);
+        reset_buffer(app);
 
         let before = app.last_text().unwrap_or_default();
         adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");

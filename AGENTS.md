@@ -23,6 +23,7 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - If you add or change a build dependency, host package, vendored repo, env var, or toolchain version, update [notes/building.md](notes/building.md) in the same change.
 - Use existing scripts instead of one-off adb/chroot commands when possible, if the scripts are broken fix them (or at least open an issue).
 - Only commit, amend, tag, or push when explicitly asked. Git push may hang without user approval.
+- Do not run formatting tools (`cargo fmt`, `rustfmt`, etc.) unless explicitly asked.
 - Keep prose, comments, errors, and commit messages short unless extra detail is genuinely useful.
 
 ## Issues
