@@ -43,7 +43,8 @@ use smithay::wayland::selection::data_device::{
 };
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use std::os::fd::OwnedFd;
-use smithay::desktop::PopupManager;
+use smithay::desktop::{find_popup_root_surface, PopupKeyboardGrab, PopupManager, PopupPointerGrab};
+use smithay::input::pointer::Focus as PointerFocusMode;
 use smithay::wayland::shell::kde::decoration::{
     KdeDecorationHandler, KdeDecorationState,
 };
@@ -654,7 +655,37 @@ impl XdgShellHandler for TawcState {
             error!("Failed to track popup: {:?}", e);
         }
     }
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        let popup = surface.into();
+        let root = match find_popup_root_surface(&popup) {
+            Ok(root) => root,
+            Err(e) => {
+                error!("Failed to find popup root for grab: {:?}", e);
+                return;
+            }
+        };
+        let grab = match self
+            .popup_manager
+            .grab_popup::<Self>(root, popup, &self.seat, serial)
+        {
+            Ok(grab) => grab,
+            Err(e) => {
+                error!("Failed to grab popup: {:?}", e);
+                return;
+            }
+        };
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.set_grab(
+                self,
+                PopupPointerGrab::new(&grab),
+                serial,
+                PointerFocusMode::Keep,
+            );
+        }
+    }
     fn reposition_request(
         &mut self,
         surface: PopupSurface,

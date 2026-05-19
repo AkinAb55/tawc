@@ -1272,17 +1272,20 @@ fn test_wayland_touch_ignores_input_empty_subsurface() {
     });
 }
 
-/// Basic xdg_popup coverage: create/map a popup from wayland-debug-app and
-/// verify the same touch path hit-tests to the popup surface rather than the
-/// parent toplevel. The fixture gives both parent and popup non-zero
-/// `set_window_geometry` offsets so client-side shadows are part of the
-/// coordinate assertion.
+/// Basic xdg_popup coverage: the first tap must land on the popup with
+/// popup-local coordinates, including non-zero window-geometry/shadow
+/// offsets. A later tap outside the popup must dismiss it; GTK menu bars
+/// depend on that `popup_done` before mapping a different menu popup.
 #[test]
 fn test_wayland_touch_popup_tap() {
     with_wayland_popup(|app| {
         app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
             .expect("popup ready");
         assert_popup_shadow_geometry_tap_delivered(app);
+
+        inject_touch("tap-outside-popup");
+        app.wait_for_tag_value("POPUP_DONE", "", TIMEOUT)
+            .expect("popup dismissed after outside tap");
     });
 }
 

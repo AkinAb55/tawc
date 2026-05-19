@@ -26,10 +26,10 @@ use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::{
-    with_states, with_surface_tree_downward, BufferAssignment, SubsurfaceCachedState,
+    get_role, with_states, with_surface_tree_downward, BufferAssignment, SubsurfaceCachedState,
     SurfaceAttributes, TraversalAction,
 };
-use smithay::wayland::shell::xdg::SurfaceCachedState;
+use smithay::wayland::shell::xdg::{SurfaceCachedState, XDG_POPUP_ROLE};
 use wayland_server::{Display, ListeningSocket};
 
 use crate::host::{ActivityId, OutputHost, SurfaceEvent};
@@ -190,6 +190,40 @@ fn touch_focus_at(
     })
 }
 
+fn is_xdg_popup_surface(surface: &WlSurface) -> bool {
+    get_role(surface) == Some(XDG_POPUP_ROLE)
+}
+
+fn dismiss_host_popups_if_touch_is_outside_popup(
+    data: &mut TawcState,
+    activity_id: &ActivityId,
+    focus: Option<&WlSurface>,
+) {
+    if focus.is_some_and(is_xdg_popup_surface) {
+        return;
+    }
+
+    let roots: Vec<WlSurface> = data
+        .toplevels
+        .iter()
+        .map(|t| t.wl_surface())
+        .filter(|root| {
+            data.toplevel_to_host
+                .get(*root)
+                .is_some_and(|assigned| assigned == activity_id)
+        })
+        .cloned()
+        .collect();
+
+    for root in roots {
+        if let Some((popup, _)) = PopupManager::popups_for_surface(&root).next() {
+            if PopupManager::dismiss_popup(&root, &popup).is_ok() {
+                data.needs_render = true;
+            }
+        }
+    }
+}
+
 fn surface_accepts_touch_at(surface: &WlSurface, local: Point<f64, Logical>) -> bool {
     with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceAttributes>();
@@ -307,6 +341,11 @@ pub fn run(
                 // touch.down's events, so the client commits at the old
                 // cursor and only afterwards processes the touch.
                 let target = focus.as_ref().map(|(s, _)| s.clone());
+                dismiss_host_popups_if_touch_is_outside_popup(
+                    data,
+                    &activity_id,
+                    target.as_ref(),
+                );
                 data.set_input_focus(target.as_ref());
                 data.text_input_state.handle_android_event(
                     crate::text_input::TextInputEvent::FinishComposingText,

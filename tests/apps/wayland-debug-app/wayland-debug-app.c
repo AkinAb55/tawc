@@ -1230,9 +1230,9 @@ static void popup_configure(void *data, struct xdg_popup *popup, int32_t x,
 
 static void popup_done(void *data, struct xdg_popup *popup)
 {
-    struct app *app = data;
+    (void)data;
     (void)popup;
-    app->running = 0;
+    debug_emit("POPUP_DONE", NULL);
 }
 
 static void popup_repositioned(void *data, struct xdg_popup *popup,

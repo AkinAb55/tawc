@@ -60,7 +60,7 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * | `ic-set-selection` | `start`, `end` | `IC.setSelection(start, end)` |
  * | `ic-delete-surrounding-text` | `before`, `after` | `IC.deleteSurroundingText(before, after)` |
  * | `ic-send-key-event` | `keycode` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))` |
- * | `inject-touch` | `kind=tap|drag|multitouch` | Dispatch normalized MotionEvents to the focused SurfaceView |
+ * | `inject-touch` | `kind=tap|tap-outside-popup|drag|multitouch` | Dispatch normalized MotionEvents to the focused SurfaceView |
  *
  * Test-mode helpers:
  *
@@ -255,8 +255,8 @@ internal object InputActions {
      */
     private object InjectTouchAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val kind = args["kind"] ?: return ctx.fail("inject-touch: --arg kind=tap|drag|multitouch required")
-            if (kind !in setOf("tap", "drag", "multitouch")) {
+            val kind = args["kind"] ?: return ctx.fail("inject-touch: --arg kind=tap|tap-outside-popup|drag|multitouch required")
+            if (kind !in setOf("tap", "tap-outside-popup", "drag", "multitouch")) {
                 return ctx.fail("inject-touch: unknown kind '$kind'")
             }
             var injectError: String? = null

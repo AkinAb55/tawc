@@ -272,6 +272,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
                 send(MotionEvent.ACTION_DOWN, 0, intArrayOf(0), arrayOf(p))
                 send(MotionEvent.ACTION_UP, 0, intArrayOf(0), arrayOf(p))
             }
+            "tap-outside-popup" -> {
+                val p = point(0.80f, 0.80f)
+                send(MotionEvent.ACTION_DOWN, 0, intArrayOf(0), arrayOf(p))
+                send(MotionEvent.ACTION_UP, 0, intArrayOf(0), arrayOf(p))
+            }
             "drag" -> {
                 val ids = intArrayOf(0)
                 send(MotionEvent.ACTION_DOWN, 0, ids, arrayOf(point(0.25f, 0.35f)))
