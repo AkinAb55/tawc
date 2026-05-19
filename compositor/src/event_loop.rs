@@ -27,7 +27,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::{
     get_role, with_states, with_surface_tree_downward, BufferAssignment, SubsurfaceCachedState,
-    SurfaceAttributes, TraversalAction,
+    SurfaceAttributes, SurfaceData, TraversalAction,
 };
 use smithay::wayland::shell::xdg::{SurfaceCachedState, XDG_POPUP_ROLE};
 use wayland_server::{Display, ListeningSocket};
@@ -61,7 +61,11 @@ fn xdg_window_geometry_loc(surface: &WlSurface) -> Point<i32, Logical> {
     })
 }
 
-fn surface_logical_size(data: &TawcState, surface: &WlSurface) -> Option<(i32, i32)> {
+fn surface_logical_size_from_states(
+    data: &TawcState,
+    surface: &WlSurface,
+    states: &SurfaceData,
+) -> Option<(i32, i32)> {
     if let Some(ws) = data.surface_wlegl.get(surface) {
         return Some(render::logical_size(
             ws.committed_width,
@@ -80,34 +84,29 @@ fn surface_logical_size(data: &TawcState, surface: &WlSurface) -> Option<(i32, i
         ));
     }
 
-    let mut size = None;
-    with_states(surface, |states| {
-        let mut guard = states.cached_state.get::<SurfaceAttributes>();
-        let attrs = guard.current();
-        let buffer_scale = attrs.buffer_scale.max(1);
-        let buffer = match &attrs.buffer {
-            Some(BufferAssignment::NewBuffer(buf))
-                if matches!(buffer_type(buf), Some(BufferType::Shm)) =>
-            {
-                Some(buf.clone())
-            }
-            _ => None,
-        };
-        drop(guard);
-        let mut vp_guard = states
-            .cached_state
-            .get::<smithay::wayland::viewporter::ViewportCachedState>();
-        let viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
-        if let Some(buffer) = buffer {
-            let dims = smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
-                (data.width, data.height)
-            });
-            if let Ok((w, h)) = dims {
-                size = Some(render::logical_size(w, h, buffer_scale, viewport_dst));
-            }
+    let mut guard = states.cached_state.get::<SurfaceAttributes>();
+    let attrs = guard.current();
+    let buffer_scale = attrs.buffer_scale.max(1);
+    let buffer = match &attrs.buffer {
+        Some(BufferAssignment::NewBuffer(buf))
+            if matches!(buffer_type(buf), Some(BufferType::Shm)) =>
+        {
+            Some(buf.clone())
         }
+        _ => None,
+    };
+    drop(guard);
+
+    let mut vp_guard = states
+        .cached_state
+        .get::<smithay::wayland::viewporter::ViewportCachedState>();
+    let viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
+    let buffer = buffer?;
+    let dims = smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
+        (data.width, data.height)
     });
-    size
+    dims.ok()
+        .map(|(w, h)| render::logical_size(w, h, buffer_scale, viewport_dst))
 }
 
 fn collect_tree_hits(
@@ -129,7 +128,7 @@ fn collect_tree_hits(
             TraversalAction::DoChildren((px + loc.x, py + loc.y))
         },
         |surf, states, &(base_x, base_y)| {
-            if let Some((w, h)) = surface_logical_size(data, surf) {
+            if let Some((w, h)) = surface_logical_size_from_states(data, surf, states) {
                 let loc = states
                     .cached_state
                     .get::<SubsurfaceCachedState>()
