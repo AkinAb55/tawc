@@ -334,6 +334,18 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivit
     host::send_surface_event(SurfaceEvent::FocusChanged { activity_id, has_focus });
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnActivityFullscreenChanged(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity_id: JString,
+    fullscreen: bool,
+) {
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    info!("nativeOnActivityFullscreenChanged({}, {})", activity_id, fullscreen);
+    host::send_surface_event(SurfaceEvent::FullscreenChanged { activity_id, fullscreen });
+}
+
 // ---------------------------------------------------------------------------
 // JNI: Text input events from Android InputConnection
 // ---------------------------------------------------------------------------
@@ -663,6 +675,36 @@ pub fn finish_activity_from_native(activity_id: &str) {
         &[(&id_jstr).into()],
     ) {
         log::error!("Reverse JNI finishActivity({}) failed: {}", activity_id, e);
+    }
+}
+
+/// Reverse-JNI: set the Android fullscreen/immersive-bars mode for one
+/// compositor Activity.
+pub fn set_activity_fullscreen_from_native(activity_id: &str, fullscreen: bool) {
+    let vm = match JAVA_VM.get() {
+        Some(vm) => vm,
+        None => { log::error!("JavaVM not cached for setActivityFullscreen"); return; }
+    };
+    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
+        Some(r) => r,
+        None => { log::error!("NativeBridge class not cached for setActivityFullscreen"); return; }
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
+    };
+    let id_jstr = match env.new_string(activity_id) {
+        Ok(s) => s,
+        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
+    };
+    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
+    if let Err(e) = env.call_static_method(
+        class,
+        "setActivityFullscreen",
+        "(Ljava/lang/String;Z)V",
+        &[(&id_jstr).into(), JValue::Bool(if fullscreen { 1 } else { 0 })],
+    ) {
+        log::error!("Reverse JNI setActivityFullscreen({}, {}) failed: {}", activity_id, fullscreen, e);
     }
 }
 

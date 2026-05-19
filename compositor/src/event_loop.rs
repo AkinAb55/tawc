@@ -796,6 +796,11 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             if let Some(host) = data.hosts.get_mut(&activity_id) {
                 data.render.attach_host_surface(host);
             }
+            let fullscreen = data.host_fullscreen(&activity_id);
+            if let Some(host) = data.hosts.get_mut(&activity_id) {
+                host.fullscreen = fullscreen;
+            }
+            crate::set_activity_fullscreen_from_native(&activity_id, fullscreen);
             // Update primary-output mode + the cached logical_size that
             // configure events use. Phase 0/1 advertises only one
             // wl_output, so we just track the first/most recent host.
@@ -866,6 +871,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             if data.hosts.remove(&activity_id).is_some() {
                 info!("Host {} removed (closed {} toplevels)", activity_id, assigned.len());
             }
+            data.host_fullscreen.remove(&activity_id);
             if data.foreground_host.as_ref() == Some(&activity_id) {
                 data.foreground_host = None;
             }
@@ -888,6 +894,10 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
         }
         SurfaceEvent::OutputScaleChanged { scale } => {
             apply_output_scale(data, OutputScale::new(scale));
+        }
+        SurfaceEvent::FullscreenChanged { activity_id, fullscreen } => {
+            data.set_host_fullscreen(&activity_id, fullscreen);
+            data.needs_render = true;
         }
     }
 }
@@ -1015,9 +1025,15 @@ fn reconfigure_all_toplevels(state: &mut TawcState) {
             .and_then(|id| state.hosts.get(id))
             .map(|host| host.logical_size)
             .unwrap_or(primary);
+        let fullscreen = state
+            .toplevel_to_host
+            .get(toplevel.wl_surface())
+            .map(|id| state.host_fullscreen(id))
+            .unwrap_or(false);
         toplevel.with_pending_state(|s| {
             s.size = Some((w, h).into());
         });
+        crate::compositor::set_toplevel_fullscreen_state(toplevel, fullscreen, None);
         toplevel.send_pending_configure();
     }
 }

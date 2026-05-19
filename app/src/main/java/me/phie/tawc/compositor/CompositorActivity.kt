@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.os.IBinder
@@ -14,6 +15,8 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -39,6 +42,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
     /** False until onCreate finished its full setup — guards onDestroy
      *  cleanup against the early-return path when intent.data is missing. */
     private var initialized = false
+    private var compositorFullscreen = false
 
     private var compositorService: CompositorService? = null
 
@@ -78,17 +82,6 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         startForegroundService(serviceIntent)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = (
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        )
-        window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
-
         surfaceView = TawcSurfaceView(this)
         setContentView(surfaceView)
         surfaceView.holder.addCallback(this)
@@ -96,6 +89,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.isFocusableInTouchMode = true
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
         NativeBridge.inputView = surfaceView
+        applyCompositorFullscreen(NativeBridge.fullscreenForActivity(activityId))
 
         initialized = true
     }
@@ -137,7 +131,51 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!initialized) return
+        if (hasFocus) applyCompositorFullscreen(compositorFullscreen)
         NativeBridge.nativeOnActivityFocusChanged(activityId, hasFocus)
+    }
+
+    fun setFullscreenFromCompositor(fullscreen: Boolean) {
+        if (!initialized) {
+            compositorFullscreen = fullscreen
+            return
+        }
+        applyCompositorFullscreen(fullscreen)
+    }
+
+    private fun applyCompositorFullscreen(fullscreen: Boolean) {
+        compositorFullscreen = fullscreen
+        if (fullscreen) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(!fullscreen)
+            val types = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
+            window.insetsController?.let { controller ->
+                if (fullscreen) {
+                    controller.systemBarsBehavior =
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(types)
+                } else {
+                    controller.show(types)
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (fullscreen) {
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            } else {
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            }
+        }
     }
 
     /**

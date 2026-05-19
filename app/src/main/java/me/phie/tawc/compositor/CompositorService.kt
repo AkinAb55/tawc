@@ -137,6 +137,7 @@ class CompositorService : Service() {
 
     fun registerActivity(activityId: String, activity: CompositorActivity) {
         activities[activityId] = WeakReference(activity)
+        activity.setFullscreenFromCompositor(NativeBridge.fullscreenForActivity(activityId))
         Log.d(TAG, "Registered activity $activityId (count=${activities.size})")
     }
 

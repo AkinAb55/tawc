@@ -52,6 +52,7 @@ use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
     assert_compositor_clean, start_wayland_debug_clipboard_copy,
     start_wayland_debug_clipboard_paste, start_wayland_debug_popup, start_wayland_debug_subsurface,
+    ensure_wayland_debug_app,
     start_wayland_debug_subsurface_input_empty, start_wayland_debug_text_input,
     start_wayland_debug_text_input_no_surrounding,
     start_wayland_debug_touch, TIMEOUT,
@@ -716,6 +717,32 @@ fn test_tap_commits_pending_preedit_once() {
 /// asserts event shape rather than absolute pixels. It covers a plain tap:
 /// wl_touch.down reaches the client, followed by wl_touch.up for the same
 /// slot, with no dependency on the device's physical resolution.
+#[test]
+fn test_xdg_configure_state_maximized_vs_fullscreen() {
+    let binary = ensure_wayland_debug_app();
+
+    let mut normal = DebugApp::start(INPUT_BACKEND, &binary, "scale", WAYLAND_DEBUG_ENV)
+        .expect("start non-fullscreen debug app");
+    normal
+        .wait_for_tag_value("CONFIGURE_STATE", "maximized", TIMEOUT)
+        .expect("non-fullscreen app should be configured maximized");
+    assert!(
+        normal.payloads_with_tag("CONFIGURE_STATE").iter().all(|s| s != "fullscreen"),
+        "non-fullscreen app received fullscreen configure"
+    );
+    normal.stop().expect("normal debug app failed to stop cleanly");
+    assert_compositor_clean();
+
+    let mut fullscreen = start_wayland_debug_touch(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    fullscreen
+        .wait_for_tag_value("CONFIGURE_STATE", "fullscreen", TIMEOUT)
+        .expect("fullscreen-requesting app should be configured fullscreen");
+    fullscreen
+        .stop()
+        .expect("fullscreen debug app failed to stop cleanly");
+    assert_compositor_clean();
+}
+
 #[test]
 fn test_touch_tap() {
     with_wayland_touch(|app| {

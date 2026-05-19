@@ -14,7 +14,7 @@ use smithay::delegate_dispatch2;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::input::dnd::DndGrabHandler;
 use smithay::input::keyboard::XkbConfig;
-use smithay::reexports::wayland_server::protocol::wl_seat;
+use smithay::reexports::wayland_server::protocol::{wl_output, wl_seat};
 use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
@@ -201,6 +201,10 @@ pub struct TawcState {
     /// `onWindowFocusChanged(true)`).
     pub foreground_host: Option<ActivityId>,
 
+    /// Canonical fullscreen state per ActivityId, retained even before
+    /// the Activity registers its SurfaceView.
+    pub host_fullscreen: HashMap<ActivityId, bool>,
+
     /// Text input protocol state.
     pub text_input_state: TextInputState,
 
@@ -352,6 +356,7 @@ impl TawcState {
             buffer_commit_pending: false,
             hosts: HashMap::new(),
             toplevel_to_host: HashMap::new(),
+            host_fullscreen: HashMap::new(),
             // Phase 5: default to multi-window. Each non-child toplevel
             // gets its own Android task / recents card.
             single_activity_mode: false,
@@ -445,6 +450,53 @@ impl TawcState {
             HostAssignment { host: new_id, spawn_activity: true }
         }
     }
+
+    pub fn set_host_fullscreen(&mut self, host_id: &ActivityId, fullscreen: bool) {
+        self.host_fullscreen.insert(host_id.clone(), fullscreen);
+        if let Some(host) = self.hosts.get_mut(host_id) {
+            host.fullscreen = fullscreen;
+        }
+
+        let toplevels: Vec<_> = self
+            .toplevels
+            .iter()
+            .filter(|t| self.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+            .cloned()
+            .collect();
+
+        for toplevel in toplevels {
+            set_toplevel_fullscreen_state(&toplevel, fullscreen, None);
+            toplevel.send_pending_configure();
+        }
+    }
+
+    pub fn host_fullscreen(&self, host_id: &ActivityId) -> bool {
+        self.host_fullscreen
+            .get(host_id)
+            .copied()
+            .or_else(|| self.hosts.get(host_id).map(|host| host.fullscreen))
+            .unwrap_or(false)
+    }
+}
+
+pub fn set_toplevel_fullscreen_state(
+    toplevel: &ToplevelSurface,
+    fullscreen: bool,
+    output: Option<wl_output::WlOutput>,
+) {
+    use wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
+
+    toplevel.with_pending_state(|state| {
+        if fullscreen {
+            state.states.set(XdgState::Fullscreen);
+            state.states.unset(XdgState::Maximized);
+            state.fullscreen_output = output;
+        } else {
+            state.states.unset(XdgState::Fullscreen);
+            state.states.set(XdgState::Maximized);
+            state.fullscreen_output = None;
+        }
+    });
 }
 
 /// Result of `TawcState::assign_toplevel_to_host`. Caller owns the
@@ -597,12 +649,10 @@ impl XdgShellHandler for TawcState {
             .get(&assignment.host)
             .map(|h| h.logical_size)
             .unwrap_or(self.output_logical_size);
+        let fullscreen = self.host_fullscreen(&assignment.host);
         surface.with_pending_state(|state| {
             state.states.set(
                 wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-            );
-            state.states.set(
-                wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
             );
             state.size = Some((w, h).into());
             // Send xdg_toplevel.configure_bounds so clients that ignore
@@ -613,6 +663,7 @@ impl XdgShellHandler for TawcState {
             // window. Sending bounds tells GTK4 the maximum size it should pick.
             state.bounds = Some((w, h).into());
         });
+        set_toplevel_fullscreen_state(&surface, fullscreen, None);
         surface.send_configure();
 
         // Move input focus to the new toplevel only if its host is
@@ -700,6 +751,26 @@ impl XdgShellHandler for TawcState {
         surface.send_repositioned(token);
         if let Err(e) = surface.send_configure() {
             error!("Failed to send popup reposition configure: {:?}", e);
+        }
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<wl_output::WlOutput>) {
+        let host_id = self.toplevel_to_host.get(surface.wl_surface()).cloned();
+        set_toplevel_fullscreen_state(&surface, true, output);
+        surface.send_pending_configure();
+        if let Some(host_id) = host_id {
+            self.set_host_fullscreen(&host_id, true);
+            crate::set_activity_fullscreen_from_native(&host_id, true);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let host_id = self.toplevel_to_host.get(surface.wl_surface()).cloned();
+        set_toplevel_fullscreen_state(&surface, false, None);
+        surface.send_pending_configure();
+        if let Some(host_id) = host_id {
+            self.set_host_fullscreen(&host_id, false);
+            crate::set_activity_fullscreen_from_native(&host_id, false);
         }
     }
 }

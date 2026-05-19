@@ -56,6 +56,11 @@ pub struct OutputHost {
     /// event arrives within ms of `Register` and flips it on for hosts
     /// Android has actually given focus.
     pub foreground: bool,
+
+    /// Whether this Android Activity is in immersive fullscreen. This is
+    /// mirrored into xdg_toplevel state: false means Maximized, true means
+    /// Fullscreen.
+    pub fullscreen: bool,
 }
 
 // SAFETY: `native_window` is a raw `ANativeWindow*` (refcount is
@@ -77,6 +82,7 @@ impl OutputHost {
             physical_size: Size::from((w, h)),
             logical_size: scale.logical_size(w, h),
             foreground: false,
+            fullscreen: false,
         }
     }
 
@@ -172,6 +178,8 @@ pub enum SurfaceEvent {
     FocusChanged { activity_id: ActivityId, has_focus: bool },
     /// Runtime output scale change from Settings / test broker.
     OutputScaleChanged { scale: f64 },
+    /// Android-side fullscreen state changed outside an xdg request.
+    FullscreenChanged { activity_id: ActivityId, fullscreen: bool },
 }
 
 // SAFETY: `native_window` is stored as `usize` to keep `SurfaceEvent: Send`;

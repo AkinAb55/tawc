@@ -1175,8 +1175,18 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                struct wl_array *states)
 {
     struct app *app = data;
+    uint32_t *state;
+    int maximized = 0;
+    int fullscreen = 0;
     (void)toplevel;
-    (void)states;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            maximized = 1;
+        else if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN)
+            fullscreen = 1;
+    }
+    debug_emit("CONFIGURE_STATE",
+               fullscreen ? "fullscreen" : (maximized ? "maximized" : "other"));
     if (app->dynamic_size && width > 0 && height > 0) {
         app->win_w = width;
         app->win_h = height;

@@ -84,6 +84,7 @@ object NativeBridge {
 
     /** Weak ref to the running CompositorService for finishActivity lookups. */
     private var serviceRef: WeakReference<CompositorService>? = null
+    private val fullscreenByActivity = mutableMapOf<String, Boolean>()
 
     fun attachService(service: CompositorService) {
         appContext = service.applicationContext
@@ -153,6 +154,11 @@ object NativeBridge {
      *  to track `foreground_host`; phase 7 will use the same hook to
      *  send `Activated`/`Suspended` configures and pause frame callbacks. */
     external fun nativeOnActivityFocusChanged(activityId: String, hasFocus: Boolean)
+
+    /** Notify the compositor that Android externally changed an Activity's
+     *  fullscreen state. Most fullscreen transitions originate in native
+     *  xdg-shell handling and come back through [setActivityFullscreen]. */
+    external fun nativeOnActivityFullscreenChanged(activityId: String, fullscreen: Boolean)
 
     // --- Text input: Android InputConnection → Compositor ---
     //
@@ -290,6 +296,21 @@ object NativeBridge {
                 return@post
             }
             activity.finishAndRemoveTask()
+        }
+    }
+
+    fun fullscreenForActivity(activityId: String): Boolean =
+        synchronized(fullscreenByActivity) { fullscreenByActivity[activityId] == true }
+
+    @JvmStatic
+    fun setActivityFullscreen(activityId: String, fullscreen: Boolean) {
+        Log.d(TAG, "setActivityFullscreen from native: $activityId fullscreen=$fullscreen")
+        synchronized(fullscreenByActivity) {
+            fullscreenByActivity[activityId] = fullscreen
+        }
+        mainHandler.post {
+            serviceRef?.get()?.getActivity(activityId)
+                ?.setFullscreenFromCompositor(fullscreen)
         }
     }
 
