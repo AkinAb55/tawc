@@ -1076,10 +1076,15 @@ static int test_utimensat_follow_regular_file(void)
 	return fails;
 }
 
+#if !defined(__ANDROID__)
 /* mknodat: create a FIFO (S_IFIFO doesn't need CAP_MKNOD). The
  * test fixture rootfs lives on tmpfs which supports mkfifo, so a
  * successful return tells us the dispatch is wired up AND the
- * path translation routed to the rootfs view (not the host). */
+ * path translation routed to the rootfs view (not the host).
+ *
+ * Host-only: Android shell SELinux denies mknod on /data/local/tmp
+ * shell_data_file, and the coverage is not worth making device tests
+ * require root. */
 static int test_mknodat_fifo(void)
 {
 	int fails = 0;
@@ -1126,6 +1131,7 @@ static int test_legacy_mknod_fifo(void)
 	fails += tawc_io_step("unlinkat(legacy FIFO) -> 0", rv == 0);
 	return fails;
 }
+#endif
 #endif
 
 /* statfs: should route through translation and return 0 against an
@@ -3847,9 +3853,18 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_openat_opath_nofollow_symlink();
 	fails += test_utimensat_symlink_nofollow();
 	fails += test_utimensat_follow_regular_file();
+#if defined(__ANDROID__)
+	tawc_io_skip("mknodat FIFO host-only",
+		     "Android shell SELinux denies mknod on shell_data_file");
+# if defined(__x86_64__)
+	tawc_io_skip("legacy mknod FIFO host-only",
+		     "Android shell SELinux denies mknod on shell_data_file");
+# endif
+#else
 	fails += test_mknodat_fifo();
-#if defined(__x86_64__)
+# if defined(__x86_64__)
 	fails += test_legacy_mknod_fifo();
+# endif
 #endif
 	fails += test_statfs_in_rootfs();
 	fails += test_xattr_dispatch();

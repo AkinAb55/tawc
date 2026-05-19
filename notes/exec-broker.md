@@ -439,16 +439,12 @@ workflows are:
   `tests/integration/src/adb.rs`). `chroot(2)` requires
   `CAP_SYS_CHROOT` — fundamental, not a workaround. tawcroot and proot
   installs all go through the broker.
-- **`tawcroot/test.sh --device`**. The handler tests call `mknod()` to
-  verify the seccomp handler routes mknod correctly, and SELinux
-  denies `shell:shell_exec → shell_data_file:file mknod`. App uid
-  can mknod in its own data dir, but `untrusted_app` can't `execute`
-  files there (W^X policy), so we'd have to ship every freshly-built
-  test binary as a jniLib. Easier: the test runner uses `su -c`,
-  while production tawcroot stays rootless. (`tawcroot/test.sh --host`
-  unprivileged covers most iteration anyway.)
 - **`scripts/emulator.sh` setup**: `setenforce 0`, Magisk policy.
   One-time emulator bootstrap, irrelevant once the AVD exists.
+
+`tawcroot/test.sh --device` runs as adb shell. The FIFO/mknod handler
+checks are host-only because Android SELinux denies mknod on
+`shell_data_file`; the rest of the device cleat suite stays rootless.
 
 Everything else — fixture installs, integration tests, log probes,
 chroot file inspection, the readiness check, the install-id probe,

@@ -331,27 +331,16 @@ The right shape is "let nested seccomp work":
 Nested-seccomp work is its own project; not urgent. Documented at
 `RootfsEnv.kt` (the `MOZ_DISABLE_*` entries gated on `Method.PROOT`).
 
-### Integration test harness requires root even against proot installs
+### Integration test harness root migration
 
-The proot install + runtime path is genuinely rootless (broker
-dispatch routes through `run-as $PKG`), but the integration test
-scaffolding originally went straight through `su -c` for any
-device-side filesystem or `/proc` poke. Result: `run-integration-tests.sh`
-against a proot install triggered a superuser-permission popup and
-silently required a rooted device — exactly the headline
-rootless-on-unrooted story we ship proot to support.
-
-Partly mitigated by the broker migration: tests now route through
-`adb::rootfs_host_exec` / `adb::rootfs_run` (`tests/integration/src/adb.rs`),
-and the source files were renamed (`chroot_process.rs` →
-`rootfs_process.rs`, `chroot.rs` → `rootfs.rs`). Without re-running
-tests on an unrooted device we can't be sure every previously
-su-bound site is gone; the broker may still need root for some
-non-tawcroot install methods. Re-verify by running
-`scripts/run-integration-tests.sh` on a Magisk-disabled emulator
-against a proot install — no "granted su permission" popup, no
-errors. Precondition for honestly claiming we test the rootless path
-in CI on unrooted emulators.
+The proot install + runtime path is genuinely rootless. The integration
+test harness was migrated to the dev exec broker
+(`adb::rootfs_host_exec` / `adb::rootfs_run` in `tests/integration/src/adb.rs`)
+instead of direct `su -c` device pokes, and `tawcroot/test.sh --device`
+now runs as adb shell. Re-verify rootless CI claims by running
+`scripts/run-integration-tests.sh` on a Magisk-disabled emulator against
+a proot or tawcroot install — no superuser popup, no errors. Chroot
+installs remain rooted by design.
 
 ## Reproducing the failure with upstream
 

@@ -388,6 +388,7 @@ build_tests() {
     # what tawcroot/test.sh --device pushes (and the TAWC_SCRATCH constant
     # in scripts/lib/tawc-scratch.sh).
     local on_device="/data/local/tmp/tawc-dev"
+    local test_tmpdir="$on_device/tt-rootless"
 
     # Per-fixture -D flags derived from the shared list — same source
     # of truth tawcroot/Makefile uses to build the host TESTS_CFLAGS.
@@ -427,7 +428,7 @@ build_tests() {
         -DTAWCROOT_PROD_OBJ_DIR="\"$out_dir/.obj-prod\""
         "${programs_defines[@]}"
         -DTAWCROOT_ANDROID_FILTER_WRAP="\"$on_device/programs/wrap\""
-        -DTAWCROOT_TEST_TMPDIR="\"$on_device/tt\""
+        -DTAWCROOT_TEST_TMPDIR="\"$test_tmpdir\""
     )
 
     local cleat_srcs=(

@@ -1796,9 +1796,9 @@ Build artifacts (per `tawcroot/build.sh`):
 - **`tests`** — cleat orchestrator. Built by default for `--abi=host`
   (hosted glibc); cross-compiled for `aarch64`/`x86_64` against bionic
   on demand via `tawcroot/build.sh --abi=<abi> --tests`. The Android
-  variant is what `tawcroot/test.sh --device` pushes and runs under
-  `su -c`; same four-layer suite, same filter syntax, same exit code
-  as host mode — only the orchestrator binary changes.
+  variant is what `tawcroot/test.sh --device` pushes and runs as adb
+  shell; same four-layer suite, same filter syntax, same exit code as
+  host mode — only the orchestrator binary changes.
 
 ## Build integration
 
@@ -1985,11 +1985,11 @@ positional args become cleat filters. `--device` mode pushes the
 NDK-cross-built orchestrator (plus tawcroot, tawcroot-testhost,
 fixtures, and the androidfilter wrap) to the canonical on-device
 scratch dir `$TAWC_SCRATCH` (`/data/local/tmp/tawc-dev/`, see
-`scripts/lib/tawc-scratch.sh`), then exec's it under `su -c`. Same
+`scripts/lib/tawc-scratch.sh`), then exec's it as adb shell. Same
 binary shape as host mode — just a different ABI and a different
-`TAWCROOT_TEST_TMPDIR` (`$TAWC_SCRATCH/tt` vs `/tmp`).
-PASSTHROUGH filters propagate through `su -c` verbatim, exit code
-is the orchestrator's own (captured via an `__exit=$?` sentinel
+`TAWCROOT_TEST_TMPDIR` (`$TAWC_SCRATCH/tt-rootless` vs `/tmp`).
+PASSTHROUGH filters propagate to the orchestrator verbatim, exit
+code is the orchestrator's own (captured via an `__exit=$?` sentinel
 because adb shell isn't always a clean exit-code passthrough).
 
 ### Cleat / STC are never linked into production
@@ -2137,12 +2137,11 @@ else lives on the dev box.
 The four Android-only items above are wired into the existing
 `scripts/run-integration-tests.sh` harness, which already supports
 `TAWC_TARGET=physical|emulator` and abstracts methods via
-`ChrootRunner`. Add tawcroot variants of the existing proot/chroot
+`RootfsRunner`. Add tawcroot variants of the existing proot/chroot
 integration tests — they should be pure dispatch additions, not
 new test logic. The emulator covers the lp64 `access`-on-x86_64
-case under the *real* zygote filter (vs the synthesized version in
-the host suite), and the device covers libhybris/AHB syscall
-coverage.
+case under the synthesized Android filter, and the device covers
+libhybris/AHB syscall coverage.
 
 ## Phasing
 
@@ -2188,8 +2187,9 @@ coverage.
      shadow) is a phase-2 follow-up — the rootfs syscall smoke is single-threaded.
 - **Phase 1 — MVP path translation (host-side)**: ✓ DONE on x86_64
    emulator (Android 16, kernel 6.6) **and validated on aarch64
-   device** (OnePlus 9, Android 14, kernel 5.4.284) under the real
-   `untrusted_app` zygote filter via `tawcroot/test.sh --device`.
+   device** (OnePlus 9, Android 14, kernel 5.4.284) via
+   `tawcroot/test.sh --device`; Android-filter-specific coverage is
+   synthesized by `tests/handler/androidfilter`.
    Path translation, fd reservation, SIGSYS/sigprocmask shadow,
    seccomp/prctl denial, well-known-symlink memo, fake-root identity,
    `renameat2`, `truncate`, and the mode-aware lstat-vs-stat memo all

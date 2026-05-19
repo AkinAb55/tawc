@@ -2,7 +2,7 @@
 //! integration-test case. The cleat orchestrator (built by
 //! `tawcroot/build.sh --abi=<abi> --testhost --tests`) runs all four
 //! tawcroot test layers (unit / handler / integration / future diff)
-//! on-device under `su -c`, so plumbing the entire suite through one
+//! on-device as the adb shell uid, so plumbing the entire suite through one
 //! `#[test]` keeps `run-integration-tests.sh` as the single command
 //! that exercises every test we have.
 //!

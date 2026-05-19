@@ -21,14 +21,14 @@
 #   - device         — cross-builds the cleat orchestrator + tawcroot +
 #                tawcroot-testhost + fixtures via the NDK, pushes the lot
 #                to $TAWC_SCRATCH (see scripts/lib/tawc-scratch.sh), and runs
-#                the orchestrator via `su -c`. Same four cleat layers as
-#                host mode (unit / handler / integration), same filter
-#                syntax, same exit code semantics — `--device` just
-#                changes where the orchestrator runs. Selection within
-#                device mode follows the rest of the tawc tree:
-#                `.tawctarget` / `TAWC_TARGET=physical|emulator` (sourced
-#                from `scripts/lib/select-device.sh` — the only tawc-app
-#                coupling in this script).
+#                the orchestrator as the adb shell uid. Same four cleat layers
+#                as host mode (unit / handler / integration), same filter
+#                syntax, same exit code semantics — `--device` just changes
+#                where the orchestrator runs. Selection within device mode
+#                follows the rest of the tawc tree: `.tawctarget` /
+#                `TAWC_TARGET=physical|emulator` (sourced from
+#                `scripts/lib/select-device.sh` — the only tawc-app coupling
+#                in this script).
 #
 # Usage:
 #   tawcroot/test.sh                # everything, host
@@ -76,11 +76,9 @@ fi
 # ---- device mode ---------------------------------------------------------
 # Cleat cross-compiles cleanly under the NDK (it's plain POSIX C + a
 # vendored stc). We push the cross-built `tests` orchestrator alongside
-# tawcroot / tawcroot-testhost / fixtures and run it via su, exactly
-# the same shape as host mode. PASSTHROUGH filters work everywhere;
-# pass/fail detection is the orchestrator's exit code, not adb-grep
-# heuristics. su is required for the test runner here; see the run-
-# command comment further down for why.
+# tawcroot / tawcroot-testhost / fixtures and run it as adb shell, exactly
+# the same shape as host mode. PASSTHROUGH filters work everywhere; pass/fail
+# detection is the orchestrator's exit code, not adb-grep heuristics.
 # shellcheck disable=SC1091
 source "$REPO_DIR/scripts/lib/select-device.sh"   # sets ANDROID_SERIAL (tawc-app glue)
 # shellcheck disable=SC1091
@@ -113,7 +111,7 @@ TESTS=$TAWC_SCRATCH/tests
 TR=$TAWC_SCRATCH/tawcroot-testhost
 PROD=$TAWC_SCRATCH/tawcroot
 FIXTURES=$TAWC_SCRATCH/programs
-TMPDIR_ON_DEVICE=$TAWC_SCRATCH/tt
+TMPDIR_ON_DEVICE=$TAWC_SCRATCH/tt-rootless
 
 # $TAWC_SCRATCH is shell-uid-writable (it's under /data/local/tmp), so a
 # single rootless `adb push` lands the binary at its final path with
@@ -160,34 +158,30 @@ for f in "$LOCAL_FIXTURES_DIR"/*; do
     push_one "$f" "$FIXTURES/$(basename "$f")"
 done
 
-# Cleat tests create rootfs trees under TAWCROOT_TEST_TMPDIR. Done via
-# su because (a) prior-run trees may be root-owned, and (b) some
-# handler tests use mknod()/mknodat() (FIFO creation), which Android's
-# SELinux policy gates behind privileged contexts — `shell` uid is
-# denied `mknod` permission on `shell_data_file`, and `untrusted_app`
-# can't exec the freshly-built test binaries at all (W^X for app data).
-# So this is the one test path that genuinely needs root, even though
-# **production tawcroot is rootless**: this is testing infrastructure
-# verifying the handler intercepts mknod, not a runtime requirement.
-adb shell "su -c 'rm -rf $TMPDIR_ON_DEVICE/tawcroot-test-rootfs-* && mkdir -p $TMPDIR_ON_DEVICE'"
+# Cleat tests create rootfs trees under TAWCROOT_TEST_TMPDIR. Use a shell-owned
+# directory so prior root-run leftovers under the old `tt` path do not matter.
+# The FIFO/mknod checks are host-only: Android shell SELinux denies mknod on
+# shell_data_file, and that one syscall is not worth making device tests need
+# root.
+adb shell "rm -rf $TMPDIR_ON_DEVICE/tawcroot-test-rootfs-* && mkdir -p $TMPDIR_ON_DEVICE"
 
 # Forward PASSTHROUGH filters verbatim — the cross-compiled cleat
 # orchestrator parses them with the same grammar as the host build.
 PT_QUOTED=""
 for a in "${PASSTHROUGH[@]}"; do
-    # Single-quote each arg for the outer su -c shell; literal `'` in args
+    # Single-quote each arg for the adb shell; literal `'` in args
     # would need escaping but cleat filters never contain one.
     PT_QUOTED+=" '$a'"
 done
 
 echo "=== running cleat tests on $ANDROID_SERIAL ($BUILD_ABI) ==="
-# adb shell doesn't always forward inner exit codes reliably across
-# vendor adb / su shims; capture the orchestrator's exit explicitly via
-# a sentinel line and grep for `__exit=0`. Output streams live so cleat's
-# coloured pass/fail stays visible.
+# adb shell doesn't always forward inner exit codes reliably across vendor
+# shells; capture the orchestrator's exit explicitly via a sentinel line and
+# grep for `__exit=0`. Output streams live so cleat's coloured pass/fail stays
+# visible.
 TMPLOG=$(mktemp)
 trap 'rm -f "$TMPLOG"' EXIT
-adb shell "su -c 'cd $TAWC_SCRATCH && $TESTS$PT_QUOTED; echo __exit=\$?'" \
+adb shell "cd $TAWC_SCRATCH && $TESTS$PT_QUOTED; echo __exit=\$?" \
     | tee "$TMPLOG"
 got=$(grep -oE '__exit=[0-9]+' "$TMPLOG" | tail -1 | cut -d= -f2)
 if [ "${got:-}" != "0" ]; then
