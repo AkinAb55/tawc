@@ -283,6 +283,29 @@ pub fn broadcast_query_state() -> io::Result<Output> {
     broker_action("query-state", &[])
 }
 
+/// Dynamically update the compositor output scale through the same broker
+/// action used by Settings tests. Value is snapped by the app to 0.25x.
+pub fn set_output_scale(scale: f32) -> io::Result<Output> {
+    let value = format!("{scale:.2}");
+    broker_action("set-output-scale", &[("value", &value)])
+}
+
+/// Read the persisted output scale from the app settings.
+pub fn get_output_scale() -> io::Result<f32> {
+    let output = broker_action("get-output-scale", &[])?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "get-output-scale failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .trim()
+        .parse::<f32>()
+        .map_err(|e| io::Error::other(format!("parse output scale: {e}; stdout={stdout:?}")))
+}
+
 // Common Android keycodes (used with [ic_send_key_event]).
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_FORWARD_DEL: u32 = 112; // Delete (forward delete)

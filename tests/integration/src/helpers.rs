@@ -166,6 +166,17 @@ pub fn start_wayland_debug_touch(backend: GraphicsBackend, env: &str) -> DebugAp
     app
 }
 
+/// Start wayland-debug-app's fractional-scale reporter.
+pub fn start_wayland_debug_scale(backend: GraphicsBackend, env: &str) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(backend, &binary, "scale", env)
+        .expect("Failed to start wayland scale debug app");
+    app.wait_ready()
+        .expect("Wayland scale debug app did not become ready");
+    app
+}
+
 /// Start wayland-debug-app's subsurface touch scene.
 pub fn start_wayland_debug_subsurface(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();

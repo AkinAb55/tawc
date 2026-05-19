@@ -34,6 +34,7 @@ use wayland_server::{Display, ListeningSocket};
 
 use crate::host::{ActivityId, OutputHost, SurfaceEvent};
 use crate::input::TouchEvent;
+use crate::scale::OutputScale;
 use crate::text_input::TextInputEvent;
 
 use crate::compositor::{ClientState, TawcState};
@@ -389,7 +390,7 @@ pub fn run(
                 .filter(|h| h.egl_surface.is_some())
                 .count();
             info!(
-                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={}",
+                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2}",
                 clients,
                 data.toplevels.len(),
                 data.surface_wlegl.len(),
@@ -398,6 +399,7 @@ pub fn run(
                 data.last_rendered_toplevels,
                 data.hosts.len(),
                 bound_hosts,
+                data.output_scale.fractional(),
             );
         }
     })?;
@@ -665,6 +667,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             // Update primary-output mode + the cached logical_size that
             // configure events use. Phase 0/1 advertises only one
             // wl_output, so we just track the first/most recent host.
+            data.output_physical_size = (width, height);
             data.output_logical_size = scale.logical_size(width, height);
             data.output.change_current_state(
                 Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
@@ -691,6 +694,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 info!("SurfaceChanged for unknown host {}", activity_id);
                 return;
             }
+            data.output_physical_size = (width, height);
             data.output_logical_size = scale.logical_size(width, height);
             data.output.change_current_state(
                 Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
@@ -744,7 +748,66 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 data.set_input_focus(None);
             }
         }
+        SurfaceEvent::OutputScaleChanged { scale } => {
+            apply_output_scale(data, OutputScale::new(scale));
+        }
     }
+}
+
+fn apply_output_scale(state: &mut TawcState, scale: OutputScale) {
+    if state.output_scale == scale {
+        return;
+    }
+
+    state.output_scale = scale;
+    for host in state.hosts.values_mut() {
+        host.update_scale(scale);
+    }
+
+    let (pw, ph) = state.output_physical_size;
+    state.output_logical_size = scale.logical_size(pw, ph);
+    let mode_size = if pw > 0 && ph > 0 { (pw, ph) } else { (1, 1) };
+    state.output.change_current_state(
+        Some(smithay::output::Mode { size: mode_size.into(), refresh: 60_000 }),
+        None,
+        Some(scale.smithay_scale()),
+        None,
+    );
+
+    for surface in live_surfaces(state) {
+        state.send_surface_scale(&surface);
+    }
+    reconfigure_all_toplevels(state);
+    state.needs_render = true;
+    info!(
+        "Output scale changed: {:.2} logical={}x{}",
+        scale.fractional(),
+        state.output_logical_size.0,
+        state.output_logical_size.1,
+    );
+}
+
+fn live_surfaces(state: &TawcState) -> Vec<WlSurface> {
+    let mut surfaces = Vec::new();
+    for surface in state.surface_wlegl.keys().chain(state.surface_shm.keys()) {
+        if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == surface) {
+            surfaces.push(surface.clone());
+        }
+    }
+    for toplevel in &state.toplevels {
+        let surface = toplevel.wl_surface();
+        if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == surface) {
+            surfaces.push(surface.clone());
+        }
+    }
+    for x11 in &state.x11_surfaces {
+        if let Some(surface) = x11.wl_surface() {
+            if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == &surface) {
+                surfaces.push(surface.clone());
+            }
+        }
+    }
+    surfaces
 }
 
 /// Flip a host's foreground state and notify assigned toplevels via

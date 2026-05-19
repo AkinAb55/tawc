@@ -21,6 +21,12 @@ object Settings {
     private const val PREFS_NAME = "tawc-settings"
     private const val KEY_GRAPHICS_BACKEND = "graphics_backend"
     private const val KEY_TINT_BUFFERS_BY_TYPE = "tint_buffers_by_type"
+    private const val KEY_OUTPUT_SCALE = "output_scale"
+
+    const val MIN_OUTPUT_SCALE = 0.5f
+    const val MAX_OUTPUT_SCALE = 4.0f
+    const val OUTPUT_SCALE_STEP = 0.25f
+    const val DEFAULT_OUTPUT_SCALE = 2.0f
 
     @Volatile private var prefs: SharedPreferences? = null
 
@@ -56,6 +62,30 @@ object Settings {
         set(value) {
             requirePrefs().edit().putBoolean(KEY_TINT_BUFFERS_BY_TYPE, value).apply()
         }
+
+    /**
+     * Physical pixels per Wayland logical pixel. Stored as a snapped float so
+     * the UI, broker, and compositor all speak the same 0.25x grid.
+     */
+    var outputScale: Float
+        get() = snapOutputScale(requirePrefs().getFloat(KEY_OUTPUT_SCALE, DEFAULT_OUTPUT_SCALE))
+        set(value) {
+            requirePrefs().edit().putFloat(KEY_OUTPUT_SCALE, snapOutputScale(value)).apply()
+        }
+
+    fun snapOutputScale(value: Float): Float {
+        if (!value.isFinite()) return DEFAULT_OUTPUT_SCALE
+        val clamped = value.coerceIn(MIN_OUTPUT_SCALE, MAX_OUTPUT_SCALE)
+        val steps = ((clamped - MIN_OUTPUT_SCALE) / OUTPUT_SCALE_STEP).toIntWithRound()
+        return MIN_OUTPUT_SCALE + steps * OUTPUT_SCALE_STEP
+    }
+
+    fun formatOutputScale(value: Float): String {
+        return String.format(java.util.Locale.US, "%.2f", snapOutputScale(value))
+    }
+
+    private fun Float.toIntWithRound(): Int =
+        kotlin.math.floor(this + 0.5f).toInt()
 }
 
 /**

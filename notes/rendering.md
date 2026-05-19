@@ -124,7 +124,9 @@ We advertise all scale paths clients commonly need:
 Runtime scale changes should update the single `OutputScale`, call
 `Output::change_current_state` with `Scale::Fractional`, resend
 `TawcState::send_surface_scale` for every live surface, then reconfigure
-toplevels with the new logical sizes.
+toplevels with the new logical sizes. The Android Settings slider and
+`set-output-scale` broker action both use the same 0.5x..4.0x range,
+snapped to 0.25x.
 
 ### GTK4 minimum version
 

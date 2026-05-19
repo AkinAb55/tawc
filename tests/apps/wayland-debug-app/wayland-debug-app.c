@@ -17,6 +17,7 @@
  *   touch                       Fullscreen touch visualizer
  *   subsurface                  Fullscreen toplevel with a touchable subsurface
  *   popup                       Fullscreen toplevel with a touchable xdg_popup
+ *   scale                       Report wp_fractional_scale_v1 changes
  */
 
 #define _GNU_SOURCE
@@ -38,6 +39,7 @@
 #include <wayland-client.h>
 
 #include "text-input-unstable-v3-client-protocol.h"
+#include "fractional-scale-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #ifndef MFD_CLOEXEC
@@ -209,6 +211,8 @@ struct app {
     struct xdg_popup *child_popup;
     struct zwp_text_input_manager_v3 *text_input_manager;
     struct zwp_text_input_v3 *text_input;
+    struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
+    struct wp_fractional_scale_v1 *fractional_scale;
 
     int running;
     int configured;
@@ -219,6 +223,7 @@ struct app {
     int touch_debug;
     int fullscreen;
     int dynamic_size;
+    int report_scale;
     int scene_kind;
     int scene_child_created;
     int scene_child_ready;
@@ -228,6 +233,7 @@ struct app {
     int popup_configure_y;
     int popup_configure_w;
     int popup_configure_h;
+    uint32_t last_preferred_scale;
     int win_w;
     int win_h;
     wl_fixed_t pointer_x;
@@ -255,6 +261,7 @@ struct wayland_mode {
     int touch_debug;
     int fullscreen;
     int dynamic_size;
+    int report_scale;
     int scene_kind;
 };
 
@@ -850,6 +857,22 @@ static void wm_base_ping(void *data, struct xdg_wm_base *wm_base, uint32_t seria
 
 static const struct xdg_wm_base_listener wm_base_listener = {
     .ping = wm_base_ping,
+};
+
+static void fractional_scale_preferred_scale(
+    void *data, struct wp_fractional_scale_v1 *fractional_scale,
+    uint32_t preferred_scale)
+{
+    struct app *app = data;
+    char buf[32];
+    (void)fractional_scale;
+    app->last_preferred_scale = preferred_scale;
+    checked_snprintf(buf, sizeof(buf), "%.2f", (double)preferred_scale / 120.0);
+    debug_emit("SCALE_CHANGED", buf);
+}
+
+static const struct wp_fractional_scale_v1_listener fractional_scale_listener = {
+    .preferred_scale = fractional_scale_preferred_scale,
 };
 
 static void create_scene_child(struct app *app);
@@ -1554,6 +1577,13 @@ static void registry_global(void *data, struct wl_registry *registry,
             registry, name, &zwp_text_input_manager_v3_interface, 1);
         require_true(app->text_input_manager != NULL,
                      "bind zwp_text_input_manager_v3 failed");
+    } else if (strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0) {
+        require_true(app->fractional_scale_manager == NULL,
+                     "duplicate wp_fractional_scale_manager_v1 global");
+        app->fractional_scale_manager = wl_registry_bind(
+            registry, name, &wp_fractional_scale_manager_v1_interface, 1);
+        require_true(app->fractional_scale_manager != NULL,
+                     "bind wp_fractional_scale_manager_v1 failed");
     }
 }
 
@@ -1587,6 +1617,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->touch_debug = mode->touch_debug;
     app->fullscreen = mode->fullscreen;
     app->dynamic_size = mode->dynamic_size;
+    app->report_scale = mode->report_scale;
     app->scene_kind = mode->scene_kind;
     app->win_w = WIN_W;
     app->win_h = WIN_H;
@@ -1614,6 +1645,9 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     if (mode->use_text_input)
         require_true(app->text_input_manager != NULL,
                      "missing zwp_text_input_manager_v3");
+    if (mode->report_scale)
+        require_true(app->fractional_scale_manager != NULL,
+                     "missing wp_fractional_scale_manager_v1");
 
     app->surface = wl_compositor_create_surface(app->compositor);
     require_true(app->surface != NULL,
@@ -1642,6 +1676,15 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
         zwp_text_input_v3_add_listener(app->text_input, &text_input_listener,
                                        app);
     }
+    if (mode->report_scale) {
+        app->fractional_scale =
+            wp_fractional_scale_manager_v1_get_fractional_scale(
+                app->fractional_scale_manager, app->surface);
+        require_true(app->fractional_scale != NULL,
+                     "get_fractional_scale returned NULL");
+        wp_fractional_scale_v1_add_listener(app->fractional_scale,
+                                            &fractional_scale_listener, app);
+    }
 
     wl_surface_commit(app->surface);
     checked_flush(app->display);
@@ -1651,6 +1694,8 @@ static void teardown_wayland(struct app *app)
 {
     if (app->text_input)
         zwp_text_input_v3_destroy(app->text_input);
+    if (app->fractional_scale)
+        wp_fractional_scale_v1_destroy(app->fractional_scale);
     if (app->pointer)
         wl_pointer_destroy(app->pointer);
     if (app->touch)
@@ -1675,6 +1720,8 @@ static void teardown_wayland(struct app *app)
         wl_surface_destroy(app->surface);
     if (app->text_input_manager)
         zwp_text_input_manager_v3_destroy(app->text_input_manager);
+    if (app->fractional_scale_manager)
+        wp_fractional_scale_manager_v1_destroy(app->fractional_scale_manager);
     if (app->wm_base)
         xdg_wm_base_destroy(app->wm_base);
     if (app->seat)
@@ -1795,6 +1842,41 @@ static int cmd_touch(int argc, char **argv)
     return 0;
 }
 
+static int cmd_scale(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland scale debug",
+        .app_id = "wayland-debug-app-scale",
+        .use_text_input = 0,
+        .editable = 0,
+        .provide_surrounding = 0,
+        .dynamic_size = 1,
+        .report_scale = 1,
+    };
+
+    (void)argc;
+    (void)argv;
+
+    struct app app;
+    memset(&app, 0, sizeof(app));
+    signal_app = &app;
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    setup_wayland(&app, &mode);
+
+    while (app.running) {
+        if (wl_display_dispatch(app.display) < 0) {
+            if (errno == EINTR && !app.running)
+                break;
+            fatal("wl_display_dispatch failed: %s", strerror(errno));
+        }
+    }
+
+    teardown_wayland(&app);
+    return 0;
+}
+
 static int run_scene_command(const struct wayland_mode *mode)
 {
     struct app app;
@@ -1867,6 +1949,7 @@ static const struct command commands[] = {
       "Text-input surface that never sends surrounding",
       cmd_text_input_no_surrounding },
     { "touch", "Fullscreen touch visualizer", cmd_touch },
+    { "scale", "Report fractional scale changes", cmd_scale },
     { "subsurface", "Fullscreen toplevel with a touchable subsurface",
       cmd_subsurface },
     { "popup", "Fullscreen toplevel with a touchable xdg_popup", cmd_popup },

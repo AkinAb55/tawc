@@ -118,7 +118,7 @@ object NativeBridge {
      *  between the initial configure and the host registering would
      *  otherwise be told to resize after the fact, which Vulkan/vkcube
      *  doesn't recover from. */
-    external fun nativeStartCompositor(width: Int, height: Int)
+    external fun nativeStartCompositor(width: Int, height: Int, outputScale: Float)
 
     /** Stop the Rust compositor thread. Called when the Service is destroyed. */
     external fun nativeStopCompositor()
@@ -197,6 +197,10 @@ object NativeBridge {
      *  wash). Read live by every frame, so the change is visible on the
      *  next paint. */
     external fun nativeSetTintBuffersByType(enabled: Boolean)
+
+    /** Update the compositor output scale live. The compositor propagates
+     *  this through wl_output, fractional-scale, and xdg configure events. */
+    external fun nativeSetOutputScale(scale: Float)
 
     /**
      * Scan a rootfs for installed `.desktop` apps. Returns a JSON array

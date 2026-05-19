@@ -112,6 +112,10 @@ impl OutputHost {
         self.physical_size = Size::from((w, h));
         self.logical_size = scale.logical_size(w, h);
     }
+
+    pub fn update_scale(&mut self, scale: OutputScale) {
+        self.logical_size = scale.logical_size(self.physical_size.w, self.physical_size.h);
+    }
 }
 
 impl Drop for OutputHost {
@@ -166,6 +170,8 @@ pub enum SurfaceEvent {
     /// focus). Phase 7 extends this to drive `Activated`/`Suspended`
     /// configures.
     FocusChanged { activity_id: ActivityId, has_focus: bool },
+    /// Runtime output scale change from Settings / test broker.
+    OutputScaleChanged { scale: f64 },
 }
 
 // SAFETY: `native_window` is stored as `usize` to keep `SurfaceEvent: Send`;

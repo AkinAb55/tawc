@@ -315,6 +315,8 @@ before any client connection arrives.
 | `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
 | `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream` / `cpu`). Used by the Settings screen for ad-hoc developer toggling. **Tests do NOT use this** — they pass `--graphics` on each RUNINSIDE spawn so the persisted pref isn't disturbed. |
 | `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
+| `set-output-scale` (`value`) | SettingsActions | Snap to the 0.25x grid, persist `Settings.outputScale`, and push the live compositor output scale. Integration tests restore the previous value after use. |
+| `get-output-scale` | SettingsActions | Print the persisted output scale. |
 
 **Rule for input actions: every driver goes through `TawcInputConnection`.**
 There is intentionally no broker action that calls `NativeBridge.native*`

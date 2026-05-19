@@ -101,6 +101,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     _class: JClass,
     initial_width: jint,
     initial_height: jint,
+    output_scale: f32,
 ) {
     android_logger::init_once(
         android_logger::Config::default()
@@ -176,6 +177,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
 
     let initial_size = (initial_width.max(0), initial_height.max(0));
+    let initial_scale = sanitize_output_scale(output_scale as f64).unwrap_or(DEFAULT_OUTPUT_SCALE);
     std::thread::spawn(move || {
         if let Err(e) = run_compositor(
             touch_channel,
@@ -183,6 +185,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
             surface_event_channel,
             state_query_channel,
             initial_size,
+            initial_scale,
         ) {
             log::error!("Compositor failed: {}", e);
         }
@@ -413,6 +416,18 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetTintBu
     render::TINT_BUFFERS_BY_TYPE.store(enabled != 0, Ordering::Relaxed);
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetOutputScale(
+    _env: JNIEnv,
+    _class: JClass,
+    scale: f32,
+) {
+    match sanitize_output_scale(scale as f64) {
+        Some(scale) => host::send_surface_event(SurfaceEvent::OutputScaleChanged { scale }),
+        None => log::error!("Ignoring invalid output scale: {}", scale),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JNI: Launcher (LauncherActivity)
 // ---------------------------------------------------------------------------
@@ -579,6 +594,15 @@ pub fn finish_activity_from_native(activity_id: &str) {
 /// Fractional by default so the normal dev path exercises the fractional
 /// scale protocol and rendering math.
 const DEFAULT_OUTPUT_SCALE: f64 = 2.0;
+const MIN_OUTPUT_SCALE: f64 = 0.5;
+const MAX_OUTPUT_SCALE: f64 = 4.0;
+
+fn sanitize_output_scale(scale: f64) -> Option<f64> {
+    if !scale.is_finite() {
+        return None;
+    }
+    Some(scale.clamp(MIN_OUTPUT_SCALE, MAX_OUTPUT_SCALE))
+}
 
 /// Set up EGL context, renderer, Wayland display, and socket. Then hand off
 /// to the calloop event loop. The first `OutputHost` is added asynchronously
@@ -589,6 +613,7 @@ fn run_compositor(
     surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
     state_query_channel: smithay::reexports::calloop::channel::Channel<()>,
     initial_physical_size: (i32, i32),
+    initial_scale: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- EGL context (no surface yet — first Activity provides one) ---
     let (raw_display, raw_config, raw_context) =
@@ -630,7 +655,7 @@ fn run_compositor(
     // finally registers — Vulkan WSI doesn't recover from that and the
     // cube hangs after committing two buffers.
     let mut wl_display: Display<TawcState> = Display::new()?;
-    let scale = OutputScale::new(DEFAULT_OUTPUT_SCALE);
+    let scale = OutputScale::new(initial_scale);
     let (init_pw, init_ph) = initial_physical_size;
     let initial_logical = if init_pw > 0 && init_ph > 0 {
         scale.logical_size(init_pw, init_ph)
@@ -659,7 +684,14 @@ fn run_compositor(
     // GlobalId is not RAII — the global lives as long as the Display.
     let _output_global = output.create_global::<TawcState>(&wl_display.handle());
 
-    let state = TawcState::new(&mut wl_display, scale, initial_logical, render_state, output);
+    let state = TawcState::new(
+        &mut wl_display,
+        scale,
+        initial_logical,
+        (init_pw, init_ph),
+        render_state,
+        output,
+    );
 
     // --- Run ---
     // Note: the listening socket is bound inside `event_loop::run` as the

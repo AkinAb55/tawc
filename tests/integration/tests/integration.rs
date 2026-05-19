@@ -4,5 +4,6 @@ mod gfxstream;
 mod hybris;
 mod input;
 mod libhybris_zink;
+mod scaling;
 mod tawcroot;
 mod xwayland;

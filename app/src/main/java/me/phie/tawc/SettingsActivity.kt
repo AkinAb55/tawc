@@ -8,6 +8,7 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import me.phie.tawc.compositor.NativeBridge
@@ -43,6 +44,10 @@ class SettingsActivity : AppCompatActivity() {
         )
         scaffold.content.addView(
             buildSectionCard("Debug rendering", buildTintBuffersCheckbox()),
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
+        )
+        scaffold.content.addView(
+            buildOutputScaleCard(),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
 
@@ -107,5 +112,45 @@ class SettingsActivity : AppCompatActivity() {
                 NativeBridge.nativeSetTintBuffersByType(checked)
             }
         }
+    }
+
+    private fun buildOutputScaleCard(): android.view.View {
+        val cardPad = (12 * resources.displayMetrics.density).toInt()
+        val min = Settings.MIN_OUTPUT_SCALE
+        val step = Settings.OUTPUT_SCALE_STEP
+        val steps = ((Settings.MAX_OUTPUT_SCALE - min) / step).toInt()
+        val title = TextView(this).apply {
+            textSize = 16f
+            setTypeface(typeface, Typeface.BOLD)
+            text = "Display scale: ${Settings.formatOutputScale(Settings.outputScale)}"
+        }
+        val slider = SeekBar(this).apply {
+            max = steps
+            progress = ((Settings.outputScale - min) / step).toInt()
+            setPadding(cardPad, cardPad / 2, cardPad, cardPad / 2)
+        }
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                val scale = Settings.snapOutputScale(min + progress * step)
+                title.text = "Display scale: ${Settings.formatOutputScale(scale)}"
+                if (fromUser) {
+                    Settings.outputScale = scale
+                    NativeBridge.nativeSetOutputScale(scale)
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+        })
+        val card = tawcCard()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(cardPad, cardPad, cardPad, cardPad)
+            clipToPadding = false
+            addView(title, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(slider, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        card.addView(column)
+        return card
     }
 }

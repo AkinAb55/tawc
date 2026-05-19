@@ -148,6 +148,10 @@ pub struct TawcState {
     /// display's metrics for both.
     pub output_logical_size: (i32, i32),
 
+    /// Physical size behind the single advertised output. This lets runtime
+    /// scale changes recompute logical size even before a new surface event.
+    pub output_physical_size: (i32, i32),
+
     /// Per-Activity render targets. One entry per Android `CompositorActivity`
     /// that has registered its `SurfaceView`. For phase 0-4 there is at most
     /// one host (the `"primary"` Activity). Phase 5 onward populates this
@@ -237,6 +241,7 @@ impl TawcState {
         display: &mut Display<Self>,
         output_scale: OutputScale,
         output_logical_size: (i32, i32),
+        output_physical_size: (i32, i32),
         render: crate::render::RenderState,
         output: smithay::output::Output,
     ) -> Self {
@@ -320,6 +325,7 @@ impl TawcState {
             popup_manager: PopupManager::default(),
             output_scale,
             output_logical_size,
+            output_physical_size,
             text_input_state: TextInputState::new(),
             client_count: Arc::new(AtomicU32::new(0)),
             toplevels_changed: false,

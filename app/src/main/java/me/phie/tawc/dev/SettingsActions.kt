@@ -3,6 +3,7 @@ package me.phie.tawc.dev
 import android.util.Log
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
+import me.phie.tawc.compositor.NativeBridge
 
 /**
  * Broker actions that read/write entries in [Settings]. Registered
@@ -18,6 +19,8 @@ import me.phie.tawc.Settings
  * |--------|------|--------|
  * | `set-graphics-backend` | `value` ∈ {"libhybris","gfxstream","cpu"} | `Settings.graphicsBackend = …` |
  * | `get-graphics-backend` | — | prints current backend key on stdout |
+ * | `set-output-scale` | `value` ∈ 0.5..4.0, snapped to 0.25 | persist and push live compositor scale |
+ * | `get-output-scale` | — | prints current output scale |
  */
 internal object SettingsActions {
 
@@ -26,6 +29,8 @@ internal object SettingsActions {
     fun registerAll() {
         ActionRegistry.register("set-graphics-backend", SetGraphicsBackendAction)
         ActionRegistry.register("get-graphics-backend", GetGraphicsBackendAction)
+        ActionRegistry.register("set-output-scale", SetOutputScaleAction)
+        ActionRegistry.register("get-output-scale", GetOutputScaleAction)
     }
 
     private object SetGraphicsBackendAction : BrokerAction {
@@ -46,6 +51,28 @@ internal object SettingsActions {
     private object GetGraphicsBackendAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             ctx.out(Settings.graphicsBackend.key)
+            return 0
+        }
+    }
+
+    private object SetOutputScaleAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val raw = args["value"]
+                ?: return ctx.fail("set-output-scale: --arg value=<scale> required")
+            val parsed = raw.toFloatOrNull()
+                ?: return ctx.fail("set-output-scale: invalid value '$raw'")
+            val scale = Settings.snapOutputScale(parsed)
+            Settings.outputScale = scale
+            NativeBridge.nativeSetOutputScale(scale)
+            Log.i(TAG, "set-output-scale: ${Settings.formatOutputScale(scale)}")
+            ctx.out(String.format(java.util.Locale.US, "%.2f", scale))
+            return 0
+        }
+    }
+
+    private object GetOutputScaleAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            ctx.out(String.format(java.util.Locale.US, "%.2f", Settings.outputScale))
             return 0
         }
     }
