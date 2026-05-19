@@ -1,14 +1,12 @@
-/* SIGSYS handler — phase 0 stub.
+/* SIGSYS handler.
  *
- * In phase 0 the handler does the absolute minimum needed to prove the
+ * The foundation smoke uses the observation slot to prove the
  * filter/handler contract: record what it saw and return -ENOSYS via
- * ucontext rewrite. Path translation, fd-provenance tracking, and the
- * dispatch table all bolt onto the same shape later — the hot-path
- * constraints (no malloc, no stdio, no libc with hidden state) are
- * already enforced by the structure here. See notes/tawcroot.md
+ * ucontext rewrite. Production dispatch uses the same hot-path
+ * constraints (no malloc, no stdio, no libc with hidden state). See notes/tawcroot.md
  * "SIGSYS handler" and "Why the handler is async-signal-safe".
  *
- * The smoke driver reads `tawcroot_handler_observe()` after triggering
+ * The foundation smoke reads `tawcroot_handler_observe()` after triggering
  * a TRAP to validate that the handler ran and saw the right thing.
  */
 

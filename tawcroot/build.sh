@@ -24,8 +24,8 @@
 #                         the APK as `libtawcroot.so`.
 # `tawcroot-testhost`  -- same source set + `tawcroot/tests/testhost/src/*.c`,
 #                         compiled with `-DTAWCROOT_TESTHOST`. Drives the
-#                         in-binary smoke flows (phase-0 trap-contract +
-#                         raw-syscall sweep, phase-1 path-translation,
+#                         in-binary smoke flows (trap-contract +
+#                         raw-syscall sweep, rootfs syscall translation,
 #                         --exec-child re-entry). Cleat tests fork+exec
 #                         it as a subprocess. Never packaged into the APK.
 #
@@ -41,7 +41,7 @@
 #
 # Layout (everything under the project dir):
 #   ./tawcroot/                          -- tawcroot source tree (this dir)
-#   ./tawcroot/tests/testhost/           -- testhost-only sources (smoke, child, phase1)
+#   ./tawcroot/tests/testhost/           -- testhost-only sources (smoke, child, rootfs_smoke)
 #   ./tawcroot/tests/{unit,handler,integration}/ -- cleat test sources
 #   ./deps/cleat/                        -- vendored cleat repo (gitignored, cloned by this script)
 #   ./build/tawcroot-<abi>/              -- per-ABI build dir (gitignored)
@@ -162,7 +162,7 @@ fi
 # ---------------------------------------------------------------------------
 # Source files. Production is intentionally tiny — no test scaffolding,
 # no smoke driver, no argv-reachable test branches. The testhost flow
-# (smoke.c, child.c, phase1.c, testhost_main.c) lives under tawcroot/tests/testhost/
+# (smoke.c, child.c, rootfs_smoke.c, testhost_main.c) lives under tawcroot/tests/testhost/
 # and is only linked when TESTHOST=1.
 SRC_C_PROD=(
     "$TAWCROOT_DIR/src/main.c"
@@ -201,7 +201,7 @@ SRC_C_TESTHOST_EXTRA=(
     "$TESTHOST_DIR/src/testhost_main.c"
     "$TESTHOST_DIR/src/smoke.c"
     "$TESTHOST_DIR/src/child.c"
-    "$TESTHOST_DIR/src/phase1.c"
+    "$TESTHOST_DIR/src/rootfs_smoke.c"
 )
 SRC_S_aarch64=(
     "$TAWCROOT_DIR/src/arch/aarch64_stub.S"
@@ -324,7 +324,7 @@ build_binary() {
     echo "==> $out_name: $(ls -la "$out" | awk '{print $5}') bytes"
 
     # Sanity: must be ET_EXEC, statically linked (no PT_INTERP), and the
-    # entry must be at the chosen base. Anything else means a phase-0
+    # entry must be at the chosen base. Anything else means the foundation
     # invariant has slipped.
     local etype entry pt_interp
     etype=$("$readelf" -h "$out" | awk '/Type:/ {print $2}')

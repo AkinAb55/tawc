@@ -1,5 +1,5 @@
 /* tawcroot-testhost entry -- replaces main.c's `tawcroot_main` when the
- * binary is built with `-DTAWCROOT_TESTHOST`. Drives the phase-0 / phase-1
+ * binary is built with `-DTAWCROOT_TESTHOST`. Drives the foundation and rootfs
  * smoke flows that exercise the SIGSYS handler and BPF filter from inside
  * the same process whose filter is being tested.
  *
@@ -23,7 +23,7 @@
 #include "handler.h"
 #include "child.h"
 #include "smoke.h"
-#include "phase1.h"
+#include "rootfs_smoke.h"
 #include "tawc_uapi.h"
 
 #ifndef FD_CLOEXEC
@@ -43,7 +43,7 @@ static int parent_main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	tawc_io_str("tawcroot phase-0 foundation smoke (parent)\n");
+	tawc_io_str("tawcroot foundation smoke (parent)\n");
 	tawc_io_kv_hex("stub_insn_addr",
 		       (unsigned long)(uintptr_t)&tawcroot_raw_syscall_insn[0]);
 	tawc_io_kv_hex("stub_ret_addr",
@@ -132,12 +132,12 @@ int tawcroot_testhost_main(int argc, char **argv)
 		} else if (tawc_streq(argv[i], "-r") && i + 1 < argc) {
 			rootfs = argv[++i];
 		}
-		/* `-b src:dst` is parsed inside tawcroot_phase1_main so it
+		/* `-b src:dst` is parsed inside tawcroot_rootfs_smoke_main so it
 		 * has access to argv unmodified -- keep the dispatch loop
 		 * here narrow. */
 	}
 
 	if (is_child)            return tawcroot_child_main(argc, argv);
-	if (rootfs)              return tawcroot_phase1_main_argv(argc, argv, rootfs);
+	if (rootfs)              return tawcroot_rootfs_smoke_main_argv(argc, argv, rootfs);
 	return parent_main(argc, argv);
 }

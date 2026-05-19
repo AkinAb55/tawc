@@ -1,7 +1,7 @@
 /* Foundation-smoke routines extracted from main.c.
  *
  * These exercise the BPF IP allowlist + handler dispatch contract without
- * ever loading a guest. Phase 1 will keep them around as regression tests
+ * ever loading a guest. We keep them around as regression tests
  * (the IP-allowlist contract is the spine of the whole architecture, and
  * the smoke is cheap to keep running on every binary).
  *

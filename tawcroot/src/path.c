@@ -1,4 +1,4 @@
-/* Path translation — phase-1 MVP.
+/* Path translation.
  *
  * Today's policy:
  *   - Absolute guest path:

@@ -1,10 +1,9 @@
 /* Build + install the tawcroot seccomp filter. Single source of truth for
- * the trap set; the dispatch table indexes from the same list (later phase).
+ * the trap set; the dispatch table indexes from the same list.
  *
- * Phase-0 surface: install_smoke_filter() installs a minimal filter for the
- * foundation smoke (one TRAP syscall + IP allowlist for the stub). Phase 1
- * grows this into the full path-bearing trap set with a generated
- * jump-table. Keep the API small so refactor doesn't ripple.
+ * install_smoke_filter() installs a minimal filter for the foundation smoke
+ * (one TRAP syscall + IP allowlist for the stub). install_filter() takes the
+ * full path-bearing trap set generated from the dispatch table.
  */
 
 #pragma once
@@ -15,7 +14,7 @@
 /* Returns 0 on success, -errno on failure (raw syscall semantics). */
 long tawcroot_install_smoke_filter(int trap_syscall_nr);
 
-/* Phase-1 filter: build BPF from a list of syscall numbers to TRAP, plus
+/* Build BPF from a list of syscall numbers to TRAP, plus
  * the IP allowlist. Same shape as the smoke filter; the trap set comes
  * from the caller so the dispatch table and the filter share one source
  * of truth. Returns 0 / -errno. */

@@ -1,6 +1,5 @@
 /* Foundation-smoke helpers shared between parent and --exec-child paths.
- * Phase 1 will replace most of this with real handler/path-translation
- * unit tests. Until then this is the "is everything alive" surface. */
+ * This is the "is the filter/handler/bootstrap alive" surface. */
 
 #pragma once
 
@@ -8,7 +7,7 @@
 
 #include "handler.h"
 
-/* Phase-0 smoke handoff blob. Distinct from the production
+/* Foundation-smoke handoff blob. Distinct from the production
  * `tawcroot_exec_state` typedef in tawcroot/include/exec_state.h (the
  * real loader handoff). The names previously collided; renamed per
  * review finding D7 to keep the testhost out of the production

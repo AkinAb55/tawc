@@ -4,7 +4,7 @@
  * handler this is forbidden: even `tawc_write` issues a syscall through
  * the stub, which is fine, but the rest of the design constrains the
  * handler to no allocations / no stdio. Use these freely from main /
- * --exec-child / phase-1 init code; do not call them from handlers.
+ * --exec-child / rootfs init code; do not call them from handlers.
  *
  * Output goes to stdout (fd 1). No newline auto-append.
  */
@@ -21,7 +21,7 @@ void tawc_io_kv_hex(const char *k, unsigned long v);
 void tawc_io_kv_dec(const char *k, long v);
 
 /* Print "[ok ] label\n" or "[FAIL] label\n"; return 0 if ok, 1 otherwise.
- * Used by the smoke driver; phase-1 unit tests use the same convention. */
+ * Used by the smoke drivers; unit tests use the same convention. */
 int  tawc_io_step(const char *label, int ok);
 
 /* Print "[skip] label (reason)\n". Used when the kernel lacks a syscall the

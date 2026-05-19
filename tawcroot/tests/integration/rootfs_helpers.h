@@ -7,7 +7,7 @@
  *   - tests/integration/test_exec_child.c
  *   - tests/integration/test_prod_fork.c
  *
- * The phase-1 / androidfilter suites have their own rootfs builder
+ * The rootfs syscall / androidfilter suites have their own rootfs builder
  * with a much richer symlink topology; we deliberately don't share
  * with them because their needs and assertions are different.
  *

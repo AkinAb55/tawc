@@ -37,7 +37,7 @@ typedef long (*tawcroot_handler_fn)(const tawcroot_syscall_args *args,
 void tawcroot_dispatch_install(int nr, tawcroot_handler_fn fn);
 tawcroot_handler_fn tawcroot_dispatch_get(int nr);
 
-/* Phase-1 init: register every handler we ship today. Single source of
+/* Register every handler we ship today. Single source of
  * truth for "what's in the trap set"; the BPF filter generator reads
  * the same list. */
 void tawcroot_dispatch_init(void);

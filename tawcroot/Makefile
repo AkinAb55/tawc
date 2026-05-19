@@ -159,7 +159,7 @@ TESTHOST_EXTRA_C := \
     $(SRC_TH)/src/testhost_main.c \
     $(SRC_TH)/src/smoke.c \
     $(SRC_TH)/src/child.c \
-    $(SRC_TH)/src/phase1.c
+    $(SRC_TH)/src/rootfs_smoke.c
 
 ARCH_S := $(SRC_T)/src/arch/x86_64_stub.S \
           $(SRC_T)/src/arch/x86_64_loader_jump.S

@@ -272,7 +272,7 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 	 * and stats the wrong inode (cwd dir instead of dirfd). wc, which
 	 * uses fstat() on its input fd to decide buffer strategy, then read
 	 * stale size and segfaulted. We pass through as-is (the dirfd is
-	 * the guest's, but for phase-1 minimum we don't track guest fd
+	 * the guest's, but we don't yet track guest fd
 	 * provenance — the kernel will see whatever fd it is and stat the
 	 * corresponding inode). */
 	if (flags & AT_EMPTY_PATH) {
@@ -1077,8 +1077,8 @@ static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 
 /* Translate-and-pass-through wrappers for the simpler path-bearing
  * syscalls. These all take (dirfd, path, ...) at the kernel layer; the
- * guest's dirfd is currently passed through (phase-1 minimum — fd
- * provenance comes later) and the path is translated. */
+ * guest's dirfd is currently passed through (fd provenance comes later)
+ * and the path is translated. */
 
 #define DECLARE_AT_PASS(name, sysnr, narg, pmode)                         \
 static long handle_##name(const tawcroot_syscall_args *args,             \

@@ -7,7 +7,7 @@
  * same value as `mcontext_t::pc` for a SECCOMP_RET_TRAP delivery. The IP
  * allowlist in filter.c therefore matches against the `_ret` label, not the
  * `_insn` label. `mcontext.regs[0]` is x0 — both the first arg and the
- * return slot. Empirically verified — see `src/filter.c` and the phase-0
+ * return slot. Empirically verified — see `src/filter.c` and the foundation
  * smoke driver.
  */
 

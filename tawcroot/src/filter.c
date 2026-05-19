@@ -1,4 +1,4 @@
-/* Phase-0 seccomp filter.
+/* tawcroot seccomp filter.
  *
  * Goal: prove the IP allowlist contract before we wire up the rest. The
  * filter we install here is intentionally minimal:
@@ -8,7 +8,7 @@
  *   3. syscall_nr == trap_syscall_nr    → TRAP          (smoke-test target)
  *   4. default                          → ALLOW
  *
- * Phase 1 expands rule 3 into a generated jump table covering the full trap
+ * The rootfs/prod filter expands rule 3 into a generated jump table covering the full trap
  * set. The shape of rules 1, 2, and 4 is the contract that Approach A
  * (re-exec into ourselves) depends on — see notes/tawcroot.md "Why non-PIE".
  *
@@ -135,4 +135,3 @@ long tawcroot_install_filter(const int *trap_nrs, size_t n_traps)
 #endif
 	return tawc_seccomp(SECCOMP_SET_MODE_FILTER, 0, &fprog);
 }
-

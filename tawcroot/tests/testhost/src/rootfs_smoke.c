@@ -1,4 +1,4 @@
-/* Phase-1 smoke: real path translation + identity decoration.
+/* Rootfs syscall smoke: path translation + identity decoration.
  *
  * The driver issues a set of guest-perspective syscalls via inline asm
  * (so each one's IP is outside the stub allowlist and traps into our
@@ -13,7 +13,8 @@
  * file under /etc/probe before installing the filter so we can compare
  * the bytes after.
  *
- * See notes/tawcroot.md "Phase 1 -- MVP path translation".
+ * See notes/tawcroot.md "Phase 1 -- MVP path translation" for the
+ * historical bring-up label.
  */
 
 #include <stdbool.h>
@@ -23,20 +24,21 @@
 #include <linux/stat.h>
 #include <sys/stat.h>
 
-#include "phase1.h"
+#include "rootfs_smoke.h"
 #include "io.h"
 #include "raw_sys.h"
 #include "filter.h"
 #include "fdtab.h"
 #include "handler.h"
 #include "dispatch.h"
+#include "errno_neg.h"
 #include "path.h"
 #include "sysnr.h"
 #include "usercopy.h"
 
 #include "tawc_uapi.h"
 
-/* ----- inline-asm syscall probes (issued from within phase1.c so the
+/* ----- inline-asm syscall probes (issued from within this file so the
  * IP is outside the stub allowlist and the filter TRAPs into our
  * handler) ---------------------------------------------------------- */
 
@@ -137,10 +139,10 @@ static long open_rootfs(const char *path)
 
 /* ----- entry ------------------------------------------------------ */
 
-int tawcroot_phase1_main_argv(int argc, char **argv, const char *rootfs)
+int tawcroot_rootfs_smoke_main_argv(int argc, char **argv, const char *rootfs)
 {
 	/* Collect `-b src:dst` entries. We need them parsed before
-	 * `tawcroot_phase1_main` installs the seccomp filter -- once the
+	 * `tawcroot_rootfs_smoke_main` installs the seccomp filter -- once the
 	 * filter is up, opening additional bind src dirs becomes a TRAPed
 	 * openat, which we'd dispatch through our own translator and route
 	 * back into the host filesystem... that works, but doing it before
@@ -152,7 +154,7 @@ int tawcroot_phase1_main_argv(int argc, char **argv, const char *rootfs)
 		size_t colon = 0;
 		while (spec[colon] && spec[colon] != ':') colon++;
 		if (!spec[colon]) {
-			tawc_io_str("[phase1] -b entry missing ':' -- '");
+			tawc_io_str("[rootfs-smoke] -b entry missing ':' -- '");
 			tawc_io_str(spec);
 			tawc_io_str("'\n");
 			return 1;
@@ -164,7 +166,7 @@ int tawcroot_phase1_main_argv(int argc, char **argv, const char *rootfs)
 		const char *dst = spec + colon + 1;
 		long br = tawcroot_path_add_bind(src, dst);
 		if (br < 0) {
-			tawc_io_str("[phase1] bind add failed for '");
+			tawc_io_str("[rootfs-smoke] bind add failed for '");
 			tawc_io_str(spec);
 			tawc_io_str("' errno=-");
 			tawc_io_dec(-br);
@@ -172,7 +174,7 @@ int tawcroot_phase1_main_argv(int argc, char **argv, const char *rootfs)
 			return 1;
 		}
 	}
-	return tawcroot_phase1_main(rootfs);
+	return tawcroot_rootfs_smoke_main(rootfs);
 }
 
 /* ----- per-scenario test functions -------------------------------- */
@@ -588,7 +590,7 @@ static int test_dotdot_via_dirfd_clamps_at_rootfs(void)
 }
 
 /* Bind-src dirfd `..` clamps at the bind-dst boundary in the guest
- * view. The phase-1 fixture binds <TMPDIR>/...-bindsrc to /lib64, so
+ * view. The rootfs smoke fixture binds <TMPDIR>/...-bindsrc to /lib64, so
  * a dirfd opened through /lib64 walks `..` to the guest rootfs root
  * (not the host's /tmp). dirfd_to_guest_abs reverse-translates the
  * bind-src host path to /<bind.dst>/..., the appended `..` folds
@@ -646,7 +648,7 @@ static int test_dotdot_via_bind_dst_dirfd(void)
 
 /* Bind-src dirfd `..` must NOT escape into the host. From a dirfd
  * opened through a bind dst, naive kernel passthrough of `..` would
- * walk up the host tree past the bind src; the phase-1 fixture plants
+ * walk up the host tree past the bind src; the rootfs smoke fixture plants
  * FAKE_ROOTFS_SIBLING/foo/host-secret at <TMPDIR> (sibling of the bind
  * src) precisely as a probe target the rootfs view never exposes.
  * dirfd_to_guest_abs reverse-translates the bind-src host path to
@@ -678,17 +680,43 @@ static int test_dotdot_via_bind_dst_does_not_escape_to_host(void)
 			      fd_bind >= 0);
 	if (fd_bind < 0) return fails;
 
-	/* FAKE_BINDSRC = "<TMPDIR>/tawcroot-test-rootfs-phase1-bindsrc" and
-	 * FAKE_ROOTFS_SIBLING = "<TMPDIR>/tawcroot-test-rootfs-phase1-evil"
-	 * are siblings — so `../tawcroot-test-rootfs-phase1-evil/...`
-	 * from the bind dirfd is the same regardless of TAWCROOT_TEST_TMPDIR.
+	/* FAKE_BINDSRC ends in "-bindsrc" and FAKE_ROOTFS_SIBLING uses the
+	 * same basename with "-evil" instead. Build "../<sibling>/..." from
+	 * the runtime bind src so this test works for the plain rootfs-smoke
+	 * fixture and the androidfilter fixture.
 	 *
 	 * faccessat(F_OK, 0): rv==0 would mean "the kernel reached the file",
 	 * i.e. the dirfd `..` walked past the bind src and into /tmp on the
 	 * host. The fix clamps at the bind-dst boundary, so rv must be < 0. */
-	long rv = inline_faccessat((int)fd_bind,
-		"../tawcroot-test-rootfs-phase1-evil/foo/host-secret",
-		0 /* F_OK */, 0);
+	const char *src = tawcroot_binds[0].src;
+	size_t src_len = tawcroot_binds[0].src_len;
+	size_t base = src_len;
+	while (base > 0 && src[base - 1] != '/') base--;
+	const char suffix[] = "-bindsrc";
+	size_t suffix_len = sizeof suffix - 1;
+	size_t name_len = src_len - base;
+	int has_suffix = name_len >= suffix_len;
+	for (size_t i = 0; has_suffix && i < suffix_len; i++) {
+		if (src[src_len - suffix_len + i] != suffix[i])
+			has_suffix = 0;
+	}
+	if (!has_suffix || name_len + 32 > 512) {
+		tawc_io_str("  [skip] bind src does not use smoke fixture name\n");
+		tawc_close((int)fd_bind);
+		return fails;
+	}
+	char escape[512];
+	size_t e = 0;
+	escape[e++] = '.';
+	escape[e++] = '.';
+	escape[e++] = '/';
+	for (size_t i = 0; i < name_len - suffix_len; i++)
+		escape[e++] = src[base + i];
+	const char tail[] = "-evil/foo/host-secret";
+	for (size_t i = 0; i < sizeof tail; i++)
+		escape[e++] = tail[i];
+
+	long rv = inline_faccessat((int)fd_bind, escape, 0 /* F_OK */, 0);
 	fails += tawc_io_step(
 		"faccessat(<bind dst dirfd>, \"../<sibling>/host-secret\", F_OK) "
 		"clamps at bind-dst boundary (no host escape)",
@@ -952,7 +980,7 @@ static int test_openat_opath_nofollow_symlink(void)
  * st_mtime did NOT move. Each one independently catches the bug.
  *
  * /utime-link is a fresh symlink to /utime-target, both laid
- * down by build_fake_rootfs in test_phase1.c; using a dedicated
+ * down by build_fake_rootfs in test_rootfs_syscalls_smoke.c; using a dedicated
  * pair avoids coupling with /etc/probe (which other tests read). */
 static int test_utimensat_symlink_nofollow(void)
 {
@@ -1702,7 +1730,7 @@ static int test_ioctl_translation(void)
  * dispatch + EFAULT + passthrough paths against a regfile (where
  * everything ends in -ENOTTY), this one verifies the actual
  * data-bearing paths against a real pty allocated through the
- * `/dev` bind set up in test_phase1.c.
+ * `/dev` bind set up in test_rootfs_syscalls_smoke.c.
  *
  * Coverage:
  *   - TCGETS2 on a pty returns success and a populated termios2 whose
@@ -1980,16 +2008,10 @@ static int test_internal_fd_protection(void)
 }
 
 /* Guest seccomp / prctl(PR_SET_SECCOMP) handling. We can't honestly
- * install the guest's filter (it'd stack on top of ours and could
- * KILL_PROCESS our own raw_syscall stub), but returning -EPERM
- * tripped Mozilla's content-sandbox setup into a teardown path
- * that aborted inside libhybris's bionic-Q linker on the
- * `unregister_tls_module` CHECK. So we lie about successful install
- * — the guest thinks its filter is up but the only filter actually
- * in place is ours, which already enforces translation. The crucial
- * thing tested below is that the LIE doesn't break the actual
- * translation: a path syscall after the fake-success still routes
- * through our handler. */
+ * install the guest's filter: it would stack on top of ours and could
+ * kill our raw_syscall stub, return before our trap, or hand SIGSYS to
+ * a guest-owned handler. Refuse with -EPERM and verify translation still
+ * works after the denial. */
 static int test_guest_seccomp_prctl_handling(void)
 {
 	int fails = 0;
@@ -1998,15 +2020,15 @@ static int test_guest_seccomp_prctl_handling(void)
 	 * the dispatch path without needing a valid filter program. */
 	INLINE_SYS6(TAWC_SYS_seccomp, 1 /*SET_MODE_FILTER*/,
 		    0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("seccomp(SET_MODE_FILTER) -> 0 (faked)",
-			      rv == 0);
+	fails += tawc_io_step("seccomp(SET_MODE_FILTER) -> -EPERM",
+			      rv == TAWC_EPERM);
 	tawc_io_kv_dec("    rv", rv);
 
-	/* prctl(PR_SET_SECCOMP) -> 0 (faked, same rationale). */
+	/* prctl(PR_SET_SECCOMP) -> -EPERM (same rationale). */
 	INLINE_SYS6(TAWC_SYS_prctl, 22 /*PR_SET_SECCOMP*/,
 		    0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("prctl(PR_SET_SECCOMP) -> 0 (faked)",
-			      rv == 0);
+	fails += tawc_io_step("prctl(PR_SET_SECCOMP) -> -EPERM",
+			      rv == TAWC_EPERM);
 	tawc_io_kv_dec("    rv", rv);
 
 	/* io_uring_setup -> -ENOSYS (review D4). The guest must fall
@@ -3514,7 +3536,7 @@ static int test_chroot_dotdot_clamps(void)
  *     probe.txt content is reachable as /test-bind/probe.txt
  *   - chdir("/") + getcwd reports "/"
  *
- * The test precondition is two binds set up by test_phase1.c args:
+ * The test precondition is two binds set up by test_rootfs_syscalls_smoke.c args:
  *     -b FAKE_BINDSRC:lib64        (will be dropped by chroot("/usr"))
  *     -b FAKE_BINDSRC:usr/test-bind (will be re-anchored to test-bind)
  */
@@ -3688,11 +3710,11 @@ static int test_chroot_through_symlink_follows_post(void)
 
 /* ----- main ------------------------------------------------------- */
 
-int tawcroot_phase1_main(const char *rootfs)
+int tawcroot_rootfs_smoke_main(const char *rootfs)
 {
 	int fails = 0;
 
-	tawc_io_str("\ntawcroot phase-1 smoke (path translation)\n");
+	tawc_io_str("\ntawcroot rootfs syscall smoke\n");
 	tawc_io_str("  rootfs = "); tawc_io_str(rootfs); tawc_io_str("\n");
 
 	long rfd = open_rootfs(rootfs);
@@ -3791,7 +3813,7 @@ int tawcroot_phase1_main(const char *rootfs)
 	if (n_traps > trap_cap) return 1;
 
 	long flt = tawcroot_install_filter(trap_nrs, n_traps);
-	fails += tawc_io_step("install seccomp filter (phase-1 set)",
+	fails += tawc_io_step("install seccomp filter (rootfs syscall set)",
 			      flt == 0);
 
 	if (fails != 0) return 1;
@@ -3878,9 +3900,9 @@ int tawcroot_phase1_main(const char *rootfs)
 	fails += test_chroot_through_symlink_follows_post();
 
 	if (fails == 0) {
-		tawc_io_str("PHASE-1 SMOKE: PASS\n");
+		tawc_io_str("ROOTFS SYSCALL SMOKE: PASS\n");
 	} else {
-		tawc_io_str("PHASE-1 SMOKE: FAIL (");
+		tawc_io_str("ROOTFS SYSCALL SMOKE: FAIL (");
 		tawc_io_dec(fails);
 		tawc_io_str(" failure(s))\n");
 	}

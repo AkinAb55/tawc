@@ -1,4 +1,4 @@
-/* Fd-shape syscall handlers — phase 0.5 internal-fd protection.
+/* Fd-shape syscall handlers — internal-fd protection.
  *
  * See include/fdtab.h for the rationale. Every handler here is the
  * minimum viable wrapper around the corresponding host syscall; the

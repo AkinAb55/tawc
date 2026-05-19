@@ -1,4 +1,4 @@
-/* Phase-0 SIGSYS handler.
+/* SIGSYS handler.
  *
  * Async-signal-safe by construction (notes/tawcroot.md "Why the handler
  * is async-signal-safe"): no malloc, no stdio, no libc calls with hidden
@@ -7,8 +7,8 @@
  *
  * The recorded `tawcroot_handler_obs` is a single-slot snapshot — one
  * writer per TRAP, atomic-ish via plain stores guarded by a release fence.
- * Phase 1 will replace this with the dispatch table; the observation slot
- * stays around as a debug hatch.
+ * The dispatch table handles production traps; the observation slot stays
+ * around as a test/debug hatch.
  *
  * We rely on rt_sigaction directly (not bionic's libc wrapper) because
  * we link `-nostdlib`. On x86_64 the kernel mandates SA_RESTORER and a
@@ -49,7 +49,7 @@ struct kernel_sigaction {
 
 extern void tawcroot_sigreturn_trampoline(void);
 
-/* Phase-0 debug observation slot. Per review finding D2 the production
+/* Foundation-smoke debug observation slot. Per review finding D2 the production
  * handler should not write to a mutable process-wide global on every
  * TRAP — that's contention for multi-threaded guests and violates the
  * "no mutable handler state without snapshot rules" principle from
@@ -61,7 +61,7 @@ extern void tawcroot_sigreturn_trampoline(void);
  * multi-threaded guest. Two threads trapping concurrently will
  * interleave the field stores below, and tawcroot_handler_observe
  * may snapshot a half-updated record. This is acceptable because the
- * existing testhost smoke (smoke.c, child.c, phase1.c) is
+ * existing testhost smoke (smoke.c, child.c, rootfs_smoke.c) is
  * single-threaded by construction. The day someone writes a
  * multi-threaded handler test, this slot needs the same seqlock
  * treatment as the SIGSYS-shadow state in signal_shadow.c — until

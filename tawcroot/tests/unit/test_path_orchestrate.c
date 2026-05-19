@@ -564,7 +564,7 @@ test(orch_zero_capacity_is_efault)
 /* ----- chroot bind re-anchoring (tawcroot_path_binds_reanchor) -----
  *
  * Pure on bind state — exercised here directly. The handler-layer
- * tests in tests/testhost/src/phase1.c cover the integration via a
+ * tests in tests/testhost/src/rootfs_smoke.c cover the integration via a
  * real chroot syscall on a fake rootfs; these exercise the corner
  * cases that are awkward to set up there (overflow, exact-match-of-
  * new-root, mixed-state arrays). */

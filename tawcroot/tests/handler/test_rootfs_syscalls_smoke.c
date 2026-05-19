@@ -1,15 +1,15 @@
-/* Handler-layer tests: phase-1 path translation + runtime invariants.
+/* Handler-layer tests: rootfs syscall translation + runtime invariants.
  *
  * Sets up a minimal fake rootfs, forks `tawcroot-testhost -r <rootfs>`,
  * and registers one cleat test per `[ok ]` / `[FAIL]` line in its output.
  *
- * The testhost installs the dispatch table for phase-1 + 0.5 and issues
+ * The testhost installs the dispatch table and issues
  * guest-perspective syscalls via inline asm so each one's IP traps into
  * the SIGSYS handler. The handler dispatches to the registered fs/identity
  * functions; the smoke checks each result via `tawc_io_step`. We surface
  * those checks individually via cleat.
  *
- * Coverage (per `tests/testhost/src/phase1.c`, ~50+ checks):
+ * Coverage (per `tests/testhost/src/rootfs_smoke.c`, ~50+ checks):
  *   - getuid/geteuid/getgid/getegid -> 0 (fake-root identity)
  *   - openat absolute path translates to <rootfs>/etc/probe
  *   - openat2 RESOLVE_IN_ROOT clamps absolute-symlink escape (host-secret)
@@ -22,7 +22,7 @@
  *   - linkat falls back to symlink, renameat2/truncate/cwd round-trips, …
  *
  * See notes/tawcroot.md "Phase 1 -- MVP path translation" and
- * "Phase 0.5 -- runtime invariants".
+ * "Phase 0.5 -- runtime invariants" for the historical bring-up labels.
  */
 
 #define _GNU_SOURCE  /* symlink(), PATH_MAX in some glibc layouts */
@@ -44,14 +44,14 @@
 # define TAWCROOT_TEST_TMPDIR "/tmp"
 #endif
 
-#define FAKE_ROOTFS         TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-phase1"
+#define FAKE_ROOTFS         TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-syscalls"
 /* Sibling that shares the rootfs as a byte prefix. Exercises the
  * resolve_relative / handle_getcwd boundary check (review finding B4):
  * "<rootfs>-evil" must NOT be treated as inside the rootfs. */
-#define FAKE_ROOTFS_SIBLING TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-phase1-evil"
+#define FAKE_ROOTFS_SIBLING TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-syscalls-evil"
 /* Bind source for the bind-vs-memo precedence test (review finding B5):
  * binds must win over rootfs-side symlink memos. */
-#define FAKE_BINDSRC        TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-phase1-bindsrc"
+#define FAKE_BINDSRC        TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-syscalls-bindsrc"
 
 static bool write_file(const char *path, const char *contents)
 {
@@ -72,7 +72,7 @@ static void rmrf(const char *path)
 	(void)!system(cmd);
 }
 
-/* Build the minimal rootfs the phase-1 smoke expects:
+/* Build the minimal rootfs the rootfs syscall smoke expects:
  *   <root>/etc/probe          -- "hello-from-rootfs"
  *   <root>/usr/lib/probe.so   -- "libprobe-data"
  *   <root>/lib                -- symlink -> usr/lib
@@ -172,21 +172,21 @@ register_dynamic_tests
 	rmrf(FAKE_BINDSRC);
 	if (!build_fake_rootfs(FAKE_ROOTFS)) {
 		register_test_problem(
-			c_sv("phase1"), c_sv("fake_rootfs_setup"),
+			c_sv("rootfs_syscalls_smoke"), c_sv("fake_rootfs_setup"),
 			cstr_from_fmt("failed to build fake rootfs at %s: %s",
 				      FAKE_ROOTFS, strerror(errno)));
 		return;
 	}
 	if (!build_sibling_evil(FAKE_ROOTFS_SIBLING)) {
 		register_test_problem(
-			c_sv("phase1"), c_sv("fake_rootfs_sibling_setup"),
+			c_sv("rootfs_syscalls_smoke"), c_sv("fake_rootfs_sibling_setup"),
 			cstr_from_fmt("failed to build sibling at %s: %s",
 				      FAKE_ROOTFS_SIBLING, strerror(errno)));
 		return;
 	}
 	if (!build_bindsrc(FAKE_BINDSRC)) {
 		register_test_problem(
-			c_sv("phase1"), c_sv("fake_bindsrc_setup"),
+			c_sv("rootfs_syscalls_smoke"), c_sv("fake_bindsrc_setup"),
 			cstr_from_fmt("failed to build bindsrc at %s: %s",
 				      FAKE_BINDSRC, strerror(errno)));
 		return;
@@ -211,7 +211,7 @@ register_dynamic_tests
 		"-b", "/dev:dev",
 		NULL
 	};
-	steps_register_from_testhost(c_sv("phase1"), args);
+	steps_register_from_testhost(c_sv("rootfs_syscalls_smoke"), args);
 
 	/* Best-effort cleanup. The rootfs is small and the test runner is
 	 * short-lived; if cleanup fails there's nothing meaningful to do. */

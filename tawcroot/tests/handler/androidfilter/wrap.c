@@ -131,7 +131,7 @@ static bool install_filter(bool include_legacy_x86_64,
 	/* Cap mirrors the production trap_nrs[256] in main.c. The current
 	 * trap set fits comfortably in 64 slots, but the array+guard pair
 	 * is the cheap defense against silent truncation as the set
-	 * grows — see the same pattern in main.c and phase1.c. */
+	 * grows — see the same pattern in main.c and rootfs_smoke.c. */
 	int trap_nrs[64];
 	const size_t trap_cap = sizeof trap_nrs / sizeof trap_nrs[0];
 	size_t n = 0;

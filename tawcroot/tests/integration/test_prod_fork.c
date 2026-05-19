@@ -1,6 +1,6 @@
 /* Integration tests for guest-driven fork() under production tawcroot.
  *
- * The phase-1 testhost stress already covers concurrent CLONE_VM |
+ * The rootfs-smoke testhost stress already covers concurrent CLONE_VM |
  * CLONE_THREAD threads (`test_sigsys_block_shadow_multithread`); that
  * exercises the per-tid signal shadow. What it does NOT exercise is a
  * guest creating a SEPARATE PROCESS via clone(SIGCHLD) — the path

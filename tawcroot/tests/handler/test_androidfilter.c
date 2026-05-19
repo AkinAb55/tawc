@@ -1,13 +1,13 @@
 /* Handler-layer tests under a synthesized Android-`untrusted_app` seccomp
  * prefilter.
  *
- * Same shape as test_phase1.c: build a fake rootfs, fork tawcroot-testhost
+ * Same shape as test_rootfs_syscalls_smoke.c: build a fake rootfs, fork tawcroot-testhost
  * with `-r <rootfs>`, parse [ok ]/[FAIL] lines into cleat tests. The only
  * difference is the wrapper binary (TAWCROOT_ANDROID_FILTER_WRAP) is
  * prepended to the argv, so the testhost runs with an Android-shape stacked
  * filter layered under tawcroot's own filter.
  *
- * What this catches that the bare phase-1 suite doesn't:
+ * What this catches that the bare rootfs syscall suite doesn't:
  *
  *   - openat2 / faccessat2 / clone3 / close_range RET_TRAP from the outer
  *     filter must be caught by tawcroot's SIGSYS handler. Bug shapes:
@@ -33,7 +33,7 @@
  *   cleat orchestrator (host glibc)
  *     -> wrap (host glibc, installs Android-shape seccomp filter)
  *          -> tawcroot-testhost (freestanding, installs its own filter +
- *             SIGSYS handler, runs all phase-0/0.5/1 checks)
+ *             SIGSYS handler, runs the rootfs syscall checks)
  *
  * The wrapper does NOT install a SIGSYS handler. Default disposition for
  * SIGSYS is process termination, mimicking Android's behavior pre-tawcroot:
@@ -189,7 +189,7 @@ register_dynamic_tests
 		"-r", FAKE_ROOTFS,
 		"-b", FAKE_BINDSRC ":lib64",
 		"-b", FAKE_BINDSRC ":usr/test-bind",
-		/* Mirror test_phase1.c: expose host /dev so
+		/* Mirror test_rootfs_syscalls_smoke.c: expose host /dev so
 		 * test_ioctl_pty_translation can allocate a real pty. */
 		"-b", "/dev:dev",
 		NULL
@@ -215,7 +215,7 @@ register_dynamic_tests
 	 * simulated. test_ioctl_pty_translation only meaningfully
 	 * exercises the bypass under this wrapper — without it, the
 	 * host kernel happily fulfils TCGETS2 and the translator's
-	 * effort is invisible. The other phase-1 tests must still pass
+	 * effort is invisible. The other rootfs syscall tests must still pass
 	 * untouched: they don't touch termios2 cmds.
 	 *
 	 * Both arches: the xperm-EACCES rule is keyed on the (arch-

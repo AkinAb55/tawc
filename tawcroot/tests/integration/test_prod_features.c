@@ -1,5 +1,5 @@
 /* Integration tests for production-tawcroot feature paths that
- * existed only at the handler-test layer (testhost / phase1) before:
+ * existed only at the handler-test layer (testhost / rootfs smoke) before:
  *
  *   1. AF_UNIX bind() sun_path translation. Untested anywhere prior.
  *      The gpg-agent regression — bind("/run/.gnupg/S.gpg-agent") on
@@ -9,7 +9,7 @@
  *   2. Reserved fd hidden from /proc/self/fd via getdents64 dirent
  *      filtering. The gpgme closefrom death-spiral regression
  *      (notes/tawcroot.md "Phase 5c"; src/syscalls_fd.c::handle_getdents64
- *      + src/dirent_filter.c). The phase-1 testhost has the same
+ *      + src/dirent_filter.c). The rootfs testhost has the same
  *      check (test_internal_fd_protection) but only against the
  *      testhost's own filter install — not under production main.c +
  *      seccomp + supervisor_init.

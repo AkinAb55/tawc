@@ -1,6 +1,6 @@
 /* Path translation.
  *
- * Phase-1 surface, intentionally narrow: a single translator that takes
+ * Current surface, intentionally narrow: a single translator that takes
  * a guest-absolute path and yields a (base_fd, suffix) pair we can use
  * with `*at` syscalls. Bind-mount lookup, `..`/symlink clamping, and
  * fd-relative resolution all hang off the same return shape — see
@@ -93,7 +93,7 @@ tawcroot_path_result tawcroot_path_translate(const char *guest_path,
 					     tawcroot_path_mode mode);
 
 /* Configure paths to the host root and to the in-rootfs `/proc` mirror
- * for reverse-translation. Set at init from main.c / phase1.c. */
+ * for reverse-translation. Set at init from main.c / rootfs_smoke.c. */
 extern char tawcroot_rootfs_host_path[4096];
 extern size_t tawcroot_rootfs_host_path_len;
 

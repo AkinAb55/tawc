@@ -2,7 +2,7 @@
  * test per [ok ]/[FAIL] line.
  *
  * The testhost binary already prints `  [ok ] LABEL` / `  [FAIL] LABEL` for
- * each individual check (~80+ across phase-0 + phase-1). Re-running the
+ * each individual check (~80+ across the foundation + rootfs smokes). Re-running the
  * testhost per check would be silly; instead each test file's
  * `register_dynamic_tests` block runs the testhost ONCE, parses the output,
  * and registers one cleat test per parsed step under its module.
@@ -17,7 +17,8 @@
  *
  * cleat's test_module_from_file() doesn't apply here -- we pass `module`
  * explicitly. By convention, use the file's basename without `test_` /
- * `.c` (e.g. `phase0` for `tests/handler/test_phase0.c`).
+ * `.c` (e.g. `foundation_smoke` for
+ * `tests/handler/test_foundation_smoke.c`).
  */
 
 #pragma once

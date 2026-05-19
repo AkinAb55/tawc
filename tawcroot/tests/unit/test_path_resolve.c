@@ -9,8 +9,8 @@
  * up on a real filesystem: depth-bombs, mid-path errors,
  * pathologically long targets, etc.
  *
- * The integration tests in tests/handler/test_phase1.c plus
- * tests/testhost/src/phase1.c cover the same resolver end-to-end
+ * The integration tests in tests/handler/test_rootfs_syscalls_smoke.c plus
+ * tests/testhost/src/rootfs_smoke.c cover the same resolver end-to-end
  * against a real fake rootfs (this confirms the production oracle in
  * path.c, which these unit tests don't exercise).
  *

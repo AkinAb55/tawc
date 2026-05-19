@@ -7,7 +7,7 @@
  * is the same value as `mcontext_t::gregs[REG_RIP]` for a SECCOMP_RET_TRAP
  * delivery. The IP allowlist in filter.c therefore matches against the
  * `_ret` label (post-SYSCALL), not the `_insn` label (the SYSCALL itself).
- * Empirically verified — see `src/filter.c` and the phase-0 smoke driver.
+ * Empirically verified — see `src/filter.c` and the foundation smoke driver.
  */
 
 #pragma once

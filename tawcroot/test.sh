@@ -11,8 +11,9 @@
 #
 # All four are registered through cleat and share one filter syntax,
 # one exit code, one report. Positional args are full-match regexes
-# against `module`, `name`, or `module::name` (e.g. `handler/test_phase0`,
-# `phase1_path_translation_smoke`, `.*phase.*`). Multiple args are
+# against `module`, `name`, or `module::name` (e.g.
+# `handler/test_foundation_smoke`, `rootfs_syscalls_smoke`, `.*smoke.*`).
+# Multiple args are
 # combined with OR. See cleat docs/test_framework.md.
 #
 # Modes:
@@ -32,9 +33,8 @@
 # Usage:
 #   tawcroot/test.sh                # everything, host
 #   tawcroot/test.sh --device       # everything, device
-#   tawcroot/test.sh phase0         # filter (host)
+#   tawcroot/test.sh foundation_smoke # filter (host)
 #   tawcroot/test.sh --no-build     # reuse existing build/
-#   tawcroot/test.sh --list         # list cleat tests (host)
 
 set -euo pipefail
 

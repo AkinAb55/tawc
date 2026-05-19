@@ -576,7 +576,8 @@ the saved resume PC from `ucontext_t` for x86_64 and aarch64. If
 the observed filter address is not the post-syscall PC label,
 stop and fix the stub/filter contract before implementing path
 translation. (Status: passing on x86_64 emulator — see
-`tawcroot/src/main.c::smoke_phase0` and the comment in `filter.c`
+`tawcroot/tests/handler/test_foundation_smoke.c`,
+`tawcroot/tests/testhost/src/smoke.c`, and the comment in `filter.c`
 where the `_ret`-vs-`_insn` discrepancy is documented.) The same smoke must issue every raw syscall the handler
 or `--exec-child` bootstrap plans to use (`openat`, `read`, `write`,
 `close`, `mmap`, `mprotect`, `munmap`, `getcwd`, `readlinkat`,
@@ -1757,20 +1758,20 @@ tawcroot/                            # everything tawcroot-specific lives here
     ├── testhost/
     │   ├── include/
     │   │   ├── child.h     # --exec-child entry
-    │   │   ├── phase1.h    # phase-1 smoke entry
-    │   │   └── smoke.h     # phase-0 smoke harness
+    │   │   ├── rootfs_smoke.h # rootfs syscall smoke entry
+    │   │   └── smoke.h        # foundation smoke harness
     │   └── src/
-    │       ├── testhost_main.c  # argv dispatch (--exec-child / -r ROOTFS / phase-0)
+    │       ├── testhost_main.c  # argv dispatch (--exec-child / -r ROOTFS / foundation)
     │       ├── child.c          # --exec-child re-entry
-    │       ├── phase1.c         # phase-1 smoke driver (inline-asm syscall probes)
-    │       └── smoke.c          # phase-0 smoke (trap-contract, raw-syscall exercise)
+    │       ├── rootfs_smoke.c   # rootfs syscall smoke (inline-asm probes)
+    │       └── smoke.c          # foundation smoke (trap-contract, raw-syscall exercise)
     ├── unit/                # cleat-direct pure-function tests (no fork)
     │   └── test_strings.c   # tawc_strlen/streq/starts_with/parse_long/int_to_str
     ├── handler/             # cleat tests that fork tawcroot-testhost
     │   ├── steps.{c,h}      # parse [ok ]/[FAIL] lines from testhost stdout and
     │   │                    #   register one cleat test per check (dynamic)
-    │   ├── test_phase0.c    # one register_dynamic_tests call -> phase-0 smokes
-    │   └── test_phase1.c    # builds fake rootfs, then phase-1 smokes
+    │   ├── test_foundation_smoke.c      # one dynamic test per foundation step
+    │   └── test_rootfs_syscalls_smoke.c # builds fake rootfs, then rootfs smokes
     └── integration/         # cleat tests that fork production tawcroot
         └── programs/        # tiny C guests built by the runner and exec'd under tawcroot
 ```
@@ -1945,7 +1946,7 @@ The test layer lives in two places:
 
 1. **`tawcroot-testhost`** — a *second* binary built from the
    same production sources plus `tawcroot/tests/testhost/src/{testhost_main,
-   smoke,child,phase1}.c`, compiled with `-DTAWCROOT_TESTHOST`. Same
+   smoke,child,rootfs_smoke}.c`, compiled with `-DTAWCROOT_TESTHOST`. Same
    `_start`, same raw-syscall stub, same filter, same handler — the
    only difference is `main.c` routes argv-dispatch into
    `tawcroot_testhost_main()` (which lives outside `tawcroot/src/`)
@@ -2051,10 +2052,10 @@ or layer-3 functional test.
    contains the step line plus its trailing kv-context. The shared
    helper is `tawcroot/tests/handler/steps.{c,h}`.
 
-   Today's modules: `handler/test_phase0` (phase-0 foundation
-   smoke -> trap-contract + raw-syscall sweep + state-fd handoff +
-   `--exec-child` re-exec), `handler/test_phase1` (phase-1 path
-   translation + phase-0.5 runtime invariants). Together they
+   Today's modules: `handler/test_foundation_smoke` (trap-contract +
+   raw-syscall sweep + state-fd handoff + `--exec-child` re-exec),
+   `handler/test_rootfs_syscalls_smoke` (path translation +
+   runtime invariants). Together they
    produce 100+ individually-named cleat tests; one testhost exec
    per file. Adding a new check is a one-line `tawc_io_step()` call
    in the testhost — the cleat side picks it up automatically next
@@ -2096,7 +2097,7 @@ or layer-3 functional test.
   a pre-filter wrapper that installs an Android-`untrusted_app`-shaped
   seccomp filter (RET_TRAP on `openat2`/`faccessat2`/`clone3`, plus
   the lp64 legacy set on x86_64) before exec'ing the testhost. Reuses
-  the entire phase-1 step list via the `--include-legacy-x86_64` /
+  the entire rootfs syscall step list via the `--include-legacy-x86_64` /
   default split — produces the `androidfilter` and (on x86_64)
   `androidfilter_legacy` modules, ~104 cleat tests on x86_64. Catches
   the probe-ordering / handler-recursion / dispatch-coverage bugs
@@ -2111,7 +2112,7 @@ or layer-3 functional test.
   appear to trap it). Found one bug: the testhost's `prod_rootfs_init`
   ordered `probe_openat2` before `install_handler`, mirroring the same
   bug fixed in production main.c months ago. See
-  `tawcroot/tests/testhost/src/phase1.c`.
+  `tawcroot/tests/testhost/src/rootfs_smoke.c`.
 - **Real-workload smoke** (`tawcroot/tests/integration/workload/`): drive
   a `pacstrap`'d Arch chroot through tawcroot on the dev box,
   including a `pacman -Syu`. This is where we measure the perf
@@ -2184,7 +2185,7 @@ coverage.
      Lives in `src/syscalls_fd.c` + `src/syscalls_control.c`;
      reservation entry point is `tawcroot_fd_reserve` in
      `include/fdtab.h`. Guest-multi-thread mask state (per-thread
-     shadow) is a phase-2 follow-up — phase-1 smoke is single-threaded.
+     shadow) is a phase-2 follow-up — the rootfs syscall smoke is single-threaded.
 - **Phase 1 — MVP path translation (host-side)**: ✓ DONE on x86_64
    emulator (Android 16, kernel 6.6) **and validated on aarch64
    device** (OnePlus 9, Android 14, kernel 5.4.284) under the real
@@ -2299,7 +2300,7 @@ coverage.
        (`tawcroot/tests/unit/test_path_resolve.c`: chain, self-loop, depth
        bomb, NOFOLLOW leaf, absolute-target clamp, `..`-target clamp)
        and end-to-end against a real fake rootfs on host + device
-       (`tawcroot/tests/handler/test_phase1.c` rootfs adds `/altpath`,
+       (`tawcroot/tests/handler/test_rootfs_syscalls_smoke.c` rootfs adds `/altpath`,
        `/chain1..3`, `/loop`).
    Phase-1 outstanding: the openat2 fast path in `handle_openat`
    stays for the tiny perf win on 5.6+, but is now redundant — the
@@ -2356,7 +2357,7 @@ coverage.
      stash. Production `main.c` sets it from `argv[cmd_start]`
      after `prod_rootfs_init`; `tawcroot_loader_exec_child`
      re-sets it from the carried `exec_state.guest_exe` (or the
-     new exec path if absent). Validated in `phase1.c`.
+     new exec path if absent). Validated in `rootfs_smoke.c`.
    - **2f — Handler reinstall in `--exec-child`**: ✓ DONE.
      `tawcroot_loader_exec_child` calls `tawcroot_supervisor_init`
      (in `src/supervisor.c`) when `exec_state.rootfs_host` is present.
@@ -2396,7 +2397,7 @@ coverage.
          (exec_handler.c:91-101; "Phase 5c").
      `tawcroot/tests/integration/test_prod_features.c` covers
      production-binary feature paths that used to live only at the
-     phase-1 testhost handler layer:
+     rootfs-smoke testhost handler layer:
        * `prod_unix_bind_translates_sun_path` — AF_UNIX bind() sun_path
          translation (gpg-agent regression). Was untested anywhere
          before this.
@@ -2503,7 +2504,7 @@ coverage.
      `fstat` to the wrong inode. wc, gpg-agent, etc. would then read
      stale stat data and segfault. Added a one-byte peek via the
      EFAULT-safe usercopy helper in both `handle_newfstatat` and
-     `handle_statx`. Test in `phase1.c::fstatat(fd, "", AT_EMPTY_PATH)`.
+     `handle_statx`. Test in `rootfs_smoke.c::fstatat(fd, "", AT_EMPTY_PATH)`.
 
    These fixes are why static binaries worked early in phase 5 but
    anything script-based (pacman-key) and anything that did `bash $UID`

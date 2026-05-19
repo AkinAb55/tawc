@@ -8,13 +8,11 @@
  * (this works because we link non-PIE -- the stub is at the same
  * link-time-fixed address in the new image).
  *
- * Phase 0 child: read the smoke state-fd, reinstall handler, re-run the
+ * Foundation-smoke child: read the smoke state-fd, reinstall handler, re-run the
  * trap-contract assertion, exit.
  *
- * Phase 1+ child will additionally: re-open rootfs / bind fds from the
- * versioned state blob, set up dispatch + identity tables, then run the
- * manual ELF loader and jump to the guest entry. None of that exists
- * yet; this file is intentionally small.
+ * Production `--exec-child` uses the loader path in main.c; this file is
+ * the testhost-only smoke child.
  *
  * See notes/tawcroot.md "Approach A: re-exec into ourselves first" and
  * "Why non-PIE".
@@ -45,7 +43,7 @@ int tawcroot_child_main(int argc, char **argv)
 
 	long inst = tawcroot_install_handler();
 
-	tawc_io_str("\ntawcroot phase-0 foundation smoke (--exec-child)\n");
+	tawc_io_str("\ntawcroot foundation smoke (--exec-child)\n");
 	tawc_io_kv_hex("stub_ret_addr",
 		       (unsigned long)(uintptr_t)&tawcroot_raw_syscall_ret[0]);
 	tawc_io_kv_dec("state_fd", state_fd);

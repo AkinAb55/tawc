@@ -1,4 +1,4 @@
-/* Handler-layer tests: phase-0 foundation smoke.
+/* Handler-layer tests: foundation trap/bootstrap smoke.
  *
  * Forks `tawcroot-testhost` with no args once and registers one cleat
  * test per `[ok ]` / `[FAIL]` line in its output. The testhost installs
@@ -20,5 +20,5 @@
 
 register_dynamic_tests
 {
-	steps_register_from_testhost(c_sv("phase0"), NULL);
+	steps_register_from_testhost(c_sv("foundation_smoke"), NULL);
 }
