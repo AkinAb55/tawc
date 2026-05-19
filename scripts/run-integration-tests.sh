@@ -36,19 +36,9 @@ done
 
 # shellcheck source=../scripts/lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
-# shellcheck source=../scripts/lib/tawc-scratch.sh
-source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
-# shellcheck source=../scripts/lib/tawc-install-id.sh
-source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 export TAWC_EXEC_BIN="$ROOT_DIR/build/tawc-exec/tawc-exec"
 
-# tawc-install-id.sh exported TAWC_INSTALL_ID (auto-detected when unset
-# and exactly one install is present; errors if 0 or >1). The cargo
-# test harness reads the same env var via tawc_integration::install_id.
-INSTALL_ID="$TAWC_INSTALL_ID"
-INSTALL_DIR="/data/data/me.phie.tawc/distros/$INSTALL_ID"
-
-echo "=== Checking adb connection ($ANDROID_SERIAL, install=$INSTALL_ID) ==="
+echo "=== Checking adb connection ($ANDROID_SERIAL) ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }
 
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -56,7 +46,23 @@ if [ "$DO_BUILD" -eq 1 ]; then
     # own force-stop + am start + readiness wait below, so the
     # compositor lifetime brackets the cargo run cleanly.
     "$ROOT_DIR/scripts/app-build-install.sh" --no-launch
+fi
 
+# tawc-install-id.sh may use the in-app broker to auto-detect the install
+# id, so resolve it only after the APK install step has had a chance to
+# put the debug app on the device.
+# shellcheck source=../scripts/lib/tawc-install-id.sh
+source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
+
+# tawc-install-id.sh exported TAWC_INSTALL_ID (auto-detected when unset
+# and exactly one install is present; errors if 0 or >1). The cargo
+# test harness reads the same env var via tawc_integration::install_id.
+INSTALL_ID="$TAWC_INSTALL_ID"
+INSTALL_DIR="/data/data/me.phie.tawc/distros/$INSTALL_ID"
+
+echo "=== Using install id: $INSTALL_ID ==="
+
+if [ "$DO_BUILD" -eq 1 ]; then
     echo "=== Verifying in-app install is present at $INSTALL_DIR ==="
     if ! "$TAWC_EXEC" /system/bin/sh -c "test -d $INSTALL_DIR/rootfs" >/dev/null 2>&1; then
         cat >&2 <<EOF
@@ -72,6 +78,8 @@ EOF
     fi
 
     echo "=== Pushing pidfile helper ==="
+    # shellcheck source=../scripts/lib/tawc-scratch.sh
+    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
     adb push tests/apps/tawc-pidfile-exec.sh "$TAWC_SCRATCH/tawc-pidfile-exec.sh"
     # `cp` + chmod via the broker — runs as the app uid, which owns the
     # rootfs tree. No su required.
@@ -93,12 +101,13 @@ fi
 # Launch the compositor once for the whole suite. Tests assert it is
 # running rather than starting it themselves, so the suite gets a single
 # clean compositor lifetime instead of N partial ones. Force-stop first
-# so a leftover wayland-0 socket from a previous run is cleared before
-# the new compositor binds. The Service is `exported="false"`, so we
-# launch MainActivity — its onCreate calls startForegroundService.
+# so a previous app process/compositor is gone before the new one starts.
+# The Service is `exported="false"`, so we launch MainActivity — its
+# onCreate calls startForegroundService.
 echo "=== Starting compositor ==="
 adb shell "am force-stop me.phie.tawc"
 sleep 0.3
+adb logcat -c >/dev/null 2>&1 || true
 adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
 
 # Wait until the tawc process is alive, the wayland socket exists, AND
@@ -108,7 +117,6 @@ adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
 # `am force-stop` leaves the previous run's socket file behind, so the
 # stat alone would falsely match a stale socket while the new
 # compositor is still in early init. The logcat probe disambiguates.
-adb logcat -c >/dev/null 2>&1 || true
 COMPOSITOR_READY=0
 for _ in $(seq 1 150); do
     # Wayland socket lives in the app's private data dir; probe via
