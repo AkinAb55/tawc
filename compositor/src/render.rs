@@ -57,9 +57,9 @@ pub static TINT_BUFFERS_BY_TYPE: AtomicBool = AtomicBool::new(true);
 const TINT_EDGE_FADE_PX: f32 = 150.0;
 
 /// What kind of buffer is backing a surface for this frame. Drives the
-/// renderer's per-surface choice of tint colour and `force_opaque`.
-/// SHM is its own variant rather than a `BufferOrigin` because SHM
-/// buffers don't carry a `WleglBufferData`.
+/// renderer's per-surface choice of debug tint colour. SHM is its own variant
+/// rather than a `BufferOrigin` because SHM buffers don't carry a
+/// `WleglBufferData`.
 #[derive(Clone, Copy, Debug)]
 enum SurfaceKind {
     Shm,
@@ -78,19 +78,6 @@ impl SurfaceKind {
         }
     }
 
-    /// Whether the renderer should overwrite the texture's alpha
-    /// channel with `1.0` before blending. Only libhybris needs this:
-    /// GTK assumes its toplevel is opaque and never writes alpha into
-    /// the AHB, and smithay's stock EXTERNAL_OES shader has no
-    /// `NO_ALPHA` variant for external textures (see `variant_for_format`
-    /// in `deps/smithay/src/backend/renderer/gles/shaders/implicit/mod.rs`),
-    /// so without the override every libhybris surface would render
-    /// fully transparent. Gfxstream's Vulkan WSI writes proper alpha
-    /// and SHM has its own format-driven opacity handling — both stay
-    /// `false`.
-    fn force_opaque(self) -> bool {
-        matches!(self, SurfaceKind::Wlegl(BufferOrigin::Hybris))
-    }
 }
 
 /// GPU-side rendering state, separate from Wayland protocol state.
@@ -106,16 +93,13 @@ impl SurfaceKind {
 pub struct RenderState {
     pub renderer: GlesRenderer,
     pub importer: AhbTextureImporter,
-    /// Texture shader with a `force_opaque` uniform but no tinting.
-    /// Used for every surface when `TINT_BUFFERS_BY_TYPE` is off, so
-    /// libhybris-AHB still gets the alpha override it needs (otherwise
-    /// smithay's stock EXTERNAL_OES shader would render GTK windows
-    /// fully transparent — see notes on [`SurfaceKind::force_opaque`]).
+    /// Texture shader with a `force_opaque` uniform but no tinting. Used for
+    /// every surface when `TINT_BUFFERS_BY_TYPE` is off, so no-alpha buffer
+    /// formats can be drawn opaque even with the custom shader.
     pub plain_shader: Option<GlesTexProgram>,
     /// Texture shader that washes the sampled colour toward a per-call
-    /// `tint_color` and respects the same `force_opaque` flag. Used
-    /// for every surface when `TINT_BUFFERS_BY_TYPE` is on; the caller
-    /// picks the tint colour from [`SurfaceKind::tint_color`].
+    /// `tint_color`. Used for every surface when `TINT_BUFFERS_BY_TYPE` is
+    /// on; the caller picks the tint colour from [`SurfaceKind::tint_color`].
     pub tint_shader: Option<GlesTexProgram>,
     pub raw_egl_display: *const c_void,
     pub raw_egl_context: *const c_void,
@@ -177,9 +161,8 @@ unsafe impl Send for RenderState {}
 /// Compile the plain texture shader. One uniform: `force_opaque`
 /// (`1.0` rewrites the texture's alpha channel to `1.0` before
 /// blending; `0.0` leaves it as-is). Used when `TINT_BUFFERS_BY_TYPE`
-/// is off, but kept distinct from smithay's stock EXTERNAL_OES shader
-/// because libhybris-AHB still needs the alpha override regardless of
-/// whether the user wants debug tinting.
+/// is off, but kept distinct from smithay's stock EXTERNAL_OES shader so
+/// the plain and tinting paths share one draw setup.
 pub fn compile_plain_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
     match renderer.compile_custom_texture_shader(
         SHADER_SOURCE_PLAIN,
@@ -338,6 +321,11 @@ void main() {
 /// attaches don't re-import.
 /// Returns true if any new texture was imported (caller uses for dirty tracking).
 pub fn import_wlegl_buffers(state: &mut TawcState) -> bool {
+    // Same race as the SHM path: Xwayland may bind an X11Surface to its
+    // wl_surface after the first commit. Firefox/WebRender can be WLEGL-only,
+    // so do not rely on SHM import to repair the host association.
+    crate::xwayland::associate_pending_x11_surfaces(state);
+
     let buffers: Vec<WlBuffer> = state
         .surface_wlegl
         .values()
@@ -553,6 +541,7 @@ struct SurfaceDraw {
     logical_h: i32,
     buf_w: i32,
     buf_h: i32,
+    implicit_opaque: bool,
     kind: SurfaceKind,
 }
 
@@ -587,6 +576,7 @@ struct SurfaceDrawSpec {
     buf_h: i32,
     logical_w: i32,
     logical_h: i32,
+    implicit_opaque: bool,
     kind: SurfaceKind,
 }
 
@@ -638,6 +628,7 @@ fn collect_tree_draws(
                     logical_h: spec.logical_h,
                     buf_w: spec.buf_w,
                     buf_h: spec.buf_h,
+                    implicit_opaque: spec.implicit_opaque,
                     kind: spec.kind,
                 });
             }
@@ -755,8 +746,7 @@ fn draw_surfaces(
             Size::from((dst_w, dst_h)),
         );
         let damage = Rectangle::from_size(Size::from((dst_w, dst_h)));
-
-        let force_opaque = if draw.kind.force_opaque() { 1.0 } else { 0.0 };
+        let force_opaque = if draw.implicit_opaque { 1.0 } else { 0.0 };
         let (shader, uniforms): (Option<&GlesTexProgram>, Vec<Uniform>) = if tint_enabled {
             let [r, g, b] = draw.kind.tint_color();
             (
@@ -833,6 +823,7 @@ pub fn render_frame(
                 buf_h: ws.committed_height,
                 logical_w: lw,
                 logical_h: lh,
+                implicit_opaque: !data.has_alpha,
                 kind: SurfaceKind::Wlegl(data.origin),
             });
         }
@@ -848,10 +839,10 @@ pub fn render_frame(
             buf_h: ss.committed_height,
             logical_w: lw,
             logical_h: lh,
+            implicit_opaque: false,
             kind: SurfaceKind::Shm,
         })
     });
-
     // Now bind the renderer. Disjoint-field-borrow on TawcState lets us
     // reach into `state.render` for the rest of the function without
     // re-borrowing `state` as a whole.
@@ -866,10 +857,9 @@ pub fn render_frame(
     // of the app (home / install / distro-info screens).
     frame.clear(BACKGROUND_COLOR, &[Rectangle::from_size(output_size)])?;
 
-    // One draw pass over all surfaces in tree order. Per-surface
-    // shader + uniforms come from `draw.kind` and the `tint_enabled`
-    // flag — see [`SurfaceKind::tint_color`] /
-    // [`SurfaceKind::force_opaque`].
+    // One draw pass over all surfaces in tree order. Per-surface shader
+    // uniforms come from `draw.kind` and the `tint_enabled` flag — see
+    // [`SurfaceKind::tint_color`].
     draw_surfaces(
         &draws, &mut frame, scale, screen_w, screen_h,
         plain_shader.as_ref(), tint_shader.as_ref(), tint_enabled,

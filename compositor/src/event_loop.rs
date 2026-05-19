@@ -531,35 +531,8 @@ pub fn run(
         // 2. Render — once per bound host. Hosts without an EGLSurface
         // (Activity backgrounded / surfaceDestroyed) are skipped.
         if data.needs_render {
-            data.needs_render = false;
-            let mut rendered_any = false;
-            // Snapshot keys so we don't hold a borrow on data.hosts
-            // across the render call. We only render *foreground* hosts
-            // (Phase 7) — backgrounded hosts have already been told to
-            // suspend via the configure event in `set_host_foreground`,
-            // so painting them would just burn cycles on pixels nobody
-            // sees.
-            let host_ids: Vec<ActivityId> = data
-                .hosts
-                .iter()
-                .filter(|(_, h)| h.egl_surface.is_some() && h.foreground)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for id in host_ids {
-                // Take the host out of the map so render_frame can hold
-                // a `&mut OutputHost` while still passing `&mut TawcState`.
-                if let Some(mut host) = data.hosts.remove(&id) {
-                    if let Err(e) = render::render_frame(data, &mut host) {
-                        error!("Render error on host {}: {}", id, e);
-                    } else {
-                        rendered_any = true;
-                    }
-                    data.hosts.insert(id, host);
-                }
-            }
-            if rendered_any {
-                data.frame_count += 1;
-                data.last_rendered_toplevels = data.toplevels.len();
+            if render_bound_hosts(data) {
+                data.needs_render = false;
             }
         }
 
@@ -715,6 +688,37 @@ pub fn run(
     Ok(())
 }
 
+fn render_bound_hosts(data: &mut TawcState) -> bool {
+    let mut rendered_any = false;
+    // Snapshot keys so we don't hold a borrow on data.hosts across the render
+    // call. Render every bound EGL host: the SurfaceView can be registered
+    // before Android delivers focus, and skipping that first paint leaves the
+    // task black.
+    let host_ids: Vec<ActivityId> = data
+        .hosts
+        .iter()
+        .filter(|(_, h)| h.egl_surface.is_some())
+        .map(|(k, _)| k.clone())
+        .collect();
+    for id in host_ids {
+        // Take the host out of the map so render_frame can hold a
+        // `&mut OutputHost` while still passing `&mut TawcState`.
+        if let Some(mut host) = data.hosts.remove(&id) {
+            if let Err(e) = render::render_frame(data, &mut host) {
+                error!("Render error on host {}: {}", id, e);
+            } else {
+                rendered_any = true;
+            }
+            data.hosts.insert(id, host);
+        }
+    }
+    if rendered_any {
+        data.frame_count += 1;
+        data.last_rendered_toplevels = data.toplevels.len();
+    }
+    rendered_any
+}
+
 // ---------------------------------------------------------------------------
 // Surface event handling (per-Activity SurfaceView lifecycle)
 // ---------------------------------------------------------------------------
@@ -759,6 +763,9 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 data.hosts.get(&activity_id).map(|h| h.egl_surface.is_some()).unwrap_or(false),
                 data.hosts.len(),
             );
+            if render_bound_hosts(data) {
+                data.needs_render = false;
+            }
         }
         SurfaceEvent::SurfaceChanged { activity_id, width, height } => {
             let scale = data.output_scale;
@@ -776,6 +783,9 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             );
             reconfigure_all_toplevels(data);
             data.needs_render = true;
+            if render_bound_hosts(data) {
+                data.needs_render = false;
+            }
         }
         SurfaceEvent::SurfaceDestroyed { activity_id } => {
             if let Some(host) = data.hosts.get_mut(&activity_id) {

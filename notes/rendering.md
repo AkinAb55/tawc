@@ -98,6 +98,14 @@ falls back to SHM instead of using hardware-accelerated AHB buffers.
 The SHM path is tracked separately from AHB: `surface_shm` HashMap holds `SurfaceShmState`
 per surface. Surfaces using the AHB channel protocol are never checked for SHM buffers.
 
+## Alpha and Opaque Regions
+
+`wl_surface.set_opaque_region` is a protocol optimization hint. tawc's custom
+AHB draw path currently ignores it for correctness: RGBA buffers render using
+their sampled alpha. Android no-alpha formats (`RGBX_8888`, `RGB_888`,
+`RGB_565`) are still treated as implicit full-surface opaque buffers because the
+format itself has no alpha channel.
+
 ## Verified clients
 
 - `weston-simple-egl` (AHB)

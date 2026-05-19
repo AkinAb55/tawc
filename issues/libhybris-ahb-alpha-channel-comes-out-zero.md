@@ -1,69 +1,36 @@
-# libhybris AHB texels arrive with alpha=0 — why?
+# Verify libhybris AHB alpha
 
-When a libhybris/GTK client renders into a gralloc1 AHB and we sample
-the resulting EGLImage through a stock smithay EXTERNAL_OES shader, the
-alpha channel reads back as `0`. We work around it in
-`compositor/src/render.rs` by force-overwriting alpha to `1` for every
-libhybris-origin surface (`SurfaceKind::force_opaque` →
-`force_opaque=true` for `BufferOrigin::Hybris`), but the underlying
-cause is unclear and worth investigating.
+We previously assumed libhybris/GTK AHB alpha could be `0` even when RGB content
+was valid, and papered over that by forcing alpha to `1` for every libhybris
+surface. That workaround breaks real per-pixel transparency and has been
+removed. RGBA buffers now render using sampled alpha; only explicit no-alpha
+Android formats are forced opaque.
 
 ## What we know
 
-- Symptom: without the override, every GTK toplevel running under the
-  libhybris backend renders fully transparent (the compositor
-  background `tawc_window_bg` shows through).
-- The override is the long-standing fix and is what the previous
-  `wlegl_opaque_shader` was built around.
-- The same shader is now used **only** for libhybris-origin AHBs.
-  Gfxstream-Vulkan AHBs go through `force_opaque=false` and render
-  correctly with the texture's actual alpha, so the issue is specific
-  to the libhybris path.
-- SHM clients aren't affected — smithay's stock shader handles
-  RGBA-vs-XRGB SHM formats correctly via the `NO_ALPHA` define driven
-  off the wl_shm format.
+- Wayland's `wl_surface.set_opaque_region` is an optimization hint. A correct
+  compositor may ignore it.
+- tawc now ignores client opaque regions in its custom AHB draw path. This keeps
+  RGBA transparency honest and avoids using an optimization hint as a correctness
+  mechanism.
+- `compositor/src/wlegl.rs` records Android buffer formats. `RGBX_8888`,
+  `RGB_888`, and `RGB_565` are treated as no-alpha formats and drawn opaque.
+- We do not currently have proof that libhybris RGBA alpha is corrupt. The old
+  Firefox black-screen evidence was mixed with compositor render scheduling and
+  surface-state reentry bugs.
 
-## Hypotheses (none verified)
+## Still Worth Testing
 
-1. GTK genuinely never writes the alpha channel because it considers
-   its toplevel opaque, and the gralloc buffer's alpha bits are
-   left uninitialized at `0`. If true, this is a documentation
-   problem — the override is correct and the only question is why
-   modern GTK doesn't request an XRGB-style format.
-2. libhybris's gralloc1 import path is producing an AHB whose EGL
-   image binding doesn't preserve alpha (a format mismatch between
-   the producer's view and the consumer's view). If true, the override
-   is masking a libhybris bug and a Vulkan/GLES client that legitimately
-   wanted per-pixel alpha through libhybris would also lose it.
-3. The vendor GLES driver inside libhybris writes alpha=0 into the
-   AHB on flush for some buffer formats (Adreno-specific quirk?).
-
-## Where to look
-
-- `wlegl.rs::tawc_wlegl_import` — the gralloc1 buffer reconstruction
-  and its `format`/`usage` arguments. Print what GTK is actually asking
-  for on the wire.
-- `gl_import.rs::AhbTextureImporter::import_ahb` — how we go from AHB
-  to EGLImage to GL_TEXTURE_EXTERNAL_OES. A `EGL_IMAGE_PRESERVED` /
-  alpha-channel attribute might be the culprit.
-- Vendor blob behaviour: render a known-alpha pattern from a non-GTK
-  libhybris GLES client (something tiny that explicitly clears to
-  `(1, 0, 0, 0.5)`) and observe what the compositor samples back via
-  the plain shader (`force_opaque=false`).
+- Add a tiny libhybris GLES client that draws known RGBA pixels, then verify the
+  compositor samples/combines alpha correctly.
+- If Firefox/GTK opaque content disappears with sampled alpha, isolate whether
+  the producer, libhybris gralloc import, AHB metadata, or our EGLImage import is
+  corrupting alpha.
+- Confirm which GTK apps use explicit no-alpha Android formats versus RGBA.
 
 ## Repro
 
-1. Edit `compositor/src/render.rs`'s `SurfaceKind::force_opaque` to
-   return `false` for every variant.
-2. Build, install, launch any GTK app under the libhybris backend
-   (e.g. `scripts/rootfs-run.sh 'gtk4-demo'`).
-3. Observe the GTK window rendering as the dark `tawc_window_bg`
-   background — toplevel content is fully transparent.
-4. Revert the edit; the window renders normally.
-
-## Why not fix now
-
-The workaround is a one-line uniform pick that's effectively free, the
-visible behaviour is correct, and untangling whether this is a
-GTK/libhybris/vendor-driver problem needs careful instrumentation. File
-this for future investigation rather than blocking on it.
+1. Build and install tawc.
+2. Launch a GTK/libhybris client with known transparent content.
+3. Verify transparent pixels blend with the compositor background and opaque
+   pixels remain visible.

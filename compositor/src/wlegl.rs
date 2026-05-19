@@ -82,11 +82,8 @@ impl WleglHandleData {
     }
 }
 
-/// Which Wayland protocol minted the wl_buffer holding the AHB. The
-/// renderer reads this to pick a debug tint colour and to decide
-/// whether to force `alpha=1` — libhybris/GTK never writes alpha so its
-/// AHBs need force-opaque, gfxstream-Vulkan writes proper alpha so its
-/// AHBs don't.
+/// Which Wayland protocol minted the wl_buffer holding the AHB. The renderer
+/// reads this to pick a debug tint colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferOrigin {
     /// `android_wlegl` — libhybris's Wayland EGL platform (chroot
@@ -106,9 +103,17 @@ pub struct WleglBufferData {
     ahb: *mut ndk_sys::AHardwareBuffer,
     pub width: i32,
     pub height: i32,
+    pub has_alpha: bool,
     pub origin: BufferOrigin,
     /// Imported on first render; reused thereafter.
     pub texture: Mutex<Option<GlesTexture>>,
+}
+
+fn android_format_has_alpha(format: u32) -> bool {
+    // Android/HAL common formats: RGBA_8888=1, RGBX_8888=2, RGB_888=3,
+    // RGB_565=4. Treat unknown/implementation-defined formats as alpha-capable
+    // unless we have an explicit no-alpha value.
+    !matches!(format, 2 | 3 | 4)
 }
 
 impl WleglBufferData {
@@ -131,6 +136,7 @@ impl WleglBufferData {
             ahb,
             width,
             height,
+            has_alpha: true,
             origin: BufferOrigin::Gfxstream,
             texture: Mutex::new(None),
         }
@@ -283,6 +289,7 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                     ahb,
                     width,
                     height,
+                    has_alpha: android_format_has_alpha(fmt_u),
                     origin: BufferOrigin::Hybris,
                     texture: Mutex::new(None),
                 };
