@@ -11,8 +11,8 @@
 #                              installed to install/usr/lib/gfxstream/
 #   - build-<abi>-mesa-zink/  → -Dgallium-drivers=zink -Degl=enabled
 #                              installed to install/usr/lib/mesa-zink/
-# The shared setup work (cargo virtgpu_kumquat_ffi, .so stubs,
-# pkg-config files, cross.txt) is done once per ABI.
+# The shared setup work (host-built sysroot, cargo virtgpu_kumquat_ffi,
+# .so stubs, pkg-config files, cross.txt) is done once per ABI.
 #
 # Bridge architecture:
 #   chroot: vulkan app -> libvulkan.so.1 -> libvulkan_gfxstream.so (this)
@@ -159,6 +159,12 @@ build_one() {
     local PC_DIR="$OUT_DIR/pkgconfig"
     local STUB_DIR="$OUT_DIR/stubs"
     local CARGO_DIR="$OUT_DIR/cargo"
+    local SYSROOT_DISTRO="${TAWC_SYSROOT_DISTRO:-arch}"
+    local SYSROOT="$REPO_DIR/build/sysroots/$SYSROOT_DISTRO-$abi"
+
+    if [ ! -d "$SYSROOT/usr" ] || [ ! -f "$SYSROOT/.tawc-sysroot" ]; then
+        "$SCRIPT_DIR/build-host-sysroot.sh" "--abi=$abi" "--distro=$SYSROOT_DISTRO" --profile=prod
+    fi
 
     if [ "$CLEAN" = "1" ]; then
         echo "==> [$abi] wiping $OUT_DIR and Mesa build-$abi-* trees"
@@ -193,11 +199,9 @@ EOF
     # implementations at load time, we just need stubs to record DT_NEEDED.
     # Mesa references some interface symbols (wl_*_interface) at link time
     # from wayland-scanner-generated protocol files, so we copy real .so
-    # files for libwayland-{client,server} when available — the
-    # build/<arch>-sysroot pull from the device's installed rootfs (via
-    # scripts/pull-sysroot.sh) is the convenient source. Pure stubs
-    # (libudev, libffi) are fine.
-    local SYSROOT_LIB="$REPO_DIR/build/${abi}-sysroot/usr/lib"
+    # files for libwayland-{client,server} from the host-built sysroot.
+    # Pure stubs (libudev, libffi) are fine.
+    local SYSROOT_LIB="$SYSROOT/usr/lib"
     gen_stub() {
         local soname="$1"
         if [ ! -f "$STUB_DIR/$soname" ]; then
@@ -224,14 +228,12 @@ EOF
     copy_or_stub libffi.so.8
 
     # ── Synthetic pkg-config files ──
-    # Headers come from the host (wayland-client.h, xf86drm.h, vulkan/*.h
-    # are ABI-portable C). Library .so paths point to our stub dir for
-    # runtime DT_NEEDED entries. virtgpu_kumquat_ffi points at the cargo
-    # static lib + Mesa's own header dir (in-tree, untouched).
-    local HOST_WAYLAND_INC
-    HOST_WAYLAND_INC="$(pkg-config --variable=includedir wayland-client)"
-    local HOST_WAYLAND_PROT_DATADIR
-    HOST_WAYLAND_PROT_DATADIR="$(pkg-config --variable=pkgdatadir wayland-protocols)"
+    # Headers and target-side .pc metadata come from build-host-sysroot.sh,
+    # not from a live device rootfs. Library .so paths point to our stub
+    # dir for runtime DT_NEEDED entries. virtgpu_kumquat_ffi points at the
+    # cargo static lib + Mesa's own header dir (in-tree, untouched).
+    local SYSROOT_WAYLAND_INC="$SYSROOT/usr/include"
+    local SYSROOT_WAYLAND_PROT_DATADIR="$SYSROOT/usr/share/wayland-protocols"
     local HOST_WAYLAND_SCANNER
     HOST_WAYLAND_SCANNER="$(command -v wayland-scanner)"
 
@@ -246,20 +248,20 @@ Libs: $libs
 EOF
     }
 
-    write_pc wayland-client "-I$HOST_WAYLAND_INC" "-L$STUB_DIR -lwayland-client" "1.25.0"
+    write_pc wayland-client "-I$SYSROOT_WAYLAND_INC" "-L$STUB_DIR -lwayland-client" "1.25.0"
     # libglvnd is headers-only at Mesa build time (Mesa-Zink's libEGL_mesa.so.0
     # is a glvnd vendor lib, registered via runtime libEGL.so.1 from the
     # distro). The host's headers in /usr/include/glvnd/ are ABI-portable.
-    write_pc libglvnd "-I/usr/include" "" "$(pkg-config --modversion libglvnd 2>/dev/null || echo 1.7.0)"
+    write_pc libglvnd "-I$SYSROOT/usr/include" "" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libglvnd 2>/dev/null || echo 1.7.0)"
     # wayland-egl-backend: headers-only API used by Mesa to plug its libEGL
     # into wl_egl_window. Host pkg-config wayland-egl-backend is the
     # natural source; no runtime lib needed at build time.
-    write_pc wayland-egl-backend "-I$HOST_WAYLAND_INC" "" \
-        "$(pkg-config --modversion wayland-egl-backend 2>/dev/null || echo 3)"
-    write_pc wayland-server "-I$HOST_WAYLAND_INC" "-L$STUB_DIR -lwayland-server" "1.25.0"
-    write_pc libdrm "-I/usr/include -I/usr/include/libdrm" "-L$STUB_DIR -ldrm" "$(pkg-config --modversion libdrm)"
-    write_pc libudev "-I/usr/include" "-L$STUB_DIR -ludev" "$(pkg-config --modversion libudev)"
-    write_pc libffi "-I$(pkg-config --variable=includedir libffi)" "-L$STUB_DIR -lffi" "$(pkg-config --modversion libffi)"
+    write_pc wayland-egl-backend "-I$SYSROOT_WAYLAND_INC" "" \
+        "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion wayland-egl-backend 2>/dev/null || echo 3)"
+    write_pc wayland-server "-I$SYSROOT_WAYLAND_INC" "-L$STUB_DIR -lwayland-server" "1.25.0"
+    write_pc libdrm "-I$SYSROOT/usr/include -I$SYSROOT/usr/include/libdrm" "-L$STUB_DIR -ldrm" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libdrm)"
+    write_pc libudev "-I$SYSROOT/usr/include" "-L$STUB_DIR -ludev" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libudev)"
+    write_pc libffi "-I$SYSROOT/usr/include" "-L$STUB_DIR -lffi" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libffi)"
 
     # virtgpu_kumquat_ffi: static lib from cargo + header from Mesa source.
     # Static archive built by cargo pulls in libstd's stubs for libgcc_s,
@@ -280,7 +282,7 @@ Libs:
 EOF
 
     cat >"$PC_DIR/wayland-protocols.pc" <<EOF
-pkgdatadir=$HOST_WAYLAND_PROT_DATADIR
+pkgdatadir=$SYSROOT_WAYLAND_PROT_DATADIR
 Name: wayland-protocols
 Description: host wayland-protocols
 Version: 1.45
@@ -289,23 +291,14 @@ Libs:
 EOF
 
     # ── meson cross file ──
-    # `-idirafter /usr/include` makes the host's headers available WITHOUT
-    # clobbering the cross-toolchain's own /usr/<triple>/include
-    # (which has the right stdint.h with 64-bit uintptr_t). `idirafter`
-    # searches last so the cross-toolchain's headers win for arch-sensitive
-    # files; the host's headers are only consulted for things the cross
-    # toolchain doesn't ship (wayland-client.h, xf86drm.h, vulkan/*.h).
-    # `-isystem /usr/include` would put it BEFORE the cross gcc's targets
-    # and break uintptr_t — confirmed by `-fpermissive` cast errors on
-    # DrmVirtGpuDevice.cpp during initial attempts.
-    #
-    # On x86_64 the host IS the target, so `idirafter` is a no-op
-    # in practice — the headers it points at are the ones the
-    # compiler would pick up anyway. Kept for symmetry.
+    # Target headers come from the host-built sysroot's .pc files above.
+    # Keep the compiler's libc/sysroot selection with the toolchain:
+    # the app/rootfs runtime supplies distro libs, but Mesa itself only
+    # needs ABI-stable C headers and explicit DT_NEEDED stubs here.
     cat >"$OUT_DIR/cross.txt" <<EOF
 [binaries]
-c = ['$CC_BIN', '-idirafter', '/usr/include']
-cpp = ['$CXX_BIN', '-idirafter', '/usr/include']
+c = '$CC_BIN'
+cpp = '$CXX_BIN'
 ar = '$AR_BIN'
 strip = '$STRIP_BIN'
 pkg-config = 'pkg-config'
@@ -325,6 +318,10 @@ EOF
     # kumquat without pulling Mesa's Rust subprojects into the meson graph.
     # Required by patch deps/mesa-patches/mesa/02-meson-external-kumquat-ffi.patch.
     local BUILD_DIR_GFXSTREAM="$MESA_DIR/build-$abi-gfxstream"
+    if [ -f "$BUILD_DIR_GFXSTREAM/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_GFXSTREAM/build.ninja"; then
+        echo "==> [$abi] old host-header Mesa builddir detected; reconfiguring"
+        rm -rf "$BUILD_DIR_GFXSTREAM"
+    fi
     if [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
         PKG_CONFIG_LIBDIR="$PC_DIR" meson setup "$BUILD_DIR_GFXSTREAM" "$MESA_DIR" \
             --cross-file "$OUT_DIR/cross.txt" \
@@ -392,6 +389,10 @@ EOF
     # build as glvnd vendor libs (libfoo_mesa.so.0) which is what the distro
     # libglvnd dispatch expects.
     local BUILD_DIR_ZINK="$MESA_DIR/build-$abi-mesa-zink"
+    if [ -f "$BUILD_DIR_ZINK/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_ZINK/build.ninja"; then
+        echo "==> [$abi] old host-header Mesa-Zink builddir detected; reconfiguring"
+        rm -rf "$BUILD_DIR_ZINK"
+    fi
     if [ ! -f "$BUILD_DIR_ZINK/build.ninja" ]; then
         PKG_CONFIG_LIBDIR="$PC_DIR" meson setup "$BUILD_DIR_ZINK" "$MESA_DIR" \
             --cross-file "$OUT_DIR/cross.txt" \

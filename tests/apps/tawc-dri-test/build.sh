@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build tawc-dri-test inside the chroot.
-# Requires: gcc (base-devel), libxcb (provided transitively by gtk3).
+# Manual in-rootfs build. Normal integration flow uses
+# scripts/build-test-apps.sh on the host.
+# Requires: gcc, libxcb.
 set -euo pipefail
 cd "$(dirname "$0")"
 gcc -o tawc-dri-test tawc-dri-test.c \

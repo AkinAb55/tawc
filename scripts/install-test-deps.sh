@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install integration-test packages and rebuild in-rootfs test apps.
+# Install integration-test runtime packages and copy host-cross-built test apps.
 #
 # Usage: scripts/install-test-deps.sh
 # Set TAWC_INSTALL_ID=<id> when more than one install exists. Re-run after
@@ -35,11 +35,12 @@ echo "=== Detected distro: $DISTRO_KEY ==="
 case "$DISTRO_KEY" in
     arch|manjaro)
         # Pacman package set. Comments name the test cases each item
-        # exists for.
+        # exists for. Test app build dependencies are intentionally not
+        # installed here; scripts/build-test-apps.sh cross-builds them
+        # on the host against build/sysroots/<distro>-<abi>/.
         PKGS=(
-            # Test-app build chain (gtk4-debug-app, tawc-dri-test,
-            # eglx11-test compiled by the build phase below).
-            gcc gtk4 pkg-config wayland wayland-protocols cairo
+            # Runtime libs for host-cross-built test apps.
+            gtk4 cairo wayland libx11 libxcb libglvnd
             # apps:: tests — gtk3-demos provides gtk3-demo-application,
             # gtk4-demos provides gtk4-widget-factory; firefox + supertuxkart
             # are real-app tests on hardware buffers.
@@ -64,19 +65,19 @@ case "$DISTRO_KEY" in
         ;;
     void)
         # Void package set. Logical match for the pacman list:
-        #   gtk4              -> gtk4 + gtk4-devel
-        #   gtk3              -> gtk+3 + gtk+3-devel
+        #   gtk4              -> gtk4
+        #   gtk3              -> gtk+3
         #   gtk3-demos        -> gtk+3-demo (gtk3-demo, gtk3-widget-factory)
         #   gtk4-demos        -> gtk4-demo  (gtk4-demo, gtk4-widget-factory)
         #   mesa-utils        -> glxinfo    (Void splits this out of mesa-demos)
         #   mesa-demos        -> mesa-demos (es2gears_x11 lives here)
         #   vulkan-tools      -> Vulkan-Tools
         #   xorg-xclock       -> xclock
-        # supertuxkart, weston, firefox, pkg-config keep their names.
+        # supertuxkart, weston, firefox keep their names.
         #
-        # `-devel` packages bring the headers + `.pc` files we need
-        # for gtk4-debug-app's `pkg-config --cflags --libs gtk4` step.
-        # Arch's main packages ship them; Void splits them out.
+        # `-devel` packages are intentionally absent: test app headers
+        # and `.pc` files live in the host sysroot built by
+        # scripts/build-host-sysroot.sh.
         #
         # `mesa-dri` is the open-source GL stack (DRI drivers). On a
         # real ARM device it normally sits dormant because libhybris
@@ -94,14 +95,9 @@ case "$DISTRO_KEY" in
         # files, and harfbuzz NULL-derefs trying to shape with no
         # usable face. Arch's bootstrap already has Bitstream / Liberation.
         PKGS=(
-            # `base-devel` is Void's gcc + binutils + make + autoconf etc.
-            # meta — needed to compile gtk4-debug-app and the other test
-            # programs in the build phase below. Arch's PKGS list adds
-            # `gcc` explicitly above; on Void the meta is the idiomatic
-            # way to pull the C toolchain.
-            base-devel
-            gtk4 gtk4-devel pkg-config wayland-devel wayland-protocols cairo-devel
-            gtk+3 gtk+3-devel gtk+3-demo gtk4-demo firefox supertuxkart
+            # Runtime libs for host-cross-built test apps.
+            gtk4 cairo wayland libX11 libxcb libglvnd
+            gtk+3 gtk+3-demo gtk4-demo firefox supertuxkart
             glxinfo weston Vulkan-Tools
             xclock
             mesa-demos mesa-dri
@@ -143,76 +139,38 @@ echo "=== Installing chroot test deps: ${PKGS[*]} ==="
 TAWC_OP_TITLE="install test deps ($DISTRO_KEY)" \
     "$ROOT_DIR/scripts/rootfs-run.sh" "$INSTALL_CMD"
 
-# --- Build phase ---
-# Compile each in-rootfs test program from its sources at
-# `tests/apps/<name>/` so the integration suite's freshness check
-# (`tests/integration/src/rootfs.rs`) finds a binary at
-# `/tmp/<name>/<name>` inside the rootfs. Tests do not rebuild — they
-# error pointing back here if a binary is missing.
-build_test_app() {
+# --- Build/copy phase ---
+# Cross-compile each test program on the host from tests/apps/<name>/,
+# then copy outputs into the rootfs so the integration suite's path
+# checks find /usr/local/bin/<name>. Tests never compile on the device.
+copy_test_app() {
     local name="$1"
-    local src_dir="$ROOT_DIR/tests/apps/$name"
-    local rootfs_path="/tmp/$name"
-    local fs_build_dir="$TAWC_DISTROS_DIR/rootfs$rootfs_path"
-    local staging="$TAWC_SCRATCH/$name-src"
+    local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
+    local staging="$TAWC_SCRATCH/$name-out"
+    local rootfs="$TAWC_DISTROS_DIR/rootfs"
+    local bin_dir="$rootfs/usr/local/bin"
+    local lib_dir="$rootfs/usr/local/lib"
 
-    [ -d "$src_dir" ] || { echo "ERROR: missing $src_dir" >&2; exit 1; }
+    [ -d "$out_dir" ] || { echo "ERROR: missing $out_dir" >&2; exit 1; }
 
-    echo "=== Building $name ==="
+    echo "=== Copying $name ==="
     "$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"
     adb shell rm -rf "$staging" >/dev/null
-    adb push "$src_dir" "$staging" >/dev/null
+    adb push "$out_dir" "$staging" >/dev/null
     # cp + chmod via the broker — runs as the app uid which owns the
     # rootfs tree (no su / no run-as / no ownership-flip dance).
-    "$TAWC_EXEC" /system/bin/sh -c \
-        "mkdir -p $fs_build_dir && cp $staging/* $fs_build_dir && chmod -R a+rwX $fs_build_dir"
-    "$ROOT_DIR/scripts/rootfs-run.sh" "$rootfs_path/build.sh"
-}
-
-# NDK cross-build the bionic side of libhybris-tls-repro. The matching
-# glibc binary is compiled inside the rootfs by build_test_app below;
-# this step produces the Android-ABI .sos that the test asks libhybris
-# to dlopen. Drops them directly into the rootfs (overlapping
-# build_test_app's path) so they land alongside the compiled `repro` exe.
-#
-# Two .sos:
-#   tls_lib.so   — normal __thread vars; round-tripped through
-#                  hybris_dlopen+dlclose by the main test.
-#   weak_lib.so  — has an unresolved weak __thread reference, so the
-#                  static linker emits R_AARCH64_TLSDESC against an
-#                  undefined weak symbol. After the loud-error fix the
-#                  repro expects hybris_dlopen("./weak_lib.so") to fail.
-build_libhybris_tls_repro_helper() {
-    local src_dir="$ROOT_DIR/tests/apps/libhybris-tls-repro"
-    local rootfs_dir="/tmp/libhybris-tls-repro"
-    local fs_dir="$TAWC_DISTROS_DIR/rootfs$rootfs_dir"
-    local ndk_root="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${ANDROID_HOME:-$HOME/Android/Sdk}/ndk}}"
-    local ndk_clang
-    # ANDROID_NDK_ROOT may already point at a versioned NDK; otherwise
-    # we landed on the .../ndk umbrella and pick the highest version.
-    if [ -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" ]; then
-        ndk_clang="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+    if [ "$name" = "libhybris-tls-repro" ]; then
+        "$TAWC_EXEC" /system/bin/sh -c "\
+            mkdir -p $bin_dir $lib_dir && \
+            cp $staging/$name $bin_dir/$name && \
+            cp $staging/tls_lib.so $staging/weak_lib.so $lib_dir/ && \
+            chmod a+rx $bin_dir/$name $lib_dir/tls_lib.so $lib_dir/weak_lib.so"
     else
-        local ndk_versioned
-        ndk_versioned=$(ls -d "$ndk_root"/*/toolchains/llvm/prebuilt/linux-x86_64/bin 2>/dev/null \
-                       | sort -V | tail -n1)
-        if [ -z "$ndk_versioned" ]; then
-            echo "ERROR: cannot locate Android NDK under $ndk_root" >&2
-            echo "       set ANDROID_NDK_ROOT or install the NDK via sdkmanager" >&2
-            exit 1
-        fi
-        ndk_clang="$ndk_versioned/aarch64-linux-android29-clang"
+        "$TAWC_EXEC" /system/bin/sh -c "\
+            mkdir -p $bin_dir && \
+            cp $staging/$name $bin_dir/$name && \
+            chmod a+rx $bin_dir/$name"
     fi
-    for name in tls_lib weak_lib; do
-        echo "=== Cross-building libhybris-tls-repro/${name}.so ==="
-        local tmp_so
-        tmp_so=$(mktemp -t "tawc-${name}.XXXXXX.so")
-        "$ndk_clang" -fPIC -shared -o "$tmp_so" "$src_dir/${name}.c"
-        adb push "$tmp_so" "$TAWC_SCRATCH/libhybris-tls-repro-${name}.so" >/dev/null
-        rm -f "$tmp_so"
-        "$TAWC_EXEC" /system/bin/sh -c \
-            "mkdir -p $fs_dir && cp $TAWC_SCRATCH/libhybris-tls-repro-${name}.so $fs_dir/${name}.so && chmod a+rx $fs_dir/${name}.so"
-    done
 }
 
 # Apps that integration tests actually consume — keep this list in sync
@@ -226,19 +184,23 @@ build_libhybris_tls_repro_helper() {
 # (`tests/integration/tests/apps.rs:9`,
 #  `tests/integration/tests/libhybris.rs`).
 HOST_ARCH=$("$TAWC_EXEC" /system/bin/uname -m | tr -d '\r\n')
+case "$HOST_ARCH" in
+    aarch64) BUILD_ABI=aarch64 ;;
+    x86_64)  BUILD_ABI=x86_64 ;;
+    *) echo "ERROR: unsupported rootfs arch '$HOST_ARCH'" >&2; exit 1 ;;
+esac
+BUILD_DISTRO="${TAWC_SYSROOT_DISTRO:-$DISTRO_KEY}"
+
 APPS=(gtk4-debug-app wayland-debug-app eglx11-test)
 if [ "$HOST_ARCH" = "aarch64" ]; then
     APPS+=(tawc-dri-test libhybris-tls-repro)
 else
     echo "=== Skipping tawc-dri-test, libhybris-tls-repro on $HOST_ARCH (need libhybris, aarch64-only) ==="
 fi
+echo "=== Cross-building test apps on host ($BUILD_DISTRO/$BUILD_ABI) ==="
+"$ROOT_DIR/scripts/build-test-apps.sh" "--distro=$BUILD_DISTRO" "--abi=$BUILD_ABI"
 for app in "${APPS[@]}"; do
-    build_test_app "$app"
-    if [ "$app" = "libhybris-tls-repro" ]; then
-        # Drop the NDK-built bionic .so beside the just-compiled repro
-        # binary in the rootfs.
-        build_libhybris_tls_repro_helper
-    fi
+    copy_test_app "$app"
 done
 
 echo "=== Done ==="

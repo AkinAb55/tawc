@@ -1,9 +1,8 @@
 #!/bin/bash
-# Build the GTK4 debug app on the phone inside the chroot.
-# Run from the host. Pushes sources, compiles.
+# Build the GTK4 debug app on the host and copy it into the rootfs.
 #
-# Build deps (gtk4, pkg-config) are expected to already be installed in
-# the chroot — run `scripts/install-test-deps.sh` once per chroot install.
+# Runtime deps are expected to already be installed in the rootfs — run
+# `scripts/install-test-deps.sh` once per rootfs install.
 #
 # Usage:
 #   scripts/build-debug-app.sh
@@ -21,17 +20,28 @@ source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
 source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 
 app_name="gtk4-debug-app"
-src_dir="$ROOT_DIR/tests/apps/$app_name"
 chroot_root="/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/rootfs"
-build_dir="$chroot_root/tmp/$app_name"
+bin_dir="$chroot_root/usr/local/bin"
+host_arch=$("$TAWC_EXEC" /system/bin/uname -m | tr -d '\r\n')
+case "$host_arch" in
+    aarch64) build_abi=aarch64 ;;
+    x86_64)  build_abi=x86_64 ;;
+    *) echo "ERROR: unsupported rootfs arch '$host_arch'" >&2; exit 1 ;;
+esac
+distro_key=$("$TAWC_EXEC" /system/bin/cat "/data/data/me.phie.tawc/distros/$TAWC_INSTALL_ID/metadata.json" \
+    | tr -d '\r' \
+    | sed -n 's/.*"distro"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n1)
+build_distro="${TAWC_SYSROOT_DISTRO:-$distro_key}"
 
-echo "=== $app_name: pushing source ==="
-adb push "$src_dir/$app_name.c" "$TAWC_SCRATCH/$app_name.c" >/dev/null
-adb push "$src_dir/build.sh" "$TAWC_SCRATCH/$app_name-build.sh" >/dev/null
-"$TAWC_EXEC" /system/bin/sh -c "mkdir -p $build_dir && cp $TAWC_SCRATCH/$app_name.c $build_dir/$app_name.c && cp $TAWC_SCRATCH/$app_name-build.sh $build_dir/build.sh && chmod +x $build_dir/build.sh"
+echo "=== $app_name: cross-building ($build_distro/$build_abi) ==="
+"$ROOT_DIR/scripts/build-test-apps.sh" "--distro=$build_distro" "--abi=$build_abi" "--app=$app_name"
 
-echo "=== $app_name: building ==="
-"$ROOT_DIR/scripts/rootfs-run.sh" "/tmp/$app_name/build.sh"
+echo "=== $app_name: copying ==="
+"$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"
+adb shell rm -rf "$TAWC_SCRATCH/$app_name-out" >/dev/null
+adb push "$ROOT_DIR/build/test-apps/$build_distro-$build_abi/$app_name" "$TAWC_SCRATCH/$app_name-out" >/dev/null
+"$TAWC_EXEC" /system/bin/sh -c "mkdir -p $bin_dir && cp $TAWC_SCRATCH/$app_name-out/$app_name $bin_dir/$app_name && chmod a+rx $bin_dir/$app_name"
 
 echo "=== $app_name: done ==="
-echo "Binary (inside chroot): /tmp/$app_name/$app_name"
+echo "Binary (inside chroot): /usr/local/bin/$app_name"

@@ -498,6 +498,7 @@ tawcAbis.forEach { abi ->
         //   - the patches dir (a patch edit must rebuild)
         //   - dep manifest + helper (a Mesa pin bump must rebuild)
         inputs.file("$tawcRoot/scripts/build-mesa-gfxstream.sh")
+        inputs.file("$tawcRoot/scripts/build-host-sysroot.sh")
         inputs.dir("$tawcRoot/deps/mesa-patches")
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")

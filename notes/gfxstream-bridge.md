@@ -810,7 +810,7 @@ required), so they can run unattended on the emulator too.
 - **End-to-end Vulkan works on the device.** `libvulkan_gfxstream.so` + ICD JSON ride in the APK as `assets/mesa-gfxstream/`, and `BridgeInstallProvider` (sibling of `LibhybrisInstallProvider` in `TawcInstaller.providers`) lays them into every rootfs at `/usr/lib/gfxstream/` (a tawc-owned namespace, matching `/usr/lib/hybris/`) at install time. With the gfxstream backend selected, `vulkaninfo --summary` from the chroot reports `Virtio-GPU GFXStream (Adreno (TM) 660), driverID=DRIVER_ID_QUALCOMM_PROPRIETARY`. No daemon spawn, no pidfile, no broker action lifecycle.
 - **gfxstream host renderer also builds on x86_64 Linux** (`meson setup -Dgfxstream-build=host` on `deps/gfxstream`) — the original validation milestone, now superseded by the NDK cross.
 - **`libvulkan_gfxstream.so` + `libvirtgpu_kumquat_ffi.a` cross-build for glibc**, advertise `VK_KHR_wayland_surface`, and load under the chroot's stock vulkan-icd-loader for both supported ABIs.
-- **Build script: `scripts/build-mesa-gfxstream.sh`.** Mirrors the `build-libhybris.sh` "stub .so + synthetic .pc + cross gcc" pattern, with a small pulled sysroot for libraries whose real symbols are referenced at link time. It reads `build/<arch>-sysroot/`, populated by `scripts/pull-sysroot.sh`, because empty stubs lose the `wl_*_interface` / `drmIoctl` symbols that wayland-scanner-generated protocol files and gfxstream's DRM platform code reference. Pure stubs are fine for libudev / libffi (only DT_NEEDED matters).
+- **Build script: `scripts/build-mesa-gfxstream.sh`.** Mirrors the `build-libhybris.sh` "stub .so + synthetic .pc + cross gcc" pattern, with a host-built sysroot for libraries whose real symbols are referenced at link time. It reads `build/sysroots/<distro>-<arch>/` (and the compatibility `build/<arch>-sysroot` link), populated by `scripts/build-host-sysroot.sh`, because empty stubs lose the `wl_*_interface` / `drmIoctl` symbols that wayland-scanner-generated protocol files and gfxstream's DRM platform code reference. Pure stubs are fine for libudev / libffi (only DT_NEEDED matters).
 - **Mesa patches at `deps/mesa-patches/mesa/`** (xwayland-patches style — sentinel-based idempotent re-apply on patch hash change):
   - `01-add-cargo-toml.patch`: drops `Cargo.toml` files into the four Mesa-internal Rust crates (`mesa3d_util`, `mesa3d_protocols`, `virtgpu_kumquat`, `virtgpu_kumquat_ffi`) plus a workspace `Cargo.toml`, so cargo can build them directly. Templates copied from the matching crates in magma-gpu/rutabaga_gfx (which Cargo-builds the same source). Differences: thiserror 2.0 (Mesa floor; rutabaga ships 1.0), zerocopy 0.8.13.
   - `02-meson-external-kumquat-ffi.patch`: adds a meson option `virtgpu_kumquat_external_ffi=true` that, when set, skips the four `subdir(...)` calls that build the Rust pieces via meson and instead resolves `dep_virtgpu_kumquat_ffi` via plain pkg-config. Also gates the `add_languages('rust')` block on the same condition, so meson never spins up the Rust subproject machinery at all.
@@ -818,7 +818,7 @@ required), so they can run unattended on the emulator too.
   - `05-tawc-vulkan-wsi.patch`: custom Wayland WSI for the gfxstream bridge — surface entrypoints, swapchain shell + per-image alloc (kumquat blob create + `VkImportColorBufferGOOGLE`), present loop with `wl_surface.frame()` throttling for FIFO mode. End-to-end with `gfxstream::test_vkcube_renders_via_ahb`.
 - **The cargo + meson-external split** is what unblocked kumquat. Mesa's `subprojects/packagefiles/*/meson.build` hard-code `native: true` on every Rust crate's `static_library()`. The proc-macro chain (cfg-if/syn/quote/proc-macro2/unicode-ident) and the regular host-machine crates (cfg-if as `mesa3d_util` dep) can't both satisfy meson in a cross-build context — see git history for the dead-end attempts. Cargo handles cross-builds + proc-macros transparently and produces a static lib that's just linked in like any other dep.
 - **`deps/deps.list` pins:** `mesa` (mesa-25.3.6), `gfxstream` (current main), `rutabaga_gfx` (magma-gpu fork with the kumquat server source).
-- **Cross-build sysroot pull:** use `scripts/pull-sysroot.sh`. Pulling from a live rootfs is still fragile and not a permanent reproducibility answer, but the script is the supported path today.
+- **Cross-build sysroot:** use `scripts/build-host-sysroot.sh`. It downloads distro packages on the host and extracts the target headers/libs into `build/sysroots/<distro>-<arch>/`; no live device rootfs is required.
 
 ### Why kumquat must run as untrusted_app (the SELinux trap)
 
@@ -1015,21 +1015,15 @@ GL/EGL apps.
   happens even under the custom WSI, because the chroot still has
   only one Vulkan ICD).
 
-### Sysroot pull
+### Host sysroot
 
-`scripts/pull-sysroot.sh` — hooks into the standard
-`.tawctarget` / `TAWC_TARGET` device-selection mechanism, picks ABI
-from `ro.product.cpu.abi`, and tars a curated subset of the
-installed rootfs into `build/<arch>-sysroot/`. Run once after every
-fresh install (or every time the in-rootfs library set rolls — e.g.
-a pacman upgrade that bumps a soname).
+`scripts/build-host-sysroot.sh` downloads distro packages on the host,
+extracts them into `build/sysroots/<distro>-<arch>/`, and maintains
+`build/<arch>-sysroot` as a compatibility symlink. Production Mesa
+builds request `--profile=prod`; test-app builds request
+`--profile=full` for GTK/Cairo/X11 headers.
 
-`build/<arch>-sysroot/` is gitignored (under `build/`).
-
-The whole "pull from a live device" approach is fragile — see
-[../issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md).
-The script is the supported way today, but it shouldn't be the
-permanent answer.
+There is no device-rootfs sysroot pull path anymore.
 
 ## WSI plan: custom Vulkan WSI (May 2026, current direction)
 

@@ -124,7 +124,7 @@ fn test_weston_simple_egl_renders_via_ahb() {
 fn test_vkcube_renders_via_ahb() {
     let mut app = launch_and_wait_for_ahb(
         BACKEND,
-        "vkcube --wsi wayland --c 3000",
+        "vkcube --wsi wayland",
         "vkcube",
         VKCUBE_LAUNCH_TIMEOUT,
     );

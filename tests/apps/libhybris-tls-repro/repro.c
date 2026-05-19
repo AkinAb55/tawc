@@ -362,7 +362,7 @@ int main(int argc, char** argv) {
     // Loud-error guards previously documented in
     // issues/libhybris-tls-dlsym-and-weak-tlsdesc.md. Running this here
     // (with tls_lib.so still open) keeps repro self-contained: weak_lib.so
-    // sits beside tls_lib.so in the same /tmp/libhybris-tls-repro/ dir.
+    // sits beside tls_lib.so in the current working directory.
     fprintf(stderr, "[repro] === loud-error guard checks ===\n");
     if (assert_dlsym_tls_refused(h)) return 1;
     if (assert_weak_tlsdesc_refused("./weak_lib.so")) return 1;

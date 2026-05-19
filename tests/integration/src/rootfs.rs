@@ -2,13 +2,13 @@ use std::io;
 
 use crate::adb;
 
-/// Verify a test app binary built by `scripts/install-test-deps.sh`
-/// exists in the rootfs and return its path. The build itself runs at
-/// install-test-deps time — tests no longer compile anything. If you
-/// edited the source under `tests/apps/<name>/`, re-run install-test-deps
-/// to pick up the change.
+/// Verify a test app binary copied by `scripts/install-test-deps.sh`
+/// exists in the rootfs and return its path. The binary is cross-built
+/// on the host at install-test-deps time — tests never compile on the
+/// device. If you edited the source under `tests/apps/<name>/`, re-run
+/// install-test-deps to pick up the change.
 fn check_rootfs_app(name: &str) -> io::Result<String> {
-    let binary_rootfs = format!("/tmp/{name}/{name}");
+    let binary_rootfs = format!("/usr/local/bin/{name}");
     let probe = format!(
         "test -x {bin} && echo OK || echo MISSING",
         bin = binary_rootfs
@@ -52,22 +52,24 @@ pub fn ensure_eglx11_test() -> io::Result<String> {
 /// `libhybris-tls-repro` — regression test for the libhybris bionic
 /// linker's TLS-module unregister assertion (`linker_tls.cpp:93`).
 /// Returns the absolute path to the `libhybris-tls-repro` binary
-/// inside the rootfs. The NDK-cross-built `tls_lib.so` companion lives
-/// next to it at `/tmp/libhybris-tls-repro/tls_lib.so`.
+/// inside the rootfs. The NDK-cross-built bionic companions live under
+/// `/usr/local/lib/`.
 pub fn ensure_libhybris_tls_repro() -> io::Result<String> {
     let bin = check_rootfs_app("libhybris-tls-repro")?;
     // Also confirm the bionic-side .so landed — install-test-deps cross-
     // builds it via NDK; if missing, the binary check above passes but
     // the test would fail with a confusing dlopen error.
-    let so = "/tmp/libhybris-tls-repro/tls_lib.so";
-    let probe = format!("test -f {so} && echo OK || echo MISSING");
+    let so_dir = "/usr/local/lib";
+    let so = format!("{so_dir}/tls_lib.so");
+    let weak = format!("{so_dir}/weak_lib.so");
+    let probe = format!("test -f {so} -a -f {weak} && echo OK || echo MISSING");
     let output = adb::rootfs_run(&probe)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.lines().any(|l| l.trim() == "OK") {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{so} not found. Run `scripts/install-test-deps.sh` \
+                "{so} or {weak} not found. Run `scripts/install-test-deps.sh` \
                  (which cross-builds the bionic-ABI tls_lib.so via the \
                  Android NDK on the host)."
             ),

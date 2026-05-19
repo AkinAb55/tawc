@@ -14,7 +14,7 @@ tests/
     tests/integration.rs        single test binary, declares the submodules
     tests/<module>.rs           one file per group; see its docstring
 scripts/
-  build-debug-app.sh          Manual debug-app build script
+  build-debug-app.sh          Manual debug-app cross-build/copy script
   run-integration-tests.sh    Build everything, deploy, run integration tests
 ```
 
@@ -58,8 +58,8 @@ text input) get a single `apps::` entry.
 ## Debug App (`gtk4-debug-app`)
 
 A small C program built against GTK4 that exposes a subcommand CLI and
-emits structured `TAWC_DEBUG:` lines for the test harness to parse. Builds
-inside the chroot with `gcc` + `pkg-config --cflags --libs gtk4`.
+emits structured `TAWC_DEBUG:` lines for the test harness to parse. It
+is cross-built on the host against `build/sysroots/<distro>-<abi>/`.
 
 ### Output Protocol
 
@@ -82,11 +82,11 @@ TAWC_DEBUG:VULKAN_LOADED:yes|no     Whether libvulkan was mapped at READY time
 ### Building
 
 ```bash
-# From host (pushes source, builds in chroot):
+# From host (cross-builds, then copies into the rootfs):
 scripts/build-debug-app.sh
 
-# Or manually in chroot:
-cd /tmp/gtk4-debug-app && ./build.sh
+# Build all test clients without copying:
+scripts/build-test-apps.sh --abi=aarch64 --distro=arch
 ```
 
 The Rust harness also calls `chroot::ensure_debug_app()` automatically with
@@ -96,7 +96,7 @@ manual runs.
 ### Running Manually
 
 ```bash
-scripts/rootfs-run.sh '/tmp/gtk4-debug-app/gtk4-debug-app text-input'
+scripts/rootfs-run.sh '/usr/local/bin/gtk4-debug-app text-input'
 ```
 
 ## Integration Tests
@@ -130,11 +130,11 @@ instead of attaching to the wrong target.
 
 Prerequisites: a phone (or emulator) connected via adb, the tawc app
 installed, an in-app distro installed (see [installation.md](installation.md)),
-and the test suite's chroot packages **and binaries** installed by
+and the test suite's rootfs packages **and binaries** installed by
 `scripts/install-test-deps.sh`. That script installs the runtime
-package set (gtk3/gtk4/wayland/cairo/weston/mesa-utils/vulkan-tools/…) plus a C
-toolchain, then compiles every in-rootfs test program from
-`tests/apps/<name>/` into `/tmp/<name>/<name>` inside the rootfs.
+package set (gtk3/gtk4/wayland/cairo/weston/mesa-utils/vulkan-tools/…),
+cross-builds every test program from `tests/apps/<name>/` on the host,
+and installs executables into `/usr/local/bin/` inside the rootfs.
 **Re-run install-test-deps after editing any `tests/apps/<name>/*`
 source** — tests check the binaries exist and refuse to run if not,
 they do not compile anything at runtime. The suite auto-targets the
@@ -196,7 +196,7 @@ Host (cargo test)                    Phone
 
 - **`adb.rs`**: Shell commands, chroot execution, broker-action-based input injection (`input_text`, `ic_commit_text`, `enable_test_input`, …; all routed through `tawc-exec --action`)
 - **`rootfs.rs`**: `ensure_debug_app` / `ensure_wayland_debug_app` /
-  `ensure_tawc_dri_test` / `ensure_eglx11_test` — each one just probes for `/tmp/<name>/<name>`
+  `ensure_tawc_dri_test` / `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
   inside the rootfs and returns its path, errorring with a pointer at
   `scripts/install-test-deps.sh` if the binary is missing. Tests do
   **not** compile anything; they also do not install chroot packages.
@@ -264,7 +264,7 @@ text input, keep the deferred-READY pattern in `on_map()`.
   produces when each `tests/*.rs` is its own target. `Cargo.toml` has
   `autotests = false` plus an explicit `[[test]]` entry so the
   per-group files aren't auto-discovered as separate binaries.
-- **C for debug app:** Sub-second builds, no cargo on phone, `base-devel` already in chroot.
+- **C for debug app:** Host-side cross-builds are quick after the sysroot exists; no compiler or `base-devel` is needed in the device rootfs.
 - **Broker `ic-*` actions over `adb shell input text`:** The system IME
   can intercept `input text` key events and buffer/autocorrect them.
   Broker actions drive `TawcInputConnection`, the same Kotlin state

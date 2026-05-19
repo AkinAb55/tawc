@@ -1,7 +1,7 @@
 #!/bin/bash
-# Build eglx11-test inside the chroot.
-# Requires: gcc, libX11, EGL/GLES headers (provided by the chroot's
-# mesa-utils + libglvnd / installed by scripts/install-test-deps.sh).
+# Manual in-rootfs build. Normal integration flow uses
+# scripts/build-test-apps.sh on the host.
+# Requires: gcc, libX11, EGL/GLES headers.
 set -euo pipefail
 cd "$(dirname "$0")"
 gcc -o eglx11-test eglx11-test.c \

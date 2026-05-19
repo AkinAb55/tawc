@@ -1,7 +1,8 @@
 #!/bin/bash
-# Build the toolkitless Wayland debug app inside the rootfs.
+# Manual in-rootfs build. Normal integration flow uses
+# scripts/build-test-apps.sh on the host.
 # Requires: gcc, wayland-client, wayland-protocols, wayland-scanner,
-# cairo, pkg-config (installed by scripts/install-test-deps.sh).
+# cairo, pkg-config.
 set -euo pipefail
 cd "$(dirname "$0")"
 

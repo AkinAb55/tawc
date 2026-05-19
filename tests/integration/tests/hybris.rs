@@ -59,11 +59,10 @@ const FIREFOX_CMD: &str = "firefox --no-remote";
 ///    and a new thread must be able to replay promoted-TLS initializers
 ///    after the original .so has been dlclose'd.
 ///
-/// Repro binary at tests/apps/libhybris-tls-repro/. The bionic-side
-/// tls_lib.so (a tiny .so with `__thread int g_tls_var = 42;`) is
-/// NDK-cross-built on the host by scripts/install-test-deps.sh; the
-/// glibc-side `repro` executable is built inside the rootfs and links
-/// `-lhybris-common`. Drives a full hybris_dlopen + hybris_dlsym +
+/// Repro binary at tests/apps/libhybris-tls-repro/. The glibc-side
+/// executable and bionic-side tls_lib.so (a tiny .so with `__thread int
+/// g_tls_var = 42;`) are host-cross-built by scripts/install-test-deps.sh.
+/// Drives a full hybris_dlopen + hybris_dlsym +
 /// hybris_dlclose round-trip plus thread isolation, post-dlclose replay,
 /// and an assert that get_tls() returns the declared initialiser.
 ///
@@ -80,9 +79,9 @@ const FIREFOX_CMD: &str = "firefox --no-remote";
 fn test_libhybris_tls_dlclose_does_not_abort() {
     let bin = rootfs::ensure_libhybris_tls_repro().expect("libhybris-tls-repro build");
 
-    // Run from inside the install dir so the relative `./tls_lib.so`
-    // arg keeps the test self-contained.
-    let cmd = format!("cd /tmp/libhybris-tls-repro && {} ./tls_lib.so", bin);
+    // Run from inside the companion library dir so the repro's relative
+    // weak_lib.so guard remains self-contained.
+    let cmd = format!("cd /usr/local/lib && {} ./tls_lib.so", bin);
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run libhybris-tls-repro");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

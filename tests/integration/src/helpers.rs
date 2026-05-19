@@ -1,5 +1,5 @@
 //! Shared test helpers used by the per-group submodules under `tests/`.
-//! OnceLock state means one-time setup (debug-app build) runs once per
+//! OnceLock state means one-time path checks run once per
 //! `cargo test` invocation. The compositor itself is launched by
 //! `run-integration-tests.sh` before the test binary starts; tests just
 //! assert it's there.
@@ -24,8 +24,8 @@ pub fn require_compositor() {
     compositor::assert_running();
 }
 
-/// Build/install the gtk4-debug-app inside the chroot if needed and return
-/// the path to the binary. Memoized per test binary.
+/// Return the gtk4-debug-app path, verifying that install-test-deps copied
+/// the host-built binary into the rootfs. Memoized per test binary.
 pub fn ensure_gtk4_debug_app() -> String {
     require_compositor();
     static BIN: OnceLock<String> = OnceLock::new();
@@ -33,8 +33,8 @@ pub fn ensure_gtk4_debug_app() -> String {
         .clone()
 }
 
-/// Build/install the toolkitless Wayland debug app inside the chroot
-/// if needed and return the path to the binary. Memoized per test binary.
+/// Return the toolkitless Wayland debug app path, verifying that
+/// install-test-deps copied it into the rootfs. Memoized per test binary.
 pub fn ensure_wayland_debug_app() -> String {
     require_compositor();
     static BIN: OnceLock<String> = OnceLock::new();

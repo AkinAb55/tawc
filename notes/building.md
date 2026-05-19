@@ -41,10 +41,10 @@ and launch as documented in AGENTS.md's Common Commands.
 | `bindgen` (Mesa's gfxstream-vk meson Rust bindings) | `cargo install bindgen-cli` | same |
 | Cargo NDK (cargo subcommand — `cargo build` will fail with `error: no such command: ndk` if missing) | `cargo install cargo-ndk` | same |
 | Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). | same |
-| Build basics | `base-devel`                                        | `build-essential pkg-config`                         |
+| Build basics | `base-devel`                                        | `build-essential pkg-config curl libarchive-tools`   |
 | Meson + Ninja (libxkbcommon) | `meson ninja`                            | `meson ninja-build`                                  |
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev wayland-protocols`                   |
-| Test rootfs Wayland/Cairo app deps (`install-test-deps`) | `wayland wayland-protocols cairo` | `libwayland-dev wayland-protocols libcairo2-dev` |
+| Host sysroot + test app builds | `curl libarchive wayland` | `curl libarchive-tools libwayland-dev` |
 | Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool`                          |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
 | `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |
@@ -85,32 +85,31 @@ script prefers the triple-prefixed names (`x86_64-linux-gnu-gcc`,
 which Debian ships by default) when present and falls back to plain
 `gcc` otherwise. No separate cross-toolchain is needed.
 
-### Sysroot pull (per-ABI)
+### Host sysroots (per-ABI)
 
 Both `--abi=aarch64` and `--abi=x86_64` cross-builds of
 `build-mesa-gfxstream.sh` link `libvulkan_gfxstream.so` against a
-curated set of distro `.so`s + headers (wayland, libdrm, libudev,
-libffi) sitting in `build/<arch>-sysroot/`. Populate via
-`scripts/pull-sysroot.sh` — uses the standard
-`.tawctarget`/`TAWC_TARGET` device selection, picks ABI from the
-connected device, and tars the relevant subset out of the installed
-chroot.
+small distro sysroot under `build/sysroots/<distro>-<arch>/`. The
+canonical builder is:
 
-This whole arrangement is fragile (see
-[../issues/sysroot-pull-from-live-device.md](../issues/sysroot-pull-from-live-device.md));
-keep using it for now.
+```bash
+scripts/build-host-sysroot.sh --abi=aarch64 --distro=arch --profile=prod
+scripts/build-host-sysroot.sh --abi=x86_64 --distro=arch --profile=prod
+```
 
-**Symptom when missing:** the gradle build reports
-`buildMesaGfxstreamArm64-v8a` failing with what looks like a malformed
-patch error (`patch: **** malformed patch at line 598`). It isn't —
-that's a downstream Mesa link step failing with
-`undefined reference to wl_buffer_interface` /
-`wl_surface_interface` / `wl_output_interface`, surfaced through the
-patch-applying task chain. Fix is always `scripts/pull-sysroot.sh`
-followed by a rebuild — the empty stub `libwayland-client.so.0`
-`build-mesa-gfxstream.sh` falls back to when the sysroot is absent
-doesn't carry those wayland-scanner interface symbols, so Mesa's WSI
-.c files can't take their address.
+`build-mesa-gfxstream.sh` runs this automatically when its production
+sysroot is missing. `scripts/build-test-apps.sh` uses the same script
+with `--profile=full`, which pulls the GTK/Cairo/Wayland/X11 header and
+pkg-config closure needed to build test clients on the host. There is no
+device-rootfs sysroot pull path anymore.
+
+Default distro is Arch (`TAWC_SYSROOT_DISTRO=arch`). `void` support uses
+`xbps-install` when that host tool is available. The builder keeps a
+compatibility link at `build/<arch>-sysroot` for older build consumers.
+For non-production profiles (`--profile=full`, used by test apps), distro
+package downloads go through the dev mirror cache by default
+(`http://127.0.0.1:8080/proxy/`); run `scripts/cache-proxy.sh run` first
+or set `TAWC_MIRROR_PROXY` explicitly.
 
 ## Environment variables
 
@@ -263,11 +262,11 @@ sidesteps the in-tree Rust subproject build (which doesn't
 cross-compile cleanly) by linking to a separately-cargo-built
 `libvirtgpu_kumquat_ffi.a` via pkg-config. Output .so is ~7MB.
 
-Pre-req: pull a small ABI-specific sysroot from the installed rootfs
-into `build/<arch>-sysroot/` using the supported script:
+Pre-req: make sure the host sysroot exists. The Mesa build script does
+this automatically, but the standalone command is:
 
 ```bash
-scripts/pull-sysroot.sh
+scripts/build-host-sysroot.sh --abi=aarch64 --profile=prod
 scripts/build-mesa-gfxstream.sh
 scripts/build-mesa-gfxstream.sh --abi=x86_64
 scripts/build-mesa-gfxstream.sh --clean   # wipe builddir
@@ -442,6 +441,6 @@ adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 See [testing.md](testing.md) for full details.
 
 ```bash
-scripts/build-debug-app.sh                 # debug app on phone
+scripts/build-debug-app.sh                 # cross-build + copy debug app
 cd tests/integration && cargo test -- --nocapture --test-threads=1
 ```

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Build the glibc-side repro binary inside the rootfs.
+# Manual in-rootfs build of the glibc-side repro binary. Normal
+# integration flow uses scripts/build-test-apps.sh on the host.
 #
 # tls_lib.so (the bionic-built TLS library that repro loads) is
 # cross-compiled with the Android NDK on the host by
-# scripts/install-test-deps.sh and copied into this directory before
-# build.sh runs — see the libhybris-tls-repro hook there.
+# scripts/install-test-deps.sh and installed under /usr/local/lib/.
 set -euo pipefail
 cd "$(dirname "$0")"
 gcc -O0 -g repro.c -o libhybris-tls-repro \

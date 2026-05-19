@@ -23,7 +23,7 @@ pub struct DebugApp {
 
 impl DebugApp {
     /// Start the debug app with the given subcommand.
-    /// `binary_path` is the path inside the chroot (e.g. "/tmp/gtk4-debug-app/gtk4-debug-app").
+    /// `binary_path` is the path inside the chroot (e.g. "/usr/local/bin/gtk4-debug-app").
     /// `env` is a shell-style env prefix prepended to the command, e.g.
     /// `"GDK_GL=disabled"` to override the chroot's default `gles:always`
     /// and force GTK3's SHM path. Pass `""` for no extra env.

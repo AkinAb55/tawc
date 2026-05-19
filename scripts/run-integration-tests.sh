@@ -143,8 +143,9 @@ else
     echo "=== Running integration tests ==="
 fi
 # Note: the test programs (gtk4-debug-app, tawc-dri-test, eglx11-test)
-# are built by `scripts/install-test-deps.sh`, not by the Rust harness.
-# The harness checks that `/tmp/<name>/<name>` exists in the rootfs and
+# are host-cross-built/copied by `scripts/install-test-deps.sh`, not by
+# the Rust harness.
+# The harness checks that `/usr/local/bin/<name>` exists in the rootfs and
 # fails fast with a pointer back to install-test-deps if not. Re-run
 # install-test-deps after editing any source under `tests/apps/`.
 cd "$ROOT_DIR/tests/integration"
