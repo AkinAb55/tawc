@@ -133,8 +133,8 @@ pub struct TawcState {
     #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
     // Legacy KDE server-decoration protocol used by Qt and older toolkits.
-    // Kept alongside xdg-decoration so clients get a server-side-decorated
-    // answer no matter which common decoration negotiation path they support.
+    // TAWC presents Linux windows as Android app surfaces, so it suppresses
+    // desktop chrome instead of asking clients to draw titlebars.
     #[allow(dead_code)]
     pub kde_decoration_state: KdeDecorationState,
     // Held to keep wp_fractional_scale_manager_v1 registered.
@@ -727,7 +727,6 @@ impl XdgDecorationHandler for TawcState {
         _mode: wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
         use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        // Always force server-side (no decorations since we don't draw any)
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(Mode::ServerSide);
         });
@@ -760,9 +759,18 @@ impl KdeDecorationHandler for TawcState {
         &mut self,
         _surface: &WlSurface,
         decoration: &OrgKdeKwinServerDecoration,
-        _mode: WEnum<KdeDecorationMode>,
+        mode: WEnum<KdeDecorationMode>,
     ) {
-        decoration.mode(KdeDecorationMode::Server);
+        match mode {
+            WEnum::Value(KdeDecorationMode::Server | KdeDecorationMode::None) => {
+                decoration.mode(KdeDecorationMode::Server);
+            }
+            // Firefox/GTK re-requests client-side decorations each time the
+            // compositor repeats "server". Ignore that request so desktop
+            // chrome stays suppressed without creating a protocol ping-pong.
+            WEnum::Value(KdeDecorationMode::Client) | WEnum::Unknown(_) => {}
+            _ => {}
+        }
     }
 }
 

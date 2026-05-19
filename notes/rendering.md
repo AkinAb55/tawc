@@ -7,10 +7,10 @@ The compositor clears every frame to a flat color matching the rest of the app U
 ## Window Management
 
 All toplevels are configured as maximized at the full logical output size:
-`round(physical_size / output_scale)`. The xdg-decoration protocol is
-implemented, always requesting server-side decorations (which we don't draw,
-so clients get no decorations). Surfaces are rendered at (0,0) instead of
-centered.
+`round(physical_size / output_scale)`. The xdg-decoration and legacy KDE
+server-decoration protocols are implemented to suppress desktop titlebars; TAWC
+presents each Linux toplevel as an Android app surface. Surfaces are rendered at
+(0,0) instead of centered.
 
 ## Popup and Subsurface Positioning
 
