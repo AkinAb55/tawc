@@ -190,7 +190,7 @@ returns null, before any disk state is written.
 - Multi-install / multiple ids on one device. Still implicit "id =
   arch" in `scripts/rootfs-run.sh` (env-overridable),
   `tests/integration/src/{adb,rootfs,rootfs_process}.rs`, and
-  `scripts/build-debug-app.sh` / `scripts/run-integration-tests.sh`
+  `scripts/run-integration-tests.sh`
   preflight paths. The on-disk layout, [Installation],
   [InstallationStore] and [InstallationService] are already
   id-parameterised, so the only thing missing is "how do

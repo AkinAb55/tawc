@@ -9,12 +9,11 @@ subset is just a libtest substring filter (`<module>::test_name`).
 
 ```
 tests/
-  apps/gtk4-debug-app/        C + GTK4, runs on phone in chroot, structured stdout
+  apps/wayland-debug-app/     C + Wayland/Cairo protocol test client
   integration/                Rust tests on host
     tests/integration.rs        single test binary, declares the submodules
     tests/<module>.rs           one file per group; see its docstring
 scripts/
-  build-debug-app.sh          Manual debug-app cross-build/copy script
   run-integration-tests.sh    Build everything, deploy, run integration tests
 ```
 
@@ -29,7 +28,7 @@ prerequisites are. As of writing the modules are:
 | `gfxstream`     | `gfxstream` | Experimental bridge-backend coverage plus an `eglinfo` software-fallback guard. Vulkan-native `vkcube` works today and runs unconditionally; GL/EGL app tests are gated on the remaining Zink-on-gfxstream work in [gfxstream-bridge.md](gfxstream-bridge.md). Surface ignored cases with `cargo test -- --ignored`. |
 | `cpu_graphics`  | `cpu`       | Backend-agnostic SHM paths under software-only rendering: `weston-simple-shm`, GTK3 with `GDK_GL=disabled`, GTK4 with `GSK_RENDERER=cairo`, plus an `eglinfo` llvmpipe/swrast sanity. |
 | `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. |
-| `input`         | `cpu`       | gtk4-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). Buffer type is irrelevant for input. |
+| `input`         | `cpu`       | wayland-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). Buffer type is irrelevant for input. |
 | `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
 
 The **backend pin** for each module is enforced at every spawn: tests
@@ -55,36 +54,38 @@ compositor's SHM plumbing doesn't depend on the chroot's graphics
 env). Apps where buffer type is irrelevant (e.g. `lxterminal` driving
 text input) get a single `apps::` entry.
 
-## Debug App (`gtk4-debug-app`)
+## Debug App (`wayland-debug-app`)
 
-A small C program built against GTK4 that exposes a subcommand CLI and
-emits structured `TAWC_DEBUG:` lines for the test harness to parse. It
-is cross-built on the host against `build/sysroots/<distro>-<abi>/`.
+A small C program built against libwayland-client and Cairo that exposes
+a subcommand CLI and emits structured `TAWC_DEBUG:` lines for the test
+harness to parse. It is cross-built on the host against
+`build/sysroots/<distro>-<abi>/`.
 
 ### Output Protocol
 
-Every test-relevant line is prefixed `TAWC_DEBUG:` to filter from GTK/Wayland noise:
+Every test-relevant line is prefixed `TAWC_DEBUG:` to filter from client
+and Wayland noise:
 ```
-TAWC_DEBUG:READY                    Window mapped, text view focused
+TAWC_DEBUG:READY                    Window mapped and initialized
 TAWC_DEBUG:TEXT_CHANGED:<text>      Full buffer contents after change
-TAWC_DEBUG:CURSOR_POS:<offset>      Cursor position (character offset) after mark-set
+TAWC_DEBUG:CURSOR_POS:<offset>      Cursor position (character offset)
 TAWC_DEBUG:PREEDIT:<text>           Current composing/preedit string
-TAWC_DEBUG:RENDERER:<class>         GSK renderer class name
-TAWC_DEBUG:VULKAN_LOADED:yes|no     Whether libvulkan was mapped at READY time
+TAWC_DEBUG:KEY:<name>               Keyboard event observed by the client
+TAWC_DEBUG:TOUCH_DOWN:<id>:<x>:<y>:<active>
 ```
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `text-input` | Opens a GtkTextView, reports text changes / cursor moves |
+| `text-input` | Opens a Wayland toplevel with text-input-v3 enabled |
+| `text-input-no-surrounding` | Text-input client that never sends surrounding text |
+| `touch` / `subsurface` / `popup` | Touch routing scenes |
+| `clipboard-copy` / `clipboard-paste` | Wayland/Android clipboard bridge probes |
 
 ### Building
 
 ```bash
-# From host (cross-builds, then copies into the rootfs):
-scripts/build-debug-app.sh
-
 # Build all test clients without copying:
 make -C tests/apps ABI=aarch64 DISTRO=arch all
 ```
@@ -96,7 +97,7 @@ for ad-hoc manual runs.
 ### Running Manually
 
 ```bash
-scripts/rootfs-run.sh '/usr/local/bin/gtk4-debug-app text-input'
+scripts/rootfs-run.sh '/usr/local/bin/wayland-debug-app text-input'
 ```
 
 ## Integration Tests
@@ -168,7 +169,7 @@ Host (cargo test)                    Phone
   │                                    │ (test programs already compiled
   │                                    │  and deployed by the runner; the
   │                                    │  harness only checks they exist)
-  ├─ adb shell (start client) ─────────┤──→ gtk4-debug-app  /  wayland-debug-app  /  …
+  ├─ adb shell (start client) ─────────┤──→ wayland-debug-app / stock apps / …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
   │                                    │
   ├─ tawc-exec --action ic-commit-text ┤──→ ExecBroker / InputActions
@@ -191,8 +192,8 @@ Host (cargo test)                    Phone
 ### Key Modules
 
 - **`adb.rs`**: Shell commands, chroot execution, broker-action-based input injection (`input_text`, `ic_commit_text`, `enable_test_input`, …; all routed through `tawc-exec --action`)
-- **`rootfs.rs`**: `ensure_debug_app` / `ensure_wayland_debug_app` /
-  `ensure_tawc_dri_test` / `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
+- **`rootfs.rs`**: `ensure_wayland_debug_app` / `ensure_tawc_dri_test` /
+  `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
   inside the rootfs and returns its path. Tests do **not** compile
   anything; package install, host builds, and changed-artifact deploys
   happen up-front in `scripts/run-integration-tests.sh`.
@@ -206,8 +207,8 @@ Host (cargo test)                    Phone
   user's UI pick never leaks in.
   - `require_compositor`, `assert_compositor_clean`, `saw_ahb_import`,
     `saw_shm_import` — observation primitives.
-  - `start_text_input` / `start_text_input_no_surrounding` /
-    `start_wayland_debug_text_input` — for `input::`.
+  - `start_wayland_debug_text_input` and related Wayland debug app
+    launchers — for `input::`.
   - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
     until the client has committed its first frame regardless of
     buffer type.
@@ -228,7 +229,7 @@ Host (cargo test)                    Phone
   `require_compositor` panics with a clear message if the compositor
   isn't running, telling the developer to use the run script instead
   of invoking `cargo test` directly. The OnceLock state means
-  one-time setup (debug-app build) runs once per `cargo test` invocation.
+  one-time setup checks run once per `cargo test` invocation.
 
 ## Adding New Tests
 
@@ -237,17 +238,16 @@ create a new module: drop `tests/<new>.rs` next to the others and add a
 `mod <new>;` line to `tests/integration.rs`. Tests pick up the module
 prefix automatically and the run script's substring filter just works.
 
-If a new compositor protocol is needed, extend `gtk4-debug-app.c`:
+If a new compositor protocol is needed, extend `wayland-debug-app.c`:
 
 1. Add a new command (new function + entry in `commands[]`).
 2. Define protocol messages (`TAWC_DEBUG:YOUR_EVENT:value`) and a matching
    parser in `debug_app.rs`.
 3. Use the same `DebugApp` harness (`start`, `wait_ready`, `wait_for`).
 
-**GTK4 gotcha:** `gtk4-debug-app` defers its `READY` emission to the next
-idle so the IM context has time to enable `zwp_text_input_v3` before the
-harness starts injecting text. If you add new commands that rely on
-text input, keep the deferred-READY pattern in `on_map()`.
+Commands that rely on text input should emit `READY` only after the
+client has enabled `zwp_text_input_v3`; otherwise the harness can inject
+text before the compositor accepts it.
 
 ## Design Decisions
 

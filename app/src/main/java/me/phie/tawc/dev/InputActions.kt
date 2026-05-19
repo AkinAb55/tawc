@@ -25,7 +25,7 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * path: a "keyboard" sends commits / preedits / key events into the IC,
  * the IC mirrors the Editable, computes deltas, applies the
  * `composingRegionIsPreedit` short-circuit when it should, and forwards
- * to native. The wayland client (gtk4-debug-app) is the other endpoint
+ * to native. The wayland client (wayland-debug-app) is the other endpoint
  * — tests assert on what *it* sees on the wire.
  *
  * Why this matters: an earlier version of this file exposed bypass

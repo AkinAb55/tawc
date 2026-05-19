@@ -122,7 +122,7 @@ fn test_supertuxkart_launches() {
 }
 
 /// lxterminal hosts a VTE terminal — the canonical surroundingless
-/// text-input-v3 client (see `test_surroundingless_client_uses_keyboard_for_backspace`
+/// text-input-v3 client (see `test_wayland_surroundingless_client_uses_keyboard_for_backspace`
 /// in tests/input.rs for the protocol-level coverage). This test wires
 /// up the full real-world stack: launch lxterminal, verify it stays up
 /// past first paint, type `exit` followed by Enter, and assert the

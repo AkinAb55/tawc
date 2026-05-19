@@ -27,11 +27,6 @@ fn check_rootfs_app(name: &str) -> io::Result<String> {
     ))
 }
 
-/// `gtk4-debug-app` — the GTK4 driver used by `apps::` and `input::` tests.
-pub fn ensure_debug_app() -> io::Result<String> {
-    check_rootfs_app("gtk4-debug-app")
-}
-
 /// `wayland-debug-app` — toolkitless Wayland protocol test driver.
 pub fn ensure_wayland_debug_app() -> io::Result<String> {
     let bin = check_rootfs_app("wayland-debug-app")?;

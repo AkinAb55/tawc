@@ -7,7 +7,7 @@
 //! AOSP-latin call into. There is intentionally **no helper that pokes
 //! `NativeBridge.native*` directly** and no broker action that does so
 //! either. Tests act as a keyboard (sending IME methods to the IC) or as
-//! a wayland client (assertions go through `gtk4-debug-app`'s observed
+//! a wayland client (assertions go through `wayland-debug-app`'s observed
 //! events). The IC's full state machine — `computeReplaceDeltas`, the
 //! Editable mirror, the `composingRegionIsPreedit` short-circuit,
 //! `unitsToKeyCounts` — runs in every test the same way it runs in

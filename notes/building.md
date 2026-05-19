@@ -100,7 +100,7 @@ scripts/build-host-sysroot.sh --abi=x86_64 --distro=arch --profile=prod
 `build-mesa-gfxstream.sh` runs this automatically when its production
 sysroot is missing or lacks Mesa's required Wayland protocol XMLs.
 `tests/apps/Makefile` uses the same script with `--profile=full`, which
-pulls the GTK/Cairo/Wayland/X11 header and pkg-config closure needed to
+pulls the Cairo/Wayland/X11 header and pkg-config closure needed to
 build test clients on the host. There is no device-rootfs sysroot pull
 path anymore.
 
@@ -448,6 +448,5 @@ adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
 See [testing.md](testing.md) for full details.
 
 ```bash
-scripts/build-debug-app.sh                 # cross-build + copy debug app
 scripts/run-integration-tests.sh           # package setup, deploy, cargo test
 ```

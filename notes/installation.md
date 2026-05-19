@@ -966,4 +966,4 @@ and chroot exec live (see
 [rootfs-sessions.md](rootfs-sessions.md) and
 [exec-broker.md](exec-broker.md)). Used by the integration tests
 (`tests/integration/src/adb.rs`), `scripts/run-integration-tests.sh`,
-and `scripts/build-debug-app.sh`.
+and `scripts/run-integration-tests.sh`.

@@ -100,12 +100,12 @@ arch_packages_for_profile() {
             echo "glibc linux-api-headers wayland wayland-protocols libdrm systemd-libs libffi gcc-libs vulkan-icd-loader libxkbcommon libglvnd libdisplay-info"
             ;;
         test|full)
-            local pkgs="glibc linux-api-headers wayland wayland-protocols libdrm systemd-libs libffi gcc-libs vulkan-icd-loader libxkbcommon libglvnd libdisplay-info gtk4 cairo libx11 libxcb mesa"
+            local pkgs="glibc linux-api-headers wayland wayland-protocols libdrm systemd-libs libffi gcc-libs vulkan-icd-loader libxkbcommon libglvnd libdisplay-info cairo libx11 libxcb mesa"
             # ALARM's sync db omits %DEPENDS%, so list the test-app
             # pkg-config closure explicitly. x86_64 resolves these from
             # repo metadata, but adding them there is harmless too.
-            pkgs+=" zlib libpng fontconfig freetype2 bzip2 brotli expat xorgproto libxext libxrender libxau libxdmcp pixman pango gdk-pixbuf2 graphene glib2 harfbuzz fribidi libepoxy"
-            pkgs+=" sysprof pcre2 graphite libthai libxft glycin shared-mime-info util-linux-libs"
+            pkgs+=" zlib libpng fontconfig freetype2 bzip2 brotli expat xorgproto libxext libxrender libxau libxdmcp pixman glib2 harfbuzz"
+            pkgs+=" pcre2 graphite util-linux-libs"
             echo "$pkgs"
             ;;
     esac
@@ -117,7 +117,7 @@ void_packages_for_profile() {
             echo "wayland-devel wayland-protocols libdrm-devel eudev-libudev-devel libffi-devel gcc-libs vulkan-loader-devel libxkbcommon-devel libglvnd-devel libdisplay-info-devel"
             ;;
         test|full)
-            echo "wayland-devel wayland-protocols libdrm-devel eudev-libudev-devel libffi-devel gcc-libs vulkan-loader-devel libxkbcommon-devel libglvnd-devel libdisplay-info-devel gtk4-devel cairo-devel libX11-devel libxcb-devel MesaLib-devel"
+            echo "wayland-devel wayland-protocols libdrm-devel eudev-libudev-devel libffi-devel gcc-libs vulkan-loader-devel libxkbcommon-devel libglvnd-devel libdisplay-info-devel cairo-devel libX11-devel libxcb-devel MesaLib-devel"
             ;;
     esac
 }

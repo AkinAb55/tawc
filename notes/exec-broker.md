@@ -321,7 +321,7 @@ before any client connection arrives.
 **Rule for input actions: every driver goes through `TawcInputConnection`.**
 There is intentionally no broker action that calls `NativeBridge.native*`
 trampolines directly. Tests act as a keyboard (the IC) or as an app
-(observing `gtk4-debug-app` events on the wayland side); never as
+(observing `wayland-debug-app` events on the wayland side); never as
 something poking the compositor in the middle. Earlier revisions had
 bypass actions (`inject-text`, `set-composing`, …) that skipped the IC
 — they were deleted because text-input-v3's done-ordering produces

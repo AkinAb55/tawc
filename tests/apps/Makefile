@@ -38,14 +38,13 @@ NDK_ROOT ?= $(or $(ANDROID_NDK_ROOT),$(ANDROID_NDK_HOME),$(ANDROID_HOME)/ndk)
 NDK_BIN_DIR := $(shell if [ -x "$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(NDK_TRIPLE)29-clang" ]; then echo "$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin"; else ls -d "$(NDK_ROOT)"/*/toolchains/llvm/prebuilt/linux-x86_64/bin 2>/dev/null | sort -V | tail -n1; fi)
 NDK_CLANG := $(NDK_BIN_DIR)/$(NDK_TRIPLE)29-clang
 
-BASE_APPS := gtk4-debug-app wayland-debug-app eglx11-test
+BASE_APPS := wayland-debug-app eglx11-test
 APPS := $(BASE_APPS) $(HYBRIS_APPS)
 
 .PHONY: all clean sysroot $(APPS) adreno-struct-varying
 
 all: $(APPS)
 
-gtk4-debug-app: $(OUT_ROOT)/gtk4-debug-app/gtk4-debug-app
 wayland-debug-app: $(OUT_ROOT)/wayland-debug-app/wayland-debug-app
 eglx11-test: $(OUT_ROOT)/eglx11-test/eglx11-test
 tawc-dri-test: $(OUT_ROOT)/tawc-dri-test/tawc-dri-test
@@ -62,9 +61,6 @@ sysroot:
 
 $(XDG_SHELL_XML) $(TEXT_INPUT_XML) $(FRACTIONAL_SCALE_XML): | sysroot
 	@test -f "$@" || { echo "ERROR: missing $@ after sysroot setup" >&2; exit 1; }
-
-$(OUT_ROOT)/gtk4-debug-app/gtk4-debug-app: gtk4-debug-app/gtk4-debug-app.c | sysroot $(OUT_ROOT)/gtk4-debug-app/
-	$(CC) $(CFLAGS_SYSROOT) -o "$@" "$<" $$($(PC) --cflags gtk4) $$($(PC) --libs gtk4) $(LDFLAGS_SYSROOT) -Wall -Wextra
 
 $(OUT_ROOT)/wayland-debug-app/xdg-shell-client-protocol.h: $(XDG_SHELL_XML) | sysroot $(OUT_ROOT)/wayland-debug-app/
 	wayland-scanner client-header "$<" "$@"

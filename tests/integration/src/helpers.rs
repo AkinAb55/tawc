@@ -24,15 +24,6 @@ pub fn require_compositor() {
     compositor::assert_running();
 }
 
-/// Return the gtk4-debug-app path, verifying that the integration runner copied
-/// the host-built binary into the rootfs. Memoized per test binary.
-pub fn ensure_gtk4_debug_app() -> String {
-    require_compositor();
-    static BIN: OnceLock<String> = OnceLock::new();
-    BIN.get_or_init(|| rootfs::ensure_debug_app().expect("gtk4 debug app build"))
-        .clone()
-}
-
 /// Return the toolkitless Wayland debug app path, verifying that
 /// the integration runner copied it into the rootfs. Memoized per test binary.
 pub fn ensure_wayland_debug_app() -> String {
@@ -59,67 +50,6 @@ pub fn wait_for_keyboard_shown(timeout: Duration) {
     }
 }
 
-/// Start the text-input subcommand of the gtk4 debug app and wait for READY.
-/// `env` is prepended to the launch command (e.g. "GSK_RENDERER=cairo");
-/// pass "" for no extra env. Verifies the compositor sees the toplevel
-/// before returning.
-///
-/// Also swaps the compositor's [me.phie.tawc.compositor.ImeOutput] to a
-/// recording impl via the broker `enable-test-input` action so the
-/// system IME doesn't react to `updateSelection` and race the test
-/// (see notes/text-input.md and notes/testing.md). The recorder
-/// is process-global; tests don't need to reset it between scenes.
-pub fn start_text_input(backend: GraphicsBackend, env: &str) -> DebugApp {
-    let binary = ensure_gtk4_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
-    // Install the recording ImeOutput before the GTK app comes up so
-    // the very first `onShowKeyboard` lands on the recorder rather than
-    // briefly waking up Gboard / OpenBoard / AOSP-latin.
-    adb::enable_test_input().expect("enable-test-input action");
-    let app =
-        DebugApp::start(backend, &binary, "text-input", env).expect("Failed to start debug app");
-    app.wait_ready().expect("Debug app did not become ready");
-
-    // Wait for the client's IM context to enable text input. Without this,
-    // text injected via broker action is dropped because the compositor
-    // gates commit_string on the text-input-v3 enabled flag.
-    wait_for_keyboard_shown(TIMEOUT);
-
-    let state =
-        compositor::query_state(TIMEOUT).expect("Failed to query compositor state after app start");
-    assert!(
-        state.toplevels >= 1,
-        "Compositor should see at least 1 toplevel after app start, got {:?}",
-        state
-    );
-    assert!(
-        state.clients >= 1,
-        "Compositor should see at least 1 client after app start, got {:?}",
-        state
-    );
-
-    app
-}
-
-/// Like [start_text_input] but launches the `text-input-no-surrounding`
-/// subcommand: a bare GtkIMMulticontext attached to a drawing area, with
-/// no `gtk_im_context_set_surrounding` ever called. That mirrors the
-/// shape of clients like VTE-under-Wayland which enable text-input-v3
-/// for the soft keyboard but hold no editable buffer behind the surface
-/// — the compositor must NOT send `delete_surrounding_text` to them
-/// (the protocol's "current cursor index" is undefined and real-world
-/// clients close the connection on receipt).
-pub fn start_text_input_no_surrounding(backend: GraphicsBackend, env: &str) -> DebugApp {
-    let binary = ensure_gtk4_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
-    adb::enable_test_input().expect("enable-test-input action");
-    let app = DebugApp::start(backend, &binary, "text-input-no-surrounding", env)
-        .expect("Failed to start debug app");
-    app.wait_ready().expect("Debug app did not become ready");
-    wait_for_keyboard_shown(TIMEOUT);
-    app
-}
-
 /// Start the toolkitless Wayland debug app's text-input mode and wait
 /// until text-input-v3 is enabled. This app uses plain libwayland + SHM and
 /// owns its edit buffer, so it is faster to launch than GTK and gives tests
@@ -136,8 +66,7 @@ pub fn start_wayland_debug_text_input(backend: GraphicsBackend, env: &str) -> De
     app
 }
 
-/// Start wayland-debug-app's surrounding-less text-input mode. This is
-/// the toolkitless counterpart to [start_text_input_no_surrounding].
+/// Start wayland-debug-app's surrounding-less text-input mode.
 pub fn start_wayland_debug_text_input_no_surrounding(
     backend: GraphicsBackend,
     env: &str,

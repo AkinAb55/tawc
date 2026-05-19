@@ -2678,14 +2678,14 @@ libhybris/AHB syscall coverage.
      to avoid Android's RET_TRAP on faccessat2), so the same
      implementation serves both numbers.
 
-   With those two fixes, `scripts/run-integration-tests.sh
-   --no-build test_input_dispatch` against `--es method tawcroot`
-   passes all 13 input-dispatch scenarios on the OnePlus 9 in ~22 s.
+   With those two fixes, the then-named `test_input_dispatch` suite
+   against `--es method tawcroot` passed all 13 input-dispatch
+   scenarios on the OnePlus 9 in ~22 s.
    This is the first integration-test suite running entirely under
-   tawcroot on the device — gtk4-debug-app builds in the chroot
-   install (gcc-on-tawcroot is fine post-faccessat fix; the harness
-   supports `TAWC_BUILD_INSTALL_ID` to build in a sibling install if
-   desired) and runs from the tawcroot rootfs against the in-app
+   tawcroot on the device — the then-current debug app built in the
+   chroot install (gcc-on-tawcroot is fine post-faccessat fix; the
+   harness supported `TAWC_BUILD_INSTALL_ID` to build in a sibling
+   install if desired) and ran from the tawcroot rootfs against the in-app
    compositor over the shared `/data/data/me.phie.tawc/wayland-0`
    socket.
 
@@ -2769,7 +2769,7 @@ libhybris/AHB syscall coverage.
    aarch64-relevant bugs (apply_memo shift aliasing and untrapped
    `faccessat` NR 269); see "Bugs found while bringing up the gtk4
    input integration tests" above. With those fixed, the
-   `test_input_dispatch` integration suite (13 input-dispatch
+   then-named `test_input_dispatch` integration suite (13 input-dispatch
    scenarios driving gtk4 through the compositor over Wayland) runs
    entirely under tawcroot on the OnePlus 9.
 
@@ -2865,7 +2865,7 @@ libhybris/AHB syscall coverage.
    With those fixes pacman installs packages cleanly (`pacman -S`
    completed pkgconf in 1.5s, the full test-deps set in ~5 minutes),
    gtk3/gtk4 demos, weston, Vulkan clients, supertuxkart, and the
-   full `test_input_dispatch` flow all pass on the OnePlus 9.
+   then-named `test_input_dispatch` flow all pass on the OnePlus 9.
    Keyring init (`pacman-key --init && --populate archlinux`) also
    completes end-to-end after the wc-segfault loader-stack fix.
 

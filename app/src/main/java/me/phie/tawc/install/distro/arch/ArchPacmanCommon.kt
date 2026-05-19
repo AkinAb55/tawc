@@ -115,7 +115,7 @@ internal object ArchPacmanCommon {
         "/usr/lib/libhwasan.so*",
         // Static archives for the same multi-language runtimes and
         // sanitizers, plus a few large standalone static libs we never
-        // statically link against. We build gtk4-debug-app dynamically
+        // statically link against. Test clients are linked dynamically
         // (see `tests/apps/Makefile`), so the ld(1) `-l`
         // search of these is dead weight on disk.
         //

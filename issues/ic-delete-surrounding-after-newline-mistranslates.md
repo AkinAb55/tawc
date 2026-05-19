@@ -11,7 +11,7 @@ position and slice the wrong bytes.
 ## Repro
 
 Diagnostic instrumentation in `TawcInputConnection.deleteSurroundingText`
-(temporary, since reverted) on the emulator's `gtk4-debug-app` after
+(temporary, since reverted) on the emulator after
 `scene_recommit_word_then_newline_no_h_prepend` runs:
 
 ```
