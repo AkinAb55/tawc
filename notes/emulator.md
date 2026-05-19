@@ -324,10 +324,10 @@ few minutes the first time. Idempotent — re-running skips done steps
 
 Two AVDs are supported:
 
-- `tawc-rooted` (default) — Magisk-rooted via the rootAVD flow above.
+- `tawc-rooted` — Magisk-rooted via the rootAVD flow above.
   Required for the chroot install method (it needs `su` for bind-mounts
-  and /dev/null setup), so this is the AVD all integration tests use.
-- `tawc-rootless` (opt-in via `start rootless`) — stock AVD, no Magisk.
+  and /dev/null setup).
+- `tawc-rootless` — stock AVD, no Magisk.
   Useful for testing the tawcroot/proot install methods on a non-rooted
   image. Won't render SHM client surfaces (no `setenforce 0`), and the
   chroot install method won't work.
@@ -348,7 +348,7 @@ note.
 
 Launch / shut down:
 
-    scripts/emulator.sh start                 # current default (rooted)
+    scripts/emulator.sh start                 # refresh running tawc AVD, else rootless
     scripts/emulator.sh start rooted          # explicit rooted
     scripts/emulator.sh start rootless        # stock AVD
     scripts/emulator.sh start rooted --cold   # skip snapshot, full cold boot
@@ -357,8 +357,9 @@ Launch / shut down:
     scripts/emulator.sh stop rooted           # only stop the rooted one
 
 The variant is positional so callers (test scripts, CI, etc.) can name
-exactly which AVD they want; if the default rotates later, scripts that
-specify `rooted` keep getting rooted.
+exactly which AVD they want. With no variant, `start` refreshes the
+currently running tawc AVD when exactly one is running; if none is
+running, it starts `tawc-rootless`. If both are running, pass a variant.
 
 You can run both AVDs at once — the script resolves the right adb
 serial via `adb emu avd name`, so `start rootless` always targets the

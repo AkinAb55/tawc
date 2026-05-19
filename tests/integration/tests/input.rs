@@ -49,7 +49,8 @@ use std::time::{Duration, Instant};
 use tawc_integration::adb;
 use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
-    assert_compositor_clean, start_text_input, start_text_input_no_surrounding, TIMEOUT,
+    assert_compositor_clean, start_text_input, start_text_input_no_surrounding,
+    start_wayland_debug_text_input, TIMEOUT,
 };
 use tawc_integration::GraphicsBackend;
 
@@ -80,6 +81,7 @@ const TAP_TEXT_START_X: u32 = 85;
 /// "the target surface has been finished" — see
 /// issues/gtk4-cairo-renderer-broken.md.
 const INPUT_ENV: &str = "";
+const WAYLAND_DEBUG_ENV: &str = "";
 
 /// Reset the GTK4 buffer + preedit between scenarios so we don't pay GTK
 /// startup per scenario. Acts as a keyboard: clears any active preedit,
@@ -827,6 +829,99 @@ fn test_surroundingless_client_uses_keyboard_for_backspace() {
         "compositor sent delete_surrounding_text to a surrounding-less \
          client — this would close real-world clients (lxterminal/VTE) \
          on receipt"
+    );
+
+    app.stop().expect("debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// Toolkitless replacement-path smoke test: text-input-v3 commit_string,
+/// raw Backspace key event, and IME-style deleteSurroundingText all update
+/// the client's own edit buffer. This covers the basic GTK scenario without
+/// depending on GTK's text widget behaviour.
+#[test]
+fn test_wayland_input_basic_typing_and_delete() {
+    let mut app =
+        start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("hello world").expect("commit 'hello world'");
+    app.wait_for_text("hello world", TIMEOUT)
+        .expect("text 'hello world'");
+
+    adb::ic_send_key_event(adb::KEYCODE_DEL).expect("backspace");
+    app.wait_for_text("hello worl", TIMEOUT)
+        .expect("'hello worl' after backspace");
+
+    adb::ic_commit_text("d").expect("commit 'd'");
+    app.wait_for_text("hello world", TIMEOUT).expect("restored");
+
+    adb::ic_delete_surrounding_text(5, 0).expect("delete_surrounding");
+    app.wait_for_text("hello ", TIMEOUT)
+        .expect("'hello ' after delete_surrounding(5, 0)");
+
+    app.stop().expect("debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// The new toolkitless app exposes preedit directly, so the test can assert
+/// that composing text stays out of the committed buffer until finish.
+#[test]
+fn test_wayland_input_compose_lifecycle() {
+    let mut app =
+        start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("hello ").expect("commit 'hello '");
+    app.wait_for_text("hello ", TIMEOUT).expect("'hello '");
+
+    for prefix in ["w", "wo", "wor", "worl", "world"] {
+        adb::ic_set_composing_text(prefix).expect("setComposingText");
+        app.wait_for_preedit(prefix, TIMEOUT)
+            .unwrap_or_else(|e| panic!("preedit not '{}': {}", prefix, e));
+        assert_eq!(
+            app.last_text().as_deref().unwrap_or(""),
+            "hello ",
+            "preedit '{}' leaked into committed text",
+            prefix
+        );
+    }
+
+    adb::ic_finish_composing().expect("finishComposingText");
+    app.wait_for_text("hello world", TIMEOUT)
+        .expect("'hello world' after finishComposingText");
+    app.wait_for_preedit("", TIMEOUT)
+        .expect("preedit cleared after finishComposingText");
+
+    app.stop().expect("debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// Replacement-on-commit without GTK in the loop: a composing-region commit
+/// should delete the marked client text, then insert the replacement.
+#[test]
+fn test_wayland_input_commit_replaces_composing_region() {
+    let mut app =
+        start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("hello").expect("commit 'hello'");
+    app.wait_for_text("hello", TIMEOUT).expect("'hello'");
+    thread::sleep(Duration::from_millis(200));
+
+    adb::ic_set_composing_region(0, 5).expect("ic_set_composing_region");
+    adb::ic_commit_text("HEY").expect("ic_commit_text 'HEY'");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        last = app.last_text().unwrap_or_default();
+        if last == "HEY" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        last, "HEY",
+        "composing-region replacement produced {:?}",
+        last
     );
 
     app.stop().expect("debug app crashed or failed to stop cleanly");

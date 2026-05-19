@@ -9,7 +9,8 @@
 #   rootless  -> AVD 'tawc-rootless'  (stock; for testing tawcroot/proot
 #                                      install methods on a non-rooted image)
 #
-# `start` with no variant uses the current default (rooted today).
+# `start` with no variant refreshes the currently running tawc AVD when
+# exactly one is running. If none is running, it starts rootless.
 # Override the AVD name with TAWC_AVD=<name>.
 #
 # Usage:
@@ -93,15 +94,45 @@ serial_for_avd() {
 }
 
 cmd_start() {
-    # First positional is an optional variant name. Default: rooted.
-    local variant=rooted
+    # First positional is an optional variant name. With no variant, use
+    # the running tawc AVD if there is exactly one; otherwise start the
+    # rootless AVD, which matches tawcroot's normal no-root path.
+    local variant=""
     if [ "$#" -ge 1 ]; then
         case "$1" in
             -*) ;;  # leave for option parsing below
             *)  variant=$1; shift ;;
         esac
     fi
-    resolve_variant "$variant"
+    if [ -z "$variant" ]; then
+        if [ -n "${TAWC_AVD:-}" ]; then
+            AVD_NAME="$TAWC_AVD"
+            ROOTED=0
+        else
+            local running=()
+            local avd
+            for avd in tawc-rooted tawc-rootless; do
+                [ -n "$(running_pid "$avd")" ] && running+=("$avd")
+            done
+            case "${#running[@]}" in
+                0) variant=rootless ;;
+                1)
+                    case "${running[0]}" in
+                        tawc-rooted) variant=rooted ;;
+                        tawc-rootless) variant=rootless ;;
+                        *) AVD_NAME="${running[0]}"; ROOTED=0 ;;
+                    esac
+                    ;;
+                *)
+                    echo "ERROR: multiple tawc AVDs are running; pass rooted or rootless explicitly." >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+    fi
+    if [ -n "$variant" ]; then
+        resolve_variant "$variant"
+    fi
 
     [ -x "$EMU" ] || { echo "ERROR: emulator not found at $EMU (set ANDROID_HOME?)" >&2; exit 1; }
     [ -d "$HOME/.android/avd/$AVD_NAME.avd" ] || {

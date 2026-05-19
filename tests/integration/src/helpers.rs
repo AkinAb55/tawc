@@ -33,6 +33,15 @@ pub fn ensure_gtk4_debug_app() -> String {
         .clone()
 }
 
+/// Build/install the toolkitless Wayland debug app inside the chroot
+/// if needed and return the path to the binary. Memoized per test binary.
+pub fn ensure_wayland_debug_app() -> String {
+    require_compositor();
+    static BIN: OnceLock<String> = OnceLock::new();
+    BIN.get_or_init(|| rootfs::ensure_wayland_debug_app().expect("wayland debug app build"))
+        .clone()
+}
+
 /// Wait until the compositor reports that the Android keyboard has been shown,
 /// meaning at least one client has enabled text input. Polls the `tawc` logcat
 /// tag for the `onShowKeyboard` message emitted by NativeBridge.
@@ -107,6 +116,22 @@ pub fn start_text_input_no_surrounding(backend: GraphicsBackend, env: &str) -> D
     let app = DebugApp::start(backend, &binary, "text-input-no-surrounding", env)
         .expect("Failed to start debug app");
     app.wait_ready().expect("Debug app did not become ready");
+    wait_for_keyboard_shown(TIMEOUT);
+    app
+}
+
+/// Start the toolkitless Wayland debug app's text-input mode and wait
+/// until text-input-v3 is enabled. This app uses plain libwayland + SHM and
+/// owns its edit buffer, so it is faster to launch than GTK and gives tests
+/// full control over text/cursor behaviour.
+pub fn start_wayland_debug_text_input(backend: GraphicsBackend, env: &str) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    adb::enable_test_input().expect("enable-test-input action");
+    let app = DebugApp::start(backend, &binary, "text-input", env)
+        .expect("Failed to start wayland debug app");
+    app.wait_ready()
+        .expect("Wayland debug app did not become ready");
     wait_for_keyboard_shown(TIMEOUT);
     app
 }

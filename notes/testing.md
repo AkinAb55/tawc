@@ -132,7 +132,7 @@ Prerequisites: a phone (or emulator) connected via adb, the tawc app
 installed, an in-app distro installed (see [installation.md](installation.md)),
 and the test suite's chroot packages **and binaries** installed by
 `scripts/install-test-deps.sh`. That script installs the runtime
-package set (gtk3/gtk4/weston/mesa-utils/vulkan-tools/…) plus a C
+package set (gtk3/gtk4/wayland/cairo/weston/mesa-utils/vulkan-tools/…) plus a C
 toolchain, then compiles every in-rootfs test program from
 `tests/apps/<name>/` into `/tmp/<name>/<name>` inside the rootfs.
 **Re-run install-test-deps after editing any `tests/apps/<name>/*`
@@ -142,6 +142,9 @@ unique install if there's only one, otherwise pin via
 `TAWC_INSTALL_ID=<id>`. Some modules have additional prerequisites (e.g.
 libhybris on a real device for the GPU-rendering tests); see each
 module's docstring.
+`wayland-debug-app` is deliberately fail-fast test code: unsupported
+protocol state, missing globals, truncation, and internal invariant
+failures abort the process instead of being tolerated.
 
 ### Test Input Mechanism
 
@@ -169,7 +172,7 @@ Host (cargo test)                    Phone
   │                                    │ (test programs already compiled
   │                                    │  by install-test-deps; the
   │                                    │  harness only checks they exist)
-  ├─ adb shell (start client) ─────────┤──→ gtk4-debug-app  /  firefox  /  …
+  ├─ adb shell (start client) ─────────┤──→ gtk4-debug-app  /  wayland-debug-app  /  …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
   │                                    │
   ├─ tawc-exec --action ic-commit-text ┤──→ ExecBroker / InputActions
@@ -192,8 +195,8 @@ Host (cargo test)                    Phone
 ### Key Modules
 
 - **`adb.rs`**: Shell commands, chroot execution, broker-action-based input injection (`input_text`, `ic_commit_text`, `enable_test_input`, …; all routed through `tawc-exec --action`)
-- **`rootfs.rs`**: `ensure_debug_app` / `ensure_tawc_dri_test` /
-  `ensure_eglx11_test` — each one just probes for `/tmp/<name>/<name>`
+- **`rootfs.rs`**: `ensure_debug_app` / `ensure_wayland_debug_app` /
+  `ensure_tawc_dri_test` / `ensure_eglx11_test` — each one just probes for `/tmp/<name>/<name>`
   inside the rootfs and returns its path, errorring with a pointer at
   `scripts/install-test-deps.sh` if the binary is missing. Tests do
   **not** compile anything; they also do not install chroot packages.
@@ -208,8 +211,8 @@ Host (cargo test)                    Phone
   user's UI pick never leaks in.
   - `require_compositor`, `assert_compositor_clean`, `saw_ahb_import`,
     `saw_shm_import` — observation primitives.
-  - `start_text_input` / `start_text_input_no_surrounding` — for
-    `input::`.
+  - `start_text_input` / `start_text_input_no_surrounding` /
+    `start_wayland_debug_text_input` — for `input::`.
   - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
     until the client has committed its first frame regardless of
     buffer type.

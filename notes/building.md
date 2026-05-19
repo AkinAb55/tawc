@@ -44,6 +44,7 @@ and launch as documented in AGENTS.md's Common Commands.
 | Build basics | `base-devel`                                        | `build-essential pkg-config`                         |
 | Meson + Ninja (libxkbcommon) | `meson ninja`                            | `meson ninja-build`                                  |
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev wayland-protocols`                   |
+| Test rootfs Wayland/Cairo app deps (`install-test-deps`) | `wayland wayland-protocols cairo` | `libwayland-dev wayland-protocols libcairo2-dev` |
 | Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool`                          |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
 | `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |

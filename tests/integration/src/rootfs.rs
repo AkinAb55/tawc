@@ -33,6 +33,11 @@ pub fn ensure_debug_app() -> io::Result<String> {
     check_rootfs_app("gtk4-debug-app")
 }
 
+/// `wayland-debug-app` — toolkitless Wayland protocol test driver.
+pub fn ensure_wayland_debug_app() -> io::Result<String> {
+    check_rootfs_app("wayland-debug-app")
+}
+
 /// `tawc-dri-test` — TAWC-DRI Phase 1 round-trip client.
 pub fn ensure_tawc_dri_test() -> io::Result<String> {
     check_rootfs_app("tawc-dri-test")

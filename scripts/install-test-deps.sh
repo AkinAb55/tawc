@@ -39,7 +39,7 @@ case "$DISTRO_KEY" in
         PKGS=(
             # Test-app build chain (gtk4-debug-app, tawc-dri-test,
             # eglx11-test compiled by the build phase below).
-            gcc gtk4 pkg-config
+            gcc gtk4 pkg-config wayland wayland-protocols cairo
             # apps:: tests — gtk3-demos provides gtk3-demo-application,
             # gtk4-demos provides gtk4-widget-factory; firefox + supertuxkart
             # are real-app tests on hardware buffers.
@@ -100,7 +100,7 @@ case "$DISTRO_KEY" in
             # `gcc` explicitly above; on Void the meta is the idiomatic
             # way to pull the C toolchain.
             base-devel
-            gtk4 gtk4-devel pkg-config
+            gtk4 gtk4-devel pkg-config wayland-devel wayland-protocols cairo-devel
             gtk+3 gtk+3-devel gtk+3-demo gtk4-demo firefox supertuxkart
             glxinfo weston Vulkan-Tools
             xclock
@@ -226,7 +226,7 @@ build_libhybris_tls_repro_helper() {
 # (`tests/integration/tests/apps.rs:9`,
 #  `tests/integration/tests/libhybris.rs`).
 HOST_ARCH=$("$TAWC_EXEC" /system/bin/uname -m | tr -d '\r\n')
-APPS=(gtk4-debug-app eglx11-test)
+APPS=(gtk4-debug-app wayland-debug-app eglx11-test)
 if [ "$HOST_ARCH" = "aarch64" ]; then
     APPS+=(tawc-dri-test libhybris-tls-repro)
 else
