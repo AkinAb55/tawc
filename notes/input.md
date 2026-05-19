@@ -14,8 +14,14 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
 - `event_loop.rs` has a calloop channel source that converts `TouchEvent` into Smithay
   `DownEvent`/`MotionEvent`/`UpEvent` and calls `touch.down()`/`.motion()`/`.up()` +
   `.frame()`. Events are flushed immediately to minimize latency.
-- Coordinates arrive in physical pixels from Android and are divided by the scale factor
-  (2) to get logical Wayland coordinates.
+- Coordinates arrive in physical pixels from Android and are divided by the current
+  output scale to get logical Wayland coordinates.
+- Touch-down hit-tests the host's toplevel, subsurface, and popup trees in draw
+  order. A surface with an explicit `wl_surface.set_input_region` only receives
+  the touch if the local point is inside that region; `NULL` input region keeps
+  the Wayland default of the whole surface. This matters for Firefox/WebRender:
+  visible render-only child surfaces may use an empty input region, so the touch
+  must fall through to the browser toplevel.
 - Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
 - The seat advertises pointer, keyboard, and touch capabilities. Keyboard capability
   is required for Firefox to enable text input (see text-input.md).
@@ -31,9 +37,6 @@ processes `GDK_TOUCH_BEGIN` directly, and GDK's Wayland backend sets `emulating_
 on the primary touch which synthesizes crossing events for child widget routing. No server-side
 touch-to-pointer emulation is needed. When debugging touch, check coordinates carefully — the
 GTK widget tree only routes events to children whose GdkWindow allocation contains the hit point.
-
-**Known issues:**
-- Focus is always the first alive toplevel (no multi-window focus management yet).
 
 ## Simulating Touch via adb
 

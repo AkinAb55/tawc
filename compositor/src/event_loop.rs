@@ -180,11 +180,24 @@ fn touch_focus_at(
     hits.into_iter().rev().find_map(|hit| {
         let within_x = location.x >= hit.x as f64 && location.x < (hit.x + hit.w) as f64;
         let within_y = location.y >= hit.y as f64 && location.y < (hit.y + hit.h) as f64;
-        if within_x && within_y {
-            Some((hit.surface, Point::from((hit.x as f64, hit.y as f64))))
+        let origin = Point::from((hit.x as f64, hit.y as f64));
+        if within_x && within_y && surface_accepts_touch_at(&hit.surface, location - origin) {
+            Some((hit.surface, origin))
         } else {
             None
         }
+    })
+}
+
+fn surface_accepts_touch_at(surface: &WlSurface, local: Point<f64, Logical>) -> bool {
+    with_states(surface, |states| {
+        let mut guard = states.cached_state.get::<SurfaceAttributes>();
+        let attrs = guard.current();
+        attrs
+            .input_region
+            .as_ref()
+            .map(|region| region.contains(local.to_i32_round()))
+            .unwrap_or(true)
     })
 }
 

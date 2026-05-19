@@ -225,6 +225,7 @@ struct app {
     int dynamic_size;
     int report_scale;
     int scene_kind;
+    int scene_child_input_empty;
     int scene_child_created;
     int scene_child_ready;
     int child_x;
@@ -263,6 +264,7 @@ struct wayland_mode {
     int dynamic_size;
     int report_scale;
     int scene_kind;
+    int scene_child_input_empty;
 };
 
 static struct app *signal_app;
@@ -1017,6 +1019,13 @@ static void create_scene_child(struct app *app)
     app->child_surface = wl_compositor_create_surface(app->compositor);
     require_true(app->child_surface != NULL,
                  "wl_compositor_create_surface child returned NULL");
+    if (app->scene_child_input_empty) {
+        struct wl_region *region = wl_compositor_create_region(app->compositor);
+        require_true(region != NULL,
+                     "wl_compositor_create_region child input returned NULL");
+        wl_surface_set_input_region(app->child_surface, region);
+        wl_region_destroy(region);
+    }
 
     if (app->scene_kind == SCENE_SUBSURFACE) {
         app->child_subsurface = wl_subcompositor_get_subsurface(
@@ -1619,6 +1628,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->dynamic_size = mode->dynamic_size;
     app->report_scale = mode->report_scale;
     app->scene_kind = mode->scene_kind;
+    app->scene_child_input_empty = mode->scene_child_input_empty;
     app->win_w = WIN_W;
     app->win_h = WIN_H;
     app->display = wl_display_connect(NULL);
@@ -1917,6 +1927,25 @@ static int cmd_subsurface(int argc, char **argv)
     return run_scene_command(&mode);
 }
 
+static int cmd_subsurface_input_empty(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland subsurface input-empty debug",
+        .app_id = "wayland-debug-app-subsurface-input-empty",
+        .use_text_input = 0,
+        .editable = 0,
+        .provide_surrounding = 0,
+        .fullscreen = 1,
+        .dynamic_size = 1,
+        .scene_kind = SCENE_SUBSURFACE,
+        .scene_child_input_empty = 1,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
 static int cmd_popup(int argc, char **argv)
 {
     static const struct wayland_mode mode = {
@@ -1952,6 +1981,8 @@ static const struct command commands[] = {
     { "scale", "Report fractional scale changes", cmd_scale },
     { "subsurface", "Fullscreen toplevel with a touchable subsurface",
       cmd_subsurface },
+    { "subsurface-input-empty",
+      "Fullscreen toplevel with a non-input subsurface", cmd_subsurface_input_empty },
     { "popup", "Fullscreen toplevel with a touchable xdg_popup", cmd_popup },
     { NULL, NULL, NULL },
 };

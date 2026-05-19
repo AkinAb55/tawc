@@ -51,7 +51,8 @@ use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
     assert_compositor_clean, start_text_input, start_text_input_no_surrounding,
     start_wayland_debug_popup, start_wayland_debug_subsurface, start_wayland_debug_text_input,
-    start_wayland_debug_text_input_no_surrounding, start_wayland_debug_touch, TIMEOUT,
+    start_wayland_debug_subsurface_input_empty, start_wayland_debug_text_input_no_surrounding,
+    start_wayland_debug_touch, TIMEOUT,
 };
 use tawc_integration::GraphicsBackend;
 
@@ -888,6 +889,14 @@ fn with_wayland_subsurface(run: impl FnOnce(&DebugApp)) {
     assert_compositor_clean();
 }
 
+fn with_wayland_subsurface_input_empty(run: impl FnOnce(&DebugApp)) {
+    let mut app = start_wayland_debug_subsurface_input_empty(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    run(&app);
+    app.stop()
+        .expect("debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
 fn with_wayland_popup(run: impl FnOnce(&DebugApp)) {
     let mut app = start_wayland_debug_popup(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
     run(&app);
@@ -1246,6 +1255,18 @@ fn test_wayland_touch_subsurface_tap() {
         app.wait_for_tag_value("SURFACE_READY", "subsurface", TIMEOUT)
             .expect("subsurface ready");
         assert_surface_tap_delivered(app, "subsurface");
+    });
+}
+
+/// Render-only subsurfaces can be visible but set an empty input region.
+/// Firefox/WebRender uses that shape: the child surface must not steal the
+/// touch from the browser toplevel.
+#[test]
+fn test_wayland_touch_ignores_input_empty_subsurface() {
+    with_wayland_subsurface_input_empty(|app| {
+        app.wait_for_tag_value("SURFACE_READY", "subsurface", TIMEOUT)
+            .expect("subsurface ready");
+        assert_surface_tap_delivered(app, "toplevel");
     });
 }
 

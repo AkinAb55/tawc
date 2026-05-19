@@ -188,6 +188,20 @@ pub fn start_wayland_debug_subsurface(backend: GraphicsBackend, env: &str) -> De
     app
 }
 
+/// Start wayland-debug-app's subsurface scene with the child input region empty.
+pub fn start_wayland_debug_subsurface_input_empty(
+    backend: GraphicsBackend,
+    env: &str,
+) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(backend, &binary, "subsurface-input-empty", env)
+        .expect("Failed to start wayland input-empty subsurface debug app");
+    app.wait_ready()
+        .expect("Wayland input-empty subsurface debug app did not become ready");
+    app
+}
+
 /// Start wayland-debug-app's xdg_popup touch scene.
 pub fn start_wayland_debug_popup(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
