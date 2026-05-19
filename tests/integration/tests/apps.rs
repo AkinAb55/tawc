@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use tawc_integration::helpers::{
-    assert_compositor_clean, launch_and_wait_for_toplevel, TIMEOUT,
+    assert_compositor_clean, launch_and_wait_for_toplevel, wait_for_keyboard_shown, TIMEOUT,
 };
 use tawc_integration::{adb, compositor, GraphicsBackend};
 
@@ -28,6 +28,49 @@ const FIREFOX_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const STK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const LXTERMINAL_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const LXTERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+const GTK_WIDGET_FACTORY_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+// Physical coordinates inside a GtkEntry on gtk4-widget-factory's first page.
+// The stock app opens on page 1, whose first column contains editable entries
+// near the upper left. Tapping this point focuses one of those GtkEntry widgets
+// and makes GTK enable text-input-v3.
+const GTK_WIDGET_FACTORY_ENTRY_X: u32 = 170;
+const GTK_WIDGET_FACTORY_ENTRY_Y: u32 = 220;
+
+fn assert_broker_ok(output: std::process::Output, action: &str) {
+    assert!(
+        output.status.success(),
+        "{action} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn ctrl_key(keycode: u32) {
+    assert_broker_ok(
+        adb::ic_send_modified_key_event(keycode, true, false, false)
+            .unwrap_or_else(|e| panic!("Ctrl key action failed: {e}")),
+        "ic-send-modified-key-event",
+    );
+    std::thread::sleep(Duration::from_millis(150));
+}
+
+fn wait_for_android_clipboard(expected: &str, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let got = adb::clipboard_get_text().expect("get Android clipboard");
+        if got == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Android clipboard did not become {:?}; last={:?}",
+            expected,
+            got
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
 
 /// Firefox launches, maps a toplevel, and the compositor sees a client.
 /// Buffer-path coverage lives in `hybris::test_firefox_renders_via_ahb` and
@@ -144,5 +187,51 @@ fn test_lxterminal_input_and_exit() {
     // processes — discard it. Drop tears down the lingering local adb
     // shell wrapper.
     let _ = term.stop();
+    assert_compositor_clean();
+}
+
+/// The GTK debug app gives us protocol-level assertions; this is the
+/// stock GTK4 app smoke for the same user-facing path. It drives a real
+/// `gtk4-widget-factory` GtkEntry:
+///   - Android clipboard -> Wayland selection -> GTK paste (`Ctrl+V`)
+///   - Android IC text input and editing inside GTK
+///   - GTK copy (`Ctrl+C`) -> Wayland selection -> Android clipboard
+#[test]
+fn test_gtk4_widget_factory_copy_paste_and_text_input() {
+    let paste_text = "gtk4 widget factory paste";
+    let expected = "gtk4 widget factory paste edited";
+
+    adb::logcat_clear().expect("Failed to clear logcat");
+    adb::enable_test_input().expect("enable-test-input action");
+    adb::clipboard_set_text(paste_text).expect("set Android clipboard");
+
+    let mut factory = launch_and_wait_for_toplevel(
+        BACKEND,
+        "gtk4-widget-factory",
+        "gtk4-widget-factory",
+        GTK_WIDGET_FACTORY_LAUNCH_TIMEOUT,
+    );
+
+    adb::input_tap(GTK_WIDGET_FACTORY_ENTRY_X, GTK_WIDGET_FACTORY_ENTRY_Y)
+        .expect("tap gtk4-widget-factory entry");
+    wait_for_keyboard_shown(TIMEOUT);
+
+    ctrl_key(adb::KEYCODE_A);
+    ctrl_key(adb::KEYCODE_V);
+
+    adb::ic_commit_text(" input").expect("commit GTK input text");
+    std::thread::sleep(Duration::from_millis(250));
+    adb::ic_delete_surrounding_text(5, 0).expect("delete GTK input text");
+    std::thread::sleep(Duration::from_millis(250));
+    adb::ic_commit_text("edited").expect("commit GTK edited text");
+    std::thread::sleep(Duration::from_millis(250));
+
+    ctrl_key(adb::KEYCODE_A);
+    ctrl_key(adb::KEYCODE_C);
+    wait_for_android_clipboard(expected, TIMEOUT);
+
+    factory
+        .stop()
+        .expect("gtk4-widget-factory failed to stop cleanly");
     assert_compositor_clean();
 }

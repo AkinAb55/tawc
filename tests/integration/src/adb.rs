@@ -239,6 +239,30 @@ pub fn ic_send_key_event(keycode: u32) -> io::Result<Output> {
     broker_action("ic-send-key-event", &[("keycode", &kc)])
 }
 
+/// Call `TawcInputConnection.sendKeyEvent` with a modifier meta-state.
+/// Used for real GTK shortcuts such as Ctrl+A/C/V, where the focused
+/// Wayland client must see the modifier held while the key is delivered.
+pub fn ic_send_modified_key_event(
+    keycode: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> io::Result<Output> {
+    let kc = keycode.to_string();
+    let ctrl = if ctrl { "true" } else { "false" };
+    let alt = if alt { "true" } else { "false" };
+    let shift = if shift { "true" } else { "false" };
+    broker_action(
+        "ic-send-modified-key-event",
+        &[
+            ("keycode", &kc),
+            ("ctrl", ctrl),
+            ("alt", alt),
+            ("shift", shift),
+        ],
+    )
+}
+
 /// Set Android's real ClipboardManager text through tawc's debug broker.
 /// This is intentionally app-side rather than `adb shell` clipboard poking:
 /// Android exposes clipboard APIs to the foreground app, while shell access
@@ -327,3 +351,6 @@ pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_FORWARD_DEL: u32 = 112; // Delete (forward delete)
 pub const KEYCODE_ENTER: u32 = 66;
 pub const KEYCODE_TAB: u32 = 61;
+pub const KEYCODE_A: u32 = 29;
+pub const KEYCODE_C: u32 = 31;
+pub const KEYCODE_V: u32 = 50;

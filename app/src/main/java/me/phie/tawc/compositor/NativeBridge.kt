@@ -192,6 +192,11 @@ object NativeBridge {
      *  which translates the delta into Backspace / Forward-Delete key events). */
     external fun nativeSendKeyEvent(keycode: Int)
 
+    /** One half of a real key press/release pair. Used by
+     *  [TawcInputConnection.sendKeyEvent] for modified shortcuts where
+     *  the modifier has to stay down while the main key is delivered. */
+    external fun nativeSendKeyState(keycode: Int, pressed: Boolean)
+
     /** Query compositor state (logs COMPOSITOR_STATE line to logcat). */
     external fun nativeQueryState()
 

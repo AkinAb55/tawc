@@ -62,6 +62,10 @@ pub enum TextInputEvent {
     /// IC's translation of standalone `deleteSurroundingText` into
     /// Backspace presses.
     KeyPress { keycode: u32 },
+    /// Send one side of a real wl_keyboard key event. Used when Android
+    /// delivers a modified key (e.g. Ctrl+C): the modifier must remain
+    /// pressed while the main key's press+release is emitted.
+    KeyState { keycode: u32, pressed: bool },
 }
 
 /// Global sender for text input events from JNI. Replaced on compositor restart.
@@ -589,8 +593,8 @@ impl TextInputState {
                     }
                     ti.preedit_string(None, 0, 0);
                 }
-                TextInputEvent::KeyPress { .. } => {
-                    unreachable!("KeyPress handled in event_loop.rs")
+                TextInputEvent::KeyPress { .. } | TextInputEvent::KeyState { .. } => {
+                    unreachable!("keyboard events handled in event_loop.rs")
                 }
             }
 

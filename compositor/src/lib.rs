@@ -397,6 +397,24 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSendKeyEv
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSendKeyState(
+    _env: JNIEnv,
+    _class: JClass,
+    keycode: i32,
+    pressed: bool,
+) {
+    match keymap::android_to_evdev(keycode) {
+        Some(evdev) => text_input::send_text_input_event(
+            text_input::TextInputEvent::KeyState {
+                keycode: evdev,
+                pressed,
+            },
+        ),
+        None => info!("Unhandled key state: keycode={} pressed={}", keycode, pressed),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JNI: State query from Android
 // ---------------------------------------------------------------------------

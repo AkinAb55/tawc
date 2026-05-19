@@ -60,6 +60,7 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * | `ic-set-selection` | `start`, `end` | `IC.setSelection(start, end)` |
  * | `ic-delete-surrounding-text` | `before`, `after` | `IC.deleteSurroundingText(before, after)` |
  * | `ic-send-key-event` | `keycode` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))` |
+ * | `ic-send-modified-key-event` | `keycode`, `ctrl`, `alt`, `shift` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))` |
  * | `inject-touch` | `kind=tap|tap-outside-popup|drag|multitouch` | Dispatch normalized MotionEvents to the focused SurfaceView |
  *
  * Test-mode helpers:
@@ -87,6 +88,7 @@ internal object InputActions {
         ActionRegistry.register("ic-set-selection", IcSetSelectionAction)
         ActionRegistry.register("ic-delete-surrounding-text", IcDeleteSurroundingTextAction)
         ActionRegistry.register("ic-send-key-event", IcSendKeyEventAction)
+        ActionRegistry.register("ic-send-modified-key-event", IcSendModifiedKeyEventAction)
         ActionRegistry.register("inject-touch", InjectTouchAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
@@ -154,6 +156,13 @@ internal object InputActions {
         val raw = args[key] ?: return default
         return raw.toIntOrNull() ?: error("'$key' must be an integer (got '$raw')")
     }
+
+    private fun argBool(args: Map<String, String>, key: String): Boolean =
+        when (args[key]?.lowercase()) {
+            null, "", "0", "false", "no" -> false
+            "1", "true", "yes" -> true
+            else -> error("'$key' must be a boolean")
+        }
 
     // -- IC drivers ---------------------------------------------------------
 
@@ -244,6 +253,23 @@ internal object InputActions {
                 val ic = NativeBridge.activeInputConnection
                 Log.d(TAG, "InputAction ic-send-key-event $keycode (ic=${ic != null})")
                 ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keycode))
+            }
+        }
+    }
+
+    private object IcSendModifiedKeyEventAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val keycode = argInt(args, "keycode")
+                ?: return ctx.fail("ic-send-modified-key-event: --arg keycode=... required")
+            if (keycode < 0) return ctx.fail("ic-send-modified-key-event: keycode must be >= 0")
+            var metaState = 0
+            if (argBool(args, "ctrl")) metaState = metaState or KeyEvent.META_CTRL_ON
+            if (argBool(args, "alt")) metaState = metaState or KeyEvent.META_ALT_ON
+            if (argBool(args, "shift")) metaState = metaState or KeyEvent.META_SHIFT_ON
+            return withFocusedActivity(ctx) { _ ->
+                val ic = NativeBridge.activeInputConnection
+                Log.d(TAG, "InputAction ic-send-modified-key-event $keycode meta=$metaState (ic=${ic != null})")
+                ic?.sendKeyEvent(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keycode, 0, metaState))
             }
         }
     }

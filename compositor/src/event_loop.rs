@@ -481,6 +481,22 @@ pub fn run(
                     );
                 }
             }
+            TextInputEvent::KeyState { keycode, pressed } => {
+                if let Some(keyboard) = data.seat.get_keyboard() {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    let time = data.start_time.elapsed().as_millis() as u32;
+                    let keycode = Keycode::from(keycode + 8); // evdev → XKB offset
+                    let state = if pressed {
+                        KeyState::Pressed
+                    } else {
+                        KeyState::Released
+                    };
+                    keyboard.input::<(), _>(
+                        data, keycode, state, serial, time,
+                        |_, _, _| FilterResult::Forward,
+                    );
+                }
+            }
             _ => {
                 data.text_input_state.handle_android_event(evt);
             }

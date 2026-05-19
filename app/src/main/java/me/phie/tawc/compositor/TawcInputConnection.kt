@@ -237,6 +237,23 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         repeat(after) { NativeBridge.nativeSendKeyEvent(KeyEvent.KEYCODE_FORWARD_DEL) }
     }
 
+    private fun emitModifiedKey(event: KeyEvent) {
+        val modifiers = mutableListOf<Int>()
+        if (event.isCtrlPressed && event.keyCode !in setOf(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT)) {
+            modifiers += KeyEvent.KEYCODE_CTRL_LEFT
+        }
+        if (event.isAltPressed && event.keyCode !in setOf(KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT)) {
+            modifiers += KeyEvent.KEYCODE_ALT_LEFT
+        }
+        if (event.isShiftPressed && event.keyCode !in setOf(KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT)) {
+            modifiers += KeyEvent.KEYCODE_SHIFT_LEFT
+        }
+
+        modifiers.forEach { NativeBridge.nativeSendKeyState(it, true) }
+        NativeBridge.nativeSendKeyEvent(event.keyCode)
+        modifiers.asReversed().forEach { NativeBridge.nativeSendKeyState(it, false) }
+    }
+
     /**
      * If the Editable has a composing region that DOES NOT correspond to
      * the Wayland preedit (i.e. set by [setComposingRegion] — committed
@@ -303,8 +320,12 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         // Only handle key-down events to avoid double-processing
         if (event.action != KeyEvent.ACTION_DOWN) return true
 
-        Log.d(TAG, "InputConnection.sendKeyEvent: keyCode=${event.keyCode}")
-        NativeBridge.nativeSendKeyEvent(event.keyCode)
+        Log.d(TAG, "InputConnection.sendKeyEvent: keyCode=${event.keyCode} meta=${event.metaState}")
+        if (event.isCtrlPressed || event.isAltPressed || event.isShiftPressed) {
+            emitModifiedKey(event)
+        } else {
+            NativeBridge.nativeSendKeyEvent(event.keyCode)
+        }
         return true
     }
 
