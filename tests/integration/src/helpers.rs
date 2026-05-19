@@ -171,6 +171,17 @@ pub fn start_wayland_debug_popup(backend: GraphicsBackend, env: &str) -> DebugAp
     app
 }
 
+/// Start wayland-debug-app's grabbed popup switching scene.
+pub fn start_wayland_debug_popup_switch(backend: GraphicsBackend, env: &str) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(backend, &binary, "popup-switch", env)
+        .expect("Failed to start wayland popup switch debug app");
+    app.wait_ready()
+        .expect("Wayland popup switch debug app did not become ready");
+    app
+}
+
 /// True if compositor logcat shows a libhybris android_wlegl AHB import.
 pub fn saw_ahb_import(logs: &str) -> bool {
     logs.contains("wlegl: imported ANativeWindowBuffer as texture")

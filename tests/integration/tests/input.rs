@@ -52,7 +52,7 @@ use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
     assert_compositor_clean, start_wayland_debug_clipboard_copy,
     start_wayland_debug_clipboard_paste, start_wayland_debug_popup, start_wayland_debug_subsurface,
-    ensure_wayland_debug_app,
+    ensure_wayland_debug_app, start_wayland_debug_popup_switch,
     start_wayland_debug_subsurface_input_empty, start_wayland_debug_text_input,
     start_wayland_debug_text_input_no_surrounding,
     start_wayland_debug_touch, TIMEOUT,
@@ -377,6 +377,14 @@ fn with_wayland_subsurface_input_empty(run: impl FnOnce(&DebugApp)) {
 
 fn with_wayland_popup(run: impl FnOnce(&DebugApp)) {
     let mut app = start_wayland_debug_popup(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    run(&app);
+    app.stop()
+        .expect("debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+fn with_wayland_popup_switch(run: impl FnOnce(&DebugApp)) {
+    let mut app = start_wayland_debug_popup_switch(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
     run(&app);
     app.stop()
         .expect("debug app crashed or failed to stop cleanly");
@@ -807,6 +815,26 @@ fn test_touch_popup_tap() {
         inject_touch("tap-outside-popup");
         app.wait_for_tag_value("POPUP_DONE", "", TIMEOUT)
             .expect("popup dismissed after outside tap");
+    });
+}
+
+/// GTK menu bars use grabbed xdg_popups. When a tap outside the current
+/// popup opens another menu popup on the same toplevel, the compositor must
+/// dismiss the old popup through the grab path; a bare `popup_done` leaves
+/// Smithay's active-grab stack pointing at the old menu and the next
+/// `xdg_popup.grab` is rejected as not-topmost.
+#[test]
+fn test_touch_grabbed_popup_switches_to_next_popup() {
+    with_wayland_popup_switch(|app| {
+        inject_touch("tap-menu-a");
+        app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
+            .expect("first grabbed popup ready");
+
+        inject_touch("tap-menu-b");
+        app.wait_for_tag_value("POPUP_DONE", "", TIMEOUT)
+            .expect("first grabbed popup dismissed before second popup");
+        app.wait_for_tag_value("SURFACE_READY", "popup2", TIMEOUT)
+            .expect("second grabbed popup ready after outside touch");
     });
 }
 

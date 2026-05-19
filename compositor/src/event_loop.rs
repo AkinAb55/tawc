@@ -17,6 +17,7 @@ use smithay::backend::input::TouchSlot;
 use smithay::backend::renderer::{buffer_type, BufferType};
 use smithay::backend::input::KeyState;
 use smithay::desktop::PopupManager;
+use smithay::desktop::PopupUngrabStrategy;
 use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
@@ -197,8 +198,36 @@ fn dismiss_host_popups_if_touch_is_outside_popup(
     data: &mut TawcState,
     activity_id: &ActivityId,
     focus: Option<&WlSurface>,
+    serial: smithay::utils::Serial,
+    time: u32,
 ) {
     if focus.is_some_and(is_xdg_popup_surface) {
+        return;
+    }
+
+    let mut dismissed_active_grab = false;
+    let mut grab_ended = false;
+    if let Some(grab) = data.active_popup_grab.as_mut() {
+        let had_active_grab = !grab.has_ended();
+        if had_active_grab {
+            let _ = grab.ungrab(PopupUngrabStrategy::All);
+            dismissed_active_grab = true;
+        }
+        grab_ended = grab.has_ended();
+    }
+    if grab_ended {
+        data.active_popup_grab = None;
+        if let Some(pointer) = data.seat.get_pointer() {
+            pointer.unset_grab(data, serial, time);
+        }
+        if let Some(keyboard) = data.seat.get_keyboard() {
+            if keyboard.is_grabbed() {
+                keyboard.unset_grab(data);
+            }
+        }
+    }
+    if dismissed_active_grab {
+        data.needs_render = true;
         return;
     }
 
@@ -344,6 +373,8 @@ pub fn run(
                     data,
                     &activity_id,
                     target.as_ref(),
+                    serial,
+                    time,
                 );
                 data.set_input_focus(target.as_ref());
                 data.text_input_state.handle_android_event(
@@ -665,6 +696,13 @@ pub fn run(
         }
 
         data.popup_manager.cleanup();
+        if data
+            .active_popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.has_ended())
+        {
+            data.active_popup_grab = None;
+        }
         data.text_input_state.cleanup();
 
         // Update keyboard and text input focus only when toplevels changed.

@@ -43,7 +43,9 @@ use smithay::wayland::selection::data_device::{
 };
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use std::os::fd::OwnedFd;
-use smithay::desktop::{find_popup_root_surface, PopupKeyboardGrab, PopupManager, PopupPointerGrab};
+use smithay::desktop::{
+    find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
+};
 use smithay::input::pointer::Focus as PointerFocusMode;
 use smithay::wayland::shell::kde::decoration::{
     KdeDecorationHandler, KdeDecorationState,
@@ -154,6 +156,10 @@ pub struct TawcState {
 
     /// Popup manager for tracking xdg_popup surfaces and their positions.
     pub popup_manager: PopupManager,
+    /// Active explicit xdg_popup grab. Touch input is not routed through
+    /// Smithay's pointer grab, so the touch outside-dismiss path uses this
+    /// to keep popup-grab bookkeeping in sync with `popup_done`.
+    pub active_popup_grab: Option<PopupGrab<Self>>,
 
     /// Output scale factor (physical pixels per logical pixel). Canonical source
     /// of truth — lib.rs sets this at startup and render.rs reads it back.
@@ -290,8 +296,9 @@ impl TawcState {
         ViewporterState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "tawc");
-        // Advertise pointer, keyboard, and touch capabilities
-        seat.add_pointer();
+        // Advertise only input devices tawc actually has. Android touch
+        // should not appear as a Wayland pointer; toolkits must use wl_touch
+        // for touchscreen interactions.
         let xkb_root = "/data/data/me.phie.tawc/files/xkb";
         std::env::set_var("XKB_CONFIG_ROOT", xkb_root);
         // Smithay falls back to writing the keymap to a tempfile under
@@ -347,6 +354,7 @@ impl TawcState {
             surface_shm: HashMap::new(),
             toplevels: Vec::new(),
             popup_manager: PopupManager::default(),
+            active_popup_grab: None,
             output_scale,
             output_logical_size,
             output_physical_size,
@@ -725,6 +733,7 @@ impl XdgShellHandler for TawcState {
                 return;
             }
         };
+        self.active_popup_grab = Some(grab.clone());
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }

@@ -281,8 +281,8 @@ internal object InputActions {
      */
     private object InjectTouchAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val kind = args["kind"] ?: return ctx.fail("inject-touch: --arg kind=tap|tap-outside-popup|drag|multitouch required")
-            if (kind !in setOf("tap", "tap-outside-popup", "drag", "multitouch")) {
+            val kind = args["kind"] ?: return ctx.fail("inject-touch: --arg kind=tap|tap-outside-popup|tap-menu-a|tap-menu-b|drag|multitouch required")
+            if (kind !in setOf("tap", "tap-outside-popup", "tap-menu-a", "tap-menu-b", "drag", "multitouch")) {
                 return ctx.fail("inject-touch: unknown kind '$kind'")
             }
             var injectError: String? = null

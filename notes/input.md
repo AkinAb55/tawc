@@ -23,8 +23,11 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
   visible render-only child surfaces may use an empty input region, so the touch
   must fall through to the browser toplevel.
 - Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
-- The seat advertises pointer, keyboard, and touch capabilities. Keyboard capability
-  is required for Firefox to enable text input (see text-input.md).
+- The seat should advertise only real input capabilities. Keyboard capability
+  is required for Firefox to enable text input (see text-input.md). Do not
+  spoof a Wayland pointer or synthesize `wl_pointer.enter`/motion from finger
+  taps just to satisfy toolkit assumptions; if real pointer hardware is added,
+  wire it as a real pointer path.
 - Touch-down moves both keyboard focus AND text-input-v3 focus to the target
   surface via `TawcState::set_input_focus` — they are conceptually one focus and
   splitting them invites drift. The focus update happens *before* delivering

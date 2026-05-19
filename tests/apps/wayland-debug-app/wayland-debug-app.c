@@ -19,6 +19,7 @@
  *   touch                       Fullscreen touch visualizer
  *   subsurface                  Fullscreen toplevel with a touchable subsurface
  *   popup                       Fullscreen toplevel with a touchable xdg_popup
+ *   popup-switch                Two touch-opened grabbed xdg_popups
  *   scale                       Report wp_fractional_scale_v1 changes
  */
 
@@ -216,6 +217,10 @@ struct app {
     struct wl_callback *child_ready_callback;
     struct xdg_surface *child_xdg_surface;
     struct xdg_popup *child_popup;
+    struct wl_surface *second_child_surface;
+    struct wl_callback *second_child_ready_callback;
+    struct xdg_surface *second_child_xdg_surface;
+    struct xdg_popup *second_child_popup;
     struct zwp_text_input_manager_v3 *text_input_manager;
     struct zwp_text_input_v3 *text_input;
     struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
@@ -245,6 +250,7 @@ struct app {
     int popup_configure_y;
     int popup_configure_w;
     int popup_configure_h;
+    int popup_switch_created;
     uint32_t last_preferred_scale;
     int win_w;
     int win_h;
@@ -265,6 +271,7 @@ enum scene_kind {
     SCENE_NONE = 0,
     SCENE_SUBSURFACE = 1,
     SCENE_POPUP = 2,
+    SCENE_POPUP_SWITCH = 3,
 };
 
 struct wayland_mode {
@@ -865,9 +872,12 @@ static const char *surface_label_for_touch(struct app *app,
     if (surface == app->child_surface) {
         if (app->scene_kind == SCENE_SUBSURFACE)
             return "subsurface";
-        if (app->scene_kind == SCENE_POPUP)
+        if (app->scene_kind == SCENE_POPUP ||
+            app->scene_kind == SCENE_POPUP_SWITCH)
             return "popup";
     }
+    if (surface == app->second_child_surface)
+        return "popup2";
     return NULL;
 }
 
@@ -898,15 +908,26 @@ static void child_ready_done(void *data, struct wl_callback *callback,
 {
     struct app *app = data;
     (void)time;
-    require_true(callback == app->child_ready_callback,
+    require_true(callback == app->child_ready_callback ||
+                 callback == app->second_child_ready_callback,
                  "ready callback for unexpected object");
+    if (callback == app->second_child_ready_callback) {
+        wl_callback_destroy(callback);
+        app->second_child_ready_callback = NULL;
+        debug_emit("SURFACE_READY", "popup2");
+        return;
+    }
+
     wl_callback_destroy(callback);
     app->child_ready_callback = NULL;
     app->scene_child_ready = 1;
-    if (app->scene_kind == SCENE_POPUP)
+    if (app->scene_kind == SCENE_POPUP ||
+        app->scene_kind == SCENE_POPUP_SWITCH)
         emit_popup_layout(app);
     debug_emit("SURFACE_READY",
-               app->scene_kind == SCENE_POPUP ? "popup" : "subsurface");
+               (app->scene_kind == SCENE_POPUP ||
+                app->scene_kind == SCENE_POPUP_SWITCH)
+                   ? "popup" : "subsurface");
     if (!app->ready_emitted) {
         app->ready_emitted = 1;
         debug_emit("READY", NULL);
@@ -1031,6 +1052,14 @@ static void attach_labeled_buffer(struct app *app, struct wl_surface *surface,
         wl_callback_add_listener(app->child_ready_callback,
                                  &child_ready_listener, app);
     }
+    if (surface == app->second_child_surface &&
+        !app->second_child_ready_callback) {
+        app->second_child_ready_callback = wl_surface_frame(surface);
+        require_true(app->second_child_ready_callback != NULL,
+                     "wl_surface_frame second child returned NULL");
+        wl_callback_add_listener(app->second_child_ready_callback,
+                                 &child_ready_listener, app);
+    }
 
     wl_surface_attach(surface, buf->buffer, 0, 0);
     wl_surface_damage_buffer(surface, 0, 0, width, height);
@@ -1100,7 +1129,9 @@ static void request_redraw(struct app *app)
     wl_surface_commit(app->surface);
     checked_flush(app->display);
 
-    if (!app->ready_emitted && app->scene_kind == SCENE_NONE) {
+    if (!app->ready_emitted &&
+        (app->scene_kind == SCENE_NONE ||
+         app->scene_kind == SCENE_POPUP_SWITCH)) {
         app->ready_emitted = 1;
         debug_emit("READY", NULL);
     }
@@ -1151,12 +1182,24 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
         checked_flush(app->display);
         return;
     }
+    if (xdg_surface == app->second_child_xdg_surface) {
+        xdg_surface_set_window_geometry(app->second_child_xdg_surface,
+                                        POPUP_SHADOW, POPUP_SHADOW,
+                                        CHILD_W, CHILD_H);
+        attach_labeled_buffer(app, app->second_child_surface,
+                              CHILD_W + POPUP_SHADOW * 2,
+                              CHILD_H + POPUP_SHADOW * 2, "popup2",
+                              0.42, 0.72, 0.96);
+        checked_flush(app->display);
+        return;
+    }
 
     require_true(xdg_surface == app->xdg_surface,
                  "configure for unexpected xdg_surface %p",
                  (void *)xdg_surface);
     app->configured = 1;
-    if (app->scene_kind == SCENE_POPUP) {
+    if (app->scene_kind == SCENE_POPUP ||
+        app->scene_kind == SCENE_POPUP_SWITCH) {
         xdg_surface_set_window_geometry(
             app->xdg_surface, POPUP_PARENT_GEOM_X, POPUP_PARENT_GEOM_Y,
             app->win_w - POPUP_PARENT_GEOM_X - POPUP_PARENT_GEOM_R,
@@ -1278,8 +1321,9 @@ static void compute_child_position(struct app *app)
 
 static void create_scene_child(struct app *app)
 {
-    if (app->scene_kind == SCENE_NONE || app->scene_child_created ||
-        !app->configured)
+    if (app->scene_kind == SCENE_NONE ||
+        app->scene_kind == SCENE_POPUP_SWITCH ||
+        app->scene_child_created || !app->configured)
         return;
 
     compute_child_position(app);
@@ -1340,6 +1384,49 @@ static void create_scene_child(struct app *app)
     }
 
     app->scene_child_created = 1;
+}
+
+static void create_switch_popup(struct app *app, int second, uint32_t serial)
+{
+    int x = (int)(app->win_w * (second ? 0.65 : 0.30)) - CHILD_W / 2;
+    int y = (int)(app->win_h * 0.25) - CHILD_H / 2;
+    x = clamp_i32(x, 0, app->win_w > CHILD_W ? app->win_w - CHILD_W : 0);
+    y = clamp_i32(y, 0, app->win_h > CHILD_H ? app->win_h - CHILD_H : 0);
+
+    struct wl_surface **surface =
+        second ? &app->second_child_surface : &app->child_surface;
+    struct xdg_surface **xdg_surface =
+        second ? &app->second_child_xdg_surface : &app->child_xdg_surface;
+    struct xdg_popup **popup =
+        second ? &app->second_child_popup : &app->child_popup;
+
+    *surface = wl_compositor_create_surface(app->compositor);
+    require_true(*surface != NULL, "wl_compositor_create_surface switch popup");
+    *xdg_surface = xdg_wm_base_get_xdg_surface(app->wm_base, *surface);
+    require_true(*xdg_surface != NULL, "xdg surface switch popup");
+    xdg_surface_add_listener(*xdg_surface, &xdg_surface_listener, app);
+
+    struct xdg_positioner *positioner =
+        xdg_wm_base_create_positioner(app->wm_base);
+    require_true(positioner != NULL, "switch popup positioner");
+    xdg_positioner_set_size(positioner, CHILD_W, CHILD_H);
+    xdg_positioner_set_anchor_rect(positioner, x - POPUP_PARENT_GEOM_X,
+                                   y - POPUP_PARENT_GEOM_Y, 1, 1);
+    xdg_positioner_set_anchor(positioner, XDG_POSITIONER_ANCHOR_TOP_LEFT);
+    xdg_positioner_set_gravity(positioner,
+                               XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+    xdg_positioner_set_constraint_adjustment(
+        positioner, XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_NONE);
+    *popup = xdg_surface_get_popup(*xdg_surface, app->xdg_surface, positioner);
+    require_true(*popup != NULL, "xdg_surface_get_popup switch popup");
+    xdg_popup_add_listener(*popup, &popup_listener, app);
+    xdg_popup_grab(*popup, app->seat, serial);
+    xdg_surface_set_window_geometry(*xdg_surface, POPUP_SHADOW,
+                                    POPUP_SHADOW, CHILD_W, CHILD_H);
+    xdg_positioner_destroy(positioner);
+    wl_surface_commit(*surface);
+    debug_emit("POPUP_OPEN_REQUEST", second ? "second" : "first");
+    checked_flush(app->display);
 }
 
 static void text_input_enter(void *data, struct zwp_text_input_v3 *text_input,
@@ -1567,12 +1654,15 @@ static void pointer_enter(void *data, struct wl_pointer *pointer,
                           wl_fixed_t surface_x, wl_fixed_t surface_y)
 {
     struct app *app = data;
+    char buf[64];
     (void)pointer;
     (void)serial;
-    (void)surface_y;
-    require_true(surface == app->surface,
-                 "pointer enter for unexpected surface %p", (void *)surface);
+    (void)surface;
     app->pointer_x = surface_x;
+    checked_snprintf(buf, sizeof(buf), "%.1f:%.1f",
+                     wl_fixed_to_double(surface_x),
+                     wl_fixed_to_double(surface_y));
+    debug_emit("POINTER_ENTER", buf);
 }
 
 static void pointer_leave(void *data, struct wl_pointer *pointer,
@@ -1589,10 +1679,14 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
                            wl_fixed_t surface_y)
 {
     struct app *app = data;
+    char buf[64];
     (void)pointer;
     (void)time;
     (void)surface_y;
     app->pointer_x = surface_x;
+    checked_snprintf(buf, sizeof(buf), "%.1f",
+                     wl_fixed_to_double(surface_x));
+    debug_emit("POINTER_MOTION", buf);
 }
 
 static void move_cursor_to_surface_x(struct app *app, wl_fixed_t surface_x)
@@ -1687,7 +1781,6 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial,
 {
     struct app *app = data;
     (void)touch;
-    (void)serial;
     (void)time;
     const char *label = surface_label_for_touch(app, surface);
     require_true(label != NULL, "touch down for unexpected surface %p",
@@ -1708,6 +1801,16 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial,
 
     if (!app->touch_debug)
         move_cursor_to_surface_x(app, x);
+
+    if (app->scene_kind == SCENE_POPUP_SWITCH && surface == app->surface) {
+        if (!app->scene_child_created) {
+            create_switch_popup(app, 0, serial);
+            app->scene_child_created = 1;
+        } else if (!app->popup_switch_created) {
+            create_switch_popup(app, 1, serial);
+            app->popup_switch_created = 1;
+        }
+    }
 }
 
 static void touch_up(void *data, struct wl_touch *touch, uint32_t serial,
@@ -1933,7 +2036,6 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
         require_true(app->subcompositor != NULL, "missing wl_subcompositor");
     require_true(app->seat != NULL, "missing wl_seat");
     require_true(app->keyboard != NULL, "wl_seat missing keyboard capability");
-    require_true(app->pointer != NULL, "wl_seat missing pointer capability");
     require_true(app->touch != NULL, "wl_seat missing touch capability");
     require_true(app->wm_base != NULL, "missing xdg_wm_base");
     if (mode->use_text_input)
@@ -2015,6 +2117,14 @@ static void teardown_wayland(struct app *app)
         wl_touch_destroy(app->touch);
     if (app->keyboard)
         wl_keyboard_destroy(app->keyboard);
+    if (app->second_child_popup)
+        xdg_popup_destroy(app->second_child_popup);
+    if (app->second_child_xdg_surface)
+        xdg_surface_destroy(app->second_child_xdg_surface);
+    if (app->second_child_ready_callback)
+        wl_callback_destroy(app->second_child_ready_callback);
+    if (app->second_child_surface)
+        wl_surface_destroy(app->second_child_surface);
     if (app->child_popup)
         xdg_popup_destroy(app->child_popup);
     if (app->child_xdg_surface)
@@ -2315,6 +2425,24 @@ static int cmd_popup(int argc, char **argv)
     return run_scene_command(&mode);
 }
 
+static int cmd_popup_switch(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland popup switch debug",
+        .app_id = "wayland-debug-app-popup-switch",
+        .use_text_input = 0,
+        .editable = 0,
+        .provide_surrounding = 0,
+        .fullscreen = 1,
+        .dynamic_size = 1,
+        .scene_kind = SCENE_POPUP_SWITCH,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
 typedef int (*command_fn)(int argc, char **argv);
 
 struct command {
@@ -2339,6 +2467,8 @@ static const struct command commands[] = {
     { "subsurface-input-empty",
       "Fullscreen toplevel with a non-input subsurface", cmd_subsurface_input_empty },
     { "popup", "Fullscreen toplevel with a touchable xdg_popup", cmd_popup },
+    { "popup-switch", "Two touch-opened grabbed xdg_popups",
+      cmd_popup_switch },
     { NULL, NULL, NULL },
 };
 
