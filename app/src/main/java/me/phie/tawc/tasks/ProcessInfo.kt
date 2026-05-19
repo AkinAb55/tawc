@@ -26,5 +26,6 @@ data class ProcessInfo(
     val orphanRootfsId: String?,
     val comm: String,
     val cmdline: String,
+    val displayCommand: String,
     val requiresSu: Boolean,
 )

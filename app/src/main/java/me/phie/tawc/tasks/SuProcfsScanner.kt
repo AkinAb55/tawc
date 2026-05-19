@@ -151,9 +151,20 @@ $cases
                 orphanRootfsId = null,
                 comm = parts[2].trim(),
                 cmdline = parts[3].trimEnd(),
+                displayCommand = binaryName(parts[3].trimEnd().ifBlank {
+                    parts[2].trim().ifBlank { "unknown command" }
+                }),
                 requiresSu = true,
             )
         }
         return out
     }
+
+    private fun binaryName(command: String): String {
+        if (command == "unknown command") return command
+        val first = command.trim().split(WHITESPACE, limit = 2).firstOrNull().orEmpty()
+        return first.substringAfterLast('/').ifBlank { "unknown command" }
+    }
+
+    private val WHITESPACE = Regex("\\s+")
 }

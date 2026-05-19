@@ -107,6 +107,7 @@ internal object AppUidProcfsScanner {
                 orphanRootfsId = matchedOrphan,
                 comm = comm,
                 cmdline = cmdline,
+                displayCommand = displayCommand(cmdline, comm, match?.commandPath),
                 requiresSu = false,
             )
         }
@@ -115,8 +116,8 @@ internal object AppUidProcfsScanner {
 
     /**
      * Installed slots beat orphan slots across all signals. Link checks
-     * are the cheap fast path; maps is only read after those miss an
-     * installed slot.
+     * are the cheap ownership path; maps gives tawcroot rows the guest
+     * executable because kernel cmdline still names the wrapper.
      */
     private fun classify(
         procEntry: String,
@@ -128,12 +129,18 @@ internal object AppUidProcfsScanner {
             readlinkOrNull("$procEntry/root"),
         )
         val linkMatch = firstRootfsMatch(paths.asSequence(), classifier)
-        if (linkMatch?.ownerInstallId != null) return linkMatch
-
         val mapsMatch = firstMapsMatch("$procEntry/maps", classifier)
-        if (mapsMatch?.ownerInstallId != null) return mapsMatch
 
-        return linkMatch ?: mapsMatch
+        if (linkMatch != null) {
+            if (mapsMatch != null &&
+                mapsMatch.ownerInstallId == linkMatch.ownerInstallId &&
+                mapsMatch.orphanRootfsId == linkMatch.orphanRootfsId
+            ) {
+                return linkMatch.copy(commandPath = mapsMatch.commandPath)
+            }
+            return linkMatch
+        }
+        return mapsMatch
     }
 
     private fun readlinkOrNull(path: String): String? = try {
@@ -163,20 +170,82 @@ internal object AppUidProcfsScanner {
         return raw.trimEnd('\u0000').replace('\u0000', ' ')
     }
 
+    private fun displayCommand(
+        cmdline: String,
+        comm: String,
+        mappedGuestPath: String?,
+    ): String {
+        val cleanWrapper = strippedTawcrootCommand(cmdline)
+        val command = when {
+            cleanWrapper.isNotBlank() -> cleanWrapper
+            isTawcrootExecChild(cmdline) -> mappedGuestPath ?: UNKNOWN_COMMAND
+            else -> cmdline.ifBlank { mappedGuestPath ?: comm.ifBlank { UNKNOWN_COMMAND } }
+        }
+        return binaryName(command)
+    }
+
+    private fun isTawcrootExecChild(cmdline: String): Boolean {
+        val args = cmdline.split(' ').filter { it.isNotEmpty() }
+        return args.size >= 3 && isTawcrootArg(args[0]) && args[1] == "--exec-child"
+    }
+
+    private fun strippedTawcrootCommand(cmdline: String): String {
+        val args = cmdline.split(' ').filter { it.isNotEmpty() }
+        val marker = args.indexOf("--")
+        if (marker < 0 || marker + 1 >= args.size) return ""
+        if (!args.take(marker).any { isTawcrootArg(it) }) return ""
+        var start = marker + 1
+        if (start + 1 < args.size && args[start].endsWith("/env") && args[start + 1] == "-i") {
+            start += 2
+            while (start < args.size && ROOTFS_ENV_ASSIGNMENT.matches(args[start])) start++
+        }
+        if (start >= args.size) return ""
+        if (start + 2 < args.size &&
+            args[start].endsWith("/bash") &&
+            args[start + 1] == "-lc"
+        ) {
+            return args.drop(start + 2).joinToString(" ")
+        }
+        return args.drop(start).joinToString(" ")
+    }
+
+    private fun isTawcrootArg(arg: String): Boolean =
+        arg == "tawcroot" || arg.endsWith("/libtawcroot.so")
+
     private fun firstMapsMatch(path: String, classifier: RootfsClassifier): RootfsMatch? = try {
         var firstOrphan: RootfsMatch? = null
+        var firstInstalled: RootfsMatch? = null
         File(path).bufferedReader().use { reader ->
             while (true) {
                 val line = reader.readLine() ?: break
                 val candidate = executableMapsPath(line) ?: continue
                 val match = classifier.match(candidate) ?: continue
-                if (match.ownerInstallId != null) return match
+                if (match.ownerInstallId != null) {
+                    if (isPrimaryExecutablePath(match.commandPath)) return match
+                    if (firstInstalled == null) firstInstalled = match
+                    continue
+                }
+                if (isPrimaryExecutablePath(match.commandPath)) return match
                 if (firstOrphan == null) firstOrphan = match
             }
         }
-        firstOrphan
+        firstInstalled ?: firstOrphan
     } catch (_: Throwable) {
         null
+    }
+
+    private fun isPrimaryExecutablePath(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val name = path.substringAfterLast('/')
+        if (name.startsWith("ld-") || name.startsWith("ld-linux")) return false
+        if (name.endsWith(".so") || ".so." in name) return false
+        return true
+    }
+
+    private fun binaryName(command: String): String {
+        if (command == UNKNOWN_COMMAND) return command
+        val first = command.trim().split(WHITESPACE, limit = 2).firstOrNull().orEmpty()
+        return first.substringAfterLast('/').ifBlank { UNKNOWN_COMMAND }
     }
 
     private fun executableMapsPath(line: String): String? {
@@ -209,7 +278,11 @@ internal object AppUidProcfsScanner {
 
     private data class RootfsPrefix(val rootfs: String, val id: String)
 
-    private data class RootfsMatch(val ownerInstallId: String?, val orphanRootfsId: String?)
+    private data class RootfsMatch(
+        val ownerInstallId: String?,
+        val orphanRootfsId: String?,
+        val commandPath: String?,
+    )
 
     private class RootfsClassifier(
         private val distrosParent: String?,
@@ -218,23 +291,21 @@ internal object AppUidProcfsScanner {
     ) {
         fun match(rawPath: String): RootfsMatch? {
             val path = stripDeletedSuffix(rawPath)
-            matchDistrosSlot(path)?.let { slot ->
-                return if (slot in knownIds) {
-                    RootfsMatch(ownerInstallId = slot, orphanRootfsId = null)
-                } else {
-                    RootfsMatch(ownerInstallId = null, orphanRootfsId = slot)
-                }
-            }
+            matchDistrosSlot(path)?.let { return it }
 
             for (install in scopedInstalls) {
                 if (pathInRootfs(path, install.rootfs)) {
-                    return RootfsMatch(ownerInstallId = install.id, orphanRootfsId = null)
+                    return RootfsMatch(
+                        ownerInstallId = install.id,
+                        orphanRootfsId = null,
+                        commandPath = guestPathForRootfsPath(path, install.rootfs),
+                    )
                 }
             }
             return null
         }
 
-        private fun matchDistrosSlot(path: String): String? {
+        private fun matchDistrosSlot(path: String): RootfsMatch? {
             val parent = distrosParent ?: return null
             val prefix = "$parent/"
             if (!path.startsWith(prefix)) return null
@@ -243,12 +314,37 @@ internal object AppUidProcfsScanner {
             if (slotEnd <= 0) return null
             val afterSlot = rest.substring(slotEnd + 1)
             if (afterSlot != "rootfs" && !afterSlot.startsWith("rootfs/")) return null
+            val commandPath = when {
+                afterSlot == "rootfs" -> "/"
+                else -> "/" + afterSlot.removePrefix("rootfs/")
+            }
             return rest.substring(0, slotEnd)
+                .let { slot ->
+                    if (slot in knownIds) {
+                        RootfsMatch(
+                            ownerInstallId = slot,
+                            orphanRootfsId = null,
+                            commandPath = commandPath,
+                        )
+                    } else {
+                        RootfsMatch(
+                            ownerInstallId = null,
+                            orphanRootfsId = slot,
+                            commandPath = commandPath,
+                        )
+                    }
+                }
         }
+
+        private fun guestPathForRootfsPath(path: String, rootfs: String): String =
+            if (path == rootfs) "/" else "/" + path.removePrefix("$rootfs/")
     }
 
     /** See [scan]. */
     data class OrphanPattern(val parentPath: String, val knownIds: Set<String>)
 
     private val MAPS_FIELD_SPLIT = Regex("\\s+")
+    private val WHITESPACE = Regex("\\s+")
+    private val ROOTFS_ENV_ASSIGNMENT = Regex("[A-Za-z_][A-Za-z0-9_]*=.*")
+    private const val UNKNOWN_COMMAND = "unknown command"
 }

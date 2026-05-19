@@ -190,25 +190,21 @@ class TaskManagerActivity : AppCompatActivity() {
         }
         labelColumn.addView(
             TextView(this@TaskManagerActivity).apply {
-                text = "${p.pid}  ${p.comm}"
+                text = p.displayCommand.ifBlank { "unknown command" }
                 textSize = 15f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
             },
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
         )
-        // Skip the second line when cmdline adds nothing over comm,
-        // otherwise Stop buttons render at uneven heights across rows.
-        if (p.cmdline.isNotBlank() && p.cmdline != p.comm) {
-            labelColumn.addView(
-                TextView(this@TaskManagerActivity).apply {
-                    text = p.cmdline
-                    textSize = 12f
-                    alpha = 0.7f
-                    maxLines = 2
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
-            )
-        }
+        labelColumn.addView(
+            TextView(this@TaskManagerActivity).apply {
+                text = p.pid.toString()
+                textSize = 12f
+                alpha = 0.7f
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
         row.addView(labelColumn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
         val stop = buildStopControl(p)
