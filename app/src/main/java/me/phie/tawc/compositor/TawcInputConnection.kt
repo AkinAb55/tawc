@@ -77,17 +77,12 @@ import android.util.Log
  * is to skip the delete and let `super.commitText` update the Editable;
  * the next round-trip from the client reconciles the buffer.
  *
- * `lastSyncedCursor` does NOT catch the case where the Wayland buffer's
- * cursor has moved without our model knowing — for instance after we sent
- * a `commit_string("\n")` whose effect GTK doesn't include in the next
- * `set_surrounding_text` (it reports the previous line as context with
- * cursor at end-of-line, hiding the trailing newline). Editable cursor
- * and `lastSyncedCursor` both say 5; the actual wire cursor is at 6.
- * For OpenBoard's per-Enter "re-commit the previous word" pattern that
- * relies on this — `setComposingRegion(0, N)` + `commitText(word, 1)` +
- * `commitText("\n", 1)` — `commitText` short-circuits when the new text
- * equals the marked region: the buffer already contains those bytes, so
- * no wire `delete_surrounding_text` is needed (and would be wrong).
+ * `wireCursor` tracks cursor movement caused by our outbound operations
+ * even when the next client `set_surrounding_text` omits that movement —
+ * for instance GTK reporting the previous line while hiding trailing
+ * newlines. Standalone `deleteSurroundingText` uses `wireCursor` so its
+ * Backspace / Forward-Delete key counts land at the client's cursor, not
+ * at Android's possibly stale Editable selection.
  *
  * `BaseInputConnection(view, true)` (`fullEditor=true`) means
  * `mFallbackMode=false`, so `sendCurrentText()` is a no-op — calling
@@ -115,6 +110,24 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
      * the class-level "Cursor synchronisation" docs.
      */
     private var lastSyncedCursor: Int = 0
+
+    /**
+     * Best-effort UTF-16 cursor position in the focused Wayland client's
+     * committed buffer. Reset from [updateFromCompositor], then advanced by
+     * outbound commits/deletes that may not be reflected in the next
+     * surrounding-text report.
+     */
+    private var wireCursor: Int = 0
+
+    /** UTF-16 length of the current Wayland preedit overlay, if any. */
+    private var activePreeditUtf16Length: Int = 0
+
+    /**
+     * Set after we commit a trailing newline. Some clients echo that change
+     * with full surrounding text but a cursor before the newline run; keep our
+     * predicted wire cursor for that one echo.
+     */
+    private var pendingTrailingNewlineCommit: Boolean = false
 
     init {
         // Cache as the active IC so reverse-JNI updates and dev IC
@@ -169,6 +182,9 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         // (Standalone deleteSurroundingText takes the [emitKeys] path
         // instead — see its override below.)
         NativeBridge.nativeCommitText(str, before, after)
+        wireCursor = (wireCursor - before).coerceAtLeast(0) + str.length
+        activePreeditUtf16Length = 0
+        pendingTrailingNewlineCommit = str.endsWith("\n")
         composingRegionIsPreedit = false
         return true
     }
@@ -179,6 +195,9 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         Log.d(TAG, "InputConnection.setComposingText: \"$str\" cursorPos=$newCursorPosition delete=$before/$after")
         super.setComposingText(text, newCursorPosition)
         NativeBridge.nativeSetComposingText(str, before, after)
+        wireCursor = (wireCursor - before).coerceAtLeast(0)
+        activePreeditUtf16Length = str.length
+        pendingTrailingNewlineCommit = false
         // The Editable's composing region is now whatever super created — and
         // it IS our Wayland preedit (the bytes only exist as overlay there).
         composingRegionIsPreedit = true
@@ -199,6 +218,9 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         Log.d(TAG, "InputConnection.finishComposingText")
         super.finishComposingText()
         NativeBridge.nativeFinishComposingText()
+        wireCursor += activePreeditUtf16Length
+        activePreeditUtf16Length = 0
+        pendingTrailingNewlineCommit = false
         composingRegionIsPreedit = false
         return true
     }
@@ -218,16 +240,23 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
      * counts pass straight through. That's exact for ASCII, which is the
      * only case where an empty mirror coexists with a non-zero unit count.
      */
-    private fun unitsToKeyCounts(beforeUnits: Int, afterUnits: Int): Pair<Int, Int> {
-        if (beforeUnits == 0 && afterUnits == 0) return Pair(0, 0)
+    private data class DeleteKeyPlan(
+        val beforeKeys: Int,
+        val afterKeys: Int,
+        val deletedBeforeUnits: Int,
+    )
+
+    private fun unitsToKeyPlan(beforeUnits: Int, afterUnits: Int): DeleteKeyPlan {
+        if (beforeUnits == 0 && afterUnits == 0) return DeleteKeyPlan(0, 0, 0)
         val ed = editable
-        if (ed == null || ed.isEmpty()) return Pair(beforeUnits, afterUnits)
-        val cursor = Selection.getSelectionStart(ed).coerceIn(0, ed.length)
+        if (ed == null || ed.isEmpty()) return DeleteKeyPlan(beforeUnits, afterUnits, beforeUnits)
+        val cursor = wireCursor.coerceIn(0, ed.length)
         val beforeStart = (cursor - beforeUnits).coerceAtLeast(0)
         val afterEnd = (cursor + afterUnits).coerceAtMost(ed.length)
-        return Pair(
+        return DeleteKeyPlan(
             Character.codePointCount(ed, beforeStart, cursor),
             Character.codePointCount(ed, cursor, afterEnd),
+            cursor - beforeStart,
         )
     }
 
@@ -283,27 +312,30 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         // The wire delete is relative to the Wayland client's cursor, not
         // the Editable's. They match as long as nothing has moved the
         // Editable cursor under us since the last round-trip. If they
-        // diverge (the IME called setSelection or similar), our deltas
-        // would slice the wrong bytes — refuse to propagate them and let
-        // the round-trip reconcile.
-        if (cursor != lastSyncedCursor) return Pair(0, 0)
+        // diverge (the IME called setSelection, or the client reported a
+        // stale context cursor while our wire model kept advancing), our
+        // deltas would slice the wrong bytes — refuse to propagate them
+        // and let the round-trip reconcile.
+        if (cursor != lastSyncedCursor || cursor != wireCursor) return Pair(0, 0)
         return Pair(cursor - start, end - cursor)
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
         Log.d(TAG, "InputConnection.deleteSurroundingText: before=$beforeLength after=$afterLength")
         // Snapshot key counts BEFORE super collapses the deleted span.
-        val (beforeKeys, afterKeys) = unitsToKeyCounts(beforeLength, afterLength)
+        val keys = unitsToKeyPlan(beforeLength, afterLength)
         super.deleteSurroundingText(beforeLength, afterLength)
-        emitKeys(beforeKeys, afterKeys)
+        emitKeys(keys.beforeKeys, keys.afterKeys)
+        wireCursor = (wireCursor - keys.deletedBeforeUnits).coerceAtLeast(0)
+        pendingTrailingNewlineCommit = false
         return true
     }
 
     override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
-        // Convert code points to UTF-16 code units using our Editable, then
+        // Convert code points to UTF-16 code units using our wire cursor, then
         // delegate.
         val ed = editable ?: return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
-        val cursor = Selection.getSelectionStart(ed).coerceAtLeast(0)
+        val cursor = wireCursor.coerceIn(0, ed.length)
         val before16 = utf16FromCodePoints(ed, cursor, -beforeLength)
         val after16 = utf16FromCodePoints(ed, cursor, afterLength)
         return deleteSurroundingText(before16, after16)
@@ -362,9 +394,16 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         BaseInputConnection.removeComposingSpans(ed)
         // Mirror clears the Editable's composing region; reset our flag.
         composingRegionIsPreedit = false
+        activePreeditUtf16Length = 0
+        val preserveWireCursor = pendingTrailingNewlineCommit &&
+            shouldPreserveWireCursorForTrailingNewlineReport(text, newSelStart)
+        pendingTrailingNewlineCommit = false
         // Record the Wayland cursor so we can detect later setSelection
         // calls that diverge our Editable from the client's view.
         lastSyncedCursor = newSelStart
+        if (!preserveWireCursor) {
+            wireCursor = newSelStart
+        }
 
         if (curText != text) {
             ed.replace(0, ed.length, text)
@@ -398,6 +437,14 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
             }
             return cursor - idx
         }
+    }
+
+    private fun shouldPreserveWireCursorForTrailingNewlineReport(text: String, reportedCursor: Int): Boolean {
+        if (wireCursor <= reportedCursor || wireCursor > text.length) return false
+        for (i in reportedCursor until wireCursor) {
+            if (text[i] != '\n') return false
+        }
+        return true
     }
 
     companion object {

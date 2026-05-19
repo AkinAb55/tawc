@@ -11,7 +11,7 @@
 //!   surface the system IMM dispatches Gboard / OpenBoard / AOSP-latin
 //!   events through. The IC's full state machine (Editable mirror,
 //!   `computeReplaceDeltas`, `composingRegionIsPreedit` short-circuit,
-//!   `unitsToKeyCounts`, `lastSyncedCursor` divergence guard) runs on
+//!   `wireCursor`, `unitsToKeyPlan`, `lastSyncedCursor` divergence guard) runs on
 //!   every test exactly the same way it runs in production.
 //! - **As an app**: assertions go through `wayland-debug-app`'s observed
 //!   `TAWC_DEBUG:…` events (`TEXT_CHANGED`, `PREEDIT`, `CURSOR_POS`,
@@ -54,7 +54,7 @@ use tawc_integration::helpers::{
     start_wayland_debug_clipboard_paste, start_wayland_debug_popup, start_wayland_debug_subsurface,
     ensure_wayland_debug_app, start_wayland_debug_popup_switch,
     start_wayland_debug_subsurface_input_empty, start_wayland_debug_text_input,
-    start_wayland_debug_text_input_no_surrounding,
+    start_wayland_debug_text_input_no_surrounding, start_wayland_debug_text_input_stale_newline,
     start_wayland_debug_touch, TIMEOUT,
 };
 use tawc_integration::GraphicsBackend;
@@ -1033,6 +1033,107 @@ fn test_recommit_word_then_newline_no_h_prepend() {
     with_wayland_text_input(|app| {
         scene_recommit_word_then_newline_no_h_prepend(app);
     });
+}
+
+#[test]
+fn test_delete_surrounding_after_stale_newline_context_clears_buffer() {
+    let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("hello").expect("ic commitText 'hello'");
+    app.wait_for_text("hello", TIMEOUT).expect("'hello'");
+
+    for newline_count in 1..=3 {
+        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
+        adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
+        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
+
+        let expected = format!("hello{}", "\\n".repeat(newline_count));
+        app.wait_for_text(&expected, TIMEOUT)
+            .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
+    }
+
+    adb::ic_delete_surrounding_text(11, 11).expect("delete surrounding broad range");
+    let cleared = app.wait_for_text("", TIMEOUT);
+    let last = app.last_text();
+
+    app.stop()
+        .expect("stale-newline debug app failed to stop cleanly");
+    assert_compositor_clean();
+
+    assert!(
+        cleared.is_ok(),
+        "deleteSurroundingText after stale newline context should clear the buffer; last={:?}",
+        last
+    );
+}
+
+#[test]
+fn test_delete_surrounding_after_stale_newline_context_counts_codepoints() {
+    let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    let word = "a😀bc";
+
+    adb::ic_commit_text(word).expect("ic commitText emoji word");
+    app.wait_for_text(word, TIMEOUT).expect("emoji word");
+
+    for newline_count in 1..=3 {
+        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
+        adb::ic_commit_text(word).expect("ic commitText emoji word (re-commit)");
+        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
+
+        let expected = format!("{}{}", word, "\\n".repeat(newline_count));
+        app.wait_for_text(&expected, TIMEOUT)
+            .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
+    }
+
+    adb::ic_delete_surrounding_text(7, 0).expect("delete surrounding suffix");
+    let suffix_deleted = app.wait_for_text("a", TIMEOUT);
+    let last = app.last_text();
+
+    app.stop()
+        .expect("stale-newline debug app failed to stop cleanly");
+    assert_compositor_clean();
+
+    assert!(
+        suffix_deleted.is_ok(),
+        "deleteSurroundingText should count an emoji surrogate pair as one key; last={:?}",
+        last
+    );
+}
+
+#[test]
+fn test_commit_replace_after_stale_newline_context_does_not_slice_wire_bytes() {
+    let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("hello").expect("ic commitText 'hello'");
+    app.wait_for_text("hello", TIMEOUT).expect("'hello'");
+
+    for newline_count in 1..=3 {
+        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
+        adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
+        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
+
+        let expected = format!("hello{}", "\\n".repeat(newline_count));
+        app.wait_for_text(&expected, TIMEOUT)
+            .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
+    }
+
+    adb::ic_set_selection(5, 5).expect("ic setSelection to stale cursor");
+    adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
+    adb::ic_commit_text("HELLO").expect("ic commitText replacement");
+
+    let expected = "hello\\n\\n\\nHELLO";
+    let inserted = app.wait_for_text(expected, TIMEOUT);
+    let last = app.last_text();
+
+    app.stop()
+        .expect("stale-newline debug app failed to stop cleanly");
+    assert_compositor_clean();
+
+    assert!(
+        inserted.is_ok(),
+        "stale context replacement should fall back to insertion, not slice wire bytes; last={:?}",
+        last
+    );
 }
 
 #[test]

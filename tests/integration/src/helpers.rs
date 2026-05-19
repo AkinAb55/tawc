@@ -82,6 +82,23 @@ pub fn start_wayland_debug_text_input_no_surrounding(
     app
 }
 
+/// Start wayland-debug-app's text-input mode that reports the cursor before
+/// trailing newlines while still reporting the full surrounding text.
+pub fn start_wayland_debug_text_input_stale_newline(
+    backend: GraphicsBackend,
+    env: &str,
+) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    adb::enable_test_input().expect("enable-test-input action");
+    let app = DebugApp::start(backend, &binary, "text-input-stale-newline", env)
+        .expect("Failed to start stale-newline wayland debug app");
+    app.wait_ready()
+        .expect("Stale-newline wayland debug app did not become ready");
+    wait_for_keyboard_shown(TIMEOUT);
+    app
+}
+
 pub fn start_wayland_debug_clipboard_copy(
     backend: GraphicsBackend,
     env: &str,

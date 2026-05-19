@@ -10,7 +10,7 @@
 //! a wayland client (assertions go through `wayland-debug-app`'s observed
 //! events). The IC's full state machine — `computeReplaceDeltas`, the
 //! Editable mirror, the `composingRegionIsPreedit` short-circuit,
-//! `unitsToKeyCounts` — runs in every test the same way it runs in
+//! `wireCursor`, `unitsToKeyPlan` — runs in every test the same way it runs in
 //! production. See `notes/text-input.md` ("Test infrastructure note") for
 //! the rationale.
 //!
@@ -162,7 +162,7 @@ pub fn disable_test_input() -> io::Result<Output> {
 // the system IMM dispatches Gboard events through. The IC's full state
 // machine runs on every call — Editable mirror update, composing-region
 // delta computation, the `composingRegionIsPreedit` short-circuit, key
-// translation in `unitsToKeyCounts`, etc. The wire output is what real
+// translation in `unitsToKeyPlan`, etc. The wire output is what real
 // Gboard would produce given the same sequence of method calls.
 
 /// Call `TawcInputConnection.commitText(text, 1)` on the active IC.
@@ -215,9 +215,9 @@ pub fn ic_set_selection(start: u32, end: u32) -> io::Result<Output> {
 
 /// Call `TawcInputConnection.deleteSurroundingText(before, after)` on
 /// the active IC. Equivalent of Gboard's `deleteSurroundingText` — the
-/// IC translates this to UTF-16 unit counts via [unitsToKeyCounts] and
-/// emits Backspace × `before` + Forward-Delete × `after` key events on
-/// `wl_keyboard`. Use this for tests that assert wire-side key
+/// IC translates the UTF-16 unit range around its wire cursor to
+/// Backspace / Forward-Delete key counts on `wl_keyboard`. Use this for
+/// tests that assert wire-side key
 /// translation; for tests that just want a Backspace, prefer
 /// [ic_send_key_event] with `KEYCODE_DEL`.
 pub fn ic_delete_surrounding_text(before: u32, after: u32) -> io::Result<Output> {

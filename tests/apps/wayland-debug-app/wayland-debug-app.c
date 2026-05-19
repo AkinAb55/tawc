@@ -14,6 +14,7 @@
  * Commands:
  *   text-input                  Minimal editable text-input-v3 surface
  *   text-input-no-surrounding   Text-input surface that never sends surrounding
+ *   text-input-stale-newline    Reports cursor before trailing newlines
  *   clipboard-copy <text>       Set wl_data_device clipboard text
  *   clipboard-paste             Read focused wl_data_device clipboard text
  *   touch                       Fullscreen touch visualizer
@@ -232,6 +233,7 @@ struct app {
     int text_input_enabled;
     int editable;
     int provide_surrounding;
+    int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
     int dynamic_size;
@@ -280,6 +282,7 @@ struct wayland_mode {
     int use_text_input;
     int editable;
     int provide_surrounding;
+    int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
     int dynamic_size;
@@ -395,10 +398,19 @@ static void sync_surrounding(struct app *app, uint32_t cause)
     if (!app->provide_surrounding || !app->text_input ||
         !app->text_input_enabled)
         return;
+    int32_t cursor = (int32_t)app->cursor;
+    if (app->stale_trailing_newline_cursor &&
+        cause == ZWP_TEXT_INPUT_V3_CHANGE_CAUSE_INPUT_METHOD) {
+        size_t stale_cursor = app->text_len;
+        while (stale_cursor > 0 && app->text[stale_cursor - 1] == '\n')
+            stale_cursor--;
+        if (stale_cursor < app->text_len)
+            cursor = (int32_t)stale_cursor;
+    }
 
     zwp_text_input_v3_set_text_change_cause(app->text_input, cause);
     zwp_text_input_v3_set_surrounding_text(
-        app->text_input, app->text, (int32_t)app->cursor, (int32_t)app->cursor);
+        app->text_input, app->text, cursor, cursor);
     zwp_text_input_v3_commit(app->text_input);
     checked_flush(app->display);
 }
@@ -2002,6 +2014,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->running = 1;
     app->editable = mode->editable;
     app->provide_surrounding = mode->provide_surrounding;
+    app->stale_trailing_newline_cursor = mode->stale_trailing_newline_cursor;
     app->touch_debug = mode->touch_debug;
     app->fullscreen = mode->fullscreen;
     app->dynamic_size = mode->dynamic_size;
@@ -2206,6 +2219,40 @@ static int cmd_text_input_no_surrounding(int argc, char **argv)
         .use_text_input = 1,
         .editable = 0,
         .provide_surrounding = 0,
+    };
+
+    (void)argc;
+    (void)argv;
+
+    struct app app;
+    memset(&app, 0, sizeof(app));
+    signal_app = &app;
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    setup_wayland(&app, &mode);
+
+    while (app.running) {
+        if (wl_display_dispatch(app.display) < 0) {
+            if (errno == EINTR && !app.running)
+                break;
+            fatal("wl_display_dispatch failed: %s", strerror(errno));
+        }
+    }
+
+    teardown_wayland(&app);
+    return 0;
+}
+
+static int cmd_text_input_stale_newline(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland text-input stale-newline debug",
+        .app_id = "wayland-debug-app-stale-newline",
+        .use_text_input = 1,
+        .editable = 1,
+        .provide_surrounding = 1,
+        .stale_trailing_newline_cursor = 1,
     };
 
     (void)argc;
@@ -2456,6 +2503,9 @@ static const struct command commands[] = {
     { "text-input-no-surrounding",
       "Text-input surface that never sends surrounding",
       cmd_text_input_no_surrounding },
+    { "text-input-stale-newline",
+      "Text-input surface that reports cursor before trailing newlines",
+      cmd_text_input_stale_newline },
     { "clipboard-copy", "Set wl_data_device clipboard text",
       cmd_clipboard_copy },
     { "clipboard-paste", "Read focused wl_data_device clipboard text",
