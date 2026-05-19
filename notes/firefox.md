@@ -4,7 +4,7 @@ Firefox renders via the libhybris Wayland EGL platform against the Adreno
 660 vendor driver. Window chrome goes through AHB; fragments of content can
 fall back to SHM (no `zwp_linux_dmabuf_v1` support yet in this compositor).
 
-**Status (2026-05-08):** Works under tawcroot with **no Firefox-specific
+**Status (2026-05-19):** Works under tawcroot with **no Firefox-specific
 configuration** — no env vars, no autoconfig `firefox.cfg`, no GPU-process
 prefs. Tested on Arch Linux ARM (Firefox 150.0.1), Void Linux (150.0.2),
 and Manjaro ARM (141.0.3). The
@@ -30,7 +30,7 @@ former `widget.dmabuf.force-enabled` / `gfx.webrender.*` / `layers.gpu-
 process.enabled` autoconfig has been removed — Firefox auto-detects
 WebRender + dmabuf via libhybris's EGL stubs (see "libhybris fixes for
 Firefox" below) and the GPU process spawns cleanly under tawcroot's
-seccomp emulation.
+seccomp denial path.
 
 ### Sandbox
 
@@ -48,16 +48,17 @@ we run in the `magisk` domain with full caps. (See `notes/android.md`
 for the SELinux setup.)
 
 Under **tawcroot**, the same `seccomp(SECCOMP_SET_MODE_FILTER)` /
-`prctl(PR_SET_SECCOMP)` calls Mozilla makes are intercepted and faked
-to return success without actually installing the guest's filter —
-otherwise `-EPERM` would trigger Mozilla's "fatal sandbox-init" path
-which tears down libhybris-loaded vendor libraries while the bionic-Q
-linker's TLS-module table is in a half-written state, hitting
-`linker_tls.cpp:94`'s `mod.soinfo_ptr == si` CHECK and aborting the
-content process. The fake-success approach is sound because the
-guest's filter is purely defense-in-depth on top of tawcroot's
-translation enforcement; see `notes/tawcroot.md` "Signal-handler
-virtualisation" and `tawcroot/src/syscalls_control.c::handle_seccomp`.
+`prctl(PR_SET_SECCOMP)` calls Mozilla makes are intercepted and return
+`-EPERM` without installing the guest's filter. We can't honestly
+stack Mozilla's BPF on top of tawcroot's filter: a guest filter could
+kill tawcroot's raw-syscall stub, return errno before our translation
+trap, or route `SIGSYS` to a guest-owned handler. On the current
+physical test stack (OnePlus 9, Arch Linux ARM Firefox 150.0.3,
+2026-05-19), Firefox accepts that denial without a UI warning and
+stays alive. Older notes claimed `-EPERM` aborted during
+`unregister_tls_module`; that is not reproducible on the current
+stack. See `notes/tawcroot.md` "Signal-handler virtualisation" and
+`tawcroot/src/syscalls_control.c::handle_seccomp`.
 
 For tawcroot, `/dev/shm` is emulated in-handler via `memfd_create`
 (`tawcroot/src/shm.c`) — no host bind. `shm_open(3)` calls land in the

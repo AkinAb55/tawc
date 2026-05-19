@@ -62,6 +62,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/deps.sh
 source "$SCRIPT_DIR/lib/deps.sh"
 MESA_DIR="$(dep_dir mesa)"
+WAYLAND_PROTOCOLS_DIR="$(dep_dir wayland-protocols)"
 PATCH_DIR="$REPO_DIR/deps/mesa-patches/mesa"
 
 CLEAN=0
@@ -88,6 +89,7 @@ done
 
 # ── Vendored Mesa + patches ──
 dep_apply_patches mesa "$PATCH_DIR"
+dep_ensure wayland-protocols
 
 build_one() {
     local abi="$1"
@@ -214,11 +216,14 @@ EOF
 
     # ── Synthetic pkg-config files ──
     # Headers and target-side .pc metadata come from build-host-sysroot.sh,
-    # not from a live device rootfs. Library .so paths point to our stub
-    # dir for runtime DT_NEEDED entries. virtgpu_kumquat_ffi points at the
-    # cargo static lib + Mesa's own header dir (in-tree, untouched).
+    # not from a live device rootfs. wayland-protocols XML comes from the
+    # pinned vendored checkout, not the distro sysroot, so Mesa sees the
+    # protocol set its own source expects (e.g. staging/fifo/fifo-v1.xml).
+    # Library .so paths point to our stub dir for runtime DT_NEEDED entries.
+    # virtgpu_kumquat_ffi points at the cargo static lib + Mesa's own header
+    # dir (in-tree, untouched).
     local SYSROOT_WAYLAND_INC="$SYSROOT/usr/include"
-    local SYSROOT_WAYLAND_PROT_DATADIR="$SYSROOT/usr/share/wayland-protocols"
+    local WAYLAND_PROTOCOLS_DATADIR="$WAYLAND_PROTOCOLS_DIR"
     local HOST_WAYLAND_SCANNER
     HOST_WAYLAND_SCANNER="$(command -v wayland-scanner)"
 
@@ -267,7 +272,7 @@ Libs:
 EOF
 
     cat >"$PC_DIR/wayland-protocols.pc" <<EOF
-pkgdatadir=$SYSROOT_WAYLAND_PROT_DATADIR
+pkgdatadir=$WAYLAND_PROTOCOLS_DATADIR
 Name: wayland-protocols
 Description: host wayland-protocols
 Version: 1.45
@@ -305,6 +310,10 @@ EOF
     local BUILD_DIR_GFXSTREAM="$MESA_DIR/build-$abi-gfxstream"
     if [ -f "$BUILD_DIR_GFXSTREAM/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_GFXSTREAM/build.ninja"; then
         echo "==> [$abi] old host-header Mesa builddir detected; reconfiguring"
+        rm -rf "$BUILD_DIR_GFXSTREAM"
+    fi
+    if [ -d "$BUILD_DIR_GFXSTREAM" ] && [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
+        echo "==> [$abi] incomplete Mesa gfxstream builddir detected; reconfiguring"
         rm -rf "$BUILD_DIR_GFXSTREAM"
     fi
     if [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
@@ -376,6 +385,10 @@ EOF
     local BUILD_DIR_ZINK="$MESA_DIR/build-$abi-mesa-zink"
     if [ -f "$BUILD_DIR_ZINK/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_ZINK/build.ninja"; then
         echo "==> [$abi] old host-header Mesa-Zink builddir detected; reconfiguring"
+        rm -rf "$BUILD_DIR_ZINK"
+    fi
+    if [ -d "$BUILD_DIR_ZINK" ] && [ ! -f "$BUILD_DIR_ZINK/build.ninja" ]; then
+        echo "==> [$abi] incomplete Mesa-Zink builddir detected; reconfiguring"
         rm -rf "$BUILD_DIR_ZINK"
     fi
     if [ ! -f "$BUILD_DIR_ZINK/build.ninja" ]; then

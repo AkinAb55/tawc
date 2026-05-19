@@ -280,6 +280,10 @@ Bundled into the APK by Gradle's `packMesaGfxstream<Abi>` and laid into
 every rootfs by `BridgeInstallProvider`. The same script also builds
 the optional Mesa-Zink tarball consumed by `libhybris-zink` unless
 Gradle passes `--no-zink` via `-PtawcGraphics=...`.
+Mesa's `wayland-protocols` XML comes from the pinned
+`deps/xwayland-src/wayland-protocols` checkout, not the host sysroot.
+That keeps Mesa's generated protocol inputs in sync with the Mesa
+source even when distro sysroot packages lag.
 
 ### Xwayland (binary + libs → ships in APK as asset)
 

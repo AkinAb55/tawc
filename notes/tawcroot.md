@@ -723,15 +723,14 @@ hardening:
   real `SIGSYS`. Maintain a guest-visible shadow mask if needed, but
   clear `SIGSYS` before forwarding the real mask to the kernel.
 - `seccomp(SECCOMP_SET_MODE_*)` and `prctl(PR_SET_SECCOMP, ...)`:
-  pretend success — return `0` without installing the guest's filter.
-  We can't honestly install it (it'd stack on top of ours and could
-  `KILL_PROCESS` our own raw_syscall stub), and `-EPERM` was worse:
-  Mozilla's content sandbox treats `EPERM` as fatal and triggers a
-  teardown that aborts inside libhybris's bionic-Q linker on the
-  `unregister_tls_module` CHECK. Since the guest's filter is purely
-  defense-in-depth on top of tawcroot's translation enforcement,
-  faking success is sound. Read-only seccomp ops
-  (`SECCOMP_GET_ACTION_AVAIL` etc.) still pass through verbatim.
+  return `-EPERM` without installing the guest's filter. We can't
+  honestly install it: stacked seccomp can `KILL_PROCESS` our
+  raw_syscall stub, return errno before our path-translation trap, or
+  `RET_TRAP` into a guest-owned `SIGSYS` path. Firefox 150.0.3 on
+  Arch Linux ARM / OnePlus 9 accepts this denial without a UI warning
+  or `unregister_tls_module` abort as of 2026-05-19. Read-only
+  seccomp ops (`SECCOMP_GET_ACTION_AVAIL` etc.) still pass through
+  verbatim.
 - `prctl(PR_GET_SECCOMP)` may return the host truth (`2`) or a
   guest-compatible value if a workload needs it; do not lie in ways
   that encourage a program to install a filter we will reject.
@@ -2779,10 +2778,9 @@ coverage.
    on the OnePlus 9 with no `MOZ_DISABLE_*_SANDBOX` workaround env
    vars. Firefox-side fixes landed: in-handler `/dev/shm` memfd
    emulation (`tawcroot/src/shm.c`) so Mozilla's `shm_open(3)`
-   doesn't hard-assert; `seccomp(2)` /
-   `prctl(PR_SET_SECCOMP)` lie about successful filter install
-   so Mozilla's content-sandbox teardown path doesn't trip the
-   bionic-Q linker's `unregister_tls_module` CHECK in libhybris;
+   doesn't hard-assert; guest `seccomp(2)` /
+   `prctl(PR_SET_SECCOMP)` denial so Mozilla cannot stack a filter
+   that would bypass tawcroot's translation invariants;
    legacy x86_64 `readlink(2)` /proc/self/exe synthesis (the
    `readlinkat` handler had it but NR 89 didn't); host-auxv
    passthrough so the synthesized guest stack carries HWCAP /

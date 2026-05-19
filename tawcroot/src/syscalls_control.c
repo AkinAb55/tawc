@@ -68,37 +68,24 @@
  * (Earlier revs oversized to 64; over-read past the guest struct in
  * both directions, review finding B2.) */
 
-/* Lie about successful filter install. Returning -EPERM here works in
- * principle but breaks Firefox: Mozilla's content sandbox calls
- * `seccomp(SECCOMP_SET_MODE_FILTER, ..., &filter)` to install a per-
- * subprocess BPF filter, sees -EPERM, and falls into a "sandbox setup
- * failed, abort the child" code path that tears down a half-initialised
- * libhybris loader and aborts in `unregister_tls_module` (the Q linker
- * fork's `mod.soinfo_ptr == si` CHECK fails on a soinfo whose TLS slot
- * was already cleaned up).
+/* Refuse guest filter install. We can't honestly stack the guest's BPF
+ * filter on top of ours: it could KILL_PROCESS our raw_syscall stub,
+ * return ERRNO before our path-translation trap, or RET_TRAP into a
+ * guest-owned SIGSYS path that tawcroot virtualizes away.
  *
- * Pretending success is safe under tawcroot:
- *   - We can't install the guest's BPF filter (it'd stack on top of
- *     ours and could KILL_PROCESS our own raw_syscall stub).
- *   - Without the filter installed, the guest's SIGSYS handler never
- *     fires from the guest's filter — but it doesn't need to. Our
- *     filter still routes every trapped syscall through tawcroot's
- *     own handler, which is what actually enforces the rootfs view.
- *   - The whole tawcroot process tree already runs as the app uid in
- *     an Android per-app sandbox, plus our seccomp filter, plus the
- *     rootfs translation. Mozilla's content-process filter is a
- *     defense-in-depth layer that is fundamentally redundant under
- *     our setup.
+ * Firefox currently tolerates EPERM here without UI warnings on the
+ * tested Arch ARM rootfs (Firefox 150.0.3 / OnePlus 9, 2026-05-19).
+ * Earlier notes claimed this tripped a libhybris bionic-Q linker
+ * teardown abort; that was not reproducible on the current stack.
  *
  * SECCOMP_GET_ACTION_AVAIL and other read-only ops pass through to
- * the kernel verbatim (they don't change state). Only SET_MODE_*
- * is faked. */
+ * the kernel verbatim because they don't change state. */
 static long handle_seccomp(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	unsigned int op = (unsigned int)args->a;
 	/* SECCOMP_SET_MODE_STRICT = 0, SECCOMP_SET_MODE_FILTER = 1. */
-	if (op == 0 || op == 1) return 0;
+	if (op == 0 || op == 1) return TAWC_EPERM;
 	/* SECCOMP_GET_ACTION_AVAIL = 2, SECCOMP_GET_NOTIF_SIZES = 3, etc.
 	 * Read-only — pass through. */
 	return TAWC_RAW(TAWC_SYS_seccomp, args->a, args->b, args->c,
@@ -174,11 +161,9 @@ static long handle_prctl(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	int op = (int)args->a;
-	/* PR_SET_SECCOMP — same lie-about-success rationale as
-	 * handle_seccomp above (Firefox's sandbox is incompatible with
-	 * tawcroot regardless; -EPERM trips a teardown path that aborts
-	 * inside libhybris). */
-	if (op == PR_SET_SECCOMP) return 0;
+	/* PR_SET_SECCOMP — same guest-filter-stacking rationale as
+	 * handle_seccomp above. */
+	if (op == PR_SET_SECCOMP) return TAWC_EPERM;
 	return TAWC_RAW(TAWC_SYS_prctl, args->a, args->b, args->c,
 			args->d, args->e, 0);
 }

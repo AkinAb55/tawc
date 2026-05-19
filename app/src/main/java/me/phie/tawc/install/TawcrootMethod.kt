@@ -35,8 +35,9 @@ import java.io.IOException
  *   - No `--link2symlink` flag. Hardlink-EACCES → symlink fallback is
  *     built into the linkat handler (`syscalls_fs.c::link_with_symlink_fallback`).
  *   - No `MOZ_DISABLE_*_SANDBOX` env vars. Firefox's sandbox setup
- *     conflicts with proot's ptrace tracer; tawcroot doesn't have a
- *     tracer, so the sandbox can come up cleanly.
+ *     conflicts with proot's ptrace tracer; tawcroot instead denies
+ *     guest seccomp filter installs with `EPERM`, which current
+ *     Firefox accepts without UI warnings.
  *
  * See `notes/tawcroot.md` for the full design + phasing.
  */
