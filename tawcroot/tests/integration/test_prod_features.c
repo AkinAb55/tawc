@@ -142,6 +142,11 @@ static int run_with(const char *const *extra_args)
  * stat() assertion. */
 test(prod_unix_bind_translates_sun_path)
 {
+#if defined(__ANDROID__)
+	printf("    skipping (host-only: Android shell SELinux denies"
+	       " filesystem AF_UNIX socket creation under test rootfs)\n");
+	return;
+#else
 	rh_rmrf(FAKE_ROOTFS);
 	test_true(build_rootfs());
 
@@ -164,6 +169,7 @@ test(prod_unix_bind_translates_sun_path)
 
 	(void)unlink(host_sock);
 	rh_rmrf(FAKE_ROOTFS);
+#endif
 }
 
 test(prod_proc_self_fd_hides_reserved)

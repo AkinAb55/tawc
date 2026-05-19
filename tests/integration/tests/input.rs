@@ -65,12 +65,12 @@ const INPUT_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 
 // Physical screen coordinates for tapping inside the text view.
 // Compositor uses fractional output scale, so logical = physical / scale.
-// Text content starts at approximately physical (80, 234).
+// Text content starts at approximately physical (80, 210).
 // The actual char width depends on font size set in gtk4-debug-app.c —
 // each scenario only asserts cursor lies somewhere in the middle of the
 // typed string, so the tap can land within a wide range of columns.
-const TAP_TEXT_MID_X: u32 = 200;
-const TAP_TEXT_MID_Y: u32 = 250;
+const TAP_TEXT_MID_X: u32 = 160;
+const TAP_TEXT_MID_Y: u32 = 210;
 // Just inside the left edge of the text content (text starts at ~x=80).
 // Tapping here should land the cursor at position 0 — matches the user's
 // "click at the very start of the line" repro.
