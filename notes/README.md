@@ -21,6 +21,7 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 - [log-screen.md](log-screen.md) - shared operation/log-screen UI abstraction.
 - [launcher.md](launcher.md) - distro launcher and `.desktop` scanner.
 - [multi-activity.md](multi-activity.md) - planned one-Android-task-per-window design.
+- [task-icons-window-index.md](task-icons-window-index.md) - task recents icons/labels and Kotlin open-window metadata mirror.
 
 ## Graphics Backends
 
