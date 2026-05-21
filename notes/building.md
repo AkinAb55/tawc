@@ -50,8 +50,11 @@ and launch as documented in AGENTS.md's Common Commands.
 | `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |
 | nginx (dev-time mirror cache, optional) | `nginx`                       | `nginx`                                              |
 
-JDK 26 is **not** supported — it crashes the Kotlin Gradle plugin (2.1.20).
-Stick with 21.
+JDK 26 is **not** supported for running this Gradle build — Gradle 8.12's
+embedded Kotlin stack crashes while parsing Java version `26.0.1`. The repo
+pins the Gradle daemon to Java 21 in `gradle/gradle-daemon-jvm.properties`, so
+direct `./gradlew ...` works when a JDK 21 install is available even if the
+shell's default `java` is newer.
 
 `nginx` is only needed for the dev-time install caching proxy
 (`scripts/cache-proxy.sh`, see notes/cache-proxy.md). Skip if you
@@ -125,8 +128,8 @@ export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
 `scripts/build-app.sh` sets `JAVA_HOME` and `ANDROID_HOME` to the defaults
 above when they are unset. `ANDROID_NDK_HOME` is auto-detected by
 `scripts/build-libxkbcommon.sh`
-(it falls back to `$ANDROID_HOME/ndk/<latest>`). `JAVA_HOME` must be
-set explicitly when invoking `./gradlew` if your default JDK isn't 21.
+(it falls back to `$ANDROID_HOME/ndk/<latest>`). Direct `./gradlew` invocations
+use the repo's Gradle daemon JVM pin and require JDK 21 to be installed.
 
 ## Vendored repos
 
