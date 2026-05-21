@@ -350,7 +350,8 @@ fn with_wayland_text_input(run: impl FnOnce(&DebugApp)) {
 }
 
 /// Toolkitless coverage for the basic text-input-v3 editing surfaces:
-/// commit_string, raw key events, and IME deleteSurroundingText.
+/// commit_string, raw key events, and IME deleteSurroundingText in both
+/// directions around the cursor.
 #[test]
 fn test_basic_editing_and_delete() {
     with_wayland_text_input(|app| {
@@ -368,16 +369,35 @@ fn test_basic_editing_and_delete() {
         adb::ic_delete_surrounding_text(5, 0).expect("delete_surrounding");
         app.wait_for_text("hello ", TIMEOUT)
             .expect("'hello ' after delete_surrounding(5, 0)");
+
+        let cursor_count = app.cursor_pos_count();
+        adb::input_tap(
+            WAYLAND_TAP_COORDS.text_start_x,
+            WAYLAND_TAP_COORDS.text_mid_y,
+        )
+        .expect("tap line start");
+        let cursor = app
+            .wait_for_cursor_change(cursor_count, TIMEOUT)
+            .expect("cursor change after tap");
+        assert_eq!(cursor, 0, "tap at line start should move cursor to 0");
+
+        adb::ic_send_key_event(adb::KEYCODE_FORWARD_DEL).expect("forward delete key");
+        app.wait_for_text("ello ", TIMEOUT)
+            .expect("'ello ' after forward delete key");
+
+        adb::ic_delete_surrounding_text(0, 1).expect("delete_surrounding after cursor");
+        app.wait_for_text("llo ", TIMEOUT)
+            .expect("'llo ' after delete_surrounding(0, 1)");
     });
 }
 
 #[test]
-fn test_preedit_lifecycle() {
+fn test_preedit_lifecycle_and_autocorrect_commit() {
     with_wayland_text_input(|app| {
         adb::ic_commit_text("hello ").expect("commit 'hello '");
         app.wait_for_text("hello ", TIMEOUT).expect("'hello '");
 
-        for prefix in ["w", "wo", "wor", "worl", "world"] {
+        for prefix in ["t", "te", "teh"] {
             adb::ic_set_composing_text(prefix).expect("setComposingText");
             app.wait_for_preedit(prefix, TIMEOUT)
                 .unwrap_or_else(|e| panic!("preedit not '{}': {}", prefix, e));
@@ -389,54 +409,57 @@ fn test_preedit_lifecycle() {
             );
         }
 
+        adb::ic_commit_text("the ").expect("commit autocorrect");
+        app.wait_for_text("hello the ", TIMEOUT)
+            .expect("'hello the ' after autocorrect commit");
+        app.wait_for_preedit("", TIMEOUT)
+            .expect("preedit cleared after autocorrect");
+        assert!(
+            !app.last_text().unwrap_or_default().contains("teh"),
+            "active preedit was not replaced by autocorrect commit: {:?}",
+            app.last_text()
+        );
+
+        for prefix in ["w", "wo", "wor", "worl", "world"] {
+            adb::ic_set_composing_text(prefix).expect("setComposingText");
+            app.wait_for_preedit(prefix, TIMEOUT)
+                .unwrap_or_else(|e| panic!("preedit not '{}': {}", prefix, e));
+            assert_eq!(
+                app.last_text().as_deref().unwrap_or(""),
+                "hello the ",
+                "preedit '{}' leaked into committed text",
+                prefix
+            );
+        }
+
         adb::ic_finish_composing().expect("finishComposingText");
-        app.wait_for_text("hello world", TIMEOUT)
-            .expect("'hello world' after finishComposingText");
+        app.wait_for_text("hello the world", TIMEOUT)
+            .expect("'hello the world' after finishComposingText");
         app.wait_for_preedit("", TIMEOUT)
             .expect("preedit cleared after finishComposingText");
     });
 }
 
 #[test]
-fn test_autocorrect_replaces_preedit() {
-    with_wayland_text_input(|app| {
-        adb::ic_set_composing_text("teh").expect("setComposingText 'teh'");
-        app.wait_for_preedit("teh", TIMEOUT).expect("preedit 'teh'");
-        adb::ic_commit_text("the ").expect("commit autocorrect");
-        app.wait_for_preedit("", TIMEOUT)
-            .expect("preedit cleared after autocorrect");
-        let text = app.last_text().unwrap_or_default();
-        assert!(
-            text.ends_with("the ") && !text.contains("teh"),
-            "active preedit was not replaced by autocorrect commit: {:?}",
-            text
-        );
-    });
-}
-
-#[test]
-fn test_completion_suggestion_replaces_current_word() {
+fn test_direct_replacement_apis() {
     with_wayland_text_input(|app| {
         adb::ic_commit_text("abc").expect("commit 'abc'");
         app.wait_for_text("abc", TIMEOUT).expect("'abc'");
 
         adb::ic_replace_text(0, 3, "ABC").expect("replace current word with completion");
-
         app.wait_for_text("ABC", TIMEOUT)
-            .expect("completion suggestion should replace the current word");
-    });
-}
+            .expect("replaceText should replace the current word");
 
-#[test]
-fn test_commit_correction_replaces_current_word() {
-    with_wayland_text_input(|app| {
-        adb::ic_commit_text("abc").expect("commit 'abc'");
-        app.wait_for_text("abc", TIMEOUT).expect("'abc'");
+        adb::ic_commit_text(" def").expect("commit ' def'");
+        app.wait_for_text("ABC def", TIMEOUT).expect("'ABC def'");
 
-        adb::ic_commit_correction(0, "abc", "ABC").expect("commit correction");
-
-        app.wait_for_text("ABC", TIMEOUT)
+        adb::ic_commit_correction(4, "def", "DEF").expect("commit correction");
+        app.wait_for_text("ABC DEF", TIMEOUT)
             .expect("correction should replace the current word");
+
+        adb::ic_commit_completion(" ok").expect("commit completion");
+        app.wait_for_text("ABC DEF ok", TIMEOUT)
+            .expect("completion should commit through commitCompletion");
     });
 }
 
@@ -546,9 +569,10 @@ fn test_focus_leave_clears_pending_preedit_without_committing() {
 
 /// The two composing-region replacement shapes are distinct IC paths:
 /// setComposingText over a region emits delete+preedit, while commitText over
-/// a region emits delete+commit.
+/// a region emits delete+commit. Keep them in one focused flow so both operate
+/// on a real marked committed region without paying two app launches.
 #[test]
-fn test_composing_region_preedit_replaces_committed_text() {
+fn test_composing_region_replacement_paths() {
     with_wayland_text_input(|app| {
         adb::ic_commit_text("hello world").expect("commit 'hello world'");
         app.wait_for_text("hello world", TIMEOUT)
@@ -589,38 +613,21 @@ fn test_composing_region_preedit_replaces_committed_text() {
             "original lowercase region survived replacement: {:?}",
             text
         );
-    });
-}
-
-#[test]
-fn test_commit_text_replaces_composing_region() {
-    with_wayland_text_input(|app| {
-        adb::ic_commit_text("hello world").expect("commit 'hello world'");
-        app.wait_for_text("hello world", TIMEOUT)
-            .expect("'hello world'");
-
-        let cursor_count = app.cursor_pos_count();
-        adb::input_tap(WAYLAND_TAP_COORDS.text_mid_x, WAYLAND_TAP_COORDS.text_mid_y)
-            .expect("tap mid");
-        let cursor = app
-            .wait_for_cursor_change(cursor_count, TIMEOUT)
-            .expect("cursor change after tap");
-        assert!(cursor > 0 && cursor < 11, "cursor mid, got {}", cursor);
 
         thread::sleep(Duration::from_millis(200));
-        adb::ic_set_composing_region(0, cursor).expect("setComposingRegion");
+        adb::ic_set_composing_region(0, 5).expect("setComposingRegion over HELLO");
         adb::ic_commit_text("FOO").expect("commitText over composing region");
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
             let text = app.last_text().unwrap_or_default();
-            if text.contains("FOO") && !text.contains("hello") {
+            if text.contains("FOO") && !text.contains("HELLO") {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
         let text = app.last_text().unwrap_or_default();
         assert!(
-            text.contains("FOO") && !text.contains("hello"),
+            text.contains("FOO") && !text.contains("HELLO"),
             "commitText over region did not replace marked text: {:?}",
             text
         );
@@ -666,105 +673,73 @@ fn test_recommit_word_then_newline_no_h_prepend() {
     });
 }
 
-#[test]
-fn test_delete_surrounding_after_stale_newline_context_clears_buffer() {
-    let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
-
-    adb::ic_commit_text("hello").expect("ic commitText 'hello'");
-    app.wait_for_text("hello", TIMEOUT).expect("'hello'");
-
+fn build_stale_newline_context(app: &DebugApp, word: &str, word_utf16_len: u32) {
+    adb::ic_commit_text(word).expect("ic commitText word");
+    app.wait_for_text(word, TIMEOUT).expect("initial word");
     for newline_count in 1..=3 {
-        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
-        adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
-        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
-
-        let expected = format!("hello{}", "\\n".repeat(newline_count));
-        app.wait_for_text(&expected, TIMEOUT)
-            .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
-    }
-
-    adb::ic_delete_surrounding_text(11, 11).expect("delete surrounding broad range");
-    let cleared = app.wait_for_text("", TIMEOUT);
-    let last = app.last_text();
-
-    app.stop()
-        .expect("stale-newline debug app failed to stop cleanly");
-    assert_compositor_clean();
-
-    assert!(
-        cleared.is_ok(),
-        "deleteSurroundingText after stale newline context should clear the buffer; last={:?}",
-        last
-    );
-}
-
-#[test]
-fn test_delete_surrounding_after_stale_newline_context_counts_codepoints() {
-    let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
-    let word = "a😀bc";
-
-    adb::ic_commit_text(word).expect("ic commitText emoji word");
-    app.wait_for_text(word, TIMEOUT).expect("emoji word");
-
-    for newline_count in 1..=3 {
-        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
-        adb::ic_commit_text(word).expect("ic commitText emoji word (re-commit)");
+        adb::ic_set_composing_region(0, word_utf16_len)
+            .expect("ic setComposingRegion over word");
+        adb::ic_commit_text(word).expect("ic commitText word (re-commit)");
         adb::ic_commit_text("\n").expect("ic commitText '\\n'");
 
         let expected = format!("{}{}", word, "\\n".repeat(newline_count));
         app.wait_for_text(&expected, TIMEOUT)
             .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
     }
-
-    adb::ic_delete_surrounding_text(7, 0).expect("delete surrounding suffix");
-    let suffix_deleted = app.wait_for_text("a", TIMEOUT);
-    let last = app.last_text();
-
-    app.stop()
-        .expect("stale-newline debug app failed to stop cleanly");
-    assert_compositor_clean();
-
-    assert!(
-        suffix_deleted.is_ok(),
-        "deleteSurroundingText should count an emoji surrogate pair as one key; last={:?}",
-        last
-    );
 }
 
 #[test]
-fn test_commit_replace_after_stale_newline_context_does_not_slice_wire_bytes() {
+fn test_stale_newline_context_editing_paths() {
     let mut app = start_wayland_debug_text_input_stale_newline(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
 
-    adb::ic_commit_text("hello").expect("ic commitText 'hello'");
-    app.wait_for_text("hello", TIMEOUT).expect("'hello'");
+    build_stale_newline_context(&app, "hello", 5);
 
-    for newline_count in 1..=3 {
-        adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
-        adb::ic_commit_text("hello").expect("ic commitText 'hello' (re-commit)");
-        adb::ic_commit_text("\n").expect("ic commitText '\\n'");
+    adb::ic_delete_surrounding_text(11, 11).expect("delete surrounding broad range");
+    app.wait_for_text("", TIMEOUT).unwrap_or_else(|e| {
+        panic!(
+            "deleteSurroundingText after stale newline context should clear the buffer; \
+             last={:?}: {}",
+            app.last_text(),
+            e
+        )
+    });
 
-        let expected = format!("hello{}", "\\n".repeat(newline_count));
-        app.wait_for_text(&expected, TIMEOUT)
-            .unwrap_or_else(|e| panic!("expected {:?} after recommit/newline: {}", expected, e));
-    }
+    let word = "a😀bc";
+    build_stale_newline_context(&app, word, 5);
+
+    adb::ic_delete_surrounding_text(7, 0).expect("delete surrounding suffix");
+    app.wait_for_text("a", TIMEOUT).unwrap_or_else(|e| {
+        panic!(
+            "deleteSurroundingText should count an emoji surrogate pair as one key; \
+             last={:?}: {}",
+            app.last_text(),
+            e
+        )
+    });
+
+    adb::ic_delete_surrounding_text(1, 0).expect("clear remaining emoji phase text");
+    app.wait_for_text("", TIMEOUT)
+        .expect("clear remaining emoji phase text");
+
+    build_stale_newline_context(&app, "hello", 5);
 
     adb::ic_set_selection(5, 5).expect("ic setSelection to stale cursor");
     adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
     adb::ic_commit_text("HELLO").expect("ic commitText replacement");
 
     let expected = "hello\\n\\n\\nHELLO";
-    let inserted = app.wait_for_text(expected, TIMEOUT);
-    let last = app.last_text();
+    app.wait_for_text(expected, TIMEOUT).unwrap_or_else(|e| {
+        panic!(
+            "stale context replacement should fall back to insertion, not slice wire bytes; \
+             last={:?}: {}",
+            app.last_text(),
+            e
+        )
+    });
 
     app.stop()
         .expect("stale-newline debug app failed to stop cleanly");
     assert_compositor_clean();
-
-    assert!(
-        inserted.is_ok(),
-        "stale context replacement should fall back to insertion, not slice wire bytes; last={:?}",
-        last
-    );
 }
 
 #[test]
