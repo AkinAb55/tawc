@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import me.phie.tawc.R
 
 /**
  * Application-singleton that keeps Android notifications in sync with
@@ -48,8 +49,6 @@ object OperationsNotificationCenter {
 
     private const val TAG = "tawc-ops"
     const val CHANNEL_ID = "tawc-operations"
-    private const val CHANNEL_NAME = "Operations"
-    private const val CHANNEL_DESC = "Long-running install / uninstall / command jobs"
 
     /**
      * Notification IDs are derived from the op id's hash with a fixed
@@ -207,7 +206,7 @@ object OperationsNotificationCenter {
             )
             builder
                 .setContentIntent(tap)
-                .addAction(Notification.Action.Builder(null, "Cancel", cancel).build())
+                .addAction(Notification.Action.Builder(null, ctx.getString(R.string.action_cancel), cancel).build())
         }
         return builder.build()
     }
@@ -216,8 +215,11 @@ object OperationsNotificationCenter {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         if (nm.getNotificationChannel(CHANNEL_ID) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW)
-                    .apply { description = CHANNEL_DESC }
+                NotificationChannel(
+                    CHANNEL_ID,
+                    ctx.getString(R.string.operation_channel_name),
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply { description = ctx.getString(R.string.operation_channel_description) }
             )
         }
         // Clean up the legacy install-only channel from before the ops

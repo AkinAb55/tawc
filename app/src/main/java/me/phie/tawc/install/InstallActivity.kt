@@ -85,7 +85,7 @@ class InstallActivity : AppCompatActivity() {
             else -> false
         }
 
-        scaffold = buildChildScreen("Install")
+        scaffold = buildChildScreen(getString(R.string.title_install))
 
         val pad = (16 * resources.displayMetrics.density).toInt()
         formSection = buildFormSection(pad, savedInstanceState?.getString(KEY_LABEL_TEXT))
@@ -154,7 +154,7 @@ class InstallActivity : AppCompatActivity() {
             // not a primary action.
             s.addView(
                 MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
-                    text = "What's the difference?"
+                    text = getString(R.string.install_help_methods)
                     setTextColor(getColor(R.color.tawc_accent))
                     setOnClickListener {
                         startActivity(Intent(this@InstallActivity, InstallMethodInfoActivity::class.java))
@@ -171,7 +171,7 @@ class InstallActivity : AppCompatActivity() {
             s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
         }
 
-        installButton = primaryButton("Install") { beginInstall() }
+        installButton = primaryButton(getString(R.string.action_install)) { beginInstall() }
         s.addView(installButton, verticalLp(MATCH_PARENT, WRAP_CONTENT))
 
         // Initial validation pass — populates resolvedId, location row,
@@ -189,12 +189,12 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildDistroPicker(available: List<Distro>, pad: Int): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = "Distro"; textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_distro_label); textSize = 14f }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         if (available.isEmpty()) {
             val msg = TextView(this).apply {
-                text = "(no supported distro for this device)"
+                text = getString(R.string.install_no_supported_distro)
                 textSize = 14f
                 typeface = Typeface.MONOSPACE
             }
@@ -245,7 +245,7 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildInstallDirField(available: List<Distro>, savedLabelText: String?): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = "Label"; textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_label_label); textSize = 14f }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         val initialDefault = available.firstOrNull { it.key == selectedDistro }?.defaultLabel ?: ""
@@ -306,9 +306,9 @@ class InstallActivity : AppCompatActivity() {
 
         if (::locationLabel.isInitialized) {
             locationLabel.text = when {
-                rawLabel.isEmpty() -> "Label cannot be empty"
-                slug == null -> "Label must contain at least one letter or digit"
-                collides -> "Already installed at ${store.installationDir(slug).absolutePath}"
+                rawLabel.isEmpty() -> getString(R.string.install_label_empty)
+                slug == null -> getString(R.string.install_label_invalid)
+                collides -> getString(R.string.install_already_installed_at, store.installationDir(slug).absolutePath)
                 else -> store.installationDir(slug).absolutePath
             }
             val colorAttr = if (resolvedId == null) {
@@ -321,7 +321,7 @@ class InstallActivity : AppCompatActivity() {
 
         if (::installButton.isInitialized) {
             installButton.isEnabled = (resolvedId != null)
-            installButton.text = "Install"
+            installButton.text = getString(R.string.action_install)
         }
     }
 
@@ -332,7 +332,7 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildCacheProxyRow(): CheckBox {
         cacheProxyCheckbox = CheckBox(this).apply {
-            text = "Use local cache proxy"
+            text = getString(R.string.install_use_cache_proxy)
             isChecked = useCacheProxy ?: true
             setOnCheckedChangeListener { _, checked -> useCacheProxy = checked }
         }
@@ -348,7 +348,7 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildMethodPicker(): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = "Install method"; textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_method_label); textSize = 14f }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         methodGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
@@ -366,9 +366,9 @@ class InstallActivity : AppCompatActivity() {
             val rb = RadioButton(this).apply {
                 id = rid
                 text = when (key) {
-                    TawcrootMethod.KEY -> "TAWCroot (recommended)"
-                    ProotMethod.KEY -> "proot"
-                    ChrootMethod.KEY -> "chroot (requires root)"
+                    TawcrootMethod.KEY -> getString(R.string.install_method_tawcroot_recommended)
+                    ProotMethod.KEY -> getString(R.string.install_method_proot)
+                    ChrootMethod.KEY -> getString(R.string.install_method_chroot_requires_root)
                     else -> key
                 }
                 // Chroot greys out on un-rooted devices so the
@@ -405,7 +405,7 @@ class InstallActivity : AppCompatActivity() {
             // service start.
             android.widget.Toast.makeText(
                 this,
-                "root (su) not available — pick proot or TAWCroot, or grant Magisk root.",
+                getString(R.string.install_root_unavailable),
                 android.widget.Toast.LENGTH_LONG,
             ).show()
             return

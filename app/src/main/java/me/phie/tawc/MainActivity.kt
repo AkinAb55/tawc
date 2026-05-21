@@ -48,27 +48,27 @@ class MainActivity : AppCompatActivity() {
         // launcher tap is the natural place to ensure it's running.
         startForegroundService(Intent(this, CompositorService::class.java))
 
-        val scaffold = buildHomeScreen("TAWC")
+        val scaffold = buildHomeScreen(getString(R.string.app_name))
 
         listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scaffold.content.addView(listContainer, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = cardMargin))
 
         scaffold.content.addView(
-            tonalButton("Task manager") {
+            tonalButton(getString(R.string.title_task_manager)) {
                 startActivity(Intent(this@MainActivity, TaskManagerActivity::class.java))
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = cardMargin),
         )
 
         scaffold.content.addView(
-            tonalButton("Settings") {
+            tonalButton(getString(R.string.title_settings)) {
                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = cardMargin),
         )
 
         scaffold.content.addView(
-            primaryButton("Install new distro") {
+            primaryButton(getString(R.string.action_install_new_distro)) {
                 startActivity(Intent(this@MainActivity, InstallActivity::class.java))
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT),
@@ -87,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         val installations = store.list()
         if (installations.isEmpty()) {
             listContainer.addView(TextView(this).apply {
-                text = "You have no installed Linux distros, install one to get started."
+                text = getString(R.string.home_empty_no_distros)
                 textSize = 16f
                 alpha = 0.75f
                 gravity = Gravity.CENTER_HORIZONTAL
@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).also { it.marginEnd = gap },
         )
         header.addView(
-            tonalButton("Manage") {
+            tonalButton(getString(R.string.action_manage)) {
                 val i = Intent(this@MainActivity, DistroInfoActivity::class.java)
                     .putExtra(DistroInfoActivity.EXTRA_ID, inst.id)
                 startActivity(i)
@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity() {
         // while installing/uninstalling so it returns once ready.
         val topMargin = (4 * resources.displayMetrics.density).toInt()
         val searchBox = EditText(this).apply {
-            hint = "Search apps"
+            hint = getString(R.string.hint_search_apps)
             isSingleLine = true
             isFocusable = false
             isClickable = true
@@ -181,9 +181,9 @@ class MainActivity : AppCompatActivity() {
         val distroLine = if (title == displayName) "" else displayName
         val stateLine = when (inst.state) {
             Installation.State.READY -> ""
-            Installation.State.INSTALLING -> "installing…"
-            Installation.State.UNINSTALLING -> "uninstalling…"
-            Installation.State.FAILED -> "failed"
+            Installation.State.INSTALLING -> getString(R.string.install_state_installing)
+            Installation.State.UNINSTALLING -> getString(R.string.install_state_uninstalling)
+            Installation.State.FAILED -> getString(R.string.install_state_failed)
         }
         val subtitle = listOf(distroLine, stateLine).filter { it.isNotEmpty() }.joinToString(" — ")
         return title to subtitle

@@ -87,7 +87,7 @@ class LauncherActivity : AppCompatActivity() {
         }
 
         searchField = EditText(this).apply {
-            hint = "Search"
+            hint = getString(R.string.hint_search)
             textSize = 24f
             isSingleLine = true
             imeOptions = EditorInfo.IME_ACTION_GO
@@ -114,7 +114,7 @@ class LauncherActivity : AppCompatActivity() {
         )
 
         emptyView = TextView(this).apply {
-            text = "Loading apps…"
+            text = getString(R.string.launcher_loading_apps)
             textSize = 14f
             alpha = 0.7f
         }
@@ -173,12 +173,12 @@ class LauncherActivity : AppCompatActivity() {
     private fun loadApps() {
         val inst = installation
         if (inst == null) {
-            emptyView.text = "Installation '$installationId' not found."
+            emptyView.text = getString(R.string.launcher_installation_not_found, installationId)
             return
         }
         if (inst.state == Installation.State.INSTALLING ||
             inst.state == Installation.State.UNINSTALLING) {
-            emptyView.text = "Installation is ${inst.state.name.lowercase()} — wait for it to finish."
+            emptyView.text = getString(R.string.launcher_installation_state_wait, inst.state.name.lowercase())
             return
         }
         val rootfs = store.rootfsDir(inst.id).absolutePath
@@ -189,8 +189,7 @@ class LauncherActivity : AppCompatActivity() {
             allEntries = LauncherEntry.parseList(json)
             applyFilter()
             if (allEntries.isEmpty()) {
-                emptyView.text = "No launchable apps found in this rootfs.\n" +
-                    "Install GUI packages from a shell first."
+                emptyView.text = getString(R.string.launcher_no_launchable_apps)
             }
         }
     }
@@ -223,7 +222,7 @@ class LauncherActivity : AppCompatActivity() {
     private fun renderList() {
         listColumn.removeAllViews()
         if (filteredEntries.isEmpty() && allEntries.isNotEmpty()) {
-            emptyView.text = "No matches."
+            emptyView.text = getString(R.string.launcher_no_matches)
             emptyView.visibility = View.VISIBLE
             return
         }

@@ -104,7 +104,7 @@ class OperationLogPanel(private val activity: Activity) {
         // Tonal (shaded fill, no border) so it stays a quieter sibling
         // to the primary path while still reading as a button. Hidden
         // until a stage event tells us a job is actually running.
-        cancelButton = activity.tonalButton("Cancel") { onCancelClicked?.invoke() }
+        cancelButton = activity.tonalButton(activity.getString(R.string.action_cancel)) { onCancelClicked?.invoke() }
         cancelButton.visibility = View.GONE
         view.addView(cancelButton, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = 0).apply {
             topMargin = pad / 2

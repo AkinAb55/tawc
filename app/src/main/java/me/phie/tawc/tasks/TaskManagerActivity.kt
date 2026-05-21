@@ -3,7 +3,6 @@ package me.phie.tawc.tasks
 import android.app.Dialog
 import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.text.TextUtils
 import android.util.Log
@@ -18,6 +17,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.graphics.drawable.toDrawable
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +28,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import me.phie.tawc.R
 import me.phie.tawc.install.ChrootMethod
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationStore
@@ -72,7 +73,7 @@ class TaskManagerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scaffold = buildChildScreen("Task manager")
+        val scaffold = buildChildScreen(getString(R.string.title_task_manager))
 
         val scroll = ScrollView(this).apply { isFillViewport = true }
         listContainer = LinearLayout(this).apply {
@@ -85,7 +86,7 @@ class TaskManagerActivity : AppCompatActivity() {
         // Empty state shown immediately so the screen isn't blank
         // during the first scan; flipped to GONE if results arrive.
         emptyView = TextView(this).apply {
-            text = "No Linux processes running."
+            text = getString(R.string.task_manager_empty)
             alpha = 0.6f
             textSize = 16f
             gravity = Gravity.CENTER
@@ -164,7 +165,7 @@ class TaskManagerActivity : AppCompatActivity() {
         val byOrphanId = orphans.groupBy { it.orphanRootfsId ?: "?" }.toSortedMap()
         for ((id, procs) in byOrphanId) {
             listContainer.addView(
-                buildGroupCard("(uninstalled: $id)", procs),
+                buildGroupCard(getString(R.string.task_manager_uninstalled_group, id), procs),
                 verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = cardMargin),
             )
         }
@@ -236,7 +237,11 @@ class TaskManagerActivity : AppCompatActivity() {
                     else me.phie.tawc.R.drawable.ic_tree_expanded,
                 )
                 imageTintList = ColorStateList.valueOf(defaultTextColor())
-                contentDescription = if (treeRow.isCollapsed) "Expand" else "Collapse"
+                contentDescription = if (treeRow.isCollapsed) {
+                    getString(R.string.action_expand)
+                } else {
+                    getString(R.string.action_collapse)
+                }
             } else {
                 imageTintList = null
                 contentDescription = null
@@ -269,7 +274,7 @@ class TaskManagerActivity : AppCompatActivity() {
         }
         labelColumn.addView(
             TextView(this@TaskManagerActivity).apply {
-                text = p.displayCommand.ifBlank { "unknown command" }
+                text = p.displayCommand.ifBlank { getString(R.string.task_manager_unknown_command) }
                 textSize = 16.5f
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
@@ -297,7 +302,7 @@ class TaskManagerActivity : AppCompatActivity() {
             setPadding(cardPad * 2, cardPad * 2, cardPad * 2, cardPad)
         }
         details.addView(TextView(this).apply {
-            text = p.displayCommand.ifBlank { "Process ${p.pid}" }
+            text = p.displayCommand.ifBlank { getString(R.string.task_manager_process_title, p.pid) }
             textSize = 28f
         }, verticalLp(MATCH_PARENT, WRAP_CONTENT, cardPad))
         for ((label, value) in detailRows(p)) {
@@ -335,7 +340,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 openDetailButtons.remove(p.pid)
             }
         }
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
         dialog.show()
         dialog.window?.setLayout(
             resources.displayMetrics.widthPixels - (64 * resources.displayMetrics.density).toInt(),
@@ -344,7 +349,7 @@ class TaskManagerActivity : AppCompatActivity() {
     }
 
     private fun dialogStopButton(p: ProcessInfo): View {
-        val label = if (isProcessStopping(p)) "Stopping..." else "Stop"
+        val label = if (isProcessStopping(p)) getString(R.string.action_stopping) else getString(R.string.action_stop)
         return destructiveButton(label) {}.apply {
             minWidth = stopSlotWidth
             setDetailStopButtonState(this, p.pid)
@@ -397,7 +402,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
             })
             addView(TextView(this@TaskManagerActivity).apply {
-                text = value.ifBlank { "unknown" }
+                text = value.ifBlank { getString(R.string.task_manager_unknown) }
                 textSize = 14f
                 setTextIsSelectable(true)
             })
@@ -407,15 +412,15 @@ class TaskManagerActivity : AppCompatActivity() {
     private fun detailRows(p: ProcessInfo): List<Pair<String, String>> {
         val owner = when {
             p.ownerInstallId != null -> installNameForId(p.ownerInstallId)
-            p.orphanRootfsId != null -> "uninstalled rootfs ${p.orphanRootfsId}"
-            else -> "unknown rootfs"
+            p.orphanRootfsId != null -> getString(R.string.task_manager_uninstalled_rootfs, p.orphanRootfsId)
+            else -> getString(R.string.task_manager_unknown_rootfs)
         }
         return listOf(
-            "Distro" to owner,
-            "PID" to p.pid.toString(),
-            "Guest command" to p.guestCommand,
-            "CWD" to p.cwd,
-            "Android command line" to p.cmdline,
+            getString(R.string.task_manager_detail_distro) to owner,
+            getString(R.string.task_manager_detail_pid) to p.pid.toString(),
+            getString(R.string.task_manager_detail_guest_command) to p.guestCommand,
+            getString(R.string.task_manager_detail_cwd) to p.cwd,
+            getString(R.string.task_manager_detail_android_command_line) to p.cmdline,
         )
     }
 
@@ -427,7 +432,7 @@ class TaskManagerActivity : AppCompatActivity() {
 
     private fun buildStopControl(p: ProcessInfo): View {
         if (!isProcessStopping(p)) {
-            return destructiveButton("Stop") { stopProcess(p) }.apply {
+            return destructiveButton(getString(R.string.action_stop)) { stopProcess(p) }.apply {
                 minWidth = stopSlotWidth
                 minimumWidth = stopSlotWidth
                 minHeight = 0
@@ -454,7 +459,7 @@ class TaskManagerActivity : AppCompatActivity() {
 
     private fun buildStopAllControl(inst: Installation): View {
         val active = inst.id in stoppingInstallIds
-        return destructiveButton(if (active) "Stopping..." else "Stop all") {
+        return destructiveButton(if (active) getString(R.string.action_stopping) else getString(R.string.action_stop_all)) {
             stopAllInInstall(inst)
         }.apply {
             isEnabled = !active

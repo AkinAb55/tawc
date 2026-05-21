@@ -3,6 +3,7 @@ package me.phie.tawc
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
+import androidx.core.content.edit
 
 /**
  * Process-global settings backed by [SharedPreferences].
@@ -48,7 +49,7 @@ object Settings {
             return GraphicsBackend.fromKeyOrDefault(raw)
         }
         set(value) {
-            requirePrefs().edit().putString(KEY_GRAPHICS_BACKEND, value.key).apply()
+            requirePrefs().edit { putString(KEY_GRAPHICS_BACKEND, value.key) }
         }
 
     /**
@@ -61,7 +62,7 @@ object Settings {
     var tintBuffersByType: Boolean
         get() = requirePrefs().getBoolean(KEY_TINT_BUFFERS_BY_TYPE, true)
         set(value) {
-            requirePrefs().edit().putBoolean(KEY_TINT_BUFFERS_BY_TYPE, value).apply()
+            requirePrefs().edit { putBoolean(KEY_TINT_BUFFERS_BY_TYPE, value) }
         }
 
     /**
@@ -71,7 +72,7 @@ object Settings {
     var outputScale: Float
         get() = snapOutputScale(requirePrefs().getFloat(KEY_OUTPUT_SCALE, DEFAULT_OUTPUT_SCALE))
         set(value) {
-            requirePrefs().edit().putFloat(KEY_OUTPUT_SCALE, snapOutputScale(value)).apply()
+            requirePrefs().edit { putFloat(KEY_OUTPUT_SCALE, snapOutputScale(value)) }
         }
 
     /**
@@ -83,7 +84,7 @@ object Settings {
     var gtk3BrokenMenusWorkaround: Boolean
         get() = requirePrefs().getBoolean(KEY_GTK3_BROKEN_MENUS_WORKAROUND, true)
         set(value) {
-            requirePrefs().edit().putBoolean(KEY_GTK3_BROKEN_MENUS_WORKAROUND, value).apply()
+            requirePrefs().edit { putBoolean(KEY_GTK3_BROKEN_MENUS_WORKAROUND, value) }
         }
 
     fun snapOutputScale(value: Float): Float {

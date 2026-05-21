@@ -35,19 +35,19 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scaffold = buildChildScreen("Settings")
+        val scaffold = buildChildScreen(getString(R.string.title_settings))
         val pad = (16 * resources.displayMetrics.density).toInt()
 
         scaffold.content.addView(
-            buildSectionCard("Graphics driver", buildGraphicsBackendGroup()),
+            buildSectionCard(getString(R.string.settings_graphics_driver), buildGraphicsBackendGroup()),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
         scaffold.content.addView(
-            buildSectionCard("Debug rendering", buildTintBuffersCheckbox()),
+            buildSectionCard(getString(R.string.settings_debug_rendering), buildTintBuffersCheckbox()),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
         scaffold.content.addView(
-            buildSectionCard("Compatibility", buildGtk3BrokenMenusWorkaroundCheckbox()),
+            buildSectionCard(getString(R.string.settings_compatibility), buildGtk3BrokenMenusWorkaroundCheckbox()),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
         scaffold.content.addView(
@@ -107,7 +107,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun buildTintBuffersCheckbox(): CheckBox {
         val cardPad = (12 * resources.displayMetrics.density).toInt()
         return CheckBox(this).apply {
-            text = "Tint buffers based on type"
+            text = getString(R.string.settings_tint_buffers_by_type)
             textSize = 15f
             isChecked = Settings.tintBuffersByType
             setPadding(0, cardPad / 2, 0, cardPad / 2)
@@ -124,7 +124,7 @@ class SettingsActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
         }
         val checkbox = CheckBox(this).apply {
-            text = "GTK3 broken menus workaround"
+            text = getString(R.string.settings_gtk3_broken_menus_workaround)
             textSize = 15f
             isChecked = Settings.gtk3BrokenMenusWorkaround
             setPadding(0, cardPad / 2, 0, cardPad / 4)
@@ -134,7 +134,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
         val detail = TextView(this).apply {
-            text = "Spoof a pointer briefly entering each window, allows GTK3 menus to work correctly"
+            text = getString(R.string.settings_gtk3_broken_menus_workaround_detail)
             textSize = 13f
             setPadding(cardPad / 2, 0, 0, cardPad / 2)
         }
@@ -151,7 +151,7 @@ class SettingsActivity : AppCompatActivity() {
         val title = TextView(this).apply {
             textSize = 16f
             setTypeface(typeface, Typeface.BOLD)
-            text = "Display scale: ${Settings.formatOutputScale(Settings.outputScale)}"
+            text = getString(R.string.settings_display_scale, Settings.formatOutputScale(Settings.outputScale))
         }
         val slider = SeekBar(this).apply {
             max = steps
@@ -161,7 +161,7 @@ class SettingsActivity : AppCompatActivity() {
         slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
                 val scale = Settings.snapOutputScale(min + progress * step)
-                title.text = "Display scale: ${Settings.formatOutputScale(scale)}"
+                title.text = getString(R.string.settings_display_scale, Settings.formatOutputScale(scale))
                 if (fromUser) {
                     Settings.outputScale = scale
                     NativeBridge.nativeSetOutputScale(scale)

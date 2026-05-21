@@ -94,39 +94,42 @@ class DistroInfoActivity : AppCompatActivity() {
         val content = scaffold.content
         content.removeAllViews()
 
-        content.addView(infoRow("ID:", installation.id), rowLp(pad))
+        content.addView(infoRow(getString(R.string.distro_info_row_id), installation.id), rowLp(pad))
         if (installation.label != null) {
-            content.addView(infoRow("Label:", installation.label), rowLp(pad))
+            content.addView(infoRow(getString(R.string.distro_info_row_label), installation.label), rowLp(pad))
         }
         content.addView(
-            infoRow("Distro:", resolvedDistro?.displayName ?: installation.distro),
+            infoRow(getString(R.string.distro_info_row_distro), resolvedDistro?.displayName ?: installation.distro),
             rowLp(pad),
         )
         content.addView(
-            infoRow("Architecture:", resolvedDistro?.linuxArch ?: installation.arch),
+            infoRow(getString(R.string.distro_info_row_architecture), resolvedDistro?.linuxArch ?: installation.arch),
             rowLp(pad),
         )
-        content.addView(infoRow("Method:", installation.method), rowLp(pad))
-        content.addView(infoRow("State:", installation.state.name.lowercase()), rowLp(pad))
+        content.addView(infoRow(getString(R.string.distro_info_row_method), installation.method), rowLp(pad))
+        content.addView(infoRow(getString(R.string.distro_info_row_state), installation.state.name.lowercase()), rowLp(pad))
         if (installation.failure != null) {
-            content.addView(infoRow("Failure:", installation.failure), rowLp(pad))
+            content.addView(infoRow(getString(R.string.distro_info_row_failure), installation.failure), rowLp(pad))
         }
-        content.addView(infoRow("Source:", installation.sourceUrl), rowLp(pad))
-        content.addView(
-            infoRow("Installed:", DateFormat.getDateTimeInstance().format(Date(installation.installedAtMillis))),
-            rowLp(pad),
-        )
+        content.addView(infoRow(getString(R.string.distro_info_row_source), installation.sourceUrl), rowLp(pad))
         content.addView(
             infoRow(
-                "App version at install:",
-                if (installation.installedAtAppVersionCode > 0) {
-                    installation.installedAtAppVersionCode.toString()
-                } else "unknown",
+                getString(R.string.distro_info_row_installed),
+                DateFormat.getDateTimeInstance().format(Date(installation.installedAtMillis)),
             ),
             rowLp(pad),
         )
         content.addView(
-            infoRow("Rootfs path:", store.rootfsDir(installation.id).absolutePath),
+            infoRow(
+                getString(R.string.distro_info_row_app_version_at_install),
+                if (installation.installedAtAppVersionCode > 0) {
+                    installation.installedAtAppVersionCode.toString()
+                } else getString(R.string.distro_info_unknown),
+            ),
+            rowLp(pad),
+        )
+        content.addView(
+            infoRow(getString(R.string.distro_info_row_rootfs_path), store.rootfsDir(installation.id).absolutePath),
             rowLp(pad),
         )
         // READY and FAILED slots both have stable on-disk content
@@ -138,11 +141,11 @@ class DistroInfoActivity : AppCompatActivity() {
         val canProbeSize = installation.state == Installation.State.READY ||
             installation.state == Installation.State.FAILED
         sizeValue = TextView(this).apply {
-            text = if (canProbeSize) "computing…" else "—"
+            text = if (canProbeSize) getString(R.string.distro_info_computing) else "—"
             textSize = 14f
             typeface = Typeface.MONOSPACE
         }
-        content.addView(infoRowWithValue("Size:", sizeValue), rowLp(pad))
+        content.addView(infoRowWithValue(getString(R.string.distro_info_row_size), sizeValue), rowLp(pad))
 
         // Push the action buttons to the bottom with a flexible spacer
         // so they don't crowd the info rows.
@@ -155,12 +158,12 @@ class DistroInfoActivity : AppCompatActivity() {
         // (UNINSTALLING) or are likely broken (FAILED).
         if (installation.state == Installation.State.READY) {
             content.addView(
-                tonalButton("Run") { showRunDialog(installation) },
+                tonalButton(getString(R.string.action_run)) { showRunDialog(installation) },
                 verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
             )
         }
         content.addView(
-            destructiveButton("Delete") { confirmUninstall(installation) },
+            destructiveButton(getString(R.string.action_delete)) { confirmUninstall(installation) },
             verticalLp(MATCH_PARENT, WRAP_CONTENT),
         )
     }
@@ -168,7 +171,7 @@ class DistroInfoActivity : AppCompatActivity() {
     private fun showRunDialog(installation: Installation) {
         val pad = (16 * resources.displayMetrics.density).toInt()
         val input = EditText(this).apply {
-            hint = "e.g. firefox"
+            hint = getString(R.string.hint_run_command)
             // VISIBLE_PASSWORD is the load-bearing flag for "no autocorrect" —
             // Gboard ignores TYPE_TEXT_FLAG_NO_SUGGESTIONS on a plain CLASS_TEXT
             // field and still autocorrects.
@@ -185,10 +188,10 @@ class DistroInfoActivity : AppCompatActivity() {
         val wrap = FrameLayout(this).apply { setPadding(pad, pad / 2, pad, 0) }
         wrap.addView(input, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         val dialog = MaterialAlertDialogBuilder(this)
-            .setTitle("Run command in ${renderDistroLabel(installation)}")
+            .setTitle(getString(R.string.distro_info_run_command_title, renderDistroLabel(installation)))
             .setView(wrap)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Run") { _, _ ->
+            .setNegativeButton(getString(R.string.action_cancel), null)
+            .setPositiveButton(getString(R.string.action_run)) { _, _ ->
                 val cmd = input.text.toString().trim()
                 if (cmd.isNotEmpty()) RunCommandOp.start(this, installation, cmd)
             }
@@ -206,14 +209,13 @@ class DistroInfoActivity : AppCompatActivity() {
 
     private fun confirmUninstall(installation: Installation) {
         val name = renderDistroLabel(installation)
-        val message = "This permanently deletes the rootfs at\n" +
-            "${store.rootfsDir(installation.id).absolutePath},\n" +
-            "including all files in your Linux home directory."
         val dialog = MaterialAlertDialogBuilder(this)
-            .setTitle("Delete $name?")
-            .setMessage(message)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
+            .setTitle(getString(R.string.distro_info_delete_title, name))
+            .setMessage(
+                getString(R.string.distro_info_delete_message, store.rootfsDir(installation.id).absolutePath)
+            )
+            .setNegativeButton(getString(R.string.action_cancel), null)
+            .setPositiveButton(getString(R.string.action_delete)) { _, _ ->
                 // The dialog "Delete" press is the user's confirmation;
                 // start the uninstall directly via the service helper
                 // and open LogScreenActivity to view it. No intent-
@@ -239,7 +241,7 @@ class DistroInfoActivity : AppCompatActivity() {
         sizeScope?.cancel()
         val cs = CoroutineScope(Dispatchers.Main)
         sizeScope = cs
-        sizeValue.text = "computing…"
+        sizeValue.text = getString(R.string.distro_info_computing)
         cs.launch {
             // `runInterruptible` maps coroutine cancellation onto thread
             // interrupt; Su.run catches that and `destroyForcibly`s the

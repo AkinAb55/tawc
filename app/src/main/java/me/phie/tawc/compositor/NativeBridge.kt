@@ -2,13 +2,13 @@ package me.phie.tawc.compositor
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import androidx.core.net.toUri
 import java.lang.ref.WeakReference
 
 object NativeBridge {
@@ -280,7 +280,7 @@ object NativeBridge {
             }
             val intent = Intent(ctx, CompositorActivity::class.java).apply {
                 action = Intent.ACTION_VIEW
-                data = Uri.parse("tawc://activity/$activityId")
+                data = "tawc://activity/$activityId".toUri()
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                         Intent.FLAG_ACTIVITY_NEW_DOCUMENT or
                         Intent.FLAG_ACTIVITY_MULTIPLE_TASK

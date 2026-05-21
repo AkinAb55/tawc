@@ -134,7 +134,7 @@ class LogScreenActivity : AppCompatActivity() {
                             panel.view.visibility = View.VISIBLE
                             emptyView.visibility = View.GONE
                         } else {
-                            emptyView.text = "No operation in flight for '${currentOpId.value}'."
+                            emptyView.text = getString(R.string.operation_not_in_flight, currentOpId.value)
                             panel.view.visibility = View.GONE
                             emptyView.visibility = View.VISIBLE
                         }

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TAWC</string>
+
+    <string name="title_install">Install</string>
+    <string name="title_install_distro">Install distro</string>
+    <string name="title_distro_info">Distro info</string>
+    <string name="title_install_methods">Install methods</string>
+    <string name="title_launcher">Launcher</string>
+    <string name="title_operation_log">Operation log</string>
+    <string name="title_settings">Settings</string>
+    <string name="title_task_manager">Task manager</string>
+
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_install">Install</string>
+    <string name="action_install_new_distro">Install new distro</string>
+    <string name="action_manage">Manage</string>
+    <string name="action_run">Run</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_stop_all">Stop all</string>
+    <string name="action_stopping">Stopping&#8230;</string>
+    <string name="action_collapse">Collapse</string>
+    <string name="action_expand">Expand</string>
+
+    <string name="hint_search">Search</string>
+    <string name="hint_search_apps">Search apps</string>
+    <string name="hint_run_command">e.g. firefox</string>
+
+    <string name="home_empty_no_distros">You have no installed Linux distros, install one to get started.</string>
+    <string name="install_state_installing">installing&#8230;</string>
+    <string name="install_state_uninstalling">uninstalling&#8230;</string>
+    <string name="install_state_failed">failed</string>
+
+    <string name="settings_graphics_driver">Graphics driver</string>
+    <string name="settings_debug_rendering">Debug rendering</string>
+    <string name="settings_compatibility">Compatibility</string>
+    <string name="settings_tint_buffers_by_type">Tint buffers based on type</string>
+    <string name="settings_gtk3_broken_menus_workaround">GTK3 broken menus workaround</string>
+    <string name="settings_gtk3_broken_menus_workaround_detail">Spoof a pointer briefly entering each window, allows GTK3 menus to work correctly</string>
+    <string name="settings_display_scale">Display scale: %1$s</string>
+
+    <string name="install_help_methods">What\'s the difference?</string>
+    <string name="install_distro_label">Distro</string>
+    <string name="install_no_supported_distro">(no supported distro for this device)</string>
+    <string name="install_label_label">Label</string>
+    <string name="install_label_empty">Label cannot be empty</string>
+    <string name="install_label_invalid">Label must contain at least one letter or digit</string>
+    <string name="install_already_installed_at">Already installed at %1$s</string>
+    <string name="install_use_cache_proxy">Use local cache proxy</string>
+    <string name="install_method_label">Install method</string>
+    <string name="install_method_tawcroot_recommended">TAWCroot (recommended)</string>
+    <string name="install_method_proot">proot</string>
+    <string name="install_method_chroot_requires_root">chroot (requires root)</string>
+    <string name="install_root_unavailable">root (su) not available &#8212; pick proot or TAWCroot, or grant Magisk root.</string>
+
+    <string name="distro_info_row_id">ID:</string>
+    <string name="distro_info_row_label">Label:</string>
+    <string name="distro_info_row_distro">Distro:</string>
+    <string name="distro_info_row_architecture">Architecture:</string>
+    <string name="distro_info_row_method">Method:</string>
+    <string name="distro_info_row_state">State:</string>
+    <string name="distro_info_row_failure">Failure:</string>
+    <string name="distro_info_row_source">Source:</string>
+    <string name="distro_info_row_installed">Installed:</string>
+    <string name="distro_info_row_app_version_at_install">App version at install:</string>
+    <string name="distro_info_row_rootfs_path">Rootfs path:</string>
+    <string name="distro_info_row_size">Size:</string>
+    <string name="distro_info_unknown">unknown</string>
+    <string name="distro_info_computing">computing&#8230;</string>
+    <string name="distro_info_run_command_title">Run command in %1$s</string>
+    <string name="distro_info_delete_title">Delete %1$s?</string>
+    <string name="distro_info_delete_message">This permanently deletes the rootfs at\n%1$s,\nincluding all files in your Linux home directory.</string>
+
+    <string name="launcher_loading_apps">Loading apps&#8230;</string>
+    <string name="launcher_installation_not_found">Installation \'%1$s\' not found.</string>
+    <string name="launcher_installation_state_wait">Installation is %1$s &#8212; wait for it to finish.</string>
+    <string name="launcher_no_launchable_apps">No launchable apps found in this rootfs.\nInstall GUI packages from a shell first.</string>
+    <string name="launcher_no_matches">No matches.</string>
+
+    <string name="operation_not_in_flight">No operation in flight for \'%1$s\'.</string>
+    <string name="operation_channel_name">Operations</string>
+    <string name="operation_channel_description">Long-running install / uninstall / command jobs</string>
+
+    <string name="task_manager_empty">No Linux processes running.</string>
+    <string name="task_manager_uninstalled_group">(uninstalled: %1$s)</string>
+    <string name="task_manager_unknown_command">unknown command</string>
+    <string name="task_manager_process_title">Process %1$d</string>
+    <string name="task_manager_detail_distro">Distro</string>
+    <string name="task_manager_detail_pid">PID</string>
+    <string name="task_manager_detail_guest_command">Guest command</string>
+    <string name="task_manager_detail_cwd">CWD</string>
+    <string name="task_manager_detail_android_command_line">Android command line</string>
+    <string name="task_manager_unknown">unknown</string>
+    <string name="task_manager_unknown_rootfs">unknown rootfs</string>
+    <string name="task_manager_uninstalled_rootfs">uninstalled rootfs %1$s</string>
+</resources>
