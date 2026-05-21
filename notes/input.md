@@ -32,10 +32,9 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
   pointer hardware is added, wire it as real pointer input.
 - Touch-down moves both keyboard focus AND text-input-v3 focus to the target
   surface via `TawcState::set_input_focus` — they are conceptually one focus and
-  splitting them invites drift. The focus update happens *before* delivering
-  `touch.down` to the client, so a cross-toplevel tap's preedit-finalize (via
-  `leave`'s automatic FinishComposingText) lands on the OLD surface — exactly
-  where the typed-but-not-committed word should appear.
+  splitting them invites drift. Touch does not commit or finish text input
+  preedit. If the client moves its cursor, its next
+  `set_surrounding_text(cause=other)` drives reactive preedit cleanup.
 
 **GTK3 touch handling note:** GTK3 handles `wl_touch` events natively — GtkGestureMultiPress
 processes `GDK_TOUCH_BEGIN` directly, and GDK's Wayland backend sets `emulating_pointer=TRUE`

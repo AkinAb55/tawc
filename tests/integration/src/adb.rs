@@ -172,6 +172,36 @@ pub fn ic_commit_text(text: &str) -> io::Result<Output> {
     broker_action("ic-commit-text", &[("text", text)])
 }
 
+/// Call `TawcInputConnection.commitCompletion(...)` on the active IC.
+/// Equivalent of tapping a suggestion from an IME completion row such as
+/// Gboard's center autocomplete candidate.
+pub fn ic_commit_completion(text: &str) -> io::Result<Output> {
+    broker_action("ic-commit-completion", &[("text", text)])
+}
+
+/// Call `TawcInputConnection.commitCorrection(CorrectionInfo(...))` on
+/// the active IC.
+pub fn ic_commit_correction(offset: u32, old_text: &str, new_text: &str) -> io::Result<Output> {
+    let offset = offset.to_string();
+    broker_action(
+        "ic-commit-correction",
+        &[("offset", &offset), ("old", old_text), ("new", new_text)],
+    )
+}
+
+/// Call `TawcInputConnection.replaceText(start, end, text, 1, null)` on
+/// the active IC. This is the Android API shape for an IME/editor
+/// replacement of a known range, such as accepting a suggestion for the
+/// current word.
+pub fn ic_replace_text(start: u32, end: u32, text: &str) -> io::Result<Output> {
+    let s = start.to_string();
+    let e = end.to_string();
+    broker_action(
+        "ic-replace-text",
+        &[("start", &s), ("end", &e), ("text", text)],
+    )
+}
+
 /// Call `TawcInputConnection.setComposingText(text, 1)` on the active
 /// IC. Equivalent of Gboard's `setComposingText` — preedit-as-you-type.
 /// Successive calls replace the previous preedit; pass an empty string

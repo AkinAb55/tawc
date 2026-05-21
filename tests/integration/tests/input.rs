@@ -660,12 +660,38 @@ fn test_autocorrect_replaces_preedit() {
     });
 }
 
+#[test]
+fn test_completion_suggestion_replaces_current_word() {
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("abc").expect("commit 'abc'");
+        app.wait_for_text("abc", TIMEOUT).expect("'abc'");
+
+        adb::ic_replace_text(0, 3, "ABC").expect("replace current word with completion");
+
+        app.wait_for_text("ABC", TIMEOUT)
+            .expect("completion suggestion should replace the current word");
+    });
+}
+
+#[test]
+fn test_commit_correction_replaces_current_word() {
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("abc").expect("commit 'abc'");
+        app.wait_for_text("abc", TIMEOUT).expect("'abc'");
+
+        adb::ic_commit_correction(0, "abc", "ABC").expect("commit correction");
+
+        app.wait_for_text("ABC", TIMEOUT)
+            .expect("correction should replace the current word");
+    });
+}
+
 /// Cursor movement is the part GTK used to hide for us. The toolkitless app
 /// validates the compositor's touch delivery directly: tap moves the cursor,
 /// Backspace and composing insertion happen at that cursor, a full
 /// compose-click-compose loop inserts the second word at the tapped cursor,
-/// and touching elsewhere finalizes pending preedit without letting a stale
-/// finishComposingText duplicate it.
+/// and touching elsewhere clears pending preedit without letting a stale
+/// finishComposingText commit it at the new cursor.
 #[test]
 fn test_touch_cursor_positioning() {
     with_wayland_text_input(|app| {
@@ -681,9 +707,12 @@ fn test_full_compose_loop_with_click_in_middle() {
 }
 
 #[test]
-fn test_tap_commits_pending_preedit_once() {
+fn test_tap_clears_pending_preedit_without_committing() {
     with_wayland_text_input(|app| {
+        adb::ic_commit_text("anchor").expect("commit 'anchor'");
+        app.wait_for_text("anchor", TIMEOUT).expect("'anchor'");
         let before = app.last_text().unwrap_or_default();
+
         adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");
         app.wait_for_preedit("pending", TIMEOUT)
             .expect("preedit 'pending'");
@@ -705,20 +734,60 @@ fn test_tap_commits_pending_preedit_once() {
         thread::sleep(Duration::from_millis(300));
 
         let text = app.last_text().unwrap_or_default();
-        let without_pending = text.replacen("pending", "", 1);
-        assert!(
-            without_pending == before && text.contains("pending"),
-            "tap dropped committed text or pending preedit: before={:?} after={:?}",
-            before,
-            text
-        );
         assert_eq!(
-            text.matches("pending").count(),
-            1,
-            "stale finishComposingText duplicated pending preedit: {:?}",
-            text
+            text, before,
+            "tap should clear uncommitted preedit without inserting it at the old or new cursor"
         );
     });
+}
+
+#[test]
+fn test_focus_leave_clears_pending_preedit_without_committing() {
+    let mut text_app = start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+
+    adb::ic_commit_text("anchor").expect("commit 'anchor'");
+    text_app.wait_for_text("anchor", TIMEOUT).expect("'anchor'");
+    adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");
+    text_app
+        .wait_for_preedit("pending", TIMEOUT)
+        .expect("preedit 'pending'");
+
+    let preedit_count = text_app.count_with_tag("PREEDIT");
+    let before = text_app.last_text().unwrap_or_default();
+
+    let mut touch_app = start_wayland_debug_touch(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    text_app
+        .wait_for_tag_count("PREEDIT", preedit_count + 1, TIMEOUT)
+        .expect("focused-away text client did not receive preedit clear");
+    assert_eq!(
+        text_app.last_preedit().as_deref(),
+        Some(""),
+        "focus leave should clear preedit through the compositor"
+    );
+    assert_eq!(
+        text_app.last_text().as_deref(),
+        Some(before.as_str()),
+        "focus leave must not commit pending preedit"
+    );
+    text_app
+        .wait_for_tag_value("TEXT_INPUT_LEAVE", "", TIMEOUT)
+        .expect("focused-away text client did not receive text-input leave");
+
+    adb::ic_finish_composing().expect("finishComposingText after focus leave");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        text_app.last_text().as_deref(),
+        Some(before.as_str()),
+        "stale finishComposingText after focus leave must not commit old preedit"
+    );
+
+    touch_app
+        .stop()
+        .expect("touch debug app crashed or failed to stop cleanly");
+    text_app
+        .stop()
+        .expect("text debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
 }
 
 /// The touch visualizer uses normalized host-side injection, so this test

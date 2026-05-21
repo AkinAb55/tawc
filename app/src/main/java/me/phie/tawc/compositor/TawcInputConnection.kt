@@ -5,8 +5,11 @@ import android.text.Selection
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.CompletionInfo
+import android.view.inputmethod.CorrectionInfo
 import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.TextAttribute
 import android.util.Log
 
 /**
@@ -181,6 +184,57 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         // the two and our preedit-clearing logic undoes the IME's commit.
         // (Standalone deleteSurroundingText takes the [emitKeys] path
         // instead — see its override below.)
+        NativeBridge.nativeCommitText(str, before, after)
+        wireCursor = (wireCursor - before).coerceAtLeast(0) + str.length
+        activePreeditUtf16Length = 0
+        pendingTrailingNewlineCommit = str.endsWith("\n")
+        composingRegionIsPreedit = false
+        return true
+    }
+
+    override fun commitCompletion(text: CompletionInfo?): Boolean {
+        val str = text?.text?.toString() ?: return false
+        Log.d(TAG, "InputConnection.commitCompletion: \"$str\"")
+        return commitText(str, 1)
+    }
+
+    override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean {
+        val info = correctionInfo ?: return false
+        val offset = info.offset
+        val oldText = info.oldText?.toString() ?: return false
+        val newText = info.newText?.toString() ?: return false
+        Log.d(TAG, "InputConnection.commitCorrection: $offset \"$oldText\" -> \"$newText\"")
+        if (offset < 0) return false
+        return replaceText(offset, offset + oldText.length, newText, 1, null)
+    }
+
+    override fun replaceText(
+        start: Int,
+        end: Int,
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean {
+        val str = text.toString()
+        val ed = editable ?: return false
+        val replaceStart = start.coerceIn(0, ed.length)
+        val replaceEnd = end.coerceIn(0, ed.length)
+        if (replaceStart > replaceEnd) return false
+
+        val cursor = wireCursor.coerceIn(0, ed.length)
+        if (cursor < replaceStart || cursor > replaceEnd) {
+            Log.d(
+                TAG,
+                "InputConnection.replaceText: \"$str\" $start..$end not representable at cursor=$cursor",
+            )
+            return false
+        }
+
+        val before = cursor - replaceStart
+        val after = replaceEnd - cursor
+        Log.d(TAG, "InputConnection.replaceText: \"$str\" $start..$end cursorPos=$newCursorPosition delete=$before/$after")
+        val ok = super.replaceText(start, end, text, newCursorPosition, textAttribute)
+        if (!ok) return false
         NativeBridge.nativeCommitText(str, before, after)
         wireCursor = (wireCursor - before).coerceAtLeast(0) + str.length
         activePreeditUtf16Length = 0

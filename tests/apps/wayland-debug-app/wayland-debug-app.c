@@ -231,6 +231,7 @@ struct app {
     int configured;
     int ready_emitted;
     int text_input_enabled;
+    uint32_t text_input_commit_serial;
     int editable;
     int provide_surrounding;
     int stale_trailing_newline_cursor;
@@ -412,6 +413,7 @@ static void sync_surrounding(struct app *app, uint32_t cause)
     zwp_text_input_v3_set_surrounding_text(
         app->text_input, app->text, cursor, cursor);
     zwp_text_input_v3_commit(app->text_input);
+    app->text_input_commit_serial++;
     checked_flush(app->display);
 }
 
@@ -1462,6 +1464,7 @@ static void text_input_enter(void *data, struct zwp_text_input_v3 *text_input,
                                                (int32_t)app->cursor,
                                                (int32_t)app->cursor);
     zwp_text_input_v3_commit(app->text_input);
+    app->text_input_commit_serial++;
     checked_flush(app->display);
 }
 
@@ -1477,8 +1480,10 @@ static void text_input_leave(void *data, struct zwp_text_input_v3 *text_input,
                      !app->pending_text_input.has_delete,
                  "text-input leave with uncommitted pending transaction");
     app->text_input_enabled = 0;
+    debug_emit("TEXT_INPUT_LEAVE", NULL);
     zwp_text_input_v3_disable(text_input);
     zwp_text_input_v3_commit(text_input);
+    app->text_input_commit_serial++;
     checked_flush(app->display);
 }
 
@@ -1530,8 +1535,10 @@ static void text_input_done(void *data, struct zwp_text_input_v3 *text_input,
 {
     struct app *app = data;
     (void)text_input;
-    (void)serial;
     require_true(app->text_input_enabled, "done before text-input enter");
+    require_true(serial == app->text_input_commit_serial,
+                 "done serial mismatch: got %u expected %u", serial,
+                 app->text_input_commit_serial);
     if (app->editable)
         apply_text_input_transaction(app);
     else
@@ -1708,12 +1715,6 @@ static void move_cursor_to_surface_x(struct app *app, wl_fixed_t surface_x)
     if (x > TEXT_X)
         chars = (uint32_t)((x - TEXT_X + APPROX_CHAR_W / 2.0) / APPROX_CHAR_W);
     app->cursor = char_count_to_byte(app->text, app->text_len, chars);
-    if (app->preedit[0]) {
-        insert_text(app, app->preedit);
-        app->preedit[0] = '\0';
-        debug_emit("PREEDIT", "");
-        emit_text_and_cursor(app);
-    }
     cursor_changed_by_user(app);
 }
 

@@ -24,7 +24,7 @@
 #   - rooted only, if the tawc APK is installed: grants Magisk `su` to the
 #     app's uid (so InstallationService can call `su` without a prompt)
 #   - either: suppresses the immersive-mode education popup
-#   - either: disables Gboard (its stylus-education popup eats taps)
+#   - either: enables Gboard as the active IME and suppresses its stylus UI
 #   - either, if the tawc APK is installed: grants POST_NOTIFICATIONS
 #     (so the install foreground-service notification displays).
 # Per-app grants are no-ops when the APK isn't there yet — first install
@@ -81,6 +81,83 @@ ensure_keyboard_enabled() {
         sed -i -E 's/^(hw\.keyboard[[:space:]]*=[[:space:]]*)no[[:space:]]*$/\1yes/' "$config"
         echo "==> enabled hw.keyboard in $1 config (takes effect on next launch)"
     fi
+}
+
+configure_gboard_for_emulator() {
+    local serial=$1
+
+    "$ADB" -s "$serial" shell "su 0 sh -s" >/dev/null 2>&1 <<'EOF'
+set -eu
+
+pkg=com.google.android.inputmethod.latin
+pref_dir=/data/user_de/0/$pkg/shared_prefs
+pref=$pref_dir/${pkg}_preferences.xml
+mkdir -p "$pref_dir"
+
+if [ ! -f "$pref" ]; then
+    printf "%s\n" \
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>" \
+        "<map>" \
+        "    <boolean name=\"enable_scribe\" value=\"true\" />" \
+        "    <set name=\"show_vk_devices_names\">" \
+        "        <string></string>" \
+        "    </set>" \
+        "    <boolean name=\"disable_stylus_toolbar\" value=\"true\" />" \
+        "</map>" >"$pref"
+fi
+
+put_boolean_pref() {
+    key=$1
+    value=$2
+    tmp=$pref.tmp.$$
+    if grep -q "name=\"$key\"" "$pref"; then
+        sed -E "s#<boolean name=\"$key\" value=\"[^\"]*\" />#<boolean name=\"$key\" value=\"$value\" />#" "$pref" >"$tmp"
+    else
+        awk -v line="    <boolean name=\"$key\" value=\"$value\" />" '
+            /<\/map>/ { print line }
+            { print }
+        ' "$pref" >"$tmp"
+    fi
+    mv "$tmp" "$pref"
+}
+
+ensure_show_vk_for_current_device() {
+    tmp=$pref.tmp.$$
+    if grep -q 'name="show_vk_devices_names"' "$pref"; then
+        awk '
+            /<set name="show_vk_devices_names">/ {
+                print "    <set name=\"show_vk_devices_names\">"
+                print "        <string></string>"
+                print "    </set>"
+                in_set=1
+                next
+            }
+            in_set && /<\/set>/ { in_set=0; next }
+            in_set { next }
+            { print }
+        ' "$pref" >"$tmp"
+    else
+        awk '
+            /<\/map>/ {
+                print "    <set name=\"show_vk_devices_names\">"
+                print "        <string></string>"
+                print "    </set>"
+            }
+            { print }
+        ' "$pref" >"$tmp"
+    fi
+    mv "$tmp" "$pref"
+}
+
+put_boolean_pref enable_scribe true
+ensure_show_vk_for_current_device
+put_boolean_pref disable_stylus_toolbar true
+
+uid=$(stat -c %u /data/user_de/0/$pkg 2>/dev/null || stat -c %u /data/user/0/$pkg 2>/dev/null || true)
+gid=$(stat -c %g /data/user_de/0/$pkg 2>/dev/null || stat -c %g /data/user/0/$pkg 2>/dev/null || true)
+[ -n "$uid" ] && [ -n "$gid" ] && chown "$uid:$gid" "$pref" 2>/dev/null || true
+chmod 660 "$pref" 2>/dev/null || true
+EOF
 }
 
 # Walk `adb devices` and ask each emulator its AVD name; print the first
@@ -237,20 +314,29 @@ cmd_start() {
     "$ADB" -s "$serial" shell 'settings put secure immersive_mode_confirmations confirmed' >/dev/null 2>&1 || \
         echo "WARNING: failed to suppress immersive-mode confirmation popup" >&2
 
-    # Disable Gboard. It pops a "Try out your stylus" first-time-education
-    # dialog (StylusEducationPopupDialog) that covers the compositor and
-    # eats events. `ime disable` alone is not enough — Gboard's package
-    # services keep running and pop the dialog on stylus-tool-type taps
-    # even when it isn't the active IME. `pm disable-user` stops the
-    # whole package for user 0, so no activities/services run. Persists
-    # across reboots; resets on AVD wipe (so we re-apply every start).
-    # tawc tests don't need Android's IME — Wayland clients have
-    # zwp_text_input, and the broker `ic-commit-text` action drives our
-    # TawcInputConnection directly (the same path the system IMM uses
-    # to dispatch Gboard events).
-    "$ADB" -s "$serial" shell 'pm disable-user --user 0 com.google.android.inputmethod.latin' >/dev/null 2>&1 || \
-        echo "WARNING: failed to disable Gboard package; stylus education popup may interfere with tests" >&2
-    "$ADB" -s "$serial" shell 'am force-stop com.google.android.inputmethod.latin' >/dev/null 2>&1 || true
+    # Gboard used to be disabled here because its stylus education dialog
+    # ate stylus-tool-type taps. Keep the IME enabled for text-input work,
+    # but force the stylus path to show the normal keyboard and disable the
+    # stylus toolbar. Re-enable every start so older AVDs recover from the
+    # historical disable-user state.
+    local gboard_pkg=com.google.android.inputmethod.latin
+    local gboard_ime="$gboard_pkg/com.android.inputmethod.latin.LatinIME"
+    "$ADB" -s "$serial" shell "pm enable --user 0 $gboard_pkg" >/dev/null 2>&1 || \
+        echo "WARNING: failed to enable Gboard package" >&2
+    "$ADB" -s "$serial" shell "am force-stop $gboard_pkg" >/dev/null 2>&1 || true
+    for _ in $(seq 1 10); do
+        "$ADB" -s "$serial" shell ime list -s 2>/dev/null | tr -d '\r' | grep -qx "$gboard_ime" && break
+        sleep 0.5
+    done
+    configure_gboard_for_emulator "$serial" || \
+        echo "WARNING: failed to configure Gboard stylus preferences; stylus UI may interfere with tests" >&2
+    "$ADB" -s "$serial" shell 'settings put secure stylus_handwriting_enabled 0' >/dev/null 2>&1 || true
+    "$ADB" -s "$serial" shell "ime enable $gboard_ime" >/dev/null 2>&1 || \
+        echo "WARNING: failed to enable Gboard IME" >&2
+    "$ADB" -s "$serial" shell "ime set $gboard_ime" >/dev/null 2>&1 || \
+        echo "WARNING: failed to select Gboard IME" >&2
+    "$ADB" -s "$serial" shell 'settings put secure show_ime_with_hard_keyboard 1' >/dev/null 2>&1 || \
+        echo "WARNING: failed to show IME with hardware keyboard" >&2
 
     # tawc-app-specific runtime setup (no-op if APK isn't installed yet).
     # Grants reset on emulator wipe; setenforce 0 (rooted) resets every boot

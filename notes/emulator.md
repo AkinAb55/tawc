@@ -408,16 +408,15 @@ Post-boot it also brings the AVD into a known-good state for tawc dev:
 - `settings put secure immersive_mode_confirmations confirmed` to
   suppress the fresh-AVD "swipe down to exit fullscreen" education
   popup, which otherwise eats the first taps tests send.
-- `pm disable-user --user 0 com.google.android.inputmethod.latin` +
-  `am force-stop` to disable Gboard. Its `StylusEducationPopupDialog`
-  pops a "Try out your stylus" dialog on stylus-tool-type taps that
-  covers the compositor and eats events. `ime disable` alone isn't
-  enough — Gboard's package services keep running and pop the dialog
-  even when it isn't the active IME; `pm disable-user` stops the
-  whole package for user 0. Persists across reboots; resets on AVD
-  wipe (so the script re-applies every `start`). tawc tests don't
-  use Android's IME — Wayland clients have zwp_text_input; the broker
-  `ic-commit-text` action drives our TawcInputConnection directly.
+- `pm enable --user 0 com.google.android.inputmethod.latin` plus
+  `ime enable` / `ime set` makes Gboard the active IME. Older emulator
+  setup disabled it to avoid Gboard's stylus education dialog eating
+  stylus-tool-type taps. The script now keeps Gboard available but
+  forces Gboard's stylus path to show the normal keyboard by setting
+  `enable_scribe=true` and `show_vk_devices_names` in Gboard's
+  device-protected preferences. It also sets `disable_stylus_toolbar=true`
+  and writes `settings put secure stylus_handwriting_enabled 0`.
+  `show_ime_with_hard_keyboard=1` is set because the AVD has `hw.keyboard = yes`.
 - Forces `hw.keyboard = yes` in the AVD's `config.ini`. `avdmanager`
   defaults this to `no`, which silently drops host-keyboard
   keystrokes in the emulator window (the soft keyboard works, but a

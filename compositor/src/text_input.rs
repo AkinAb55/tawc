@@ -328,13 +328,13 @@ impl TextInputState {
             let sel_end = byte_offset_to_utf16_count(&surrounding.text, surrounding.anchor) as i32;
 
             if change_cause == ChangeCause::Other {
-                // Drop our compositor-side preedit tracking so a defensive
-                // `finishComposingText` from the IME doesn't re-commit the
-                // preedit at the new cursor (the "words reappear" bug).
+                // The client changed cursor/text outside IME control. Drop our
+                // compositor-side preedit tracking so a later defensive
+                // finishComposingText from Android cannot re-commit stale text
+                // at the new cursor. If the client is still rendering the old
+                // preedit, clear it explicitly; we cannot correctly commit it
+                // after the cursor has already moved.
                 if state.current_preedit.take().is_some() {
-                    // We had a preedit that the client may still be
-                    // rendering; tell it to clear so it doesn't shadow
-                    // the cursor at its new position.
                     clear_client_preedit = true;
                 }
             }
@@ -373,10 +373,10 @@ impl TextInputState {
         // layout — URL bars get the URL keyboard, etc.
         self.push_focused_input_type_if_changed();
 
-        // Tell the client to drop its preedit if the cursor moved
-        // out-of-band while we had one tracked. Done order means the
-        // existing preedit is replaced by the cursor on the next done
-        // (step 1) and nothing is inserted afterwards.
+        // Tell the client to drop its preedit if the cursor moved out-of-band
+        // while we had one tracked. This is reactive cleanup: unlike the old
+        // touch-down path, it only runs after the client reports a non-IME
+        // state change.
         if clear_client_preedit {
             if let Some(ti) = ti {
                 ti.preedit_string(None, 0, 0);
@@ -445,30 +445,24 @@ impl TextInputState {
     }
 
     fn leave(&mut self, surface: &WlSurface) {
-        // Per spec, leave invalidates all per-instance state — including
-        // any preedit we have outstanding. Without this finalize the user's
-        // typed-but-not-committed word would silently vanish on focus
-        // change. handle_android_event keys off `focused_surface`, which is
-        // still the leaving surface at this point, so it targets the right
-        // instances. No-op when no preedit is active.
-        self.handle_android_event(TextInputEvent::FinishComposingText);
-
         for ti in &self.instances {
             if !ti.id().same_client_as(&surface.id()) {
                 continue;
             }
-            ti.leave(surface);
             // Spec: leave invalidates per-instance state. Mirror that
             // server-side so a re-enter doesn't see stale `enabled` /
             // surrounding / content_type from before the focus change.
             // Preserve `commit_count` — it's the protocol's monotonic
             // `done(serial)` source, not per-cycle state.
             if let Some(inst) = self.instance_state.get_mut(&ti.id()) {
+                if inst.current_preedit.take().is_some() {
+                    ti.preedit_string(None, 0, 0);
+                    ti.done(inst.commit_count);
+                }
                 inst.enabled = false;
                 inst.surrounding = None;
                 inst.content_hint = 0;
                 inst.content_purpose = 0;
-                inst.current_preedit = None;
                 inst.pending_enable = false;
                 inst.pending_disable = false;
                 inst.pending_surrounding = None;
@@ -476,6 +470,7 @@ impl TextInputState {
                 inst.pending_content_hint = 0;
                 inst.pending_content_purpose = 0;
             }
+            ti.leave(surface);
         }
         if self.focused_surface.as_ref() == Some(surface) {
             self.focused_surface = None;
@@ -586,10 +581,11 @@ impl TextInputState {
                     // independently finalizes its preedit (cursor moved
                     // by touch, etc.), so a stale finishComposingText after
                     // a click no-ops here instead of duplicating text.
-                    if let Some(preedit) = inst.current_preedit.take() {
-                        if !preedit.is_empty() {
-                            ti.commit_string(Some(preedit));
-                        }
+                    let Some(preedit) = inst.current_preedit.take() else {
+                        continue;
+                    };
+                    if !preedit.is_empty() {
+                        ti.commit_string(Some(preedit));
                     }
                     ti.preedit_string(None, 0, 0);
                 }

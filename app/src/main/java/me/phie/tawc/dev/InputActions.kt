@@ -4,6 +4,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
+import android.view.inputmethod.CompletionInfo
+import android.view.inputmethod.CorrectionInfo
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import me.phie.tawc.compositor.ClipboardBridge
@@ -54,6 +56,9 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * | Action | Args | Calls |
  * |--------|------|-------|
  * | `ic-commit-text` | `text` | `IC.commitText(text, 1)` |
+ * | `ic-commit-completion` | `text` | `IC.commitCompletion(CompletionInfo(..., text))` |
+ * | `ic-commit-correction` | `offset`, `old`, `new` | `IC.commitCorrection(CorrectionInfo(...))` |
+ * | `ic-replace-text` | `start`, `end`, `text` | `IC.replaceText(start, end, text, 1, null)` |
  * | `ic-set-composing-text` | `text` | `IC.setComposingText(text, 1)` |
  * | `ic-set-composing-region` | `start`, `end` | `IC.setComposingRegion(start, end)` |
  * | `ic-finish-composing` | — | `IC.finishComposingText()` |
@@ -82,6 +87,9 @@ internal object InputActions {
 
     fun registerAll() {
         ActionRegistry.register("ic-commit-text", IcCommitTextAction)
+        ActionRegistry.register("ic-commit-completion", IcCommitCompletionAction)
+        ActionRegistry.register("ic-commit-correction", IcCommitCorrectionAction)
+        ActionRegistry.register("ic-replace-text", IcReplaceTextAction)
         ActionRegistry.register("ic-set-composing-text", IcSetComposingTextAction)
         ActionRegistry.register("ic-set-composing-region", IcSetComposingRegionAction)
         ActionRegistry.register("ic-finish-composing", IcFinishComposingAction)
@@ -173,6 +181,45 @@ internal object InputActions {
                 val ic = NativeBridge.activeInputConnection
                 Log.d(TAG, "InputAction ic-commit-text \"$text\" (ic=${ic != null})")
                 ic?.commitText(text, 1)
+            }
+        }
+    }
+
+    private object IcCommitCompletionAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val text = args["text"] ?: return ctx.fail("ic-commit-completion: --arg text=... required")
+            return withFocusedActivity(ctx) { _ ->
+                val ic = NativeBridge.activeInputConnection
+                Log.d(TAG, "InputAction ic-commit-completion \"$text\" (ic=${ic != null})")
+                ic?.commitCompletion(CompletionInfo(0, 0, text))
+            }
+        }
+    }
+
+    private object IcCommitCorrectionAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val offset = argInt(args, "offset") ?: return ctx.fail("ic-commit-correction: --arg offset=... required")
+            val oldText = args["old"] ?: return ctx.fail("ic-commit-correction: --arg old=... required")
+            val newText = args["new"] ?: return ctx.fail("ic-commit-correction: --arg new=... required")
+            if (offset < 0) return ctx.fail("ic-commit-correction: offset must be >= 0")
+            return withFocusedActivity(ctx) { _ ->
+                val ic = NativeBridge.activeInputConnection
+                Log.d(TAG, "InputAction ic-commit-correction $offset \"$oldText\" -> \"$newText\" (ic=${ic != null})")
+                ic?.commitCorrection(CorrectionInfo(offset, oldText, newText))
+            }
+        }
+    }
+
+    private object IcReplaceTextAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val start = argInt(args, "start") ?: return ctx.fail("ic-replace-text: --arg start=... required")
+            val end = argInt(args, "end") ?: return ctx.fail("ic-replace-text: --arg end=... required")
+            val text = args["text"] ?: return ctx.fail("ic-replace-text: --arg text=... required")
+            if (start < 0 || end < 0) return ctx.fail("ic-replace-text: start/end must be >= 0")
+            return withFocusedActivity(ctx) { _ ->
+                val ic = NativeBridge.activeInputConnection
+                Log.d(TAG, "InputAction ic-replace-text $start..$end \"$text\" (ic=${ic != null})")
+                ic?.replaceText(start, end, text, 1, null)
             }
         }
     }

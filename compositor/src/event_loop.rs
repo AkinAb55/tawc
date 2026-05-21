@@ -350,24 +350,12 @@ pub fn run(
                 let location: Point<f64, smithay::utils::Logical> =
                     (touch_scale.logical_coord(x as f64), touch_scale.logical_coord(y as f64)).into();
                 let focus = touch_focus_at(data, &activity_id, location);
-                // Finalize any active preedit *before* the touch reaches the
-                // client. Wayland text-input-v3 has no way to insert text at
-                // an "old cursor" — preedit is purely a cursor-relative
-                // overlay — so once the touch moves the cursor we'd have to
-                // either let the preedit visually follow the cursor (the
-                // Android `setComposingRegion` "active word follows" bug)
-                // or silently drop the typed text. Native clients (GTK, Qt,
-                // Firefox) reset their IM on cursor-move and the IM commits
-                // its pending text first; we are the IM, so we do that here.
-                //
-                // Order: focus first (so a cross-toplevel touch's `leave` on
-                // the old surface emits the FinishComposingText for *that*
-                // surface, not the new one); then a same-surface explicit
-                // FinishComposingText (no-op if focus actually moved or no
-                // preedit was active); then touch.down. Same calloop tick
-                // and client socket — the commit + done go out before
-                // touch.down's events, so the client commits at the old
-                // cursor and only afterwards processes the touch.
+                // Touch chooses the input target, but text-input state changes
+                // must come from the text-input protocol itself. In particular,
+                // do not speculatively commit preedit here: a touch may scroll,
+                // hit a button, or be ignored. If the client really moves the
+                // cursor, its following set_surrounding_text(cause=other)
+                // drives preedit cleanup.
                 let target = focus.as_ref().map(|(s, _)| s.clone());
                 dismiss_host_popups_if_touch_is_outside_popup(
                     data,
@@ -377,9 +365,6 @@ pub fn run(
                     time,
                 );
                 data.set_input_focus(target.as_ref());
-                data.text_input_state.handle_android_event(
-                    crate::text_input::TextInputEvent::FinishComposingText,
-                );
                 touch.down(
                     data,
                     focus,

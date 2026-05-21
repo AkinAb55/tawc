@@ -72,7 +72,7 @@ Open trade-off: the combined path still vulnerable to the same crash as standalo
 |---|---|---|
 | `commitText(text, pos)` | Insert finalized text | (atomic delete for setComposingRegion replace) `delete_surrounding_text(before, after)` + `commit_string(text)` + `done` |
 | `setComposingText(text, pos)` | Set composing text | (atomic delete) `delete_surrounding_text(before, after)` + `preedit_string(text, len, len)` + `done` |
-| `finishComposingText()` | Finalize composing text | `commit_string(tracked_preedit)` + `preedit_string(None)` + `done` |
+| `finishComposingText()` | Finalize composing text | If a preedit is tracked: `commit_string(tracked_preedit)` + `preedit_string(None)` + `done`; otherwise no-op |
 | `deleteSurroundingText(before, after)` | Delete around cursor (char counts) | Backspace×before + Forward-Delete×after on `wl_keyboard` (see "Why standalone deletion is a key event") |
 | `sendKeyEvent(event)` | Hardware key event | `wl_keyboard` press+release via `keymap::android_to_evdev` |
 | `getTextBeforeCursor(n)` | IME queries editor text | Served from BaseInputConnection's Editable |
@@ -185,27 +185,21 @@ Compositor processes commit:
 
 Keyboard focus and text-input-v3 focus are conceptually one thing — "the surface receiving input from the user". Both move together through the single `TawcState::set_input_focus(target)` helper. Every place that previously updated only one of them was a latent drift bug; the helper is now the only entry point.
 
-Call sites: `FocusChanged` (Android Activity gains/loses focus), the frame-timer cleanup (focused toplevel died), `new_toplevel` (a fresh toplevel landed on the foreground host), and `TouchEvent::Down` (user tapped — moves focus to the target surface *before* delivering the touch, so a cross-toplevel tap's preedit-finalize lands on the *old* surface via `leave`'s automatic FinishComposingText).
+Call sites: `FocusChanged` (Android Activity gains/loses focus), the frame-timer cleanup (focused toplevel died), `new_toplevel` (a fresh toplevel landed on the foreground host), and `TouchEvent::Down` (user tapped — moves focus to the target surface before delivering the touch).
 
 ## Implementation Notes
 
-### Click during preedit: finalize at the OLD cursor before the touch reaches the client
+### Cursor movement during preedit
 
-Native desktop text widgets (GTK, Qt, Firefox's editor) reset their IM context when their cursor changes for a non-IME reason; the IM responds by committing whatever it had pending. The typed-but-not-committed word survives at its old position, and the cursor then moves to its new position. Our compositor is the IM in this system, so it has to do the same thing.
+Touch events choose a Wayland input target and are delivered as touch events. They do not commit or finish text input preedit. A touch can scroll, hit a button, start a gesture, or be ignored; committing preedit before the client reports an editor-state change guesses at user intent and can desync the Android IME from the Wayland client.
 
-But by the time `set_surrounding_text` with `cause=other` reaches us, the client's cursor has already moved — and Wayland text-input-v3 has no way to commit text "at the old cursor". So `cause=other` is **too late**: the only thing we can do at that point is clear the now-mispositioned preedit and accept the loss of the typed word.
-
-The fix runs **earlier**: on `TouchEvent::Down` in the compositor's touch source, we synchronously emit `commit_string(<current_preedit>) + preedit_string(None) + done` for the focused text-input instance *before* dispatching `touch.down` to the client. Both events go out on the same client socket from the same calloop callback on the compositor thread, so wire order is FIFO — the client commits at its old cursor, and only afterwards processes the touch that moves the cursor. Same fix is applied to `leave` (focus change), since the protocol's `leave` invalidates all per-instance state, which would also drop pending preedit otherwise.
-
-The Android side does NOT make this decision — `nativeOnTouchEvent` and `nativeFinishComposingText` go through different calloop channels and there is no FIFO guarantee across sources. The decision must live in the same callback as the wire emission to be correct.
-
-Edge case: a touch that doesn't end up moving the cursor (button tap, scroll start, multi-touch gesture) still triggers a finalize. That converts the user's pending word from underlined to plain text — a strictly better failure mode than silently dropping it.
+When a client actually moves the cursor or changes text outside IME control, it reports the new state with `set_surrounding_text` plus `set_text_change_cause(cause=other)`. At that point the compositor clears its tracked `current_preedit` and, if needed, sends `preedit_string(None) + done` so the client stops rendering stale preedit at the new cursor. The pending preedit is not committed: by the time `cause=other` reaches us, text-input-v3 has no way to insert text at the old cursor.
 
 ### finishComposingText
 
-Android's `finishComposingText()` means "commit the current composing text as-is." We track the last preedit text sent to each instance (`current_preedit`). On finishComposingText, we send `commit_string(tracked_preedit)` + `preedit_string(None)` + `done`. Without this, the composing text would just vanish.
+Android's `finishComposingText()` means "commit the current composing text as-is." We track the last preedit text sent to each instance (`current_preedit`). On finishComposingText with a tracked preedit, we send `commit_string(tracked_preedit)` + `preedit_string(None)` + `done`. Without this, the composing text would just vanish. If no preedit is tracked, the event is stale and no-ops.
 
-**`current_preedit` must be cleared when the Wayland client commits a `set_surrounding_text` with `cause=other`.** A non-IME cursor move (user touch, arrow keys) means the client has finalized any preedit on its side. If we keep our `current_preedit` tracking, a subsequent `finishComposingText` from the IME (which it issues defensively after cursor moves) re-commits the preedit at the new cursor — and "words randomly reappear" in the editor. Cause=other is the explicit signal from the protocol that the client's view has changed independently.
+**`current_preedit` must be cleared when the Wayland client commits a `set_surrounding_text` with `cause=other`.** A non-IME cursor move (user touch, arrow keys) means the client's view has changed independently. If we keep our `current_preedit` tracking, a subsequent `finishComposingText` from the IME (which it issues defensively after cursor moves) re-commits the preedit at the new cursor — and "words randomly reappear" in the editor. Cause=other is the explicit signal from the protocol that stale preedit must be abandoned.
 
 ### setComposingRegion + setComposingText (Gboard's "tap to retype")
 
