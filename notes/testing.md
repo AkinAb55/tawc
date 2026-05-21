@@ -23,20 +23,23 @@ prerequisites are. As of writing the modules are:
 | Module          | Backend pin | Scope |
 |-----------------|-------------|-------|
 | `apps`          | `cpu`       | App-level smoke: program launches, maps a toplevel, and (optionally) does something simple. **No buffer-type assertions.** Pair tests here with a deeper one in the per-backend modules when a buffer-path regression is worth catching separately. |
-| `hybris`        | `libhybris` | TLS / bionic-linker regressions plus every "X renders via hardware buffers through libhybris" smoke — `weston-simple-egl`, `vkcube`, GTK3/4, Firefox, supertuxkart, plus `vulkaninfo`/`eglinfo` sanity. |
-| `libhybris_zink` | `libhybris-zink` | Representative libhybris+Zink coverage: Vulkan still through libhybris, EGL renderer must be Zink rather than llvmpipe, GTK4 should land as AHB when a capable device exists. Currently hardware-blocked on our Vulkan 1.1 Adreno devices; see [libhybris-zink.md](libhybris-zink.md). |
-| `gfxstream`     | `gfxstream` | Experimental bridge-backend coverage plus an `eglinfo` software-fallback guard. Vulkan-native `vkcube` works today and runs unconditionally; GL/EGL app tests are gated on the remaining Zink-on-gfxstream work in [gfxstream-bridge.md](gfxstream-bridge.md). Surface ignored cases with `cargo test -- --ignored`. |
+| `libhybris`     | `libhybris` | TLS / bionic-linker regressions plus every "X renders via hardware buffers through libhybris" smoke — `weston-simple-egl`, `vkcube`, GTK3/4, Firefox, supertuxkart, plus `vulkaninfo`/`eglinfo` sanity. Skipped by the runner on x86 devices. |
+| `libhybris_zink` | `libhybris-zink` | Representative libhybris+Zink coverage: Vulkan still through libhybris, EGL renderer must be Zink rather than llvmpipe, GTK4 should land as AHB when a capable device exists. Currently hardware-blocked on our Vulkan 1.1 Adreno devices; see [libhybris-zink.md](libhybris-zink.md). Skipped by the runner on x86 devices. |
+| `gfxstream`     | `gfxstream` | Experimental bridge-backend coverage plus an `eglinfo` software-fallback guard. Vulkan-native `vkcube` works today on physical devices; GL/EGL app tests are gated on the remaining Zink-on-gfxstream work in [gfxstream-bridge.md](gfxstream-bridge.md). Surface ignored cases with `cargo test -- --ignored`. Skipped by the runner on emulator targets. |
 | `cpu_graphics`  | `cpu`       | Backend-agnostic SHM paths under software-only rendering: `weston-simple-shm`, GTK3 with `GDK_GL=disabled`, GTK4 with `GSK_RENDERER=cairo`, plus an `eglinfo` llvmpipe/swrast sanity. |
-| `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. |
-| `input`         | `cpu`       | wayland-debug-app driven through compositor input dispatch (text-input-v3, wl_keyboard, touch). Buffer type is irrelevant for input. |
+| `xwayland`      | `libhybris` | Anything that drives the bionic-built Xwayland binary — pure-X11 clients, TAWC-DRI AHB round-trips, libhybris's X11 EGL plugin. The Xwayland integration is libhybris-native; no analogue under gfxstream / cpu. Skipped by the runner on x86 devices. |
+| `text_input`    | `cpu`       | wayland-debug-app text-input-v3, wl_keyboard, clipboard, and cursor-tap coverage. Buffer type is irrelevant. |
+| `touch_input`   | `cpu`       | wayland-debug-app wl_touch routing coverage, including subsurfaces and popups. Buffer type is irrelevant. |
+| `settings`      | `cpu`       | Runtime settings coverage: output scale, configure-state policy, and GTK3 broken menus workaround. |
 | `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
 
 The **backend pin** for each module is enforced at every spawn: tests
-in `hybris::` call `RootfsProcess::spawn_with(GraphicsBackend::Libhybris, …)`
+in `libhybris::` call `RootfsProcess::spawn_with(GraphicsBackend::Libhybris, …)`
 (and the corresponding `launch_and_wait_for_*` / `assert_renders_via_*`
 variants), `libhybris_zink::` pins `LibhybrisZink`, `gfxstream::` pins
-`Gfxstream`, `cpu_graphics::` / `apps::` / `input::` pin `Cpu`,
-`xwayland::` pins `Libhybris`. The
+`Gfxstream`, `cpu_graphics::` / `apps::` / `settings::` /
+`text_input::` / `touch_input::` pin `Cpu`, and `xwayland::` pins
+`Libhybris`. The
 broker carries the override through to `InstallationMethod.startInside`
 on every spawn (`GRAPHICS <key>` header on RUNINSIDE, see
 [exec-broker.md](exec-broker.md)) — the user's persisted
@@ -44,10 +47,16 @@ on every spawn (`GRAPHICS <key>` header on RUNINSIDE, see
 untouched, so a single suite run exercises every backend without a
 global flip.
 
+`scripts/run-integration-tests.sh` marks unsupported target/backend
+combinations ignored via conditional libtest attributes: active
+`gfxstream::` tests on emulator targets, and active `libhybris::`,
+`libhybris_zink::`, and `xwayland::` tests on x86 devices. Existing
+per-test `#[ignore]` markers still gate unfinished backend cases.
+
 **Where does this app go?** Apps that need both a launch smoke and a
 buffer-path assertion get two tests — one in `apps::` (just maps a
 window) and one in the matching deeper module. Real-toolkit AHB
-smokes (Firefox / GTK / STK) live in **both** `hybris::` and
+smokes (Firefox / GTK / STK) live in **both** `libhybris::` and
 `gfxstream::` so a regression in one backend doesn't accidentally
 hide behind the other; SHM smokes live only in `cpu_graphics::` (the
 compositor's SHM plumbing doesn't depend on the chroot's graphics
@@ -208,7 +217,7 @@ Host (cargo test)                    Phone
   - `require_compositor`, `assert_compositor_clean`, `saw_ahb_import`,
     `saw_shm_import` — observation primitives.
   - `start_wayland_debug_text_input` and related Wayland debug app
-    launchers — for `input::`.
+    launchers — for `text_input::` and `touch_input::`.
   - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
     until the client has committed its first frame regardless of
     buffer type.

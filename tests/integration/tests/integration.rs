@@ -1,9 +1,10 @@
 mod apps;
 mod cpu_graphics;
 mod gfxstream;
-mod hybris;
-mod input;
+mod libhybris;
 mod libhybris_zink;
-mod scaling;
+mod settings;
 mod tawcroot;
+mod text_input;
+mod touch_input;
 mod xwayland;

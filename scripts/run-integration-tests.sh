@@ -40,6 +40,19 @@ export TAWC_EXEC_BIN="$ROOT_DIR/build/tawc-exec/tawc-exec"
 echo "=== Checking adb connection ($ANDROID_SERIAL) ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }
 
+DEVICE_ABI="$(adb shell getprop ro.product.cpu.abi | tr -d '\r\n')"
+if [ -z "$DEVICE_ABI" ]; then
+    DEVICE_ABI="$(adb shell uname -m | tr -d '\r\n')"
+fi
+DEVICE_IS_EMULATOR=0
+if [[ "$ANDROID_SERIAL" == emulator-* ]] || [ "$(adb shell getprop ro.kernel.qemu | tr -d '\r\n')" = "1" ]; then
+    DEVICE_IS_EMULATOR=1
+fi
+echo "=== Detected device ABI: $DEVICE_ABI ==="
+if [ "$DEVICE_IS_EMULATOR" -eq 1 ]; then
+    echo "=== Detected emulator target ==="
+fi
+
 if [ "$DO_BUILD" -eq 1 ]; then
     # Build + install the APK. We skip the launch — this script does its
     # own force-stop + am start + readiness wait below, so the
@@ -334,6 +347,20 @@ if [ -n "$TEST_FILTER" ]; then
     echo "=== Running integration tests matching: $TEST_FILTER ==="
 else
     echo "=== Running integration tests ==="
+fi
+EXTRA_RUSTFLAGS=()
+if [ "$DEVICE_IS_EMULATOR" -eq 1 ]; then
+    echo "=== Marking gfxstream:: tests ignored on emulator ==="
+    EXTRA_RUSTFLAGS+=(--cfg tawc_skip_gfxstream_on_target)
+fi
+case "$DEVICE_ABI" in
+    x86*|i386|i686)
+        echo "=== Marking libhybris::, libhybris_zink::, xwayland:: tests ignored on x86 device ($DEVICE_ABI) ==="
+        EXTRA_RUSTFLAGS+=(--cfg tawc_skip_libhybris_on_target)
+        ;;
+esac
+if [ "${#EXTRA_RUSTFLAGS[@]}" -gt 0 ]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} ${EXTRA_RUSTFLAGS[*]}"
 fi
 cd "$ROOT_DIR/tests/integration"
 set +e

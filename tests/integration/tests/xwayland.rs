@@ -2,20 +2,21 @@
 //! compositor spawns at startup — pure-X11 clients, the TAWC-DRI
 //! AHB-shipping pipe, and EGL-on-X11 via the libhybris X11 platform
 //! plugin. Buffer-type assertions inside these tests stay here (rather
-//! than moving to `cpu_graphics::` / `hybris::` / `gfxstream::`) because
+//! than moving to `cpu_graphics::` / `libhybris::` / `gfxstream::`) because
 //! what's under test is the Xwayland integration, not the buffer
 //! plumbing in isolation.
 //!
 //! Every spawn pins [`GraphicsBackend::Libhybris`]: TAWC-DRI / `xwl_tawc`
 //! and the X11 EGL platform plugin are all libhybris-native — no
 //! analogue under gfxstream (and under CPU the AHB asserts here would
-//! never fire). Requires libhybris + a real Android GPU driver, so
-//! these still fail on the emulator.
+//! never fire). Requires libhybris + a real Android GPU driver.
+//! `scripts/run-integration-tests.sh` marks this module ignored on x86
+//! devices.
 
 use std::time::Duration;
 
-use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::helpers::{assert_compositor_clean, require_compositor};
+use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, rootfs, GraphicsBackend};
 
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
@@ -32,6 +33,10 @@ const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// them since GLAMOR is disabled in our Xwayland build (see
 /// `notes/xwayland.md`).
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
 fn test_xwayland_xclock_renders_via_shm() {
     require_compositor();
     adb::logcat_clear().expect("Failed to clear logcat");
@@ -97,6 +102,10 @@ fn test_xwayland_xclock_renders_via_shm() {
 ///
 /// See notes/xwayland.md for the broader Phase 2 plan.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
 fn test_tawc_dri_ahb_present_round_trip() {
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
@@ -168,6 +177,10 @@ fn test_tawc_dri_ahb_present_round_trip() {
 ///     fps stays at the configured 60fps target (so the X server isn't
 ///     blocking it).
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
 fn test_tawc_dri_ahb_present_animated_loop() {
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
@@ -262,6 +275,10 @@ fn test_tawc_dri_ahb_present_animated_loop() {
 /// rejected the AHB format/usage emitted by the plugin's gralloc
 /// allocate (it should match what `tawc-dri-test` already emits cleanly).
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
 fn test_eglx11_renders_via_ahb() {
     require_compositor();
     adb::logcat_clear().expect("logcat clear");
@@ -330,6 +347,10 @@ fn test_eglx11_renders_via_ahb() {
 /// listener and the libhybris plugin's queueBuffer wire shape — both
 /// load-bearing for any non-trivial GL workload.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
 fn test_es2gears_x11_renders_via_ahb() {
     require_compositor();
     adb::logcat_clear().expect("logcat clear");

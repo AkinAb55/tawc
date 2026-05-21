@@ -4,7 +4,7 @@
 //! [`GraphicsBackend::LibhybrisZink`] so the user's persisted Settings
 //! pick can't leak in.
 //!
-//! Representative subset — not a full mirror of `hybris::`. The TLS /
+//! Representative subset — not a full mirror of `libhybris::`. The TLS /
 //! dlopen regression coverage lives there; here we just confirm the
 //! stack is plumbed correctly: Vulkan still hits libhybris, and GL
 //! hits Zink (not the silent llvmpipe fallback).
@@ -20,7 +20,8 @@
 //! off (or we run `cargo test -- --ignored` to check whether it
 //! passes).
 //!
-//! libhybris is aarch64-only in tawc, so these fail on the emulator.
+//! libhybris is aarch64-only in tawc. `scripts/run-integration-tests.sh`
+//! marks the active tests in this module ignored on x86 devices.
 
 use std::time::Duration;
 
@@ -37,8 +38,12 @@ const WESTON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// `vulkaninfo --summary` must still report libhybris's Android Vulkan
 /// driver — LibhybrisZink keeps libhybris as the only ICD via
 /// `VK_ICD_FILENAMES`, exactly so Zink can dispatch into it. Same
-/// physical device the `Hybris` backend sees.
+/// physical device the `Libhybris` backend sees.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris-zink skipped on x86 device"
+)]
 fn test_vulkaninfo_loads_android_driver() {
     require_compositor();
 

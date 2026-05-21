@@ -94,7 +94,7 @@ These did not explain or fix the specific tawc failure:
 
 The earlier popup-grab-stack bug found during investigation was real but
 separate. It is covered by
-`input::test_touch_grabbed_popup_switches_to_next_popup`.
+`touch_input::test_touch_grabbed_popup_switches_to_next_popup`.
 
 ## Workaround Behavior
 

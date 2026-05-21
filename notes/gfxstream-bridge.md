@@ -642,7 +642,7 @@ overkill.
 
 ### Defaults
 
-- **aarch64 physical:** `hybris` (proven, lower latency, our
+- **aarch64 physical:** `libhybris` (proven, lower latency, our
   investment).
 - **x86_64 emulator:** `bridge` (libhybris doesn't work on AVD —
   see notes/emulator.md "libhybris on x86_64". This is the
@@ -778,7 +778,7 @@ The integration suite splits the gfxstream-aware tests across three
 modules so a regression in one backend can't accidentally hide behind
 another:
 
-- **`hybris::`** — libhybris-only assertions. The TLS / dlclose
+- **`libhybris::`** — libhybris-only assertions. The TLS / dlclose
   regression smoke (`test_libhybris_tls_dlclose_does_not_abort`),
   vulkaninfo via libhybris's `vulkanplatform_wayland.so`, eglinfo
   with the `Android META-EGL` signature, and every "X renders via
@@ -798,7 +798,7 @@ another:
 `xwayland::` always pins libhybris (TAWC-DRI / `xwl_tawc` are
 libhybris-native — no analogue under gfxstream until a bridge-side
 AHB-shipping pipe gets built). `apps::`
-and `input::` pin CPU: their launch / input-dispatch logic is
+and `text_input::` / `touch_input::` pin CPU: their launch / input-dispatch logic is
 buffer-path-independent, and CPU is the most portable spawn (no GPU
 required), so they can run unattended on the emulator too.
 
@@ -1371,7 +1371,7 @@ aliasing). Not blocking the libhybris-native physical path.
 - `notes/wsi-layer.md` — the chroot's GL/Vulkan WSI today. Under the
   bridge, the chroot's WSI becomes "Mesa with `gfxstream-vk`",
   i.e., upstream off-the-shelf. Libhybris-fork-side WSI patches
-  stay needed for users on the `hybris` backend (which we ship
+  stay needed for users on the `libhybris` backend (which we ship
   indefinitely alongside the bridge — see "Coexistence with
   libhybris" above).
 - `notes/desktop-gl-dispatch.md` — design for routing desktop-GL

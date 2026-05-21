@@ -202,7 +202,7 @@ Per-spawn via the broker `GRAPHICS` header:
 `tawc-exec --in-rootfs <id> --graphics libhybris-zink …` or
 `RootfsProcess::spawn_with(..., GraphicsBackend::LibhybrisZink)`.
 `tests/integration/tests/libhybris_zink.rs` is a representative subset
-of `hybris::` rather than a full mirror — vulkaninfo (libhybris still
+of `libhybris::` rather than a full mirror — vulkaninfo (libhybris still
 the Vulkan path), eglinfo (Zink and **not** llvmpipe), GTK4 (real GL
 app landing as AHB via libhybris's Vulkan WSI).
 

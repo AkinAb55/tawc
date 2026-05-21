@@ -7,7 +7,7 @@
 //! spawn (which selects `VK_ICD_FILENAMES` + `VIRTGPU_KUMQUAT` /
 //! `LIBGL_*` env, not libhybris).
 //!
-//! Companion module: `hybris::` runs the same smokes against the
+//! Companion module: `libhybris::` runs the same smokes against the
 //! libhybris path. A regression in one backend shouldn't accidentally
 //! hide behind the other.
 //!
@@ -18,6 +18,10 @@
 //! moment the path works (run via `cargo test -- --ignored` or drop
 //! the attribute). `test_vkcube_renders_via_ahb` is the one that
 //! works today and runs unconditionally.
+//!
+//! `scripts/run-integration-tests.sh` marks the active tests in this
+//! module ignored on emulator targets because the bridge currently does
+//! not work there.
 
 use std::time::Duration;
 
@@ -121,6 +125,10 @@ fn test_weston_simple_egl_renders_via_ahb() {
 /// notes/gfxstream-bridge.md "Remaining work to a fully-integrated
 /// bridge backend".
 #[test]
+#[cfg_attr(
+    tawc_skip_gfxstream_on_target,
+    ignore = "gfxstream skipped on emulator target"
+)]
 fn test_vkcube_renders_via_ahb() {
     let mut app = launch_and_wait_for_ahb(
         BACKEND,
@@ -170,7 +178,7 @@ fn test_gtk4_renders_via_ahb() {
 }
 
 /// Firefox under gfxstream — mirror of the libhybris steady-state
-/// surface-count check in `hybris::test_firefox_renders_via_ahb`. See
+/// surface-count check in `libhybris::test_firefox_renders_via_ahb`. See
 /// that test's doc for why we sample the compositor state snapshot
 /// instead of counting log lines.
 #[test]

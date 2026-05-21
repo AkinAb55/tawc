@@ -263,12 +263,21 @@ pub fn assert_compositor_clean() {
         .expect("Screen still shows toplevels after cleanup");
 }
 
+pub fn assert_broker_ok(output: std::process::Output, action: &str) {
+    assert!(
+        output.status.success(),
+        "{action} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Spawn a long-running graphical app via RootfsProcess and wait until the
 /// compositor reports at least one mapped toplevel **with a buffer
 /// attached** (i.e. the client has committed its first frame, whatever
 /// buffer type it picked). Doesn't care which path — the `apps::` tests
 /// use this to verify a program launches and gets to first paint; buffer-
-/// type assertions belong in `cpu_graphics::` / `hybris::` / `gfxstream::`
+/// type assertions belong in `cpu_graphics::` / `libhybris::` / `gfxstream::`
 /// (or `xwayland::`).
 ///
 /// Waiting for first-frame-attached (not just "toplevel mapped") matters
@@ -277,9 +286,10 @@ pub fn assert_compositor_clean() {
 /// the PTY, and that only happens once the first frame has gone through.
 ///
 /// `backend` pins the in-rootfs [GraphicsBackend] for this spawn. Suite
-/// tests pass an explicit value (typically `Cpu` for `apps::`/`input::`
-/// since they don't care about buffer type and CPU is the most portable
-/// path); without an override the user's Settings pick would leak in,
+/// tests pass an explicit value (typically `Cpu` for `apps::`,
+/// `settings::`, `text_input::`, and `touch_input::` since they don't
+/// care about buffer type and CPU is the most portable path); without an
+/// override the user's Settings pick would leak in,
 /// making tests non-hermetic.
 ///
 /// Panics if the app crashes or doesn't reach first paint within `timeout`.

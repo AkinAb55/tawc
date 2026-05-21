@@ -4,7 +4,7 @@
 //! + `GALLIUM_DRIVER=llvmpipe`, the Vulkan loader picks up lavapipe if
 //! `vulkan-swrast` is installed. Clients that have a GPU fast path
 //! (real toolkits, EGL/Vulkan demos) fall back to `wl_shm` — those
-//! tests live in the per-backend `hybris::` / `gfxstream::` modules
+//! tests live in the per-backend `libhybris::` / `gfxstream::` modules
 //! instead, since exercising AHB is the whole point of *those*
 //! backends.
 //!

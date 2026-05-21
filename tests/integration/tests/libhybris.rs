@@ -12,7 +12,8 @@
 //! (`weston-simple-shm`, GTK with software renderers) live in
 //! `cpu_graphics::` since they're backend-agnostic by construction.
 //!
-//! libhybris is aarch64-only in tawc, so these fail on the emulator.
+//! libhybris is aarch64-only in tawc. `scripts/run-integration-tests.sh`
+//! marks this module ignored on x86 devices.
 
 use std::time::Duration;
 
@@ -76,6 +77,10 @@ const FIREFOX_CMD: &str = "firefox --no-remote";
 ///     promoted-TLS registry kept a pointer into an unloaded .so instead
 ///     of owning the initializer bytes
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_libhybris_tls_dlclose_does_not_abort() {
     let bin = rootfs::ensure_libhybris_tls_repro().expect("libhybris-tls-repro build");
 
@@ -148,6 +153,10 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
 /// `vulkan-icd-loader` copy. Doesn't exercise swapchain/present — the
 /// `test_vkcube_renders_via_ahb` test below does.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_vulkaninfo_loads_android_driver() {
     require_compositor();
 
@@ -189,6 +198,10 @@ fn test_vulkaninfo_loads_android_driver() {
 /// renderer. The `Android META-EGL` signature is the smoking gun that
 /// our shim got loaded.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_eglinfo_loads_android_driver() {
     require_compositor();
 
@@ -221,6 +234,10 @@ fn test_eglinfo_loads_android_driver() {
 /// `ANativeWindowBuffer`s through libhybris, and presents via AHB —
 /// exactly the path the compositor's `wlegl` module imports.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_weston_simple_egl_renders_via_ahb() {
     let mut app = launch_and_wait_for_ahb(
         BACKEND,
@@ -249,6 +266,10 @@ fn test_weston_simple_egl_renders_via_ahb() {
 /// textures. Complements `test_vulkaninfo_loads_android_driver` (which
 /// only inspects extension strings) by actually exercising present.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_vkcube_renders_via_ahb() {
     // `--c` caps the frame count; we still kill via stop() so the value
     // mostly just guards against the test runner hanging if stop() fails.
@@ -277,6 +298,10 @@ fn test_vkcube_renders_via_ahb() {
 /// [`RootfsEnv`] for libhybris) renders through `android_wlegl` and
 /// presents via AHB hardware buffers.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_gtk3_renders_via_ahb() {
     assert_renders_via_ahb(
         BACKEND,
@@ -294,6 +319,10 @@ fn test_gtk3_renders_via_ahb() {
 /// because the latter pulls in a session-bus / GApplication setup that
 /// errors out in this rootfs and never actually maps a window.)
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_gtk4_renders_via_ahb() {
     assert_renders_via_ahb(
         BACKEND,
@@ -329,6 +358,10 @@ fn test_gtk4_renders_via_ahb() {
 ///   - "Firefox is wedged / not committing"
 ///     → frames doesn't advance.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_firefox_renders_via_ahb() {
     // Remove lock/crash files so Firefox doesn't show the troubleshoot-mode dialog.
     let _ = adb::rootfs_run_with(
@@ -379,6 +412,10 @@ fn test_firefox_renders_via_ahb() {
 /// supertuxkart presents through the libhybris/AHB GL path. Pairs with
 /// `apps::test_supertuxkart_launches`.
 #[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "libhybris skipped on x86 device"
+)]
 fn test_supertuxkart_renders_via_ahb() {
     let mut stk = launch_and_wait_for_ahb(
         BACKEND,
