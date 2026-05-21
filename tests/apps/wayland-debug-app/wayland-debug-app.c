@@ -68,6 +68,7 @@
 #define APPROX_CHAR_W 19.0
 #define MAX_TEXT 8192
 #define MAX_TOUCHES 16
+#define MAIN_BUFFER_COUNT 2
 
 #define KEY_BACKSPACE 14
 #define KEY_TAB 15
@@ -166,10 +167,28 @@ static void debug_emit_u32(const char *tag, uint32_t value)
 
 /* --- App state ---------------------------------------------------------- */
 
+struct app;
+struct main_shm_pool;
+
 struct shm_buffer {
     struct wl_buffer *buffer;
     void *data;
     size_t size;
+    struct main_shm_pool *pool;
+    int busy;
+    int index;
+};
+
+struct main_shm_pool {
+    struct app *app;
+    void *data;
+    size_t size;
+    int width;
+    int height;
+    int stride;
+    int retired;
+    int live_buffers;
+    struct shm_buffer buffers[MAIN_BUFFER_COUNT];
 };
 
 /* text-input-v3 delivers edits as a transaction terminated by `done`.
@@ -237,7 +256,6 @@ struct app {
     int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
-    int dynamic_size;
     int report_scale;
     int use_data_device;
     int copy_clipboard_on_focus;
@@ -257,6 +275,9 @@ struct app {
     uint32_t last_preferred_scale;
     int win_w;
     int win_h;
+    int main_next_buffer;
+    int redraw_pending;
+    struct main_shm_pool *main_pool;
     wl_fixed_t pointer_x;
     uint32_t keyboard_enter_serial;
 
@@ -286,7 +307,6 @@ struct wayland_mode {
     int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
-    int dynamic_size;
     int report_scale;
     int use_data_device;
     const char *clipboard_copy_text;
@@ -761,6 +781,29 @@ static void buffer_release(void *data, struct wl_buffer *buffer)
 {
     struct shm_buffer *buf = data;
     (void)buffer;
+
+    if (buf->pool) {
+        struct main_shm_pool *pool = buf->pool;
+        buf->busy = 0;
+        if (pool->retired) {
+            if (buf->buffer) {
+                wl_buffer_destroy(buf->buffer);
+                buf->buffer = NULL;
+                pool->live_buffers--;
+            }
+            if (pool->live_buffers == 0) {
+                munmap(pool->data, pool->size);
+                free(pool);
+            }
+            return;
+        }
+        if (pool->app && pool->app->redraw_pending) {
+            pool->app->redraw_pending = 0;
+            request_redraw(pool->app);
+        }
+        return;
+    }
+
     wl_buffer_destroy(buf->buffer);
     munmap(buf->data, buf->size);
     free(buf);
@@ -769,6 +812,107 @@ static void buffer_release(void *data, struct wl_buffer *buffer)
 static const struct wl_buffer_listener buffer_listener = {
     .release = buffer_release,
 };
+
+static void free_available_retired_pool_buffers(struct main_shm_pool *pool)
+{
+    for (int i = 0; i < MAIN_BUFFER_COUNT; i++) {
+        struct shm_buffer *buf = &pool->buffers[i];
+        if (buf->buffer && !buf->busy) {
+            wl_buffer_destroy(buf->buffer);
+            buf->buffer = NULL;
+            pool->live_buffers--;
+        }
+    }
+    if (pool->live_buffers == 0) {
+        munmap(pool->data, pool->size);
+        free(pool);
+    }
+}
+
+static void retire_main_shm_pool(struct main_shm_pool *pool)
+{
+    if (!pool)
+        return;
+    pool->retired = 1;
+    pool->app = NULL;
+    free_available_retired_pool_buffers(pool);
+}
+
+static struct main_shm_pool *create_main_shm_pool(struct app *app, int width,
+                                                  int height)
+{
+    struct main_shm_pool *pool = calloc(1, sizeof(*pool));
+    require_true(pool != NULL, "calloc main_shm_pool failed");
+
+    pool->app = app;
+    pool->width = width;
+    pool->height = height;
+    pool->stride = width * 4;
+    size_t buffer_size = (size_t)pool->stride * height;
+    pool->size = buffer_size * MAIN_BUFFER_COUNT;
+
+    int fd = create_shm_fd(pool->size);
+    if (fd < 0)
+        fatal("create main shm failed: %s", strerror(errno));
+
+    pool->data = mmap(NULL, pool->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      fd, 0);
+    if (pool->data == MAP_FAILED) {
+        int saved_errno = errno;
+        close(fd);
+        free(pool);
+        fatal("main shm mmap failed: %s", strerror(saved_errno));
+    }
+
+    struct wl_shm_pool *wl_pool =
+        wl_shm_create_pool(app->shm, fd, (int32_t)pool->size);
+    require_true(wl_pool != NULL, "wl_shm_create_pool main returned NULL");
+
+    for (int i = 0; i < MAIN_BUFFER_COUNT; i++) {
+        struct shm_buffer *buf = &pool->buffers[i];
+        size_t offset = buffer_size * (size_t)i;
+        buf->pool = pool;
+        buf->data = (char *)pool->data + offset;
+        buf->size = buffer_size;
+        buf->index = i;
+        buf->buffer = wl_shm_pool_create_buffer(
+            wl_pool, (int32_t)offset, width, height, pool->stride,
+            WL_SHM_FORMAT_ARGB8888);
+        require_true(buf->buffer != NULL,
+                     "wl_shm_pool_create_buffer main returned NULL");
+        wl_buffer_add_listener(buf->buffer, &buffer_listener, buf);
+        pool->live_buffers++;
+    }
+
+    wl_shm_pool_destroy(wl_pool);
+    close(fd);
+    return pool;
+}
+
+static void ensure_main_shm_pool(struct app *app, int width, int height)
+{
+    if (app->main_pool && app->main_pool->width == width &&
+        app->main_pool->height == height)
+        return;
+
+    retire_main_shm_pool(app->main_pool);
+    app->main_pool = create_main_shm_pool(app, width, height);
+    app->main_next_buffer = 0;
+    app->redraw_pending = 0;
+}
+
+static struct shm_buffer *next_main_buffer(struct app *app)
+{
+    for (int n = 0; n < MAIN_BUFFER_COUNT; n++) {
+        int i = (app->main_next_buffer + n) % MAIN_BUFFER_COUNT;
+        struct shm_buffer *buf = &app->main_pool->buffers[i];
+        if (!buf->busy && buf->buffer) {
+            app->main_next_buffer = (i + 1) % MAIN_BUFFER_COUNT;
+            return buf;
+        }
+    }
+    return NULL;
+}
 
 static void draw_display_text(struct app *app, cairo_t *cr)
 {
@@ -1087,35 +1231,15 @@ static void request_redraw(struct app *app)
 
     int width = app->win_w > 0 ? app->win_w : WIN_W;
     int height = app->win_h > 0 ? app->win_h : WIN_H;
-    int stride = width * 4;
-    size_t size = (size_t)stride * height;
-    int fd = create_shm_fd(size);
-    if (fd < 0)
-        fatal("create shm failed: %s", strerror(errno));
-
-    void *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
-        int saved_errno = errno;
-        perror("mmap");
-        close(fd);
-        fatal("mmap failed: %s", strerror(saved_errno));
+    ensure_main_shm_pool(app, width, height);
+    struct shm_buffer *buf = next_main_buffer(app);
+    if (!buf) {
+        app->redraw_pending = 1;
+        return;
     }
 
-    struct wl_shm_pool *pool = wl_shm_create_pool(app->shm, fd, (int32_t)size);
-    struct shm_buffer *buf = calloc(1, sizeof(*buf));
-    require_true(pool != NULL, "wl_shm_create_pool returned NULL");
-    require_true(buf != NULL, "calloc shm_buffer failed");
-    buf->data = data;
-    buf->size = size;
-    buf->buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride,
-                                            WL_SHM_FORMAT_ARGB8888);
-    require_true(buf->buffer != NULL, "wl_shm_pool_create_buffer returned NULL");
-    wl_buffer_add_listener(buf->buffer, &buffer_listener, buf);
-    wl_shm_pool_destroy(pool);
-    close(fd);
-
     cairo_surface_t *cs = cairo_image_surface_create_for_data(
-        data, CAIRO_FORMAT_ARGB32, width, height, stride);
+        buf->data, CAIRO_FORMAT_ARGB32, width, height, app->main_pool->stride);
     cairo_t *cr = cairo_create(cs);
     require_true(cairo_surface_status(cs) == CAIRO_STATUS_SUCCESS,
                  "cairo surface failed: %s",
@@ -1138,6 +1262,7 @@ static void request_redraw(struct app *app)
     cairo_destroy(cr);
     cairo_surface_destroy(cs);
 
+    buf->busy = 1;
     wl_surface_attach(app->surface, buf->buffer, 0, 0);
     wl_surface_damage_buffer(app->surface, 0, 0, width, height);
     wl_surface_commit(app->surface);
@@ -1244,7 +1369,7 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
     }
     debug_emit("CONFIGURE_STATE",
                fullscreen ? "fullscreen" : (maximized ? "maximized" : "other"));
-    if (app->dynamic_size && width > 0 && height > 0) {
+    if (width > 0 && height > 0) {
         app->win_w = width;
         app->win_h = height;
     }
@@ -2018,7 +2143,6 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->stale_trailing_newline_cursor = mode->stale_trailing_newline_cursor;
     app->touch_debug = mode->touch_debug;
     app->fullscreen = mode->fullscreen;
-    app->dynamic_size = mode->dynamic_size;
     app->report_scale = mode->report_scale;
     app->use_data_device = mode->use_data_device;
     app->paste_clipboard_on_selection = mode->clipboard_paste;
@@ -2115,6 +2239,8 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
 
 static void teardown_wayland(struct app *app)
 {
+    retire_main_shm_pool(app->main_pool);
+    app->main_pool = NULL;
     if (app->text_input)
         zwp_text_input_v3_destroy(app->text_input);
     if (app->fractional_scale)
@@ -2335,7 +2461,6 @@ static int cmd_touch(int argc, char **argv)
         .provide_surrounding = 0,
         .touch_debug = 1,
         .fullscreen = 1,
-        .dynamic_size = 1,
     };
 
     (void)argc;
@@ -2369,7 +2494,6 @@ static int cmd_scale(int argc, char **argv)
         .use_text_input = 0,
         .editable = 0,
         .provide_surrounding = 0,
-        .dynamic_size = 1,
         .report_scale = 1,
     };
 
@@ -2427,7 +2551,6 @@ static int cmd_subsurface(int argc, char **argv)
         .editable = 0,
         .provide_surrounding = 0,
         .fullscreen = 1,
-        .dynamic_size = 1,
         .scene_kind = SCENE_SUBSURFACE,
     };
 
@@ -2445,7 +2568,6 @@ static int cmd_subsurface_input_empty(int argc, char **argv)
         .editable = 0,
         .provide_surrounding = 0,
         .fullscreen = 1,
-        .dynamic_size = 1,
         .scene_kind = SCENE_SUBSURFACE,
         .scene_child_input_empty = 1,
     };
@@ -2464,7 +2586,6 @@ static int cmd_popup(int argc, char **argv)
         .editable = 0,
         .provide_surrounding = 0,
         .fullscreen = 1,
-        .dynamic_size = 1,
         .scene_kind = SCENE_POPUP,
     };
 
@@ -2482,7 +2603,6 @@ static int cmd_popup_switch(int argc, char **argv)
         .editable = 0,
         .provide_surrounding = 0,
         .fullscreen = 1,
-        .dynamic_size = 1,
         .scene_kind = SCENE_POPUP_SWITCH,
     };
 

@@ -62,7 +62,7 @@ use tawc_integration::GraphicsBackend;
 /// run exercises the dispatch paths without depending on a GPU.
 const INPUT_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 
-// Coordinates aimed at wayland-debug-app's compact 640x240 surface.
+// Coordinates aimed at wayland-debug-app's text row in its configured surface.
 // Coordinates are physical;
 // the compositor maps them to the app's logical surface through output scale.
 const WAYLAND_TAP_TEXT_MID_X: u32 = 200;
