@@ -24,6 +24,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import me.phie.tawc.Settings
 
 /**
  * Hosts the Rust Wayland compositor on a SurfaceView. All interaction
@@ -256,7 +257,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
      * multi-touch. Events are dispatched through the SurfaceView, so this
      * still exercises the Activity's MotionEvent decoding before JNI.
      */
-    fun injectTouchSequenceForDev(kind: String): String? {
+    fun injectTouchSequenceForDev(kind: String, logicalX: Float? = null, logicalY: Float? = null): String? {
         val width = surfaceView.width.toFloat()
         val height = surfaceView.height.toFloat()
         if (width <= 0f || height <= 0f) {
@@ -268,6 +269,12 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
 
         fun point(xFrac: Float, yFrac: Float): Pair<Float, Float> =
             (xFrac * width) to (yFrac * height)
+
+        fun logicalPoint(): Pair<Float, Float> {
+            val x = logicalX ?: return point(0.30f, 0.35f)
+            val y = logicalY ?: return point(0.30f, 0.35f)
+            return (x * Settings.outputScale) to (y * Settings.outputScale)
+        }
 
         fun send(
             actionMasked: Int,
@@ -327,6 +334,14 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         when (kind) {
             "tap" -> {
                 val p = point(0.30f, 0.35f)
+                send(MotionEvent.ACTION_DOWN, 0, intArrayOf(0), arrayOf(p))
+                send(MotionEvent.ACTION_UP, 0, intArrayOf(0), arrayOf(p))
+            }
+            "tap-logical" -> {
+                if (logicalX == null || logicalY == null) {
+                    return "tap-logical requires x and y"
+                }
+                val p = logicalPoint()
                 send(MotionEvent.ACTION_DOWN, 0, intArrayOf(0), arrayOf(p))
                 send(MotionEvent.ACTION_UP, 0, intArrayOf(0), arrayOf(p))
             }

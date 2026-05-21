@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use tawc_integration::adb;
 use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
-    assert_compositor_clean, start_wayland_debug_clipboard_copy,
+    assert_broker_ok, assert_compositor_clean, start_wayland_debug_clipboard_copy,
     start_wayland_debug_clipboard_paste, start_wayland_debug_text_input,
     start_wayland_debug_text_input_no_surrounding, start_wayland_debug_text_input_stale_newline,
     start_wayland_debug_touch, TIMEOUT,
@@ -62,27 +62,34 @@ use tawc_integration::GraphicsBackend;
 /// run exercises the dispatch paths without depending on a GPU.
 const INPUT_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 
-// Coordinates aimed at wayland-debug-app's text row in its configured surface.
-// Coordinates are physical;
-// the compositor maps them to the app's logical surface through output scale.
-const WAYLAND_TAP_TEXT_MID_X: u32 = 200;
-const WAYLAND_TAP_TEXT_MID_Y: u32 = 250;
-const WAYLAND_TAP_TEXT_START_X: u32 = 40;
+// Coordinates aimed at wayland-debug-app's text row in its logical surface.
+// Tests inject through the focused SurfaceView so Android window animation and
+// screen insets cannot move the tap underneath us.
+const WAYLAND_TAP_TEXT_MID_X: f32 = 100.0;
+const WAYLAND_TAP_TEXT_Y: f32 = 125.0;
+const WAYLAND_TAP_TEXT_START_X: f32 = 20.0;
 
 #[derive(Clone, Copy)]
 struct InputTapCoords {
-    text_mid_x: u32,
-    text_mid_y: u32,
-    text_start_x: u32,
+    text_mid_x: f32,
+    text_y: f32,
+    text_start_x: f32,
 }
 
 const WAYLAND_TAP_COORDS: InputTapCoords = InputTapCoords {
     text_mid_x: WAYLAND_TAP_TEXT_MID_X,
-    text_mid_y: WAYLAND_TAP_TEXT_MID_Y,
+    text_y: WAYLAND_TAP_TEXT_Y,
     text_start_x: WAYLAND_TAP_TEXT_START_X,
 };
 
 const WAYLAND_DEBUG_ENV: &str = "";
+
+fn inject_tap(x: f32, y: f32, label: &str) {
+    assert_broker_ok(
+        adb::inject_touch_logical(x, y).unwrap_or_else(|e| panic!("{label}: {e}")),
+        label,
+    );
+}
 
 // --- Scenes -----------------------------------------------------------------
 //
@@ -97,7 +104,7 @@ fn scene_click_cursor_positioning(app: &DebugApp, taps: InputTapCoords) {
     app.wait_for_text("abcdef", TIMEOUT).expect("'abcdef'");
 
     let cursor_count_before = app.cursor_pos_count();
-    adb::input_tap(taps.text_mid_x, taps.text_mid_y).expect("tap mid");
+    inject_tap(taps.text_mid_x, taps.text_y, "tap mid");
     let cursor = app
         .wait_for_cursor_change(cursor_count_before, TIMEOUT)
         .expect("CURSOR_POS event after tap");
@@ -182,7 +189,7 @@ fn scene_full_compose_loop_with_click_in_middle(app: &DebugApp, taps: InputTapCo
         .expect("'hello world'");
 
     let cursor_count = app.cursor_pos_count();
-    adb::input_tap(taps.text_mid_x, taps.text_mid_y).expect("tap mid");
+    inject_tap(taps.text_mid_x, taps.text_y, "tap mid");
     let cursor = app
         .wait_for_cursor_change(cursor_count, TIMEOUT)
         .expect("cursor change");
@@ -371,11 +378,11 @@ fn test_basic_editing_and_delete() {
             .expect("'hello ' after delete_surrounding(5, 0)");
 
         let cursor_count = app.cursor_pos_count();
-        adb::input_tap(
+        inject_tap(
             WAYLAND_TAP_COORDS.text_start_x,
-            WAYLAND_TAP_COORDS.text_mid_y,
-        )
-        .expect("tap line start");
+            WAYLAND_TAP_COORDS.text_y,
+            "tap line start",
+        );
         let cursor = app
             .wait_for_cursor_change(cursor_count, TIMEOUT)
             .expect("cursor change after tap");
@@ -464,7 +471,7 @@ fn test_direct_replacement_apis() {
 }
 
 /// Cursor movement is the part GTK used to hide for us. The toolkitless app
-/// validates the compositor's touch delivery directly: tap moves the cursor,
+/// validates SurfaceView-to-compositor touch delivery: tap moves the cursor,
 /// Backspace and composing insertion happen at that cursor, a full
 /// compose-click-compose loop inserts the second word at the tapped cursor,
 /// and touching elsewhere clears pending preedit without letting a stale
@@ -495,11 +502,11 @@ fn test_tap_clears_pending_preedit_without_committing() {
             .expect("preedit 'pending'");
 
         let cursor_count = app.cursor_pos_count();
-        adb::input_tap(
+        inject_tap(
             WAYLAND_TAP_COORDS.text_start_x,
-            WAYLAND_TAP_COORDS.text_mid_y,
-        )
-        .expect("tap line start");
+            WAYLAND_TAP_COORDS.text_y,
+            "tap line start",
+        );
         let cursor = app
             .wait_for_cursor_change(cursor_count, TIMEOUT)
             .expect("cursor change after tap");
@@ -579,8 +586,11 @@ fn test_composing_region_replacement_paths() {
             .expect("'hello world'");
 
         let cursor_count = app.cursor_pos_count();
-        adb::input_tap(WAYLAND_TAP_COORDS.text_mid_x, WAYLAND_TAP_COORDS.text_mid_y)
-            .expect("tap mid");
+        inject_tap(
+            WAYLAND_TAP_COORDS.text_mid_x,
+            WAYLAND_TAP_COORDS.text_y,
+            "tap mid",
+        );
         let cursor = app
             .wait_for_cursor_change(cursor_count, TIMEOUT)
             .expect("cursor change after tap");

@@ -20,13 +20,13 @@ const BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 const GTK3_DEMO_APPLICATION_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const GTK3_MENU_OBSERVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-// Physical coordinates for the second menubar item in gtk3-demo-application
-// on the standard integration-test phone layout with output scale 2.0. Keep
+// Wayland logical coordinates for the second menubar item in gtk3-demo-application.
+// Keep
 // both GTK3 menu tests on this exact tap: if GTK3 fixes the cold-state bug,
 // the "verify broken" test should fail instead of drifting to a different
 // click target.
-const GTK3_DEMO_APPLICATION_MENU_X: u32 = 340;
-const GTK3_DEMO_APPLICATION_MENU_Y: u32 = 170;
+const GTK3_DEMO_APPLICATION_MENU_X: f32 = 170.0;
+const GTK3_DEMO_APPLICATION_MENU_Y: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Gtk3Menu {
@@ -210,8 +210,11 @@ fn observe_gtk3_demo_application_menu_tap(workaround_enabled: bool) -> Gtk3MenuO
     adb::logcat_clear().expect("Failed to clear logcat");
 
     let (mut app, rx) = launch_gtk3_demo_application_with_wayland_debug();
-    adb::input_tap(GTK3_DEMO_APPLICATION_MENU_X, GTK3_DEMO_APPLICATION_MENU_Y)
-        .expect("tap gtk3-demo-application menu");
+    assert_broker_ok(
+        adb::inject_touch_logical(GTK3_DEMO_APPLICATION_MENU_X, GTK3_DEMO_APPLICATION_MENU_Y)
+            .expect("tap gtk3-demo-application menu"),
+        "tap gtk3-demo-application menu",
+    );
 
     let mut relevant_lines = Vec::new();
     let mut touch = None;
@@ -279,7 +282,7 @@ fn assert_gtk3_demo_application_menu_tap(
     assert_eq!(
         opened,
         expected_final_menu,
-        "unexpected GTK3 menu opened after identical tap at ({}, {}), \
+        "unexpected GTK3 menu opened after identical logical tap at ({}, {}), \
          touch={:?}, anchors_after_touch={:?}; relevant WAYLAND_DEBUG lines:\n{}",
         GTK3_DEMO_APPLICATION_MENU_X,
         GTK3_DEMO_APPLICATION_MENU_Y,

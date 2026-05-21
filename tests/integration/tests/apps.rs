@@ -31,12 +31,12 @@ const LXTERMINAL_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const LXTERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GTK_WIDGET_FACTORY_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-// Physical coordinates inside a GtkEntry on gtk4-widget-factory's first page.
+// Wayland logical coordinates inside a GtkEntry on gtk4-widget-factory's first page.
 // The stock app opens on page 1, whose first column contains editable entries
 // near the upper left. Tapping this point focuses one of those GtkEntry widgets
 // and makes GTK enable text-input-v3.
-const GTK_WIDGET_FACTORY_ENTRY_X: u32 = 170;
-const GTK_WIDGET_FACTORY_ENTRY_Y: u32 = 220;
+const GTK_WIDGET_FACTORY_ENTRY_X: f32 = 85.0;
+const GTK_WIDGET_FACTORY_ENTRY_Y: f32 = 110.0;
 
 fn ctrl_key(keycode: u32) {
     assert_broker_ok(
@@ -209,8 +209,11 @@ fn test_gtk4_widget_factory_copy_paste_and_text_input() {
         GTK_WIDGET_FACTORY_LAUNCH_TIMEOUT,
     );
 
-    adb::input_tap(GTK_WIDGET_FACTORY_ENTRY_X, GTK_WIDGET_FACTORY_ENTRY_Y)
-        .expect("tap gtk4-widget-factory entry");
+    assert_broker_ok(
+        adb::inject_touch_logical(GTK_WIDGET_FACTORY_ENTRY_X, GTK_WIDGET_FACTORY_ENTRY_Y)
+            .expect("tap gtk4-widget-factory entry"),
+        "tap gtk4-widget-factory entry",
+    );
     wait_for_keyboard_shown(TIMEOUT);
     adb::wait_for_active_input_connection(TIMEOUT)
         .expect("TawcInputConnection did not become active");

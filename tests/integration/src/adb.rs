@@ -14,11 +14,10 @@
 //! production. See `notes/text-input.md` ("Test infrastructure note") for
 //! the rationale.
 //!
-//! Tap / cursor events ([`input_tap`]) come from the OS-level
-//! `adb shell input tap` — they're real touch events from the
-//! SurfaceView's perspective, the same as a finger on the screen. They
-//! are not "IC-bypass" — touches don't go through the IC at all in
-//! production either.
+//! Tap / cursor events either come from the OS-level [`input_tap`] helper or
+//! from [`inject_touch_logical`], which dispatches a MotionEvent through the
+//! focused SurfaceView at a stable Wayland logical coordinate. Neither is an
+//! IC bypass — touches don't go through the IC in production either.
 
 use std::io;
 use std::process::{Command, Output, Stdio};
@@ -379,6 +378,15 @@ pub fn input_tap(x: u32, y: u32) -> io::Result<Output> {
 /// size on device, so callers do not need to know the physical screen size.
 pub fn inject_touch(kind: &str) -> io::Result<Output> {
     broker_action("inject-touch", &[("kind", kind)])
+}
+
+/// Inject a tap through the focused compositor SurfaceView at Wayland logical
+/// coordinates. This keeps tests out of Android screen-space/window-animation
+/// races while still exercising the Activity MotionEvent -> compositor path.
+pub fn inject_touch_logical(x: f32, y: f32) -> io::Result<Output> {
+    let x = format!("{x:.2}");
+    let y = format!("{y:.2}");
+    broker_action("inject-touch", &[("kind", "tap-logical"), ("x", &x), ("y", &y)])
 }
 
 /// Clear the logcat buffer so subsequent reads only show new messages.
