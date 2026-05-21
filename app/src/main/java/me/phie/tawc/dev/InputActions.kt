@@ -12,6 +12,7 @@ import me.phie.tawc.compositor.ClipboardBridge
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.compositor.RealImeOutput
 import me.phie.tawc.compositor.RecordingImeOutput
+import me.phie.tawc.compositor.TawcInputConnection
 
 /**
  * Broker actions that drive compositor input from host tests, registered
@@ -66,6 +67,7 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * | `ic-delete-surrounding-text` | `before`, `after` | `IC.deleteSurroundingText(before, after)` |
  * | `ic-send-key-event` | `keycode` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))` |
  * | `ic-send-modified-key-event` | `keycode`, `ctrl`, `alt`, `shift` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))` |
+ * | `ic-finish-hidden-composing` | — | `RecordingImeOutput` stale hidden IC `finishComposingText()` |
  * | `inject-touch` | `kind=tap|tap-outside-popup|drag|multitouch` | Dispatch normalized MotionEvents to the focused SurfaceView |
  *
  * Test-mode helpers:
@@ -73,6 +75,7 @@ import me.phie.tawc.compositor.RecordingImeOutput
  * | Action | Calls |
  * |--------|-------|
  * | `enable-test-input` | swap [NativeBridge.imeOutput] to a fresh [RecordingImeOutput] |
+ * | `input-ready` | succeeds only when the focused Activity has an active IC |
  * | `disable-test-input` | restore [RealImeOutput] |
  *
  * Observational:
@@ -97,9 +100,11 @@ internal object InputActions {
         ActionRegistry.register("ic-delete-surrounding-text", IcDeleteSurroundingTextAction)
         ActionRegistry.register("ic-send-key-event", IcSendKeyEventAction)
         ActionRegistry.register("ic-send-modified-key-event", IcSendModifiedKeyEventAction)
+        ActionRegistry.register("ic-finish-hidden-composing", IcFinishHiddenComposingAction)
         ActionRegistry.register("inject-touch", InjectTouchAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
+        ActionRegistry.register("input-ready", InputReadyAction)
         ActionRegistry.register("clipboard-set-text", ClipboardSetTextAction)
         ActionRegistry.register("clipboard-get-text", ClipboardGetTextAction)
         ActionRegistry.register("enable-test-input", EnableTestInputAction)
@@ -160,6 +165,33 @@ internal object InputActions {
         return if (ok) 0 else 1
     }
 
+    private fun clearRecordingImeOutput() {
+        (NativeBridge.imeOutput as? RecordingImeOutput)?.clearTestInputConnection()
+    }
+
+    private fun withActiveInputConnection(
+        ctx: ActionContext,
+        action: String,
+        block: (TawcInputConnection) -> Boolean,
+    ): Int {
+        var missing = false
+        var rejected = false
+        val status = withFocusedActivity(ctx) {
+            val ic = it.focusedInputConnectionForDev()
+            if (ic == null) {
+                ctx.err("no active TawcInputConnection for focused activity")
+                missing = true
+            } else {
+                rejected = !block(ic)
+                if (rejected) {
+                    ctx.err("$action returned false")
+                }
+            }
+        }
+        if (status != 0) return status
+        return if (missing || rejected) 1 else 0
+    }
+
     private fun argInt(args: Map<String, String>, key: String, default: Int? = null): Int? {
         val raw = args[key] ?: return default
         return raw.toIntOrNull() ?: error("'$key' must be an integer (got '$raw')")
@@ -177,10 +209,9 @@ internal object InputActions {
     private object IcCommitTextAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val text = args["text"] ?: return ctx.fail("ic-commit-text: --arg text=... required")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-commit-text \"$text\" (ic=${ic != null})")
-                ic?.commitText(text, 1)
+            return withActiveInputConnection(ctx, "ic-commit-text") { ic ->
+                Log.d(TAG, "InputAction ic-commit-text \"$text\"")
+                ic.commitText(text, 1)
             }
         }
     }
@@ -188,10 +219,9 @@ internal object InputActions {
     private object IcCommitCompletionAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val text = args["text"] ?: return ctx.fail("ic-commit-completion: --arg text=... required")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-commit-completion \"$text\" (ic=${ic != null})")
-                ic?.commitCompletion(CompletionInfo(0, 0, text))
+            return withActiveInputConnection(ctx, "ic-commit-completion") { ic ->
+                Log.d(TAG, "InputAction ic-commit-completion \"$text\"")
+                ic.commitCompletion(CompletionInfo(0, 0, text))
             }
         }
     }
@@ -202,10 +232,9 @@ internal object InputActions {
             val oldText = args["old"] ?: return ctx.fail("ic-commit-correction: --arg old=... required")
             val newText = args["new"] ?: return ctx.fail("ic-commit-correction: --arg new=... required")
             if (offset < 0) return ctx.fail("ic-commit-correction: offset must be >= 0")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-commit-correction $offset \"$oldText\" -> \"$newText\" (ic=${ic != null})")
-                ic?.commitCorrection(CorrectionInfo(offset, oldText, newText))
+            return withActiveInputConnection(ctx, "ic-commit-correction") { ic ->
+                Log.d(TAG, "InputAction ic-commit-correction $offset \"$oldText\" -> \"$newText\"")
+                ic.commitCorrection(CorrectionInfo(offset, oldText, newText))
             }
         }
     }
@@ -216,10 +245,9 @@ internal object InputActions {
             val end = argInt(args, "end") ?: return ctx.fail("ic-replace-text: --arg end=... required")
             val text = args["text"] ?: return ctx.fail("ic-replace-text: --arg text=... required")
             if (start < 0 || end < 0) return ctx.fail("ic-replace-text: start/end must be >= 0")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-replace-text $start..$end \"$text\" (ic=${ic != null})")
-                ic?.replaceText(start, end, text, 1, null)
+            return withActiveInputConnection(ctx, "ic-replace-text") { ic ->
+                Log.d(TAG, "InputAction ic-replace-text $start..$end \"$text\"")
+                ic.replaceText(start, end, text, 1, null)
             }
         }
     }
@@ -227,10 +255,9 @@ internal object InputActions {
     private object IcSetComposingTextAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val text = args["text"] ?: return ctx.fail("ic-set-composing-text: --arg text=... required")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-set-composing-text \"$text\" (ic=${ic != null})")
-                ic?.setComposingText(text, 1)
+            return withActiveInputConnection(ctx, "ic-set-composing-text") { ic ->
+                Log.d(TAG, "InputAction ic-set-composing-text \"$text\"")
+                ic.setComposingText(text, 1)
             }
         }
     }
@@ -240,20 +267,18 @@ internal object InputActions {
             val start = argInt(args, "start") ?: return ctx.fail("ic-set-composing-region: --arg start=... required")
             val end = argInt(args, "end") ?: return ctx.fail("ic-set-composing-region: --arg end=... required")
             if (start < 0 || end < 0) return ctx.fail("ic-set-composing-region: start/end must be >= 0")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-set-composing-region $start..$end (ic=${ic != null})")
-                ic?.setComposingRegion(start, end)
+            return withActiveInputConnection(ctx, "ic-set-composing-region") { ic ->
+                Log.d(TAG, "InputAction ic-set-composing-region $start..$end")
+                ic.setComposingRegion(start, end)
             }
         }
     }
 
     private object IcFinishComposingAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-finish-composing (ic=${ic != null})")
-                ic?.finishComposingText()
+            return withActiveInputConnection(ctx, "ic-finish-composing") { ic ->
+                Log.d(TAG, "InputAction ic-finish-composing")
+                ic.finishComposingText()
             }
         }
     }
@@ -263,10 +288,9 @@ internal object InputActions {
             val start = argInt(args, "start") ?: return ctx.fail("ic-set-selection: --arg start=... required")
             val end = argInt(args, "end") ?: return ctx.fail("ic-set-selection: --arg end=... required")
             if (start < 0 || end < 0) return ctx.fail("ic-set-selection: start/end must be >= 0")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-set-selection $start..$end (ic=${ic != null})")
-                ic?.setSelection(start, end)
+            return withActiveInputConnection(ctx, "ic-set-selection") { ic ->
+                Log.d(TAG, "InputAction ic-set-selection $start..$end")
+                ic.setSelection(start, end)
             }
         }
     }
@@ -275,10 +299,9 @@ internal object InputActions {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val before = argInt(args, "before", 0)!!
             val after = argInt(args, "after", 0)!!
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-delete-surrounding-text $before/$after (ic=${ic != null})")
-                ic?.deleteSurroundingText(before, after)
+            return withActiveInputConnection(ctx, "ic-delete-surrounding-text") { ic ->
+                Log.d(TAG, "InputAction ic-delete-surrounding-text $before/$after")
+                ic.deleteSurroundingText(before, after)
             }
         }
     }
@@ -296,10 +319,9 @@ internal object InputActions {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val keycode = argInt(args, "keycode") ?: return ctx.fail("ic-send-key-event: --arg keycode=... required")
             if (keycode < 0) return ctx.fail("ic-send-key-event: keycode must be >= 0")
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-send-key-event $keycode (ic=${ic != null})")
-                ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keycode))
+            return withActiveInputConnection(ctx, "ic-send-key-event") { ic ->
+                Log.d(TAG, "InputAction ic-send-key-event $keycode")
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keycode))
             }
         }
     }
@@ -313,11 +335,22 @@ internal object InputActions {
             if (argBool(args, "ctrl")) metaState = metaState or KeyEvent.META_CTRL_ON
             if (argBool(args, "alt")) metaState = metaState or KeyEvent.META_ALT_ON
             if (argBool(args, "shift")) metaState = metaState or KeyEvent.META_SHIFT_ON
-            return withFocusedActivity(ctx) { _ ->
-                val ic = NativeBridge.activeInputConnection
-                Log.d(TAG, "InputAction ic-send-modified-key-event $keycode meta=$metaState (ic=${ic != null})")
-                ic?.sendKeyEvent(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keycode, 0, metaState))
+            return withActiveInputConnection(ctx, "ic-send-modified-key-event") { ic ->
+                Log.d(TAG, "InputAction ic-send-modified-key-event $keycode meta=$metaState")
+                ic.sendKeyEvent(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keycode, 0, metaState))
             }
+        }
+    }
+
+    private object IcFinishHiddenComposingAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            var ok = false
+            val ran = onMainBlocking {
+                val recorder = NativeBridge.imeOutput as? RecordingImeOutput
+                ok = recorder?.finishHiddenComposingTextForDev() == true
+            }
+            if (!ran) return ctx.fail("main loop did not run ic-finish-hidden-composing within 5s")
+            return if (ok) 0 else ctx.fail("ic-finish-hidden-composing: no hidden test InputConnection")
         }
     }
 
@@ -359,6 +392,15 @@ internal object InputActions {
         }
     }
 
+    private object InputReadyAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            return withActiveInputConnection(ctx, "input-ready") {
+                ctx.out("ready")
+                true
+            }
+        }
+    }
+
     private object ClipboardSetTextAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             val text = args["text"] ?: return ctx.fail("clipboard-set-text: --arg text=... required")
@@ -391,7 +433,12 @@ internal object InputActions {
      */
     private object EnableTestInputAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            NativeBridge.imeOutput = RecordingImeOutput()
+            val ran = onMainBlocking {
+                clearRecordingImeOutput()
+                NativeBridge.activeInputConnection = null
+                NativeBridge.imeOutput = RecordingImeOutput()
+            }
+            if (!ran) return ctx.fail("main loop did not run enable-test-input within 5s")
             Log.i(TAG, "InputAction enable-test-input: swapped ImeOutput to RecordingImeOutput")
             return 0
         }
@@ -404,7 +451,12 @@ internal object InputActions {
      */
     private object DisableTestInputAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            NativeBridge.imeOutput = RealImeOutput
+            val ran = onMainBlocking {
+                clearRecordingImeOutput()
+                NativeBridge.activeInputConnection = null
+                NativeBridge.imeOutput = RealImeOutput
+            }
+            if (!ran) return ctx.fail("main loop did not run disable-test-input within 5s")
             Log.i(TAG, "InputAction disable-test-input: restored ImeOutput to RealImeOutput")
             return 0
         }

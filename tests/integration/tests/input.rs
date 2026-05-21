@@ -773,7 +773,7 @@ fn test_focus_leave_clears_pending_preedit_without_committing() {
         .wait_for_tag_value("TEXT_INPUT_LEAVE", "", TIMEOUT)
         .expect("focused-away text client did not receive text-input leave");
 
-    adb::ic_finish_composing().expect("finishComposingText after focus leave");
+    adb::ic_finish_hidden_composing().expect("stale finishComposingText after focus leave");
     thread::sleep(Duration::from_millis(300));
     assert_eq!(
         text_app.last_text().as_deref(),

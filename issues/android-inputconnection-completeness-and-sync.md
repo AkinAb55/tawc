@@ -22,6 +22,12 @@ could change while the Wayland text box stayed unchanged.
 - Some fallbacks return success or silently no-op in ways that could make
   an IME believe a replacement was accepted when nothing reached the
   client.
+- Reverse-JNI `onUpdateEditableText(text, selStart, selEnd)` is still
+  process-global. It does not carry the Wayland client or Android
+  `activityId`, so a late surrounding-text update from an old focused
+  client can theoretically update the current `TawcInputConnection`'s
+  Editable mirror. Test-broker guards only validate the dev input path;
+  production mirror updates need an identity-bearing route.
 
 Recent partial fixes added coverage for `replaceText`,
 `commitCorrection`, and `commitCompletion`, but that should be treated as
@@ -37,6 +43,8 @@ entrypoint table:
   value, or documented as irrelevant for tawc.
 - The Editable mirror is never allowed to drift silently from Wayland's
   last committed surrounding text.
+- Wayland-to-Android mirror updates target the correct activity/client,
+  not just whatever IC is currently global.
 - Tests can catch "Editable changed, Wayland did not" and "Wayland
   changed, Editable did not" regressions.
 - Replacement logic is shared, not duplicated across `commitText`,
@@ -82,6 +90,15 @@ entrypoint table:
      `composingRegionIsPreedit`, and newline preservation in one place.
 
 3. Make mirror drift observable in tests.
+
+   Before adding assertions, carry text-input identity through
+   reverse-JNI mirror updates. Thread enough identity from Rust text-input
+   state to Kotlin to verify that `onUpdateEditableText` targets the same
+   focused activity/client as the active IC before mutating its Editable.
+   This probably belongs with the broader activity-scoped input holder
+   work from `notes/multi-activity.md`, replacing global
+   `NativeBridge.inputView` and `NativeBridge.activeInputConnection` with
+   per-activity state.
 
    Add a debug-only broker query for the active IC mirror:
 
@@ -148,4 +165,3 @@ entrypoint table:
 - Full `scripts/run-integration-tests.sh input` passes.
 - Manual repro with GTK widget factory + Gboard suggestion row replaces
   the current word reliably.
-

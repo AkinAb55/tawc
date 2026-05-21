@@ -63,6 +63,8 @@ pub fn start_wayland_debug_text_input(backend: GraphicsBackend, env: &str) -> De
     app.wait_ready()
         .expect("Wayland debug app did not become ready");
     wait_for_keyboard_shown(TIMEOUT);
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("TawcInputConnection did not become active");
     app
 }
 
@@ -79,6 +81,8 @@ pub fn start_wayland_debug_text_input_no_surrounding(
     app.wait_ready()
         .expect("Surrounding-less wayland debug app did not become ready");
     wait_for_keyboard_shown(TIMEOUT);
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("TawcInputConnection did not become active");
     app
 }
 
@@ -96,6 +100,8 @@ pub fn start_wayland_debug_text_input_stale_newline(
     app.wait_ready()
         .expect("Stale-newline wayland debug app did not become ready");
     wait_for_keyboard_shown(TIMEOUT);
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("TawcInputConnection did not become active");
     app
 }
 

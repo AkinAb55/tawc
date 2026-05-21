@@ -1,6 +1,7 @@
 package me.phie.tawc.compositor
 
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 
 /**
@@ -83,7 +84,26 @@ class RecordingImeOutput : ImeOutput {
     }
 
     private val _calls = mutableListOf<Call>()
+    private var testInputConnection: TawcInputConnection? = null
+    private var hiddenInputConnection: TawcInputConnection? = null
     val calls: List<Call> get() = synchronized(_calls) { _calls.toList() }
+
+    private fun bindTestInputConnection(view: View) {
+        hiddenInputConnection = testInputConnection ?: hiddenInputConnection
+        testInputConnection = view.onCreateInputConnection(EditorInfo()) as? TawcInputConnection
+    }
+
+    internal fun clearTestInputConnection() {
+        testInputConnection = null
+        hiddenInputConnection = null
+    }
+
+    internal fun finishHiddenComposingTextForDev(): Boolean {
+        val ic = hiddenInputConnection ?: return false
+        hiddenInputConnection = null
+        val ok = ic.finishComposingText()
+        return ok
+    }
 
     override fun updateSelection(view: View, selStart: Int, selEnd: Int, composingStart: Int, composingEnd: Int) {
         synchronized(_calls) { _calls += Call.UpdateSelection(selStart, selEnd, composingStart, composingEnd) }
@@ -91,13 +111,23 @@ class RecordingImeOutput : ImeOutput {
 
     override fun showSoftInput(view: View) {
         synchronized(_calls) { _calls += Call.ShowSoftInput }
+        bindTestInputConnection(view)
     }
 
     override fun hideSoftInput(view: View) {
         synchronized(_calls) { _calls += Call.HideSoftInput }
+        if (hiddenInputConnection == null) {
+            hiddenInputConnection = testInputConnection
+        }
+        testInputConnection = null
+        val active = NativeBridge.activeInputConnection
+        if (active === hiddenInputConnection || active?.targetsView(view) == true) {
+            NativeBridge.activeInputConnection = null
+        }
     }
 
     override fun restartInput(view: View) {
         synchronized(_calls) { _calls += Call.RestartInput }
+        bindTestInputConnection(view)
     }
 }

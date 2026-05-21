@@ -147,6 +147,8 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         super.closeConnection()
     }
 
+    internal fun targetsView(view: View): Boolean = targetView === view
+
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val str = text?.toString() ?: return false
         // OpenBoard's per-Enter handler — after the user types <word><space>

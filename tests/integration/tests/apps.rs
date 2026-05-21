@@ -418,6 +418,7 @@ fn test_supertuxkart_launches() {
 fn test_lxterminal_input_and_exit() {
     // Stub out the system IME so it doesn't amplify our `commitText` into
     // the lxterminal IC and produce extra characters.
+    adb::logcat_clear().expect("Failed to clear logcat");
     adb::enable_test_input().expect("enable-test-input action");
 
     let mut term = launch_and_wait_for_toplevel(
@@ -436,6 +437,9 @@ fn test_lxterminal_input_and_exit() {
         term.is_running(),
         "lxterminal exited shortly after first frame — shell crash on startup?"
     );
+    wait_for_keyboard_shown(TIMEOUT);
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("TawcInputConnection did not become active");
 
     // Drive the shell: "exit" via the IC's commitText, newline via
     // wl_keyboard Enter. Same path a soft-keyboard user typing into
@@ -492,6 +496,8 @@ fn test_gtk4_widget_factory_copy_paste_and_text_input() {
     adb::input_tap(GTK_WIDGET_FACTORY_ENTRY_X, GTK_WIDGET_FACTORY_ENTRY_Y)
         .expect("tap gtk4-widget-factory entry");
     wait_for_keyboard_shown(TIMEOUT);
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("TawcInputConnection did not become active");
 
     ctrl_key(adb::KEYCODE_A);
     ctrl_key(adb::KEYCODE_V);

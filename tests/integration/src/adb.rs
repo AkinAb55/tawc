@@ -23,6 +23,8 @@
 use std::io;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::GraphicsBackend;
 
@@ -126,13 +128,28 @@ fn run_inside_argv(backend: Option<GraphicsBackend>, cmd: &str) -> Command {
 /// Run a broker action via tawc-exec. `args` are passed as repeated
 /// `--arg key=value`. Returns the helper's exit status + captured stdio,
 /// same shape as [shell].
-fn broker_action(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
+fn broker_action_raw(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
     let mut cmd = Command::new(tawc_exec_bin());
     cmd.args(["--action", name]);
     for (k, v) in args {
         cmd.args(["--arg", &format!("{k}={v}")]);
     }
     cmd.output()
+}
+
+/// Run a broker action and fail the caller if the broker returned non-zero.
+fn broker_action(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
+    let output = broker_action_raw(name, args)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(io::Error::other(format!(
+            "broker action {name} failed with {} stdout={:?} stderr={:?}",
+            output.status, stdout, stderr
+        )))
+    }
 }
 
 // ---- Test-mode setup -----------------------------------------------------
@@ -154,6 +171,35 @@ pub fn enable_test_input() -> io::Result<Output> {
 /// can't leave the recorder pinned in place across `cargo test` runs.
 pub fn disable_test_input() -> io::Result<Output> {
     broker_action("disable-test-input", &[])
+}
+
+/// Wait until the focused compositor activity has an active
+/// TawcInputConnection. In production the Android IMM creates and owns the
+/// IC after showSoftInput; in test mode RecordingImeOutput does that without
+/// waking a real third-party IME.
+pub fn wait_for_active_input_connection(timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let last = match broker_action_raw("input-ready", &[]) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                format!(
+                    "{} stdout={:?} stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            }
+            Err(e) => e.to_string(),
+        };
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Timeout waiting for active input connection (last: {})",
+                last
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 // ---- IC drivers ----------------------------------------------------------
@@ -229,6 +275,14 @@ pub fn ic_set_composing_region(start: u32, end: u32) -> io::Result<Output> {
 /// gets committed by the compositor's done-ordering.
 pub fn ic_finish_composing() -> io::Result<Output> {
     broker_action("ic-finish-composing", &[])
+}
+
+/// Finish composing on the hidden test InputConnection retained by
+/// RecordingImeOutput after keyboard hide. This is intentionally separate
+/// from [ic_finish_composing], which requires the current focused IC; use
+/// it only to model stale IME callbacks after text-input focus leave.
+pub fn ic_finish_hidden_composing() -> io::Result<Output> {
+    broker_action("ic-finish-hidden-composing", &[])
 }
 
 /// Call `TawcInputConnection.setSelection(start, end)` on the active

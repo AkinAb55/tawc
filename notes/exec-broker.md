@@ -305,14 +305,20 @@ before any client connection arrives.
 | `install` | InstallActions | Run the install state machine; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. Use `--foreground-app`. |
 | `uninstall` | InstallActions | Same shape, opposite direction. Use `--foreground-app`. |
 | `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` so the compositor logs a `COMPOSITOR_STATE …` line under `tawc-native`. Observational only — doesn't change input state. Needs no focused activity. |
-| `enable-test-input` / `disable-test-input` | InputActions | Swap `NativeBridge.imeOutput` for a `RecordingImeOutput` (or back). Stops the system IME from reacting to `updateSelection` and racing input tests. Doesn't bypass our state machine — stubs out the *third-party* IME at the boundary. Process-global; reset on process death. |
+| `enable-test-input` / `disable-test-input` | InputActions | Swap `NativeBridge.imeOutput` for a `RecordingImeOutput` (or back) on the main thread. Stops the system IME from reacting to `updateSelection` and racing input tests. Doesn't bypass our state machine — stubs out the *third-party* IME at the boundary. Process-global; reset on process death. |
+| `input-ready` | InputActions | Succeeds only when the focused `CompositorActivity` has an active `TawcInputConnection` for its own `SurfaceView`. Used by tests after `onShowKeyboard` so the first `ic-*` action cannot race IC creation. |
 | `ic-commit-text` (`text`) | InputActions | `TawcInputConnection.commitText(text, 1)`. |
+| `ic-commit-completion` (`text`) | InputActions | `TawcInputConnection.commitCompletion(CompletionInfo(..., text))`. |
+| `ic-commit-correction` (`offset`, `old`, `new`) | InputActions | `TawcInputConnection.commitCorrection(CorrectionInfo(...))`. |
+| `ic-replace-text` (`start`, `end`, `text`) | InputActions | `TawcInputConnection.replaceText(start, end, text, 1, null)`. |
 | `ic-set-composing-text` (`text`) | InputActions | `TawcInputConnection.setComposingText(text, 1)`. |
 | `ic-set-composing-region` (`start`, `end`) | InputActions | `TawcInputConnection.setComposingRegion(start, end)`. |
 | `ic-finish-composing` | InputActions | `TawcInputConnection.finishComposingText()`. |
 | `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`. |
 | `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
 | `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
+| `ic-send-modified-key-event` (`keycode`, `ctrl`, `alt`, `shift`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))`. |
+| `ic-finish-hidden-composing` | InputActions | Test-only stale-callback hook: calls `finishComposingText()` on the hidden test IC retained by `RecordingImeOutput` after keyboard hide. Normal `ic-*` actions still require the current focused IC. |
 | `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream` / `cpu`). Used by the Settings screen for ad-hoc developer toggling. **Tests do NOT use this** — they pass `--graphics` on each RUNINSIDE spawn so the persisted pref isn't disturbed. |
 | `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
 | `set-output-scale` (`value`) | SettingsActions | Snap to the 0.25x grid, persist `Settings.outputScale`, and push the live compositor output scale. Integration tests restore the previous value after use. |
@@ -333,13 +339,13 @@ assertion became a redundant proof of text-input-v3. Driving every
 scenario through IC closes that. See `notes/text-input.md`
 "Test infrastructure note" for the rationale.
 
-All `InputActions` `ic-*` handlers require a focused `CompositorActivity`
-and post the call to the main looper. The handler resolves the activity
-via `CompositorService.focusedActivity()` (walking
-`activities: Map<String, WeakReference<…>>` for `hasWindowFocus()`); no
-focused activity means exit 1 with `err("no focused CompositorActivity")`
-rather than a silent skip — loud beats silent since that's almost always
-a test setup bug.
+All normal `InputActions` `ic-*` handlers require a focused
+`CompositorActivity` and an active `TawcInputConnection` targeting that
+activity's `SurfaceView`, then post the call to the main looper. The
+handler resolves the activity via `CompositorService.focusedActivity()`
+(walking `activities: Map<String, WeakReference<…>>` for
+`hasWindowFocus()`). No focused activity, no matching IC, or an IC method
+returning `false` becomes a non-zero broker exit instead of a silent skip.
 
 Cold-starting any of the app's entry points (MainActivity,
 InstallActivity, CompositorActivity) brings up the broker. Stopping the

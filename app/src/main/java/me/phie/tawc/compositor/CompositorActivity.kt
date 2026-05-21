@@ -96,6 +96,12 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         if (initialized) {
+            if (NativeBridge.activeInputConnection?.targetsView(surfaceView) == true) {
+                NativeBridge.activeInputConnection = null
+            }
+            if (NativeBridge.inputView === surfaceView) {
+                NativeBridge.inputView = null
+            }
             NativeBridge.nativeOnActivityDestroyed(activityId)
             compositorService?.unregisterActivity(activityId)
             try {
@@ -133,6 +139,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         if (!initialized) return
         if (hasFocus) applyCompositorFullscreen(compositorFullscreen)
         NativeBridge.nativeOnActivityFocusChanged(activityId, hasFocus)
+    }
+
+    internal fun focusedInputConnectionForDev(): TawcInputConnection? {
+        val ic = NativeBridge.activeInputConnection ?: return null
+        return ic.takeIf { it.targetsView(surfaceView) }
     }
 
     fun setFullscreenFromCompositor(fullscreen: Boolean) {
