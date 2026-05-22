@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cross-compile Xwayland for aarch64 Android (bionic) and stage it for
+# Cross-compile Xwayland for Android (bionic) and stage it for
 # packaging into the APK. Loosely modelled on `scripts/build-libhybris.sh`
 # but targets the Android NDK toolchain instead of the host glibc cross-
 # compiler — Xwayland is launched as a child of the compositor (which is
@@ -7,17 +7,18 @@
 #
 # This is a layered build: each upstream dependency is cloned into
 # `./deps/xwayland-src/<lib>/` (gitignored) and cross-compiled into
-# `build/xwayland-aarch64/install/{bin,lib,include,share}` with the
+# `build/xwayland-<abi>/install/{bin,lib,include,share}` with the
 # install dir acting as both the staging area and the pkg-config sysroot
 # for downstream libs.
 #
-# Output (when the script eventually completes — currently WIP, see below):
-#   build/xwayland-aarch64/install/bin/Xwayland     # the binary the compositor exec()s
-#   build/xwayland-aarch64/install/lib/*.so         # libraries Xwayland dlopen/DT_NEEDED's
-#   build/xwayland-aarch64/install/share/X11/xkb/   # XKB data (subset)
+# Output:
+#   build/xwayland-<abi>/install/bin/Xwayland     # the binary the compositor exec()s
+#   build/xwayland-<abi>/install/lib/*.so         # libraries Xwayland dlopen/DT_NEEDED's
+#   build/xwayland-<abi>/install/share/X11/xkb/   # XKB data (subset)
 #
 # Usage:
 #   scripts/build-xwayland.sh           # incremental
+#   scripts/build-xwayland.sh --abi=x86_64
 #   scripts/build-xwayland.sh --clean   # wipe install + builddirs
 #   scripts/build-xwayland.sh --only=<lib>   # build just one stage
 #
@@ -33,9 +34,6 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/deps.sh"
 SRC_ROOT="$REPO_DIR/deps/xwayland-src"
 PATCH_ROOT="$REPO_DIR/deps/xwayland-patches"
-OUT_DIR="$REPO_DIR/build/xwayland-aarch64"
-PREFIX="$OUT_DIR/install"
-PC_DIR="$PREFIX/lib/pkgconfig"
 
 # Where the X11 / XIM / ICE / wayland sockets live in our world. Patches
 # substitute @TAWC_TMP_PREFIX@ → this; the compositor mkdirs it on
@@ -48,15 +46,22 @@ PC_DIR="$PREFIX/lib/pkgconfig"
 # wayland socket — see notes/installation.md "/usr/share/tawc".
 TAWC_TMP_PREFIX="/data/data/me.phie.tawc/share/xtmp"
 
+ABI=aarch64
 CLEAN=0
 ONLY=""
 for arg in "$@"; do
     case "$arg" in
+        --abi=aarch64|--abi=arm64|--abi=arm64-v8a) ABI=aarch64 ;;
+        --abi=x86_64) ABI=x86_64 ;;
         --clean) CLEAN=1 ;;
         --only=*) ONLY="${arg#--only=}" ;;
         *) echo "ERROR: unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
+
+OUT_DIR="$REPO_DIR/build/xwayland-$ABI"
+PREFIX="$OUT_DIR/install"
+PC_DIR="$PREFIX/lib/pkgconfig"
 
 # ── NDK toolchain ──
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -72,7 +77,19 @@ fi
 NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 NDK_API=29
-TRIPLE=aarch64-linux-android
+case "$ABI" in
+    aarch64)
+        TRIPLE=aarch64-linux-android
+        MESON_CPU_FAMILY=aarch64
+        MESON_CPU=aarch64
+        ;;
+    x86_64)
+        TRIPLE=x86_64-linux-android
+        MESON_CPU_FAMILY=x86_64
+        MESON_CPU=x86_64
+        ;;
+    *) echo "ERROR: unsupported ABI '$ABI'" >&2; exit 1 ;;
+esac
 CC="$NDK_BIN/${TRIPLE}${NDK_API}-clang"
 CXX="$NDK_BIN/${TRIPLE}${NDK_API}-clang++"
 AR="$NDK_BIN/llvm-ar"
@@ -146,8 +163,8 @@ cpp_link_args = ['-L$PREFIX/lib', '-Wl,-rpath-link,$PREFIX/lib']
 
 [host_machine]
 system = 'android'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
+cpu_family = '$MESON_CPU_FAMILY'
+cpu = '$MESON_CPU'
 endian = 'little'
 
 [properties]
@@ -200,10 +217,16 @@ build_autotools() {
     local name="$1"; shift
     local src="$SRC_ROOT/$name"
     ( cd "$src" && \
+        if { [ -f .tawc-autotools-host ] && [ "$(cat .tawc-autotools-host)" != "$TRIPLE" ]; } || \
+           { [ ! -f .tawc-autotools-host ] && [ -f Makefile ]; }; then \
+            make distclean >/dev/null 2>&1 || make clean >/dev/null 2>&1 || true; \
+            rm -f config.cache; \
+        fi && \
         if [ ! -f configure ]; then NOCONFIGURE=1 ./autogen.sh 2>/dev/null || autoreconf -fi; fi && \
         configure_autotools "$@" && \
         make -j"$(nproc)" && \
-        make install )
+        make install && \
+        printf '%s\n' "$TRIPLE" > .tawc-autotools-host )
 }
 
 stage_should_run() {

@@ -6,12 +6,11 @@
 //! what's under test is the Xwayland integration, not the buffer
 //! plumbing in isolation.
 //!
-//! Every spawn pins [`GraphicsBackend::Libhybris`]: TAWC-DRI / `xwl_tawc`
-//! and the X11 EGL platform plugin are all libhybris-native — no
-//! analogue under gfxstream (and under CPU the AHB asserts here would
-//! never fire). Requires libhybris + a real Android GPU driver.
-//! `scripts/run-integration-tests.sh` marks this module ignored on x86
-//! devices.
+//! The pure-X11 SHM smoke pins [`GraphicsBackend::Cpu`] so it can run
+//! on the x86_64 emulator. TAWC-DRI / `xwl_tawc` and the X11 EGL
+//! platform plugin are libhybris-native and still pin
+//! [`GraphicsBackend::Libhybris`]; those tests require libhybris + a
+//! real Android GPU driver and are ignored on x86 devices.
 
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ use tawc_integration::helpers::{assert_compositor_clean, require_compositor};
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, rootfs, GraphicsBackend};
 
+const SHM_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,10 +33,6 @@ const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// them since GLAMOR is disabled in our Xwayland build (see
 /// `notes/xwayland.md`).
 #[test]
-#[cfg_attr(
-    tawc_skip_libhybris_on_target,
-    ignore = "xwayland skipped on x86 device"
-)]
 fn test_xwayland_xclock_renders_via_shm() {
     require_compositor();
     adb::logcat_clear().expect("Failed to clear logcat");
@@ -46,7 +42,7 @@ fn test_xwayland_xclock_renders_via_shm() {
     // and the test would race the very first SHM import. DISPLAY=:0 is
     // already exported by RootfsEnv on rootfs entry, but be explicit
     // so the test doesn't depend on env order.
-    let mut app = RootfsProcess::spawn_with(BACKEND, "DISPLAY=:0 xclock -update 1")
+    let mut app = RootfsProcess::spawn_with(SHM_BACKEND, "DISPLAY=:0 xclock -update 1")
         .expect("spawn xclock");
     app.ensure_pgid();
 

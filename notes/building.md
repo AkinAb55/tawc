@@ -294,21 +294,22 @@ source even when distro sysroot packages lag.
 
 ### Xwayland (binary + libs → ships in APK as asset)
 
-Cross-built once. NDK clang against bionic — same toolchain as the
-Rust compositor. Aarch64-only. APK builds include it by default when
-`arm64-v8a` is enabled; pass `-PtawcXwayland=false` to Gradle or
+Cross-built per APK ABI. NDK clang against bionic — same toolchain as
+the Rust compositor. APK builds include it by default for every enabled
+ABI; pass `-PtawcXwayland=false` to Gradle or
 `--no-xwayland` to `scripts/build-app.sh` / `scripts/app-build-install.sh`
 to skip building, packaging, extracting, and spawning it.
 
 ```bash
 scripts/build-xwayland.sh           # incremental
+scripts/build-xwayland.sh --abi=x86_64
 scripts/build-xwayland.sh --clean   # wipe install + builddirs
 scripts/build-xwayland.sh --only=libx11   # rebuild one stage
 ```
 
-Output: `build/xwayland-aarch64/install/{bin/Xwayland,bin/xkbcomp,lib,share}`.
-Gradle's `stageXwaylandJniLibs` task copies the binaries + `.so` deps
-into `app/src/main/jniLibs/arm64-v8a/lib*.so` (so untrusted_app can
+Output: `build/xwayland-<abi>/install/{bin/Xwayland,bin/xkbcomp,lib,share}`.
+Gradle's `stageXwaylandJniLibs<Abi>` task copies the binaries + `.so` deps
+into `app/src/main/jniLibs/<abi>/lib*.so` (so untrusted_app can
 exec them out of `nativeLibraryDir`), and `packXwaylandShare` tars
 the XKB data tree into `assets/xwayland/share.tar`.
 `CompositorService.ensureXwaylandExtracted` extracts the share tar

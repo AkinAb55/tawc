@@ -748,9 +748,9 @@ TAWC compositor` (separate commit from the older Android support one):
 
 Gradle splits Xwayland's tree across two output paths:
 
-1. `stageXwaylandJniLibs` copies
-   `build/xwayland-aarch64/install/bin/{Xwayland,xkbcomp}` into
-   `app/src/main/jniLibs/arm64-v8a/lib{xwayland,xkbcomp}.so`, plus
+1. `stageXwaylandJniLibs<Abi>` copies
+   `build/xwayland-<abi>/install/bin/{Xwayland,xkbcomp}` into
+   `app/src/main/jniLibs/<abi>/lib{xwayland,xkbcomp}.so`, plus
    each `lib/*.so` next to them. The OS extracts these to
    `applicationInfo.nativeLibraryDir` at install time, where they
    get the `apk_data_file` SELinux type that untrusted_app may
@@ -770,14 +770,18 @@ the real binaries in `nativeLibraryDir`. The compositor's
 `xwayland::start_xwayland` then sets `PATH` and `LD_LIBRARY_PATH` so
 the smithay `Command::new("Xwayland")` lookup picks up our copy.
 
-Aarch64-only — matching libhybris, since there's no point shipping
-software-only Xwayland on the emulator without the GPU stack.
+The same packaging path now works for `arm64-v8a` and `x86_64`. On
+x86_64 the libhybris-backed AHB/EGL-on-X11 path is still unavailable,
+but pure X11 clients can render through the SHM fallback.
 
 ## Build script usage
 
 ```sh
 # Build everything from a fresh clone (idempotent re-runs)
 scripts/build-xwayland.sh
+
+# Build for the x86_64 emulator
+scripts/build-xwayland.sh --abi=x86_64
 
 # Rebuild a single stage (after editing a stage_<name>() function)
 scripts/build-xwayland.sh --only=libx11

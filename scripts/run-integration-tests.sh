@@ -355,7 +355,7 @@ if [ "$DEVICE_IS_EMULATOR" -eq 1 ]; then
 fi
 case "$DEVICE_ABI" in
     x86*|i386|i686)
-        echo "=== Marking libhybris::, libhybris_zink::, xwayland:: tests ignored on x86 device ($DEVICE_ABI) ==="
+        echo "=== Marking libhybris-backed tests ignored on x86 device ($DEVICE_ABI) ==="
         EXTRA_RUSTFLAGS+=(--cfg tawc_skip_libhybris_on_target)
         ;;
 esac

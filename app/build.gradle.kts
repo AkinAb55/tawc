@@ -55,9 +55,8 @@ fun booleanProjectProperty(name: String, default: Boolean): Boolean {
     }
 }
 
-// Build and package the bionic Xwayland server. Aarch64-only today
-// (x86_64 emulator builds have no matching Xwayland binary), and
-// overrideable for lean ARM builds with `-PtawcXwayland=false`.
+// Build and package the bionic Xwayland server for every enabled app
+// ABI, overrideable for lean builds with `-PtawcXwayland=false`.
 val xwaylandRequested: Boolean = booleanProjectProperty("tawcXwayland", true)
 
 // Build the Rust compositor for one or both Android ABIs and copy the
@@ -66,7 +65,13 @@ val xwaylandRequested: Boolean = booleanProjectProperty("tawcXwayland", true)
 // `-PtawcAbis=x86_64` or `-PtawcAbis=arm64-v8a,x86_64`.
 val tawcAbis: List<String> = (project.findProperty("tawcAbis") as String?
     ?: "arm64-v8a").split(",").map { it.trim() }.filter { it.isNotEmpty() }
-val xwaylandPackaged: Boolean = xwaylandRequested && "arm64-v8a" in tawcAbis
+val xwaylandScriptAbiFor = mapOf(
+    "arm64-v8a" to "aarch64",
+    "x86_64" to "x86_64",
+)
+val xwaylandPackageAbis: List<String> =
+    if (xwaylandRequested) tawcAbis.filter { it in xwaylandScriptAbiFor } else emptyList()
+val xwaylandPackaged: Boolean = xwaylandPackageAbis.isNotEmpty()
 
 android {
     namespace = "me.phie.tawc"
@@ -624,25 +629,10 @@ if (xwaylandPackaged) {
     // `<filesDir>/xwayland/`, which the compositor then exec()s as the
     // X server child for any X11 client. The cross-compile lives in
     // `scripts/build-xwayland.sh`; see notes/xwayland.md for the
-    // full pipeline. Aarch64-only — same reason as libhybris (no
-    // emulator support; the bionic-Xwayland piece itself would build,
-    // but there's no point shipping it without GPU acceleration).
-    val xwaylandAbi = "arm64-v8a"
-    val xwaylandInstallDir = "$tawcRoot/build/xwayland-aarch64/install"
-
-    val buildXwaylandTask = tasks.register<Exec>("buildXwayland") {
-        workingDir = tawcRoot
-        commandLine("scripts/build-xwayland.sh")
-        // Same incremental story as `buildLibhybris`. Tracked inputs:
-        //   - build script
-        //   - patches dir (a patch edit must rebuild)
-        //   - dep manifest + helper (a pin bump must rebuild)
-        inputs.file("$tawcRoot/scripts/build-xwayland.sh")
-        inputs.dir("$tawcRoot/deps/xwayland-patches")
-        inputs.file("$tawcRoot/deps/deps.list")
-        inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        outputs.dir(xwaylandInstallDir)
-    }
+    // full pipeline.
+    val xwaylandBuildTasks = mutableListOf<TaskProvider<Exec>>()
+    val xwaylandStageTasks = mutableListOf<TaskProvider<Copy>>()
+    val xwaylandInstallDirForAbi = mutableMapOf<String, String>()
 
     // Stage Xwayland's exec'ables and runtime libs as `lib*.so` files
     // under `jniLibs/<abi>/`. Files in nativeLibraryDir get the
@@ -661,32 +651,62 @@ if (xwaylandPackaged) {
     // The build's `lib/` already ships flat `lib*.so` files (no
     // version-suffix symlinks — see scripts/build-xwayland.sh), so they
     // can be copied straight into jniLibs without flattening.
-    val stageXwaylandJniLibsTask = tasks.register<Copy>("stageXwaylandJniLibs") {
-        dependsOn(buildXwaylandTask)
-        into("${project.projectDir}/src/main/jniLibs/$xwaylandAbi")
-        from("$xwaylandInstallDir/bin/Xwayland") { rename { "libxwayland.so" } }
-        from("$xwaylandInstallDir/bin/xkbcomp") { rename { "libxkbcomp.so" } }
-        from("$xwaylandInstallDir/lib") { include("*.so") }
+    xwaylandPackageAbis.forEach { abi ->
+        val capAbi = abi.replaceFirstChar { it.uppercase() }
+        val scriptAbi = xwaylandScriptAbiFor[abi]
+            ?: error("Unsupported ABI for Xwayland: $abi")
+        val xwaylandInstallDir = "$tawcRoot/build/xwayland-$scriptAbi/install"
+        xwaylandInstallDirForAbi[abi] = xwaylandInstallDir
+
+        val buildXwaylandTask = tasks.register<Exec>("buildXwayland$capAbi") {
+            workingDir = tawcRoot
+            environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+            commandLine("scripts/build-xwayland.sh", "--abi=$scriptAbi")
+            // Same incremental story as `buildLibhybris`. Tracked inputs:
+            //   - build script
+            //   - patches dir (a patch edit must rebuild)
+            //   - dep manifest + helper (a pin bump must rebuild)
+            inputs.file("$tawcRoot/scripts/build-xwayland.sh")
+            inputs.dir("$tawcRoot/deps/xwayland-patches")
+            inputs.file("$tawcRoot/deps/deps.list")
+            inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            outputs.dir(xwaylandInstallDir)
+        }
+        xwaylandBuildTasks += buildXwaylandTask
+
+        val stageXwaylandJniLibsTask = tasks.register<Copy>("stageXwaylandJniLibs$capAbi") {
+            dependsOn(buildXwaylandTask)
+            into("${project.projectDir}/src/main/jniLibs/$abi")
+            from("$xwaylandInstallDir/bin/Xwayland") { rename { "libxwayland.so" } }
+            from("$xwaylandInstallDir/bin/xkbcomp") { rename { "libxkbcomp.so" } }
+            from("$xwaylandInstallDir/lib") { include("*.so") }
+        }
+        xwaylandStageTasks += stageXwaylandJniLibsTask
     }
 
     // The XKB data files (`share/X11`, `share/xkeyboard-config-2`)
     // can't be flattened into jniLibs — Xwayland reads them via fopen
     // and the files reference each other by relative paths inside the
     // tree. Ship them as a tar asset and extract at runtime as before.
+    val xwaylandShareAbi = xwaylandPackageAbis.first()
+    val xwaylandShareBuildTask = xwaylandBuildTasks.first()
+    val xwaylandShareInstallDir = xwaylandInstallDirForAbi[xwaylandShareAbi]
+        ?: error("No Xwayland install dir for $xwaylandShareAbi")
     val xwaylandShareAssetFile = "src/main/assets/xwayland/share.tar"
     val packXwaylandShareTask = tasks.register<Exec>("packXwaylandShare") {
-        dependsOn(buildXwaylandTask)
+        dependsOn(xwaylandShareBuildTask)
         doFirst { mkdir(file(xwaylandShareAssetFile).parentFile) }
-        workingDir = file(xwaylandInstallDir)
+        workingDir = file(xwaylandShareInstallDir)
         commandLine("tar", "--format=ustar",
             "-cf", "${project.projectDir}/$xwaylandShareAssetFile",
             "share/X11", "share/xkeyboard-config-2")
-        inputs.dir("$xwaylandInstallDir/share/X11")
-        inputs.dir("$xwaylandInstallDir/share/xkeyboard-config-2")
+        inputs.dir("$xwaylandShareInstallDir/share/X11")
+        inputs.dir("$xwaylandShareInstallDir/share/xkeyboard-config-2")
         outputs.file(xwaylandShareAssetFile)
     }
 
     tasks.named("preBuild") {
-        dependsOn(stageXwaylandJniLibsTask, packXwaylandShareTask)
+        dependsOn(xwaylandStageTasks)
+        dependsOn(packXwaylandShareTask)
     }
 }
