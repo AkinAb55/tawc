@@ -557,11 +557,12 @@ Files of interest:
   / `finish_activity_from_native` reverse-JNI.
 - `compositor/src/event_loop.rs` — surface-event source, focus
   set/clear via `set_host_foreground`, per-host render loop
-  iteration, `first_alive_toplevel_of_host` for touch fallback,
-  `finishActivity` cleanup when a host loses its last toplevel.
+  iteration, and `finishActivity` cleanup when a host loses its last
+  toplevel.
 - `compositor/src/compositor.rs` — `TawcState::hosts`,
   `single_activity_mode`, `assign_toplevel_to_host` policy returning `HostAssignment`,
-  per-host configure sizing in `new_toplevel`.
+  per-host configure sizing in `new_toplevel`, and host-scoped accessors over
+  Smithay's `XdgShellState::toplevel_surfaces()`.
 - `compositor/src/desktop.rs` — `DesktopRegistry` host assignment,
   foreground/visible projection, and persistent per-host `Space<Window>`
   updates.

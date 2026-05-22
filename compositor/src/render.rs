@@ -512,8 +512,8 @@ pub fn render_frame(
     let region = Rectangle::from_size(Size::from(host.logical_size));
 
     let render = &mut state.render;
-    let plain_shader = render.plain_shader.clone();
-    let tint_shader = render.tint_shader.clone();
+    let plain_shader = render.plain_shader.as_ref();
+    let tint_shader = render.tint_shader.as_ref();
     let tint_enabled = TINT_BUFFERS_BY_TYPE.load(Ordering::Relaxed);
     let surfaces = match state.desktop.host_space(&host.activity_id) {
         Some(host_space) => host_space.render_elements_for_region(
@@ -528,8 +528,8 @@ pub fn render_frame(
         surfaces,
         screen_w,
         screen_h,
-        plain_shader.as_ref(),
-        tint_shader.as_ref(),
+        plain_shader,
+        tint_shader,
         tint_enabled,
     );
 

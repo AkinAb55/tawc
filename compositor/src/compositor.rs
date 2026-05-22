@@ -1,10 +1,10 @@
 //! Wayland protocol state and handler implementations.
 //!
-//! This module owns TawcState (the Wayland protocol side of the compositor)
-//! and all the smithay handler trait impls. It does NOT own the renderer,
-//! EGL context, or GPU textures — those live in render::RenderState.
+//! This module owns TawcState and all the Smithay handler trait impls.
+//! Renderer/EGL details stay grouped in render::RenderState, which is carried
+//! by TawcState because Smithay callbacks use one concrete state type.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info, warn};
@@ -85,8 +85,9 @@ pub struct WindowMetadata {
 
 /// Wayland protocol state for the compositor.
 ///
-/// Does NOT hold rendering state (renderer, EGL, shaders) — that's in
-/// render::RenderState. This struct is what smithay handler callbacks receive.
+/// This is what Smithay handler callbacks receive. It also carries
+/// `RenderState` because Smithay's compositor pre-commit hooks require the
+/// same state type that owns protocol handlers.
 pub struct TawcState {
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
@@ -114,8 +115,6 @@ pub struct TawcState {
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
 
-    /// Toplevel surfaces tracked for rendering and lifecycle.
-    pub toplevels: Vec<ToplevelSurface>,
     /// Smithay desktop windows, host assignments, and per-host render
     /// projections.
     pub desktop: crate::desktop::DesktopRegistry,
@@ -196,10 +195,9 @@ pub struct TawcState {
     /// wl_surfaces. `xwm` is None until Xwayland reports Ready.
     pub xwayland_shell_state: XWaylandShellState,
     pub xwm: Option<X11Wm>,
-    /// X11 toplevels currently mapped. Iterated by the renderer the
-    /// same way `toplevels` is. Override-redirect surfaces (popups,
-    /// menus) live here too — the renderer doesn't yet stack them
-    /// separately above their parent.
+    /// X11 surfaces known to the window-manager side. Once an X11 surface
+    /// gets a backing wl_surface it is mirrored into `desktop` as a Smithay
+    /// `Window`; this list remains for XWM events and parent/selection policy.
     pub x11_surfaces: Vec<X11Surface>,
     /// X display number Xwayland is listening on. None until the
     /// XWayland Ready event arrives.
@@ -319,7 +317,6 @@ impl TawcState {
             data_device_state,
             seat_state,
             seat,
-            toplevels: Vec::new(),
             desktop: crate::desktop::DesktopRegistry::new(),
             popup_manager: PopupManager::default(),
             active_popup_grab: None,
@@ -447,14 +444,7 @@ impl TawcState {
         }
         let host_ready = self.host_logical_size(host_id).is_some();
 
-        let toplevels: Vec<_> = self
-            .toplevels
-            .iter()
-            .filter(|t| self.desktop.assigned_host(t.wl_surface()) == Some(host_id))
-            .cloned()
-            .collect();
-
-        for toplevel in toplevels {
+        for toplevel in self.wayland_toplevels_for_host(host_id) {
             set_toplevel_fullscreen_state(&toplevel, fullscreen, None);
             if host_ready {
                 toplevel.send_pending_configure();
@@ -583,15 +573,6 @@ impl TawcState {
         true
     }
 
-    pub fn finish_hosts_if_unused(&mut self, host_ids: impl IntoIterator<Item = ActivityId>) {
-        let mut seen = HashSet::new();
-        for host_id in host_ids {
-            if seen.insert(host_id.clone()) {
-                self.finish_host_if_unused(&host_id);
-            }
-        }
-    }
-
     pub fn finish_host(&mut self, host_id: &ActivityId) {
         let should_finish_activity = self.hosts.contains_key(host_id)
             || self.window_metadata.contains_key(host_id)
@@ -611,13 +592,7 @@ impl TawcState {
 
     pub fn request_close_windows_for_host(&mut self, host_id: &ActivityId) -> usize {
         let mut closed = 0;
-        let toplevels: Vec<_> = self
-            .toplevels
-            .iter()
-            .filter(|t| self.desktop.assigned_host(t.wl_surface()) == Some(host_id))
-            .cloned()
-            .collect();
-        for toplevel in toplevels {
+        for toplevel in self.wayland_toplevels_for_host(host_id) {
             toplevel.send_close();
             closed += 1;
         }
@@ -690,6 +665,23 @@ impl TawcState {
         }
         self.app_metadata_cache.get(&key).cloned().flatten()
     }
+
+    pub fn wayland_toplevels_for_host(&self, host_id: &ActivityId) -> Vec<ToplevelSurface> {
+        self.xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .filter(|t| t.alive())
+            .filter(|t| self.desktop.assigned_host(t.wl_surface()) == Some(host_id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn first_wayland_toplevel_for_host(&self, host_id: &ActivityId) -> Option<WlSurface> {
+        self.wayland_toplevels_for_host(host_id)
+            .into_iter()
+            .next()
+            .map(|t| t.wl_surface().clone())
+    }
 }
 
 fn xdg_toplevel_metadata(toplevel: &ToplevelSurface) -> (String, String) {
@@ -724,6 +716,13 @@ pub fn set_toplevel_fullscreen_state(
             state.states.set(XdgState::Maximized);
             state.fullscreen_output = None;
         }
+    });
+}
+
+fn force_server_side_decoration(toplevel: &ToplevelSurface) {
+    use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(Mode::ServerSide);
     });
 }
 
@@ -826,16 +825,12 @@ impl XdgShellHandler for TawcState {
         let window = Window::new_wayland_window(surface.clone());
         self.desktop
             .add_wayland_window(surface.wl_surface().clone(), window);
-        self.toplevels.push(surface);
         self.sync_desktop_hosts();
         self.toplevels_changed = true;
-        let metadata_toplevel = self.toplevels.last().cloned();
         if let Some(focus) = new_focus.as_ref() {
             self.set_input_focus(Some(focus));
         }
-        if let Some(toplevel) = metadata_toplevel {
-            self.update_wayland_window_metadata(&toplevel);
-        }
+        self.update_wayland_window_metadata(&surface);
 
         // Reverse-JNI side effects after the &mut self borrow is released.
         if assignment.spawn_activity {
@@ -935,6 +930,15 @@ impl XdgShellHandler for TawcState {
     fn title_changed(&mut self, surface: ToplevelSurface) {
         self.update_wayland_window_metadata(&surface);
     }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let host = self.desktop.remove_wayland_toplevel(surface.wl_surface());
+        self.sync_desktop_hosts();
+        self.toplevels_changed = true;
+        if let Some(host) = host {
+            self.finish_host_if_unused(&host);
+        }
+    }
 }
 
 impl OutputHandler for TawcState {}
@@ -947,10 +951,7 @@ impl FractionalScaleHandler for TawcState {
 
 impl XdgDecorationHandler for TawcState {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
+        force_server_side_decoration(&toplevel);
         if self.toplevel_host_ready(&toplevel) {
             toplevel.send_pending_configure();
         }
@@ -961,20 +962,14 @@ impl XdgDecorationHandler for TawcState {
         toplevel: ToplevelSurface,
         _mode: wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
-        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
+        force_server_side_decoration(&toplevel);
         if self.toplevel_host_ready(&toplevel) {
             toplevel.send_pending_configure();
         }
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
+        force_server_side_decoration(&toplevel);
         if self.toplevel_host_ready(&toplevel) {
             toplevel.send_pending_configure();
         }

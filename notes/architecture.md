@@ -28,9 +28,9 @@ The compositor (`compositor/src/`) is split into:
   `nativeLauncherScan` JNI entry. No compositor-state interaction — just pure
   file I/O, safe to call from any thread.
 - **text_input.rs** -- `zwp_text_input_v3` server impl bridging Android InputConnection.
-- **compositor.rs** -- `TawcState` (Wayland protocol state, including `hosts`,
-  `single_activity_mode`, and all Smithay handler trait impls including
-  `assign_toplevel_to_host` (the multi-window policy). Does NOT hold rendering state.
+- **compositor.rs** -- `TawcState` (the single Smithay/calloop state, including `hosts`,
+  `single_activity_mode`, `RenderState`, and all Smithay handler trait impls including
+  `assign_toplevel_to_host` (the multi-window policy)).
 - **desktop.rs** -- `DesktopRegistry`: owns Smithay desktop windows, surface -> host
   assignment, foreground-host selection, and persistent per-host `Space<Window>`
   projections.
@@ -146,10 +146,10 @@ feature -- no `libwayland-server.so` needed).
 
 ## Toplevel Lifecycle
 
-Toplevels are retained as long as `ToplevelSurface::alive()` returns true (not based on
-whether they have buffers). SHM state is cleaned up when the toplevel dies. This is
-important because SHM clients don't create buffer state until after the first configure
-event, so buffer-based retain logic would immediately remove new toplevels.
+Smithay owns xdg toplevel lifetime in `XdgShellState`; tawc reads
+`toplevel_surfaces()` when it needs to configure or close host-local windows and
+uses `XdgShellHandler::toplevel_destroyed` for cleanup. Do not add a parallel
+xdg toplevel list in `TawcState`.
 
 ## Known Risks and Constraints
 

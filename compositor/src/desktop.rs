@@ -197,6 +197,17 @@ impl DesktopRegistry {
         self.surface_to_host.values().any(|h| h == host_id)
     }
 
+    pub fn host_for_surface(&self, surface: &WlSurface) -> Option<ActivityId> {
+        self.windows.iter().find_map(|(root, window)| {
+            let host = self.surface_to_host.get(root)?;
+            let mut found = root == surface;
+            window.with_surfaces(|candidate, _| {
+                found |= candidate == surface;
+            });
+            found.then(|| host.clone())
+        })
+    }
+
     pub fn sync_hosts(&mut self, hosts: &HashMap<ActivityId, OutputHost>, output: &Output) {
         let mut assigned_hosts = HashSet::new();
         assigned_hosts.extend(self.surface_to_host.values().cloned());

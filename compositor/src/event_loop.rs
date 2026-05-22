@@ -127,23 +127,16 @@ fn apply_keyboard_focus_action(data: &mut TawcState, action: KeyboardFocusAction
 }
 
 fn host_for_surface(data: &TawcState, surface: &WlSurface) -> Option<ActivityId> {
+    if let Some(host) = data.desktop.host_for_surface(surface) {
+        return Some(host);
+    }
+
     let mut current = Some(surface.clone());
     while let Some(surface) = current {
         if let Some(host) = data.desktop.assigned_host(&surface) {
             return Some(host.clone());
         }
         current = get_parent(&surface);
-    }
-
-    for root in data.toplevels.iter().map(|t| t.wl_surface()) {
-        let Some(host) = data.desktop.assigned_host(root) else {
-            continue;
-        };
-        for (popup, _) in PopupManager::popups_for_surface(root) {
-            if popup.wl_surface() == surface {
-                return Some(host.clone());
-            }
-        }
     }
     None
 }
@@ -260,15 +253,9 @@ fn dismiss_host_popups_if_touch_is_outside_popup(
     }
 
     let roots: Vec<WlSurface> = data
-        .toplevels
-        .iter()
-        .map(|t| t.wl_surface())
-        .filter(|root| {
-            data.desktop
-                .assigned_host(root)
-                .is_some_and(|assigned| assigned == activity_id)
-        })
-        .cloned()
+        .wayland_toplevels_for_host(activity_id)
+        .into_iter()
+        .map(|t| t.wl_surface().clone())
         .collect();
 
     for root in roots {
@@ -541,7 +528,7 @@ pub fn run(
             info!(
                 "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
                 clients,
-                data.toplevels.len(),
+                toplevel_count(data),
                 surfaces_wlegl,
                 surfaces_shm,
                 data.frame_count,
@@ -632,27 +619,9 @@ pub fn run(
             error!("flush_clients error in frame timer: {}", e);
         }
 
-        // 4. Cleanup — collect dead toplevels first, then remove their state.
-        // (Two-pass avoids borrowing toplevels and surface maps simultaneously.)
-        // Also remember each dead toplevel's host so we can finish the
-        // Android Activity when its last toplevel goes away (multi-window:
-        // the recents card disappears with the window).
-        let dead: Vec<(_, Option<crate::host::ActivityId>)> = data.toplevels.iter()
-            .filter(|t| !t.alive())
-            .map(|t| {
-                let surf = t.wl_surface().clone();
-                let host = data.desktop.assigned_host(&surf).cloned();
-                (surf, host)
-            })
-            .collect();
-        if !dead.is_empty() {
-            data.toplevels_changed = true;
-        }
-        for (wl, _) in &dead {
-            info!("Removing dead toplevel");
-            data.desktop.remove_wayland_toplevel(wl);
-        }
-        data.toplevels.retain(|t| t.alive());
+        // 4. Cleanup. Smithay owns xdg toplevel lifetime and calls our
+        // `toplevel_destroyed` handler; this timer only prunes stale desktop
+        // windows/assignments for surfaces that disappeared outside that path.
         data.desktop.retain_live_windows();
         data.sync_desktop_hosts();
 
@@ -661,16 +630,12 @@ pub fn run(
         // last_rendered_toplevels would stay frozen at its peak value (so
         // waiters for "compositor went idle" — assert_compositor_clean,
         // wait_for_rendered_toplevels(0) — never see it return to 0).
-        if data.last_rendered_toplevels > data.toplevels.len() {
-            data.last_rendered_toplevels = data.toplevels.len();
+        let live_toplevels = toplevel_count(data);
+        if data.last_rendered_toplevels > live_toplevels {
+            data.last_rendered_toplevels = live_toplevels;
         }
 
         data.desktop.retain_live_assignments();
-
-        // For each host that just lost a window: if neither Wayland nor
-        // Xwayland still has windows assigned to it, finish the matching
-        // Activity so its recents card disappears.
-        data.finish_hosts_if_unused(dead.into_iter().filter_map(|(_, host)| host));
 
         data.popup_manager.cleanup();
         if data
@@ -687,9 +652,9 @@ pub fn run(
         // leave the keyboard pointed at it (events go nowhere) until the
         // next FocusChanged event arrives.
         if toplevels_changed {
-            let new_focus = data.toplevels.iter()
-                .find(|t| t.alive())
-                .map(|t| t.wl_surface().clone());
+            let new_focus = data
+                .desktop_visible_host_id()
+                .and_then(|host| data.first_wayland_toplevel_for_host(&host));
             data.set_input_focus(new_focus.as_ref());
         }
 
@@ -707,7 +672,7 @@ pub fn run(
             info!(
                 "Compositor: {} frames, {} toplevels, {} wlegl, {} shm, {} hosts",
                 data.frame_count,
-                data.toplevels.len(),
+                toplevel_count(data),
                 surfaces_wlegl,
                 surfaces_shm,
                 data.hosts.len(),
@@ -785,9 +750,13 @@ fn render_visible_host(data: &mut TawcState) -> bool {
 
     if rendered {
         data.frame_count += 1;
-        data.last_rendered_toplevels = data.toplevels.len();
+        data.last_rendered_toplevels = toplevel_count(data);
     }
     rendered
+}
+
+fn toplevel_count(data: &TawcState) -> usize {
+    data.xdg_shell_state.toplevel_surfaces().len()
 }
 
 // ---------------------------------------------------------------------------
@@ -883,7 +852,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             if has_focus {
                 data.desktop.set_foreground_host(Some(activity_id.clone()));
                 data.sync_advertised_output_to_host_if_visible(&activity_id);
-                let target = first_alive_toplevel_of_host(data, &activity_id);
+                let target = data.first_wayland_toplevel_for_host(&activity_id);
                 data.set_input_focus(target.as_ref());
                 data.needs_render = true;
             } else if data.desktop.foreground_host() == Some(&activity_id) {
@@ -974,13 +943,7 @@ fn set_host_foreground(state: &mut TawcState, host_id: &crate::host::ActivityId,
     use wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 
     let host_ready = state.host_logical_size(host_id).is_some();
-    let toplevels: Vec<_> = state
-        .toplevels
-        .iter()
-        .filter(|t| state.desktop.assigned_host(t.wl_surface()) == Some(host_id))
-        .cloned()
-        .collect();
-    for t in toplevels {
+    for t in state.wayland_toplevels_for_host(host_id) {
         t.with_pending_state(|s| {
             if foreground {
                 s.states.set(XdgState::Activated);
@@ -1002,21 +965,6 @@ fn set_host_foreground(state: &mut TawcState, host_id: &crate::host::ActivityId,
     }
 }
 
-/// Find the first alive toplevel assigned to the given host. Used for
-/// touch fallback (no per-coordinate hit-testing yet) and keyboard focus
-/// when a host comes to the foreground.
-fn first_alive_toplevel_of_host(
-    state: &TawcState,
-    host_id: &crate::host::ActivityId,
-) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
-    state
-        .toplevels
-        .iter()
-        .filter(|t| t.alive())
-        .find(|t| state.desktop.assigned_host(t.wl_surface()) == Some(host_id))
-        .map(|t| t.wl_surface().clone())
-}
-
 fn reconfigure_all_toplevels(state: &mut TawcState) {
     // Each toplevel uses its own host's real SurfaceView size. If the
     // Activity has not registered yet, leave the configure pending rather
@@ -1028,7 +976,7 @@ fn reconfigure_all_toplevels(state: &mut TawcState) {
     // arrive back-to-back with the same dimensions): vkcube's Vulkan WSI
     // wedges if it sees a duplicate configure between its first and
     // second commit.
-    let toplevels = state.toplevels.clone();
+    let toplevels = state.xdg_shell_state.toplevel_surfaces().to_vec();
     for toplevel in &toplevels {
         let Some(host_id) = state
             .desktop
