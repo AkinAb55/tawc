@@ -30,10 +30,13 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
   exposes a `wl_pointer` and sends a brief center enter/leave for new
   toplevels. Do not expand that into a general touch-to-pointer path; if real
   pointer hardware is added, wire it as real pointer input.
-- Touch-down moves both keyboard focus AND text-input-v3 focus to the target
-  surface via `TawcState::set_input_focus` — they are conceptually one focus and
-  splitting them invites drift. Touch does not commit or finish text input
-  preedit. If the client moves its cursor, its next
+- Touch-down moves both keyboard focus AND text-input-v3 focus to the target's
+  keyboard-focusable surface via `TawcState::set_input_focus` — they are
+  conceptually one focus and splitting them invites drift. `wl_subsurface`
+  targets focus their main surface because the core protocol forbids keyboard
+  focus on subsurfaces; non-grabbed `xdg_popup` touches leave keyboard focus
+  unchanged. Touch does not commit or finish text input preedit. If the client
+  moves its cursor, its next
   `set_surrounding_text(cause=other)` drives reactive preedit cleanup.
 
 **GTK3 touch handling note:** GTK3 handles `wl_touch` events natively — GtkGestureMultiPress

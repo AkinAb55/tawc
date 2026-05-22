@@ -27,8 +27,8 @@ use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::{
-    get_role, with_states, with_surface_tree_downward, BufferAssignment, SubsurfaceCachedState,
-    SurfaceAttributes, SurfaceData, TraversalAction,
+    get_parent, get_role, with_states, with_surface_tree_downward, BufferAssignment,
+    SubsurfaceCachedState, SurfaceAttributes, SurfaceData, TraversalAction, SUBSURFACE_ROLE,
 };
 use smithay::wayland::shell::xdg::{SurfaceCachedState, XDG_POPUP_ROLE};
 use wayland_server::{Display, ListeningSocket};
@@ -48,6 +48,18 @@ struct HitSurface {
     y: i32,
     w: i32,
     h: i32,
+}
+
+enum KeyboardFocusAction {
+    Set(WlSurface),
+    Keep,
+    Clear,
+}
+
+struct TouchResolution {
+    touch_focus: Option<(WlSurface, Point<f64, Logical>)>,
+    popup_focus: Option<WlSurface>,
+    keyboard_focus: KeyboardFocusAction,
 }
 
 fn xdg_window_geometry_loc(surface: &WlSurface) -> Point<i32, Logical> {
@@ -190,8 +202,54 @@ fn touch_focus_at(
     })
 }
 
-fn is_xdg_popup_surface(surface: &WlSurface) -> bool {
-    get_role(surface) == Some(XDG_POPUP_ROLE)
+fn is_in_xdg_popup_tree(surface: &WlSurface) -> bool {
+    let mut current = Some(surface.clone());
+    while let Some(surface) = current {
+        if get_role(&surface) == Some(XDG_POPUP_ROLE) {
+            return true;
+        }
+        current = get_parent(&surface);
+    }
+    false
+}
+
+fn main_surface_for_subsurface_tree(surface: &WlSurface) -> WlSurface {
+    let mut current = surface.clone();
+    while get_role(&current) == Some(SUBSURFACE_ROLE) {
+        let Some(parent) = get_parent(&current) else {
+            break;
+        };
+        current = parent;
+    }
+    current
+}
+
+fn resolve_touch_down(
+    data: &TawcState,
+    activity_id: &ActivityId,
+    location: Point<f64, Logical>,
+) -> TouchResolution {
+    let touch_focus = touch_focus_at(data, activity_id, location);
+    let popup_focus = touch_focus.as_ref().map(|(surface, _)| surface.clone());
+    let keyboard_focus = match touch_focus.as_ref().map(|(surface, _)| surface) {
+        Some(surface) if is_in_xdg_popup_tree(surface) => KeyboardFocusAction::Keep,
+        Some(surface) => KeyboardFocusAction::Set(main_surface_for_subsurface_tree(surface)),
+        None => KeyboardFocusAction::Clear,
+    };
+
+    TouchResolution {
+        touch_focus,
+        popup_focus,
+        keyboard_focus,
+    }
+}
+
+fn apply_keyboard_focus_action(data: &mut TawcState, action: KeyboardFocusAction) {
+    match action {
+        KeyboardFocusAction::Set(surface) => data.set_input_focus(Some(&surface)),
+        KeyboardFocusAction::Keep => {}
+        KeyboardFocusAction::Clear => data.set_input_focus(None),
+    }
 }
 
 fn dismiss_host_popups_if_touch_is_outside_popup(
@@ -201,7 +259,7 @@ fn dismiss_host_popups_if_touch_is_outside_popup(
     serial: smithay::utils::Serial,
     time: u32,
 ) {
-    if focus.is_some_and(is_xdg_popup_surface) {
+    if focus.is_some_and(is_in_xdg_popup_tree) {
         return;
     }
 
@@ -349,25 +407,26 @@ pub fn run(
             TouchEvent::Down { id, x, y, time, .. } => {
                 let location: Point<f64, smithay::utils::Logical> =
                     (touch_scale.logical_coord(x as f64), touch_scale.logical_coord(y as f64)).into();
-                let focus = touch_focus_at(data, &activity_id, location);
-                // Touch chooses the input target, but text-input state changes
-                // must come from the text-input protocol itself. In particular,
-                // do not speculatively commit preedit here: a touch may scroll,
-                // hit a button, or be ignored. If the client really moves the
-                // cursor, its following set_surrounding_text(cause=other)
-                // drives preedit cleanup.
-                let target = focus.as_ref().map(|(s, _)| s.clone());
+                let touch_resolution = resolve_touch_down(data, &activity_id, location);
                 dismiss_host_popups_if_touch_is_outside_popup(
                     data,
                     &activity_id,
-                    target.as_ref(),
+                    touch_resolution.popup_focus.as_ref(),
                     serial,
                     time,
                 );
-                data.set_input_focus(target.as_ref());
+                // Touch chooses the input target, but keyboard/text-input
+                // focus follows Wayland role policy. In particular,
+                // wl_subsurface targets focus their main surface, and
+                // non-grabbed xdg_popup touches leave keyboard focus alone.
+                // Do not speculatively commit preedit here: a touch may
+                // scroll, hit a button, or be ignored. If the client really
+                // moves the cursor, its following
+                // set_surrounding_text(cause=other) drives preedit cleanup.
+                apply_keyboard_focus_action(data, touch_resolution.keyboard_focus);
                 touch.down(
                     data,
-                    focus,
+                    touch_resolution.touch_focus,
                     &DownEvent {
                         slot: TouchSlot::from(Some(id as u32)),
                         location,

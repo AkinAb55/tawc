@@ -300,6 +300,34 @@ fn test_touch_subsurface_tap() {
     });
 }
 
+/// The core wl_subsurface protocol says a sub-surface never has keyboard
+/// focus. Touch still targets the subsurface, but keyboard/text-input focus
+/// must stay on the compound window's main surface.
+#[test]
+fn test_touch_subsurface_tap_does_not_move_keyboard_focus_to_subsurface() {
+    with_wayland_subsurface(|app| {
+        app.wait_for_tag_value("SURFACE_READY", "subsurface", TIMEOUT)
+            .expect("subsurface ready");
+        app.wait_for_tag_value("KEYBOARD_ENTER", "toplevel", TIMEOUT)
+            .expect("initial toplevel keyboard focus");
+        let enters_before = app.count_with_tag("KEYBOARD_ENTER");
+        let leaves_before = app.count_with_tag("KEYBOARD_LEAVE");
+
+        assert_surface_tap_delivered(app, "subsurface");
+
+        assert_eq!(
+            app.count_with_tag("KEYBOARD_ENTER"),
+            enters_before,
+            "subsurface touch should not move keyboard focus into the subsurface"
+        );
+        assert_eq!(
+            app.count_with_tag("KEYBOARD_LEAVE"),
+            leaves_before,
+            "subsurface touch should not move keyboard focus away from the toplevel"
+        );
+    });
+}
+
 /// Render-only subsurfaces can be visible but set an empty input region.
 /// Firefox/WebRender uses that shape: the child surface must not steal the
 /// touch from the browser toplevel.
@@ -326,6 +354,34 @@ fn test_touch_popup_tap() {
         inject_touch("tap-outside-popup");
         app.wait_for_tag_value("POPUP_DONE", "", TIMEOUT)
             .expect("popup dismissed after outside tap");
+    });
+}
+
+/// Touch focus may enter an xdg_popup, but keyboard/text-input focus must stay
+/// on the owning toplevel. Firefox desktop menus close without activating an
+/// item if a touchscreen tap first moves keyboard focus into the popup.
+#[test]
+fn test_touch_popup_tap_does_not_move_keyboard_focus_to_popup() {
+    with_wayland_popup(|app| {
+        app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
+            .expect("popup ready");
+        app.wait_for_tag_value("KEYBOARD_ENTER", "toplevel", TIMEOUT)
+            .expect("initial toplevel keyboard focus");
+        let enters_before = app.count_with_tag("KEYBOARD_ENTER");
+        let leaves_before = app.count_with_tag("KEYBOARD_LEAVE");
+
+        assert_popup_shadow_geometry_tap_delivered(app);
+
+        assert_eq!(
+            app.count_with_tag("KEYBOARD_ENTER"),
+            enters_before,
+            "popup touch should not move keyboard focus into the popup"
+        );
+        assert_eq!(
+            app.count_with_tag("KEYBOARD_LEAVE"),
+            leaves_before,
+            "popup touch should not move keyboard focus away from the toplevel"
+        );
     });
 }
 
@@ -423,4 +479,3 @@ fn test_touch_multitouch() {
         }
     });
 }
-

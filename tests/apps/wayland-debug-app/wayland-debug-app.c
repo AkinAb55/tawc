@@ -5,9 +5,11 @@
  * integration harness.
  *
  * This is test code, not production UI. Missing globals, failed Wayland
- * requests, invalid protocol ordering, truncated protocol strings, and
- * internal state invariants abort the process so the harness sees a loud
- * failure instead of a tolerant client hiding a compositor bug.
+ * requests, invalid protocol ordering, compositor protocol violations,
+ * truncated protocol strings, and internal state invariants abort the process
+ * so the harness sees a loud failure instead of a tolerant client hiding a
+ * compositor bug. Do not make this app tolerate protocol violations; add an
+ * explicit assertion for the rule being tested.
  *
  * Usage: wayland-debug-app <command>
  *
@@ -1696,21 +1698,28 @@ static void keyboard_enter(void *data, struct wl_keyboard *keyboard,
                            struct wl_array *keys)
 {
     struct app *app = data;
+    const char *label = surface_label_for_touch(app, surface);
     (void)keyboard;
     (void)keys;
-    require_true(surface_label_for_touch(app, surface) != NULL,
+    require_true(label != NULL,
                  "keyboard enter for unexpected surface %p", (void *)surface);
+    require_true(strcmp(label, "subsurface") != 0,
+                 "protocol violation: wl_subsurface received keyboard focus");
     app->keyboard_enter_serial = serial;
+    debug_emit("KEYBOARD_ENTER", label);
     maybe_set_clipboard_selection(app);
 }
 
 static void keyboard_leave(void *data, struct wl_keyboard *keyboard,
                            uint32_t serial, struct wl_surface *surface)
 {
-    (void)data;
+    struct app *app = data;
+    const char *label = surface ? surface_label_for_touch(app, surface) : "nil";
     (void)keyboard;
     (void)serial;
-    (void)surface;
+    require_true(label == NULL || strcmp(label, "subsurface") != 0,
+                 "protocol violation: wl_subsurface lost keyboard focus");
+    debug_emit("KEYBOARD_LEAVE", label ? label : "unknown");
 }
 
 static void keyboard_key(void *data, struct wl_keyboard *keyboard,
