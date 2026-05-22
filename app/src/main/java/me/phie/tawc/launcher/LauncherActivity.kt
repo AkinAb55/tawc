@@ -1,6 +1,7 @@
 package me.phie.tawc.launcher
 
 import android.content.Context
+import android.graphics.Rect
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -16,6 +17,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,6 +32,7 @@ import me.phie.tawc.install.InstallationMethod
 import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.ui.tawcCard
 import me.phie.tawc.ui.verticalLp
+import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -73,6 +77,8 @@ class LauncherActivity : AppCompatActivity() {
 
     private var installationId: String = ""
     private var installation: Installation? = null
+    private var popupWidthPx = 0
+    private var popupHeightPx = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,6 +144,14 @@ class LauncherActivity : AppCompatActivity() {
         content.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(content)
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
+            sizePopupWindow(insets)
+            insets
+        }
+        content.viewTreeObserver.addOnGlobalLayoutListener {
+            sizePopupWindow(ViewCompat.getRootWindowInsets(window.decorView))
+        }
+        ViewCompat.requestApplyInsets(window.decorView)
 
         // Force the keyboard up: simply requesting focus isn't enough on
         // some Android versions when the IME hasn't been shown yet in the
@@ -152,7 +166,7 @@ class LauncherActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        sizePopupWindow()
+        sizePopupWindow(null)
     }
 
     override fun onDestroy() {
@@ -162,11 +176,28 @@ class LauncherActivity : AppCompatActivity() {
         // activity should not tear down a freshly launched application.
     }
 
-    private fun sizePopupWindow() {
+    private fun sizePopupWindow(insets: WindowInsetsCompat?) {
         val display = resources.displayMetrics
         val density = display.density
         val width = min((display.widthPixels * 0.92f).toInt(), (720 * density).toInt())
-        val height = min((display.heightPixels * 0.78f).toInt(), (640 * density).toInt())
+        val naturalHeight = min((display.heightPixels * 0.78f).toInt(), (640 * density).toInt())
+        val bars = insets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val ime = insets?.getInsets(WindowInsetsCompat.Type.ime())
+        val imeVisible = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        val visibleFrame = Rect().also { window.decorView.getWindowVisibleDisplayFrame(it) }
+        val keyboardGap = if (imeVisible) (16 * density).toInt() else 0
+        val availableHeight = if (imeVisible && (ime?.bottom ?: 0) > 0) {
+            val coveredBottom = max(bars?.bottom ?: 0, ime?.bottom ?: 0)
+            display.heightPixels - (bars?.top ?: 0) - coveredBottom - keyboardGap
+        } else if (imeVisible && visibleFrame.height() > 0) {
+            visibleFrame.height() - keyboardGap
+        } else {
+            naturalHeight
+        }.coerceAtLeast((240 * density).toInt())
+        val height = min(naturalHeight, availableHeight)
+        if (width == popupWidthPx && height == popupHeightPx) return
+        popupWidthPx = width
+        popupHeightPx = height
         window.setLayout(width, height)
     }
 
