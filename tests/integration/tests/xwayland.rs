@@ -12,9 +12,12 @@
 //! [`GraphicsBackend::Libhybris`]; those tests require libhybris + a
 //! real Android GPU driver and are ignored on x86 devices.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tawc_integration::helpers::{assert_compositor_clean, has_shm_surface, require_compositor};
+use tawc_integration::debug_app::DebugApp;
+use tawc_integration::helpers::{
+    assert_broker_ok, assert_compositor_clean, has_shm_surface, require_compositor,
+};
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, rootfs, GraphicsBackend};
 
@@ -22,6 +25,74 @@ const SHM_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn shell_quote_single(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn wait_for_android_clipboard(expected: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let got = adb::clipboard_get_text().expect("get Android clipboard");
+        if got == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Android clipboard did not become {:?}; last={:?}",
+            expected,
+            got
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn test_android_clipboard_text_to_x11() {
+    require_compositor();
+    let android_text = "android clipboard to x11";
+    adb::clipboard_set_text(android_text).expect("set Android clipboard");
+    wait_for_android_clipboard(android_text, XWAYLAND_LAUNCH_TIMEOUT);
+
+    let bin = rootfs::ensure_x11_debug_app().expect("build x11-debug-app");
+    let app = DebugApp::start(SHM_BACKEND, &bin, "paste", "DISPLAY=:0")
+        .expect("start x11-debug-app paste");
+    app.wait_ready()
+        .expect("x11-debug-app paste did not map its X11 window");
+    assert_broker_ok(
+        adb::inject_touch_logical(40.0, 40.0).expect("tap x11-debug-app"),
+        "tap x11-debug-app",
+    );
+    app.wait_for_tag_value("CLIPBOARD_PASTE", android_text, XWAYLAND_LAUNCH_TIMEOUT)
+        .expect("X11 client did not receive Android clipboard text");
+
+    assert_compositor_clean();
+}
+
+#[test]
+fn test_x11_clipboard_text_to_android() {
+    require_compositor();
+    let x11_text = "x11 clipboard to android";
+    let sentinel = "android clipboard before x11";
+    adb::clipboard_set_text(sentinel).expect("set Android clipboard sentinel");
+    wait_for_android_clipboard(sentinel, XWAYLAND_LAUNCH_TIMEOUT);
+
+    let bin = rootfs::ensure_x11_debug_app().expect("build x11-debug-app");
+    let subcommand = format!("copy {}", shell_quote_single(x11_text));
+    let mut app = DebugApp::start(SHM_BACKEND, &bin, &subcommand, "DISPLAY=:0")
+        .expect("start x11-debug-app copy");
+    app.wait_ready()
+        .expect("x11-debug-app copy did not map its X11 window");
+    app.wait_for("CLIPBOARD_SET", XWAYLAND_LAUNCH_TIMEOUT)
+        .expect("X11 client did not set clipboard");
+    app.wait_for("CLIPBOARD_SEND", XWAYLAND_LAUNCH_TIMEOUT)
+        .expect("XWayland did not request X11 clipboard contents");
+    wait_for_android_clipboard(x11_text, XWAYLAND_LAUNCH_TIMEOUT);
+    app.stop()
+        .expect("x11-debug-app copy crashed or failed to stop cleanly");
+
+    assert_compositor_clean();
+}
 
 /// XWayland: launch a pure-X11 client (`xclock`) against the bionic-built
 /// Xwayland the compositor spawns at startup, and verify it actually

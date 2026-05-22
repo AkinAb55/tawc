@@ -51,6 +51,37 @@ use smithay::wayland::selection::SelectionTarget;
 use crate::compositor::TawcState;
 use crate::host::ActivityId;
 
+fn configure_x11_toplevel_for_host(
+    state: &TawcState,
+    surface: &X11Surface,
+    host_id: &ActivityId,
+) -> Option<(i32, i32)> {
+    if surface.is_override_redirect() {
+        return None;
+    }
+
+    let (w, h) = state.host_logical_size(host_id)?;
+    let mut geo = surface.geometry();
+    geo.loc = (0, 0).into();
+    geo.size = (w, h).into();
+    if let Err(e) = surface.configure(geo) {
+        warn!("xwayland: configure failed: {}", e);
+        return None;
+    }
+    Some((w, h))
+}
+
+pub fn configure_x11_toplevels_for_hosts(state: &TawcState) -> bool {
+    let mut configured = false;
+    for surface in &state.x11_surfaces {
+        let Some(host_id) = state.x11_surface_host(surface) else {
+            continue;
+        };
+        configured |= configure_x11_toplevel_for_host(state, surface, &host_id).is_some();
+    }
+    configured
+}
+
 /// Spawn Xwayland and insert it as a calloop event source. On the
 /// `Ready` event the X11 window manager is constructed and stashed on
 /// the state.
@@ -242,18 +273,15 @@ impl XwmHandler for TawcState {
             warn!("xwayland: set_mapped(true) failed: {}", e);
             return;
         }
-        // Honour the X client's requested size — most X-only apps
-        // (xeyes, xclock, xterm) request a small window and forcing
-        // them to fullscreen produces unintelligible output. If the
-        // requested geometry is empty (override-redirect, fresh
-        // window), seed with a small placeholder; the client will
-        // reconfigure on its first commit.
-        let mut geo = window.geometry();
-        if geo.size.w <= 0 || geo.size.h <= 0 {
-            geo.size = (150, 100).into();
-        }
-        if let Err(e) = window.configure(geo) {
-            warn!("xwayland: configure failed: {}", e);
+        if configure_x11_toplevel_for_host(self, &window, &assignment.host).is_none() {
+            let mut geo = window.geometry();
+            geo.loc = (0, 0).into();
+            if geo.size.w <= 0 || geo.size.h <= 0 {
+                geo.size = (150, 100).into();
+            }
+            if let Err(e) = window.configure(geo) {
+                warn!("xwayland: configure failed: {}", e);
+            }
         }
         self.x11_surfaces.push(window.clone());
         // Defer host assignment until the X11Surface gets a backing
@@ -334,10 +362,14 @@ impl XwmHandler for TawcState {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        // We never let X11 clients move themselves; honour size requests
-        // but pin position to the host origin. This matches what
-        // server-side decoration looks like (always full-screen-ish).
+        if let Some(host) = self.x11_surface_host(&window) {
+            if configure_x11_toplevel_for_host(self, &window, &host).is_some() {
+                return;
+            }
+        }
+
         let mut geo = window.geometry();
+        geo.loc = (0, 0).into();
         if let Some(w) = w {
             geo.size.w = (w as i32).max(1);
         }

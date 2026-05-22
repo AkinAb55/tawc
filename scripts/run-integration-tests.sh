@@ -226,7 +226,7 @@ build_and_deploy_test_apps() {
 
     # shellcheck source=../scripts/lib/tawc-scratch.sh
     source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
-    APPS=(wayland-debug-app eglx11-test)
+    APPS=(wayland-debug-app x11-debug-app eglx11-test)
     if [ "$BUILD_ABI" = "aarch64" ]; then
         APPS+=(tawc-dri-test libhybris-tls-repro)
     else

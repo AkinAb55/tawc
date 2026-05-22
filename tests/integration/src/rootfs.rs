@@ -30,7 +30,7 @@ fn check_rootfs_app(name: &str) -> io::Result<String> {
 /// `wayland-debug-app` — toolkitless Wayland protocol test driver.
 pub fn ensure_wayland_debug_app() -> io::Result<String> {
     let bin = check_rootfs_app("wayland-debug-app")?;
-    let probe = format!("grep -a -q 'touchable xdg_popup' {bin} && echo OK || echo STALE");
+    let probe = format!("grep -a -q 'clipboard-copy-timeout' {bin} && echo OK || echo STALE");
     let output = adb::rootfs_run(&probe)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.lines().any(|l| l.trim() == "OK") {
@@ -39,7 +39,7 @@ pub fn ensure_wayland_debug_app() -> io::Result<String> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "{bin} is stale and does not include the popup/subsurface modes. Run \
+            "{bin} is stale and does not include the hostile clipboard modes. Run \
              `scripts/run-integration-tests.sh` so the changed test app \
              is rebuilt and deployed."
         ),
@@ -49,6 +49,11 @@ pub fn ensure_wayland_debug_app() -> io::Result<String> {
 /// `tawc-dri-test` — TAWC-DRI Phase 1 round-trip client.
 pub fn ensure_tawc_dri_test() -> io::Result<String> {
     check_rootfs_app("tawc-dri-test")
+}
+
+/// `x11-debug-app` — Xlib protocol test driver.
+pub fn ensure_x11_debug_app() -> io::Result<String> {
+    check_rootfs_app("x11-debug-app")
 }
 
 /// `eglx11-test` — EGL-on-X11 driver test exercising the libhybris

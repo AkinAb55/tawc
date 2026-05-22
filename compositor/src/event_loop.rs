@@ -989,4 +989,6 @@ fn reconfigure_all_toplevels(state: &mut TawcState) {
             crate::gtk3_menus_workaround::prime_toplevel(state, toplevel.wl_surface(), w, h);
         }
     }
+
+    crate::xwayland::configure_x11_toplevels_for_hosts(state);
 }

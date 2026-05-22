@@ -39,7 +39,7 @@ NDK_ROOT ?= $(or $(ANDROID_NDK_ROOT),$(ANDROID_NDK_HOME),$(ANDROID_HOME)/ndk)
 NDK_BIN_DIR := $(shell if [ -x "$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/$(NDK_TRIPLE)29-clang" ]; then echo "$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin"; else ls -d "$(NDK_ROOT)"/*/toolchains/llvm/prebuilt/linux-x86_64/bin 2>/dev/null | sort -V | tail -n1; fi)
 NDK_CLANG := $(NDK_BIN_DIR)/$(NDK_TRIPLE)29-clang
 
-BASE_APPS := wayland-debug-app eglx11-test
+BASE_APPS := wayland-debug-app x11-debug-app eglx11-test
 APPS := $(BASE_APPS) $(HYBRIS_APPS)
 
 .PHONY: all clean sysroot $(APPS) adreno-struct-varying
@@ -47,6 +47,7 @@ APPS := $(BASE_APPS) $(HYBRIS_APPS)
 all: $(APPS)
 
 wayland-debug-app: $(OUT_ROOT)/wayland-debug-app/wayland-debug-app
+x11-debug-app: $(OUT_ROOT)/x11-debug-app/x11-debug-app
 eglx11-test: $(OUT_ROOT)/eglx11-test/eglx11-test
 tawc-dri-test: $(OUT_ROOT)/tawc-dri-test/tawc-dri-test
 libhybris-tls-repro: $(OUT_ROOT)/libhybris-tls-repro/libhybris-tls-repro $(OUT_ROOT)/libhybris-tls-repro/tls_lib.so $(OUT_ROOT)/libhybris-tls-repro/weak_lib.so
@@ -110,6 +111,11 @@ $(OUT_ROOT)/eglx11-test/eglx11-test: eglx11-test/eglx11-test.c | sysroot $(OUT_R
 		$$($(PC) --cflags x11) $$($(PC) --libs x11) \
 		-lEGL -lGLESv2 -L"$(SYSROOT)/usr/lib/hybris" -Wl,-rpath,/usr/lib/hybris \
 		-ldl $(LDFLAGS_SYSROOT) -Wall -Wextra
+
+$(OUT_ROOT)/x11-debug-app/x11-debug-app: x11-debug-app/x11-debug-app.c | sysroot $(OUT_ROOT)/x11-debug-app/
+	$(CC) $(CFLAGS_SYSROOT) -o "$@" "$<" \
+		$$($(PC) --cflags x11) $$($(PC) --libs x11) \
+		$(LDFLAGS_SYSROOT) -Wall -Wextra -Werror
 
 $(HYBRIS_COMMON): | sysroot
 	"$(REPO)/scripts/build-libhybris.sh"

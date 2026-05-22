@@ -124,6 +124,33 @@ pub fn start_wayland_debug_clipboard_copy(
     app
 }
 
+pub fn start_wayland_debug_clipboard_overcap(backend: GraphicsBackend, env: &str) -> DebugApp {
+    start_wayland_debug_clipboard_source(backend, env, "clipboard-copy-overcap", "overcap")
+}
+
+pub fn start_wayland_debug_clipboard_timeout(backend: GraphicsBackend, env: &str) -> DebugApp {
+    start_wayland_debug_clipboard_source(backend, env, "clipboard-copy-timeout", "timeout")
+}
+
+fn start_wayland_debug_clipboard_source(
+    backend: GraphicsBackend,
+    env: &str,
+    subcommand: &str,
+    label: &str,
+) -> DebugApp {
+    let binary = ensure_wayland_debug_app();
+    adb::logcat_clear().expect("Failed to clear logcat");
+    let app = DebugApp::start(backend, &binary, subcommand, env)
+        .unwrap_or_else(|e| panic!("Failed to start wayland clipboard-{label} debug app: {e}"));
+    app.wait_ready()
+        .unwrap_or_else(|e| panic!("Wayland clipboard-{label} debug app did not become ready: {e}"));
+    app.wait_for("CLIPBOARD_SET", TIMEOUT)
+        .unwrap_or_else(|e| panic!("Wayland clipboard-{label} debug app did not set clipboard: {e}"));
+    app.wait_for("CLIPBOARD_SEND", TIMEOUT)
+        .unwrap_or_else(|e| panic!("Wayland clipboard-{label} debug app did not receive send request: {e}"));
+    app
+}
+
 pub fn start_wayland_debug_clipboard_paste(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
     adb::logcat_clear().expect("Failed to clear logcat");

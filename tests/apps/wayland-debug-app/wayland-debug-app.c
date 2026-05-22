@@ -18,6 +18,8 @@
  *   text-input-no-surrounding   Text-input surface that never sends surrounding
  *   text-input-stale-newline    Reports cursor before trailing newlines
  *   clipboard-copy <text>       Set wl_data_device clipboard text
+ *   clipboard-copy-overcap      Set a clipboard source larger than 1 MiB
+ *   clipboard-copy-timeout      Set a clipboard source that never closes
  *   clipboard-paste             Read focused wl_data_device clipboard text
  *   touch                       Fullscreen touch visualizer
  *   subsurface                  Fullscreen toplevel with a touchable subsurface
@@ -72,6 +74,7 @@
 #define FONT_SIZE 32.0
 #define APPROX_CHAR_W 19.0
 #define MAX_TEXT 8192
+#define CLIPBOARD_OVERCAP_BYTES (1024 * 1024 + 4096)
 #define MAX_TOUCHES 16
 #define MAIN_BUFFER_COUNT 2
 
@@ -278,6 +281,8 @@ struct app {
     int copy_clipboard_on_focus;
     int paste_clipboard_on_selection;
     int clipboard_set;
+    size_t clipboard_generated_bytes;
+    int clipboard_leave_fd_open;
     int scene_kind;
     int scene_child_input_empty;
     int scene_child_created;
@@ -307,6 +312,7 @@ struct app {
     char preedit[MAX_TEXT];
     struct text_input_pending pending_text_input;
     struct touch_point touches[MAX_TOUCHES];
+    int held_clipboard_fd;
 };
 
 enum scene_kind {
@@ -330,6 +336,8 @@ struct wayland_mode {
     int request_decoration;
     int use_data_device;
     const char *clipboard_copy_text;
+    size_t clipboard_generated_bytes;
+    int clipboard_leave_fd_open;
     int clipboard_paste;
     int scene_kind;
     int scene_child_input_empty;
@@ -706,13 +714,36 @@ static void data_source_send(void *data, struct wl_data_source *source,
                              const char *mime_type, int32_t fd)
 {
     struct app *app = data;
-    size_t len = strlen(app->clipboard_copy_text);
     (void)source;
     (void)mime_type;
     debug_emit("CLIPBOARD_SEND", mime_type);
-    if (write(fd, app->clipboard_copy_text, len) < 0)
-        debug_emit("CLIPBOARD_SEND_ERROR", strerror(errno));
-    close(fd);
+
+    if (app->clipboard_generated_bytes > 0) {
+        char chunk[4096];
+        size_t remaining = app->clipboard_generated_bytes;
+        memset(chunk, 'x', sizeof(chunk));
+        while (remaining > 0) {
+            size_t n = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+            ssize_t written = write(fd, chunk, n);
+            if (written < 0) {
+                debug_emit("CLIPBOARD_SEND_ERROR", strerror(errno));
+                break;
+            }
+            remaining -= (size_t)written;
+        }
+    } else {
+        size_t len = strlen(app->clipboard_copy_text);
+        if (write(fd, app->clipboard_copy_text, len) < 0)
+            debug_emit("CLIPBOARD_SEND_ERROR", strerror(errno));
+    }
+
+    if (app->clipboard_leave_fd_open) {
+        if (app->held_clipboard_fd >= 0)
+            close(app->held_clipboard_fd);
+        app->held_clipboard_fd = fd;
+    } else {
+        close(fd);
+    }
 }
 
 static void data_source_cancelled(void *data, struct wl_data_source *source)
@@ -2311,6 +2342,7 @@ static void on_signal(int sig)
 static void setup_wayland(struct app *app, const struct wayland_mode *mode)
 {
     app->running = 1;
+    app->held_clipboard_fd = -1;
     app->editable = mode->editable;
     app->provide_surrounding = mode->provide_surrounding;
     app->stale_trailing_newline_cursor = mode->stale_trailing_newline_cursor;
@@ -2320,12 +2352,16 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->render_pattern = mode->render_pattern;
     app->use_data_device = mode->use_data_device;
     app->paste_clipboard_on_selection = mode->clipboard_paste;
+    app->clipboard_generated_bytes = mode->clipboard_generated_bytes;
+    app->clipboard_leave_fd_open = mode->clipboard_leave_fd_open;
     app->scene_kind = mode->scene_kind;
     app->scene_child_input_empty = mode->scene_child_input_empty;
-    if (mode->clipboard_copy_text) {
+    if (mode->clipboard_copy_text || mode->clipboard_generated_bytes > 0 ||
+        mode->clipboard_leave_fd_open) {
         checked_copy(app->clipboard_copy_text,
                      sizeof(app->clipboard_copy_text),
-                     mode->clipboard_copy_text, "clipboard copy text");
+                     mode->clipboard_copy_text ? mode->clipboard_copy_text : "x",
+                     "clipboard copy text");
         app->copy_clipboard_on_focus = 1;
     }
     app->request_decoration = mode->request_decoration;
@@ -2431,6 +2467,10 @@ static void teardown_wayland(struct app *app)
 {
     retire_main_shm_pool(app->main_pool);
     app->main_pool = NULL;
+    if (app->held_clipboard_fd >= 0) {
+        close(app->held_clipboard_fd);
+        app->held_clipboard_fd = -1;
+    }
     if (app->text_input)
         zwp_text_input_v3_destroy(app->text_input);
     if (app->fractional_scale)
@@ -2631,6 +2671,39 @@ static int cmd_clipboard_copy(int argc, char **argv)
     return run_scene_command(&mode);
 }
 
+static int cmd_clipboard_copy_overcap(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland clipboard overcap debug",
+        .app_id = "wayland-debug-app-clipboard-overcap",
+        .use_data_device = 1,
+        .clipboard_generated_bytes = CLIPBOARD_OVERCAP_BYTES,
+        .editable = 0,
+        .provide_surrounding = 0,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
+static int cmd_clipboard_copy_timeout(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland clipboard timeout debug",
+        .app_id = "wayland-debug-app-clipboard-timeout",
+        .use_data_device = 1,
+        .clipboard_copy_text = "clipboard source should time out",
+        .clipboard_leave_fd_open = 1,
+        .editable = 0,
+        .provide_surrounding = 0,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
 static int cmd_clipboard_paste(int argc, char **argv)
 {
     static const struct wayland_mode mode = {
@@ -2667,6 +2740,7 @@ static int cmd_touch(int argc, char **argv)
     signal_app = &app;
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
 
     setup_wayland(&app, &mode);
 
@@ -2756,6 +2830,7 @@ static int run_scene_command(const struct wayland_mode *mode)
     signal_app = &app;
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
 
     setup_wayland(&app, mode);
 
@@ -2858,6 +2933,10 @@ static const struct command commands[] = {
       cmd_text_input_stale_newline },
     { "clipboard-copy", "Set wl_data_device clipboard text",
       cmd_clipboard_copy },
+    { "clipboard-copy-overcap", "Set oversized wl_data_device clipboard text",
+      cmd_clipboard_copy_overcap },
+    { "clipboard-copy-timeout", "Set non-closing wl_data_device clipboard text",
+      cmd_clipboard_copy_timeout },
     { "clipboard-paste", "Read focused wl_data_device clipboard text",
       cmd_clipboard_paste },
     { "touch", "Fullscreen touch visualizer", cmd_touch },

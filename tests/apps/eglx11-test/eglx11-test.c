@@ -34,18 +34,30 @@
 #include <unistd.h>
 
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 
-#define WIN_W 320
+#define WIN_W 640
 #define WIN_H 240
 
 static void log_egl_error(const char *what)
 {
     EGLint e = eglGetError();
     fprintf(stderr, "eglx11-test: %s -> EGL error 0x%04x\n", what, e);
+}
+
+static void window_size(Display *xdpy, Window xwin, int *w, int *h)
+{
+    XWindowAttributes attrs;
+    *w = WIN_W;
+    *h = WIN_H;
+    if (XGetWindowAttributes(xdpy, xwin, &attrs)) {
+        if (attrs.width > 0) *w = attrs.width;
+        if (attrs.height > 0) *h = attrs.height;
+    }
 }
 
 int main(void)
@@ -79,6 +91,19 @@ int main(void)
         XCloseDisplay(xdpy);
         return 1;
     }
+    XStoreName(xdpy, xwin, "tawc EGL X11 test");
+    XClassHint class_hint = {
+        .res_name = "eglx11-test",
+        .res_class = "TawcX11Debug",
+    };
+    XSetClassHint(xdpy, xwin, &class_hint);
+    XSizeHints hints = {
+        .flags = PSize,
+        .width = WIN_W,
+        .height = WIN_H,
+    };
+    XSetWMNormalHints(xdpy, xwin, &hints);
+    XResizeWindow(xdpy, xwin, WIN_W, WIN_H);
     XSelectInput(xdpy, xwin, ExposureMask | StructureNotifyMask);
     XMapWindow(xdpy, xwin);
     XSync(xdpy, False);
@@ -153,6 +178,10 @@ int main(void)
      * on screen. */
     for (int f = 0; f < frames; f++) {
         float t = (float)f / (float)frames;
+        int win_w = WIN_W;
+        int win_h = WIN_H;
+        window_size(xdpy, xwin, &win_w, &win_h);
+        glViewport(0, 0, win_w, win_h);
         glClearColor(t, 1.0f - t, 0.25f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         if (!eglSwapBuffers(edpy, esurf)) {
