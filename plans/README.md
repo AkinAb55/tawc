@@ -6,6 +6,7 @@ design, build, and operational notes in [`../notes/`](../notes/).
 - [audio.md](audio.md) - planned PipeWire/PulseAudio bridge to Android audio.
 - [android-inputconnection-completeness-and-sync.md](android-inputconnection-completeness-and-sync.md) - design pass for a comprehensive Android `InputConnection` bridge and mirror-sync checks.
 - [desktop-gl-dispatch.md](desktop-gl-dispatch.md) - older desktop-GL dispatcher design, likely superseded by libhybris-zink unless GLES-over-Zink overhead is unacceptable.
+- [external-storage-binds.md](external-storage-binds.md) - plan for persistent shared-storage rootfs binds via all-files access, plus a later SAF-backed virtual directory bridge.
 - [gfxstream-bridge-remaining-work.md](gfxstream-bridge-remaining-work.md) - remaining GL/GLES and x86_64 AVD work for the gfxstream bridge backend.
 - [lazy-init-compositor.md](lazy-init-compositor.md) - defer compositor GPU/Wayland initialization until the first client connects.
 - [lazy-init-kumquat.md](lazy-init-kumquat.md) - defer gfxstream/kumquat GPU initialization until the first gfxstream client connects.
