@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import me.phie.tawc.R
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ops.CancelConfirmation
@@ -183,9 +184,9 @@ class InstallationService : Service() {
             else -> "tawc:installation"
         }
         val anchorTitle = when (intent?.action) {
-            ACTION_INSTALL -> "Install $rawId"
-            ACTION_UNINSTALL -> "Uninstall $rawId"
-            else -> "TAWC"
+            ACTION_INSTALL -> getString(R.string.operation_title_install, rawId)
+            ACTION_UNINSTALL -> getString(R.string.operation_title_uninstall, rawId)
+            else -> getString(R.string.app_name)
         }
         val (notifId, notif) = OperationsNotificationCenter.placeholderForegroundFor(
             applicationContext, anchorOpId, anchorTitle,
@@ -247,11 +248,11 @@ class InstallationService : Service() {
         mirrorProxyUrl: String? = null,
     ) {
         if (!Installation.isValidId(id)) {
-            rejectInstall(id, "invalid id (allowed: ^[a-z0-9][a-z0-9_-]{0,31}$)")
+            rejectInstall(id, getString(R.string.install_reject_invalid_id))
             return
         }
         if (currentJob?.job?.isActive == true) {
-            rejectInstall(id, "another job is already running")
+            rejectInstall(id, getString(R.string.install_reject_job_running))
             return
         }
         // Reset the log replay buffer at the start of each operation so
@@ -267,7 +268,7 @@ class InstallationService : Service() {
             Installation.State.INSTALLING,
             Installation.State.UNINSTALLING,
             Installation.State.FAILED -> {
-                rejectInstall(id, "id is in state $s; uninstall first")
+                rejectInstall(id, getString(R.string.install_reject_id_state, stateLabel(s)))
                 return
             }
         }
@@ -279,8 +280,11 @@ class InstallationService : Service() {
             DistroRegistry.forKey(distroKey) ?: run {
                 rejectInstall(
                     id,
-                    "unknown or host-incompatible distro '$distroKey' " +
-                        "(available: ${DistroRegistry.availableForHost().joinToString { it.key }})",
+                    getString(
+                        R.string.install_reject_unknown_distro,
+                        distroKey,
+                        DistroRegistry.availableForHost().joinToString { it.key },
+                    ),
                 )
                 return
             }
@@ -288,7 +292,13 @@ class InstallationService : Service() {
             DistroRegistry.defaultForHost()
         }
         if (distro == null) {
-            rejectInstall(id, "no Distro supports ABI ${android.os.Build.SUPPORTED_ABIS.joinToString(",")}")
+            rejectInstall(
+                id,
+                getString(
+                    R.string.install_reject_no_distro_for_abi,
+                    android.os.Build.SUPPORTED_ABIS.joinToString(","),
+                ),
+            )
             return
         }
         // Resolve the install method. An explicit bad key (or one that
@@ -299,8 +309,11 @@ class InstallationService : Service() {
             InstallationMethod.forKey(applicationContext, methodKey) ?: run {
                 rejectInstall(
                     id,
-                    "method '$methodKey' is not enabled in this build " +
-                        "(enabled: ${EnabledMethods.keys.joinToString()})",
+                    getString(
+                        R.string.install_reject_method_not_enabled,
+                        methodKey,
+                        EnabledMethods.keys.joinToString(),
+                    ),
                 )
                 return
             }
@@ -308,7 +321,7 @@ class InstallationService : Service() {
             InstallationMethod.defaultForHost(applicationContext)
         }
         if (!method.isAvailable(applicationContext)) {
-            rejectInstall(id, "method '${method.key}' is not available on this device")
+            rejectInstall(id, getString(R.string.install_reject_method_unavailable, method.key))
             return
         }
         // mirrorProxyUrl is debug-only. Both legitimate entry points
@@ -318,7 +331,7 @@ class InstallationService : Service() {
         // loudly so the bug gets caught rather than silently dropping
         // the proxy.
         if (mirrorProxyUrl != null && !me.phie.tawc.BuildConfig.DEBUG) {
-            rejectInstall(id, "mirrorProxy is debug-build-only (got '$mirrorProxyUrl')")
+            rejectInstall(id, getString(R.string.install_reject_mirror_proxy_release, mirrorProxyUrl))
             return
         }
         val mirrorProxy = mirrorProxyUrl?.let { MirrorProxy(it) }
@@ -328,15 +341,13 @@ class InstallationService : Service() {
         val rootfsPath = store.rootfsDir(id).absolutePath
         val op = MutableOperation(
             id = "install:$id",
-            title = "Install $id",
+            title = getString(R.string.operation_title_install, id),
             log = _log,
             cancelConfirmation = CancelConfirmation(
-                title = "Cancel install of '$id'?",
-                message = "Cancelling will stop the install and remove the partially " +
-                    "extracted rootfs at\n$rootfsPath.\n" +
-                    "Nothing of yours has been written there yet, so no data will be lost.",
-                confirmLabel = "Cancel install",
-                keepLabel = "Keep installing",
+                title = getString(R.string.install_cancel_title, id),
+                message = getString(R.string.install_cancel_message, rootfsPath),
+                confirmLabel = getString(R.string.install_cancel_confirm),
+                keepLabel = getString(R.string.install_cancel_keep),
             ),
             cancelHandler = { cancelInstallAndUninstall(id) },
         )
@@ -384,11 +395,11 @@ class InstallationService : Service() {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun startUninstall(id: String) {
         if (!Installation.isValidId(id)) {
-            rejectUninstall(id, "invalid id (allowed: ^[a-z0-9][a-z0-9_-]{0,31}$)")
+            rejectUninstall(id, getString(R.string.install_reject_invalid_id))
             return
         }
         if (currentJob?.job?.isActive == true) {
-            rejectUninstall(id, "another job is already running")
+            rejectUninstall(id, getString(R.string.install_reject_job_running))
             return
         }
         // Same fresh-log policy as install: each operation starts the
@@ -413,7 +424,7 @@ class InstallationService : Service() {
         } ?: InstallationMethod.defaultForHost(applicationContext)
         val op = MutableOperation(
             id = "uninstall:$id",
-            title = "Uninstall $id",
+            title = getString(R.string.operation_title_uninstall, id),
             log = _log,
             // Uninstall has no confirm dialog at the cancel boundary —
             // the user might be tapping Cancel to abort a wipe that's
@@ -524,7 +535,10 @@ class InstallationService : Service() {
             // exactly the same way [onStartCommand]'s placeholder is
             // upgraded for direct CLI starts.
             val (bridgeNotifId, bridgeNotif) = OperationsNotificationCenter.placeholderForegroundFor(
-                applicationContext, "uninstall:$id", "Uninstall $id", "Cancelling install: cleaning up…",
+                applicationContext,
+                "uninstall:$id",
+                getString(R.string.operation_title_uninstall, id),
+                getString(R.string.operation_status_install_cancel_cleanup),
             )
             startDataSyncForeground(bridgeNotifId, bridgeNotif)
             pendingFollowupUninstallId = null
@@ -569,20 +583,20 @@ class InstallationService : Service() {
         val cancelled = userCancelledId == id
         if (cancelled) {
             Log.w(TAG, "install cancelled by user")
-            store.setState(id, Installation.State.FAILED, "Cancelled by user")
+            store.setState(id, Installation.State.FAILED, getString(R.string.operation_status_install_cancelled_by_user))
             appendLog("[cancel] install of '$id' cancelled")
             publishProgress(InstallProgress(
                 InstallStage.FAILED,
-                "Install cancelled by user",
+                getString(R.string.operation_status_install_cancelled_by_user),
                 errorMessage = "cancelled",
             ))
         } else {
             Log.e(TAG, "install failed", t)
-            store.setState(id, Installation.State.FAILED, t.message ?: "(no detail)")
+            store.setState(id, Installation.State.FAILED, t.message ?: getString(R.string.operation_status_no_detail))
             appendLog("FAILED: ${t.message}")
             publishProgress(InstallProgress(
                 InstallStage.FAILED,
-                "Install failed: ${firstLine(t.message)}",
+                getString(R.string.operation_status_install_failed, firstLine(t.message)),
                 errorMessage = t.message,
             ))
         }
@@ -597,7 +611,11 @@ class InstallationService : Service() {
             store.setState(
                 id,
                 Installation.State.FAILED,
-                if (cancelled) "Cancelled by user" else (t.message ?: "(no detail)"),
+                if (cancelled) {
+                    getString(R.string.operation_status_uninstall_cancelled_by_user)
+                } else {
+                    t.message ?: getString(R.string.operation_status_no_detail)
+                },
             )
         }
         if (cancelled) {
@@ -605,7 +623,7 @@ class InstallationService : Service() {
             appendLog("[cancel] uninstall of '$id' cancelled (rootfs may be partially deleted)")
             publishProgress(InstallProgress(
                 InstallStage.FAILED,
-                "Uninstall cancelled by user",
+                getString(R.string.operation_status_uninstall_cancelled_by_user),
                 errorMessage = "cancelled",
             ))
         } else {
@@ -613,7 +631,7 @@ class InstallationService : Service() {
             appendLog("FAILED: ${t.message}")
             publishProgress(InstallProgress(
                 InstallStage.FAILED,
-                "Uninstall failed: ${firstLine(t.message)}",
+                getString(R.string.operation_status_uninstall_failed, firstLine(t.message)),
                 errorMessage = t.message,
             ))
         }
@@ -675,10 +693,20 @@ class InstallationService : Service() {
     }
 
     private fun rejectInstall(id: String, reason: String) =
-        rejectAsTransientOp("install:$id", "Install $id", "install '$id'", reason)
+        rejectAsTransientOp(
+            "install:$id",
+            getString(R.string.operation_title_install, id),
+            getString(R.string.operation_what_install, id),
+            reason,
+        )
 
     private fun rejectUninstall(id: String, reason: String) =
-        rejectAsTransientOp("uninstall:$id", "Uninstall $id", "uninstall '$id'", reason)
+        rejectAsTransientOp(
+            "uninstall:$id",
+            getString(R.string.operation_title_uninstall, id),
+            getString(R.string.operation_what_uninstall, id),
+            reason,
+        )
 
     /**
      * Surface a refused-by-gate request through the [OperationsRegistry]
@@ -708,7 +736,7 @@ class InstallationService : Service() {
         what: String,
         reason: String,
     ) {
-        val msg = "rejected $what: $reason"
+        val msg = getString(R.string.operation_status_rejected, what, reason)
         Log.w(TAG, msg)
         // Drop foreground state so we're not anchored to the placeholder
         // notification posted in onStartCommand. The transient op's own
@@ -745,7 +773,16 @@ class InstallationService : Service() {
     private val TRANSIENT_REJECT_HOLD_MS: Long = 2_000
 
     private fun firstLine(s: String?): String =
-        s?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: "(no detail)"
+        s?.lineSequence()?.firstOrNull { it.isNotBlank() }
+            ?: getString(R.string.operation_status_no_detail)
+
+    private fun stateLabel(state: Installation.State): String =
+        when (state) {
+            Installation.State.READY -> getString(R.string.install_state_ready)
+            Installation.State.INSTALLING -> getString(R.string.install_state_installing)
+            Installation.State.UNINSTALLING -> getString(R.string.install_state_uninstalling)
+            Installation.State.FAILED -> getString(R.string.install_state_failed)
+        }
 
     private fun publishProgress(p: InstallProgress) {
         // Relabel the terminal DONE / FAILED of the install-cancel
@@ -762,7 +799,7 @@ class InstallationService : Service() {
         val cancelTailMatch = installCancelTailUninstallId != null &&
             installCancelTailUninstallId == currentJob?.id
         val effective = if (cancelTailMatch && p.stage == InstallStage.DONE) {
-            p.copy(stage = InstallStage.FAILED, message = "Install cancelled")
+            p.copy(stage = InstallStage.FAILED, message = getString(R.string.operation_status_install_cancelled))
         } else {
             p
         }

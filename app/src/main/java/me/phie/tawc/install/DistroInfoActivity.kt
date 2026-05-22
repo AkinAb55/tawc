@@ -107,7 +107,7 @@ class DistroInfoActivity : AppCompatActivity() {
             rowLp(pad),
         )
         content.addView(infoRow(getString(R.string.distro_info_row_method), installation.method), rowLp(pad))
-        content.addView(infoRow(getString(R.string.distro_info_row_state), installation.state.name.lowercase()), rowLp(pad))
+        content.addView(infoRow(getString(R.string.distro_info_row_state), stateLabel(installation.state)), rowLp(pad))
         if (installation.failure != null) {
             content.addView(infoRow(getString(R.string.distro_info_row_failure), installation.failure), rowLp(pad))
         }
@@ -141,7 +141,11 @@ class DistroInfoActivity : AppCompatActivity() {
         val canProbeSize = installation.state == Installation.State.READY ||
             installation.state == Installation.State.FAILED
         sizeValue = TextView(this).apply {
-            text = if (canProbeSize) getString(R.string.distro_info_computing) else "—"
+            text = if (canProbeSize) {
+                getString(R.string.distro_info_computing)
+            } else {
+                getString(R.string.distro_info_size_unavailable)
+            }
             textSize = 14f
             typeface = Typeface.MONOSPACE
         }
@@ -249,7 +253,7 @@ class DistroInfoActivity : AppCompatActivity() {
             // pounding storage after the user leaves this screen.
             val bytes = runInterruptible(Dispatchers.IO) { store.computeSizeBytes(targetId) }
             sizeValue.text = when {
-                bytes < 0 -> "?"
+                bytes < 0 -> getString(R.string.distro_info_unknown)
                 else -> Formatter.formatFileSize(this@DistroInfoActivity, bytes)
             }
         }
@@ -267,6 +271,14 @@ class DistroInfoActivity : AppCompatActivity() {
             ?: resolved?.displayName
             ?: "${installation.distro.replaceFirstChar { it.titlecase() }} (${installation.arch})"
     }
+
+    private fun stateLabel(state: Installation.State): String =
+        when (state) {
+            Installation.State.READY -> getString(R.string.install_state_ready)
+            Installation.State.INSTALLING -> getString(R.string.install_state_installing)
+            Installation.State.UNINSTALLING -> getString(R.string.install_state_uninstalling)
+            Installation.State.FAILED -> getString(R.string.install_state_failed)
+        }
 
     private fun infoRow(label: String, value: String): LinearLayout =
         infoRowWithValue(label, TextView(this).apply {

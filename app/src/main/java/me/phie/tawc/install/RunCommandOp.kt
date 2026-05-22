@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import kotlinx.coroutines.flow.MutableSharedFlow
+import me.phie.tawc.R
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.ops.MutableOperation
 import me.phie.tawc.ops.OperationProgress
@@ -45,12 +46,12 @@ internal object RunCommandOp {
         val procRef = arrayOfNulls<Process>(1)
         val op = MutableOperation(
             id = opId,
-            title = "${installation.id}: $command",
+            title = app.getString(R.string.operation_title_run_command, installation.id, command),
             log = sink,
             cancelHandler = { procRef[0]?.destroyForcibly() },
         )
         OperationsRegistry.register(op)
-        op.publish(OperationProgress(OperationStage.RUNNING, "Running…"))
+        op.publish(OperationProgress(OperationStage.RUNNING, app.getString(R.string.operation_status_running)))
         sink.tryEmit("$ $command")
 
         try {
@@ -67,7 +68,13 @@ internal object RunCommandOp {
 
         val method = InstallationMethod.forKey(app, installation.method)
         if (method == null) {
-            terminate(op, opId, sink, OperationStage.FAILED, "Unknown install method '${installation.method}'")
+            terminate(
+                op,
+                opId,
+                sink,
+                OperationStage.FAILED,
+                app.getString(R.string.operation_status_unknown_install_method, installation.method),
+            )
             return
         }
         val rootfs = InstallationStore(app).rootfsDir(installation.id).absolutePath
@@ -75,8 +82,17 @@ internal object RunCommandOp {
         val proc: Process = try {
             method.startInside(rootfs, command)
         } catch (t: Throwable) {
-            terminate(op, opId, sink, OperationStage.FAILED,
-                "Failed to start: ${t.javaClass.simpleName}: ${t.message}")
+            terminate(
+                op,
+                opId,
+                sink,
+                OperationStage.FAILED,
+                app.getString(
+                    R.string.operation_status_failed_to_start,
+                    t.javaClass.simpleName,
+                    t.message ?: app.getString(R.string.operation_status_no_detail),
+                ),
+            )
             return
         }
         procRef[0] = proc
@@ -95,9 +111,9 @@ internal object RunCommandOp {
             // Java's wstatus int can't reliably distinguish "exited 137"
             // from "killed by SIGKILL"; we just report what we got.
             val (stage, msg) = if (exit == 0) {
-                OperationStage.DONE to "Done"
+                OperationStage.DONE to app.getString(R.string.operation_status_done)
             } else {
-                OperationStage.FAILED to "Exited with code $exit"
+                OperationStage.FAILED to app.getString(R.string.operation_status_exited_with_code, exit)
             }
             terminate(op, opId, sink, stage, msg)
         }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">TAWC</string>
+    <string name="app_name" translatable="false">TAWC</string>
 
     <string name="title_install">Install</string>
     <string name="title_install_distro">Install distro</string>
@@ -28,8 +28,10 @@
     <string name="hint_run_command">e.g. firefox</string>
 
     <string name="home_empty_no_distros">You have no installed Linux distros, install one to get started.</string>
+    <string name="home_subtitle_separator">&#8212;</string>
     <string name="install_state_installing">installing&#8230;</string>
     <string name="install_state_uninstalling">uninstalling&#8230;</string>
+    <string name="install_state_ready">ready</string>
     <string name="install_state_failed">failed</string>
 
     <string name="settings_graphics_driver">Graphics driver</string>
@@ -53,6 +55,12 @@
     <string name="install_method_proot">proot</string>
     <string name="install_method_chroot_requires_root">chroot (requires root)</string>
     <string name="install_root_unavailable">root (su) not available &#8212; pick proot or TAWCroot, or grant Magisk root.</string>
+    <string name="install_method_info_tawcroot_title">TAWCroot (recommended)</string>
+    <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator written for TAWC. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the Wayland / GPU paths the compositor needs. Default for new installs and the only officially supported method.</string>
+    <string name="install_method_info_proot_title">proot (dev only)</string>
+    <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most desktop apps work. Slower than TAWCroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
+    <string name="install_method_info_chroot_title">chroot (requires root, dev only)</string>
+    <string name="install_method_info_chroot_body">Real Linux chroot via su. Fastest path with no syscall translation overhead, but only works on rooted devices (Magisk / Phh-style su). The chroot mounts /apex, /vendor, /system and /linkerconfig from Android so libhybris GPU drivers can resolve their dependencies. Available in debug builds; not shipped to release users.</string>
 
     <string name="distro_info_row_id">ID:</string>
     <string name="distro_info_row_label">Label:</string>
@@ -67,6 +75,7 @@
     <string name="distro_info_row_rootfs_path">Rootfs path:</string>
     <string name="distro_info_row_size">Size:</string>
     <string name="distro_info_unknown">unknown</string>
+    <string name="distro_info_size_unavailable">not available</string>
     <string name="distro_info_computing">computing&#8230;</string>
     <string name="distro_info_run_command_title">Run command in %1$s</string>
     <string name="distro_info_delete_title">Delete %1$s?</string>
@@ -81,6 +90,49 @@
     <string name="operation_not_in_flight">No operation in flight for \'%1$s\'.</string>
     <string name="operation_channel_name">Operations</string>
     <string name="operation_channel_description">Long-running install / uninstall / command jobs</string>
+    <string name="operation_starting">Starting&#8230;</string>
+    <string name="operation_title_install">Install %1$s</string>
+    <string name="operation_title_uninstall">Uninstall %1$s</string>
+    <string name="operation_title_run_command">%1$s: %2$s</string>
+    <string name="operation_status_running">Running&#8230;</string>
+    <string name="operation_status_done">Done</string>
+    <string name="operation_status_exited_with_code">Exited with code %1$d</string>
+    <string name="operation_status_unknown_install_method">Unknown install method \'%1$s\'</string>
+    <string name="operation_status_failed_to_start">Failed to start: %1$s: %2$s</string>
+    <string name="operation_status_install_cancel_cleanup">Cancelling install: cleaning up&#8230;</string>
+    <string name="operation_status_install_cancelled">Install cancelled</string>
+    <string name="operation_status_install_cancelled_by_user">Install cancelled by user</string>
+    <string name="operation_status_uninstall_cancelled_by_user">Uninstall cancelled by user</string>
+    <string name="operation_status_install_failed">Install failed: %1$s</string>
+    <string name="operation_status_uninstall_failed">Uninstall failed: %1$s</string>
+    <string name="operation_status_rejected">rejected %1$s: %2$s</string>
+    <string name="operation_status_no_detail">no detail</string>
+    <string name="operation_what_install">install \'%1$s\'</string>
+    <string name="operation_what_uninstall">uninstall \'%1$s\'</string>
+    <string name="install_reject_invalid_id">invalid id (allowed: ^[a-z0-9][a-z0-9_-]{0,31}$)</string>
+    <string name="install_reject_job_running">another job is already running</string>
+    <string name="install_reject_id_state">id is in state %1$s; uninstall first</string>
+    <string name="install_reject_unknown_distro">unknown or host-incompatible distro \'%1$s\' (available: %2$s)</string>
+    <string name="install_reject_no_distro_for_abi">no Distro supports ABI %1$s</string>
+    <string name="install_reject_method_not_enabled">method \'%1$s\' is not enabled in this build (enabled: %2$s)</string>
+    <string name="install_reject_method_unavailable">method \'%1$s\' is not available on this device</string>
+    <string name="install_reject_mirror_proxy_release">mirrorProxy is debug-build-only (got \'%1$s\')</string>
+    <string name="install_cancel_title">Cancel install of \'%1$s\'?</string>
+    <string name="install_cancel_message">Cancelling will stop the install and remove the partially extracted rootfs at\n%1$s.\nNothing of yours has been written there yet, so no data will be lost.</string>
+    <string name="install_cancel_confirm">Cancel install</string>
+    <string name="install_cancel_keep">Keep installing</string>
+    <string name="install_progress_downloading_arch_bootstrap">Downloading %1$s bootstrap&#8230;</string>
+    <string name="install_progress_downloading_bootstrap">Downloading bootstrap: %1$s / %2$s</string>
+    <string name="install_progress_verifying_bootstrap">Verifying bootstrap signature&#8230;</string>
+    <string name="install_progress_extracting_rootfs">Extracting rootfs&#8230;</string>
+    <string name="install_progress_configuring_chroot">Configuring chroot&#8230;</string>
+    <string name="install_progress_initializing_package_manager">Initializing package manager&#8230;</string>
+    <string name="install_progress_installing_base_packages">Installing base packages&#8230;</string>
+    <string name="install_progress_installed">Installed</string>
+    <string name="install_progress_nothing_to_delete">Nothing to delete</string>
+    <string name="install_progress_unmounting_chroot">Unmounting chroot&#8230;</string>
+    <string name="install_progress_deleting_rootfs">Deleting rootfs&#8230;</string>
+    <string name="install_progress_deleted">Deleted</string>
 
     <string name="task_manager_empty">No Linux processes running.</string>
     <string name="task_manager_uninstalled_group">(uninstalled: %1$s)</string>

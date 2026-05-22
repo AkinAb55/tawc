@@ -1,6 +1,7 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import me.phie.tawc.R
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.util.AppOwnership
 import me.phie.tawc.install.util.HumanSize
@@ -157,7 +158,7 @@ class Installer(
             // so the installer just hands it (cacheKey, url, format).
             progress(InstallProgress(
                 InstallStage.DOWNLOADING,
-                "Downloading ${distro.linuxArch} bootstrap…",
+                context.getString(R.string.install_progress_downloading_arch_bootstrap, distro.linuxArch),
             ))
             log("download: $effectiveBootstrapUrl" + if (attempt > 0) " (retry $attempt)" else "")
             val cf = cache.download(
@@ -166,10 +167,15 @@ class Installer(
                 bootstrap.format,
             ) { read, total ->
                 val pct = total?.let { ((read * 100) / it).toInt().coerceIn(0, 100) }
-                val totalLabel = total?.let { HumanSize.format(it) } ?: "?"
+                val totalLabel = total?.let { HumanSize.format(it) }
+                    ?: context.getString(R.string.distro_info_unknown)
                 progress(InstallProgress(
                     InstallStage.DOWNLOADING,
-                    "Downloading bootstrap: ${HumanSize.format(read)} / $totalLabel",
+                    context.getString(
+                        R.string.install_progress_downloading_bootstrap,
+                        HumanSize.format(read),
+                        totalLabel,
+                    ),
                     pct,
                 ))
             }
@@ -186,7 +192,7 @@ class Installer(
             // see notes/installation.md "Bootstrap integrity".
             progress(InstallProgress(
                 InstallStage.VERIFYING,
-                "Verifying bootstrap signature…",
+                context.getString(R.string.install_progress_verifying_bootstrap),
             ))
             log("verify: ${bootstrap.verification::class.simpleName}")
             try {
@@ -219,7 +225,7 @@ class Installer(
         // bootstraps we pass the cache-owned FIFO path (used by the
         // chroot path; proot ignores it and decompresses via
         // zstd-jni) so all `cache/install/` files have one owner.
-        progress(InstallProgress(InstallStage.EXTRACTING, "Extracting rootfs…"))
+        progress(InstallProgress(InstallStage.EXTRACTING, context.getString(R.string.install_progress_extracting_rootfs)))
         log("extract: ${cacheFile.name} -> $rootfsPath (strip=${bootstrap.stripPrefix}, method=${method.key})")
         method.extractBootstrap(
             tarball = cacheFile,
@@ -236,7 +242,7 @@ class Installer(
         // chroot-entry mechanics (mounts, bind-table, setsid, exec)
         // live entirely in [InstallationMethod.startInside] now —
         // there's nothing to materialise on disk between calls.
-        progress(InstallProgress(InstallStage.CONFIGURING, "Configuring chroot…"))
+        progress(InstallProgress(InstallStage.CONFIGURING, context.getString(R.string.install_progress_configuring_chroot)))
         distro.configure(method, rootfsPath, mirrorProxy, log)
         // Lay down everything the app ships per-rootfs (libhybris into
         // /usr/lib/hybris, the glvnd vendor JSON, …) as real files via
@@ -254,21 +260,21 @@ class Installer(
         // throughout — if either pacman invocation fails the service
         // wraps it as FAILED and the only recovery is uninstall +
         // install again.
-        progress(InstallProgress(InstallStage.PKG_KEYRING, "Initializing package manager…"))
+        progress(InstallProgress(InstallStage.PKG_KEYRING, context.getString(R.string.install_progress_initializing_package_manager)))
         distro.initPackageManager(method, rootfsPath, log)
 
         checkCancel()
         // Stage 5: install base packages.
         progress(InstallProgress(
             InstallStage.PKG_INSTALL,
-            "Installing base packages…",
+            context.getString(R.string.install_progress_installing_base_packages),
         ))
         distro.installBasePackages(method, rootfsPath, log)
 
         // All stages succeeded — flip to READY. From this point the
         // gate refuses install and only allows uninstall.
         store.setState(id, Installation.State.READY)
-        progress(InstallProgress(InstallStage.DONE, "Installed"))
+        progress(InstallProgress(InstallStage.DONE, context.getString(R.string.install_progress_installed)))
     }
 
     /**
@@ -288,7 +294,7 @@ class Installer(
     ) {
         val installDir = store.installationDir(id)
         if (!installDir.exists()) {
-            progress(InstallProgress(InstallStage.DONE, "Nothing to delete"))
+            progress(InstallProgress(InstallStage.DONE, context.getString(R.string.install_progress_nothing_to_delete)))
             return
         }
         store.setState(id, Installation.State.UNINSTALLING)
@@ -298,11 +304,11 @@ class Installer(
         // app-uid recursive delete — but the stage rolls past quickly,
         // and the install pipeline / UI is structured around these
         // labels, so we keep both for symmetry.
-        progress(InstallProgress(InstallStage.UNMOUNTING, "Unmounting chroot…"))
-        progress(InstallProgress(InstallStage.DELETING, "Deleting rootfs…"))
+        progress(InstallProgress(InstallStage.UNMOUNTING, context.getString(R.string.install_progress_unmounting_chroot)))
+        progress(InstallProgress(InstallStage.DELETING, context.getString(R.string.install_progress_deleting_rootfs)))
         method.wipe(installDir, log)
 
-        progress(InstallProgress(InstallStage.DONE, "Deleted"))
+        progress(InstallProgress(InstallStage.DONE, context.getString(R.string.install_progress_deleted)))
     }
 
 }

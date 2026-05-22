@@ -107,7 +107,7 @@ object OperationsNotificationCenter {
         ctx: Context,
         opId: String,
         title: String,
-        message: String = "Starting…",
+        message: String = ctx.getString(R.string.operation_starting),
     ): Pair<Int, Notification> {
         ensureChannel(ctx)
         return notificationIdFor(opId) to buildNotificationContent(

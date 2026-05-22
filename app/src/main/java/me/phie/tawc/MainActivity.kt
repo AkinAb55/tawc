@@ -185,7 +185,9 @@ class MainActivity : AppCompatActivity() {
             Installation.State.UNINSTALLING -> getString(R.string.install_state_uninstalling)
             Installation.State.FAILED -> getString(R.string.install_state_failed)
         }
-        val subtitle = listOf(distroLine, stateLine).filter { it.isNotEmpty() }.joinToString(" — ")
+        val subtitle = listOf(distroLine, stateLine)
+            .filter { it.isNotEmpty() }
+            .joinToString(" ${getString(R.string.home_subtitle_separator)} ")
         return title to subtitle
     }
 }

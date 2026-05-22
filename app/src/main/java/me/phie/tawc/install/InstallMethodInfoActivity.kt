@@ -7,6 +7,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import me.phie.tawc.R
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.verticalLp
 
@@ -22,43 +23,29 @@ class InstallMethodInfoActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scaffold = buildChildScreen("Install methods")
+        val scaffold = buildChildScreen(getString(R.string.title_install_methods))
         val pad = (16 * resources.displayMetrics.density).toInt()
         val content = scaffold.content
 
         if (EnabledMethods.tawcroot) {
             section(
                 content, pad,
-                "TAWCroot (recommended)",
-                "Custom systrap-based syscall emulator written for TAWC. Like " +
-                    "proot it needs no root, but uses a more efficient " +
-                    "ptrace alternative and is built specifically to handle " +
-                    "the Wayland / GPU paths the compositor needs. Default " +
-                    "for new installs and the only officially supported " +
-                    "method.",
+                getString(R.string.install_method_info_tawcroot_title),
+                getString(R.string.install_method_info_tawcroot_body),
             )
         }
         if (EnabledMethods.proot) {
             section(
                 content, pad,
-                "proot (dev only)",
-                "Userspace chroot via the Termux fork of proot. Rootless and " +
-                    "broadly compatible — pacman, package builds and most " +
-                    "desktop apps work. Slower than TAWCroot because every " +
-                    "syscall is intercepted via ptrace. Available in debug " +
-                    "builds for comparison; not shipped to release users.",
+                getString(R.string.install_method_info_proot_title),
+                getString(R.string.install_method_info_proot_body),
             )
         }
         if (EnabledMethods.chroot) {
             section(
                 content, pad,
-                "chroot (requires root, dev only)",
-                "Real Linux chroot via su. Fastest path with no syscall " +
-                    "translation overhead, but only works on rooted devices " +
-                    "(Magisk / Phh-style su). The chroot mounts /apex, " +
-                    "/vendor, /system and /linkerconfig from Android so " +
-                    "libhybris GPU drivers can resolve their dependencies. " +
-                    "Available in debug builds; not shipped to release users.",
+                getString(R.string.install_method_info_chroot_title),
+                getString(R.string.install_method_info_chroot_body),
             )
         }
 
