@@ -35,7 +35,7 @@ internal object AppUidProcfsScanner {
      * @param orphanPattern Optional `(rootfsParentPath, knownIds)` —
      *   processes whose path lives under
      *   `rootfsParentPath/<id>/rootfs` (e.g.
-     *   `/data/data/me.phie.tawc/distros/<id>/rootfs`) but whose
+     *   `<appData>/distros/<id>/rootfs`) but whose
      *   extracted slot id isn't in `knownIds` are reported as orphans
      *   (with the slot id preserved on [ProcessInfo.orphanRootfsId]).
      *   Pass `null` to disable orphan detection.

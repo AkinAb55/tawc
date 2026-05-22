@@ -195,7 +195,7 @@ data class Installation(
  * fresh one.
  *
  * `src` is provider-defined (e.g. a host-side path like
- * `/data/data/me.phie.tawc/files/libhybris/lib/libEGL.so.1`, or a
+ * `<filesDir>/libhybris/lib/libEGL.so.1`, or a
  * synthetic identifier for content-generated files). `dest` is the
  * absolute in-rootfs path (e.g. `/usr/lib/hybris/libEGL.so.1`).
  */

@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.util.Log
+import me.phie.tawc.AppPaths
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
 import java.io.File
@@ -26,6 +27,9 @@ import java.io.IOException
  * the path.
  */
 class ProotMethod(context: Context) : InstallationMethod {
+    private val appPaths = AppPaths.from(context)
+    private val tawcShare: String = appPaths.shareDir.absolutePath
+
     /** Absolute path to the vendored proot binary on disk. */
     val prootBin: String =
         File(context.applicationInfo.nativeLibraryDir, "libproot.so").absolutePath
@@ -149,8 +153,8 @@ class ProotMethod(context: Context) : InstallationMethod {
         // relying on launch order. The bare /share dir is also mkdir'd
         // so proot can satisfy the `-b` source-must-exist check on a
         // fresh device before the compositor has run.
-        File(TAWC_SHARE).mkdirs()
-        File("$TAWC_SHARE/xtmp/.X11-unix").mkdirs()
+        File(tawcShare).mkdirs()
+        File("$tawcShare/xtmp/.X11-unix").mkdirs()
 
         // We invoke proot through `/system/bin/sh -c …` rather than as
         // direct ProcessBuilder argv. Direct exec of the proot binary
@@ -382,13 +386,13 @@ class ProotMethod(context: Context) : InstallationMethod {
         // <filesDir> to in-rootfs writes — see notes/installation.md
         // "/usr/share/tawc"). RootfsEnv sets WAYLAND_DISPLAY to the
         // in-rootfs path; no /tmp/wayland-0 symlink needed.
-        addAll(listOf("-b", "$TAWC_SHARE:${TawcrootMethod.GUEST_TAWC_SHARE_DIR}"))
+        addAll(listOf("-b", "$tawcShare:${TawcrootMethod.GUEST_TAWC_SHARE_DIR}"))
         // Surface Xwayland's listening socket at the canonical X11
         // path. Asymmetric bind, no in-rootfs symlink. Pre-created in
         // [startInside] so proot accepts the source. libxcb hardcodes
         // /tmp/.X11-unix/X<N> for the `:N` form of $DISPLAY, so we
         // can't just expose it via /usr/share/tawc.
-        addAll(listOf("-b", "$TAWC_SHARE/xtmp/.X11-unix:/tmp/.X11-unix"))
+        addAll(listOf("-b", "$tawcShare/xtmp/.X11-unix:/tmp/.X11-unix"))
     }
 
     /**
@@ -457,11 +461,6 @@ class ProotMethod(context: Context) : InstallationMethod {
     companion object {
         const val KEY = "proot"
         private const val TAG = "tawc-install"
-        /** Compositor's tawc-shared dir (wayland socket, Xwayland xtmp).
-         *  Same shape as [TawcrootMethod.GUEST_TAWC_SHARE_DIR] —
-         *  source kept identical between the two methods. */
-        private const val TAWC_SHARE = "/data/data/me.phie.tawc/share"
-
         /**
          * Android paths bound into the proot view so libhybris can
          * dlopen bionic-side GPU libraries. Mirrors the bind set in

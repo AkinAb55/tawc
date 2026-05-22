@@ -36,15 +36,14 @@ SRC_ROOT="$REPO_DIR/deps/xwayland-src"
 PATCH_ROOT="$REPO_DIR/deps/xwayland-patches"
 
 # Where the X11 / XIM / ICE / wayland sockets live in our world. Patches
-# substitute @TAWC_TMP_PREFIX@ → this; the compositor mkdirs it on
-# startup. Each install method's bind config surfaces this dir at
-# /tmp/.X11-unix inside the rootfs (asymmetric bind on tawcroot/proot,
-# real bind-mount on chroot) so X clients find `:0` at the standard
-# /tmp/.X11-unix/X0 path. Living under <appData>/share/ rather than
-# /data/data/me.phie.tawc directly means it rides into the rootfs
-# through the same /share→/usr/share/tawc bind that exposes the
-# wayland socket — see notes/installation.md "/usr/share/tawc".
-TAWC_TMP_PREFIX="/data/data/me.phie.tawc/share/xtmp"
+# substitute @TAWC_TMP_PREFIX@ -> this; the compositor mkdirs it on startup.
+# Each install method's bind config surfaces this dir at /tmp/.X11-unix inside
+# the rootfs (asymmetric bind on tawcroot/proot, real bind-mount on chroot) so
+# X clients find `:0` at the standard /tmp/.X11-unix/X0 path.
+#
+# Keep this relative to <appData>. The compositor sets <appData> as Xwayland's
+# cwd before spawning it so one binary works for multi-user/profile installs.
+TAWC_TMP_PREFIX="share/xtmp"
 
 ABI=aarch64
 CLEAN=0
@@ -199,7 +198,17 @@ build_meson() {
     local name="$1"; shift
     local src="$SRC_ROOT/$name"
     local build="$OUT_DIR/build-$name"
-    if [ ! -d "$build" ]; then
+    local setup_stamp="$build/.tawc-meson-setup.sha256"
+    local setup_sig
+    setup_sig=$(
+        {
+            printf 'src=%s\nprefix=%s\nlibdir=lib\nbuildtype=release\n' "$src" "$PREFIX"
+            printf 'default_library=shared\n'
+            sha256sum "$CROSS_FILE"
+            printf 'arg=%s\n' "$@"
+        } | sha256sum | awk '{print $1}'
+    )
+    if [ ! -f "$build/build.ninja" ]; then
         echo "==> meson setup $name"
         meson setup "$build" "$src" \
             --cross-file "$CROSS_FILE" \
@@ -208,6 +217,17 @@ build_meson() {
             --buildtype=release \
             -Ddefault_library=shared \
             "$@"
+        printf '%s\n' "$setup_sig" >"$setup_stamp"
+    elif [ ! -f "$setup_stamp" ] || [ "$(cat "$setup_stamp")" != "$setup_sig" ]; then
+        echo "==> meson reconfigure $name"
+        meson setup --reconfigure "$build" "$src" \
+            --cross-file "$CROSS_FILE" \
+            --prefix="$PREFIX" \
+            --libdir=lib \
+            --buildtype=release \
+            -Ddefault_library=shared \
+            "$@"
+        printf '%s\n' "$setup_sig" >"$setup_stamp"
     fi
     echo "==> ninja install $name"
     ninja -C "$build" install
@@ -459,9 +479,9 @@ stage_xkbcomp() {
 stage_xkeyboard_config() {
     stage_should_run xkeyboard-config || return 0
     # Noarch data package — XKB rules / symbols / geometry text files
-    # consumed by Xwayland at runtime. We bake the on-device path
-    # (XWL_INSTALL_DIR/share/X11/xkb) into Xwayland via -Dxkb_dir, so
-    # this stage stages those files into $PREFIX/share/X11/xkb.
+    # consumed by Xwayland at runtime. We bake the on-device path relative to
+    # <appData> into Xwayland via -Dxkb_dir, so this stage stages those files
+    # into $PREFIX/share/X11/xkb.
     clone_pinned xkeyboard-config
     build_meson xkeyboard-config \
         -Dxorg-rules-symlinks=false \
@@ -508,8 +528,8 @@ stage_xwayland() {
         -Dxwayland_ei=false \
         -Dsha1=libmd \
         -Dxkb_default_rules=evdev \
-        -Dxkb_dir="/data/data/me.phie.tawc/files/xwayland/share/X11/xkb" \
-        -Dxkb_bin_dir="/data/data/me.phie.tawc/files/xwayland/bin" \
+        -Dxkb_dir="files/xwayland/share/X11/xkb" \
+        -Dxkb_bin_dir="files/xwayland/bin" \
         -Dxkb_output_dir="$TAWC_TMP_PREFIX/xkb"
 }
 

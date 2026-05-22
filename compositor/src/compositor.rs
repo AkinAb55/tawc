@@ -329,15 +329,15 @@ impl TawcState {
         // Advertise only input devices tawc actually has. Android touch
         // should not appear as a Wayland pointer; toolkits must use wl_touch
         // for touchscreen interactions.
-        let xkb_root = "/data/data/me.phie.tawc/files/xkb";
-        std::env::set_var("XKB_CONFIG_ROOT", xkb_root);
+        let xkb_root = crate::app_paths::get().xkb_config_root.clone();
+        std::env::set_var("XKB_CONFIG_ROOT", &xkb_root);
         // Smithay falls back to writing the keymap to a tempfile under
         // XDG_RUNTIME_DIR (or std::env::temp_dir() = /tmp) for wl_keyboard
         // versions < 7. /tmp doesn't exist on a stock Android emulator and
         // an untrusted_app can't write to it where it does. Without the
         // keymap, smithay skips wl_keyboard.enter, GTK never activates the
         // wayland IM, and text-input.enable never fires.
-        std::env::set_var("XDG_RUNTIME_DIR", "/data/data/me.phie.tawc");
+        std::env::set_var("XDG_RUNTIME_DIR", &crate::app_paths::get().data_dir);
         // libxkbcommon's `xkb_context_new` returns NULL when none of its
         // include paths can be opened; xkbcommon-rs's `Context::new`
         // doesn't NULL-check that, and the C `xkb_context_ref` it later
@@ -346,7 +346,7 @@ impl TawcState {
         // no useful log line. Catch the realistic precondition (xkb data
         // dir present) up front so the panic message lands in
         // tawc-native logcat instead of just `libc Fatal signal 11`.
-        let evdev_rules = std::path::Path::new(xkb_root).join("rules/evdev");
+        let evdev_rules = std::path::Path::new(&xkb_root).join("rules/evdev");
         if !evdev_rules.is_file() {
             panic!(
                 "xkb data missing at {} — CompositorService.ensureXkbDataExtracted should have populated this before nativeStartCompositor",

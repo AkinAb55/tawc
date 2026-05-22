@@ -33,68 +33,63 @@ pub use android::spawn;
 
 #[cfg(target_os = "android")]
 mod android {
-use kumquat_virtio::kumquat::KumquatBuilder;
-use log::{error, info};
+    use kumquat_virtio::kumquat::KumquatBuilder;
+    use log::{error, info};
 
-/// Host-side socket path the compositor binds. Must live under the
-/// `share/` subdir that every install method bind-mounts into the
-/// rootfs at `/usr/share/tawc/`. Don't move this without also updating
-/// `RootfsEnv.kt`'s `VIRTGPU_KUMQUAT_GPU_SOCKET` value.
-const KUMQUAT_SOCKET_PATH: &str = "/data/data/me.phie.tawc/share/kumquat-gpu-0";
+    /// Spawn the kumquat server on a dedicated thread. The thread blocks
+    /// in `Kumquat::run()`'s `wait_ctx.wait()` until a client connects,
+    /// then dispatches commands to the gfxstream renderer
+    /// (`libgfxstream_backend.so`).
+    ///
+    /// Errors at build time are logged and swallowed: the compositor
+    /// keeps running so the libhybris path stays usable. A missing
+    /// kumquat just means clients launched with the gfxstream backend
+    /// will see `connect()` fail with ENOENT and surface that to the user.
+    pub fn spawn() {
+        std::thread::Builder::new()
+            .name("kumquat-server".into())
+            .spawn(run)
+            .expect("failed to spawn kumquat-server thread");
+    }
 
-/// Spawn the kumquat server on a dedicated thread. The thread blocks
-/// in `Kumquat::run()`'s `wait_ctx.wait()` until a client connects,
-/// then dispatches commands to the gfxstream renderer
-/// (`libgfxstream_backend.so`).
-///
-/// Errors at build time are logged and swallowed: the compositor
-/// keeps running so the libhybris path stays usable. A missing
-/// kumquat just means clients launched with the gfxstream backend
-/// will see `connect()` fail with ENOENT and surface that to the user.
-pub fn spawn() {
-    std::thread::Builder::new()
-        .name("kumquat-server".into())
-        .spawn(run)
-        .expect("failed to spawn kumquat-server thread");
-}
+    fn run() {
+        let socket_path = crate::app_paths::get().kumquat_socket_path.clone();
+        if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                error!("kumquat: mkdir {} failed: {}", parent.display(), e);
+                return;
+            }
+        }
+        // KumquatBuilder::build() already removes a stale socket file
+        // before binding, so we don't need to.
 
-fn run() {
-    if let Some(parent) = std::path::Path::new(KUMQUAT_SOCKET_PATH).parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            error!("kumquat: mkdir {} failed: {}", parent.display(), e);
-            return;
+        // Force-disable udmabuf backing — auto-enables on kernel >= 6.6 and
+        // FATALs when SELinux denies the open on Android. See
+        // notes/gfxstream-bridge.md Orientation.
+        let mut kumquat = match KumquatBuilder::new()
+            .set_capset_names("gfxstream-vulkan".into())
+            .set_renderer_features("VulkanAllocateHostVisibleAsUdmabuf:disabled".into())
+            .set_gpu_socket(Some(socket_path.clone().into()))
+            .build()
+        {
+            Ok(k) => k,
+            Err(e) => {
+                error!("kumquat: build failed: {:?}", e);
+                return;
+            }
+        };
+
+        info!("kumquat: listening on {}", socket_path);
+        loop {
+            if let Err(e) = kumquat.run() {
+                // The fork already drops per-client errors inside
+                // Kumquat::run (rutabaga-patches/02-keep-server-alive-on-
+                // client-error). Anything reaching here is the wait_ctx
+                // itself failing, which is unrecoverable — log and exit
+                // the thread.
+                error!("kumquat: wait_ctx failed: {:?}; thread exiting", e);
+                return;
+            }
         }
     }
-    // KumquatBuilder::build() already removes a stale socket file
-    // before binding, so we don't need to.
-
-    // Force-disable udmabuf backing — auto-enables on kernel >= 6.6 and
-    // FATALs when SELinux denies the open on Android. See
-    // notes/gfxstream-bridge.md Orientation.
-    let mut kumquat = match KumquatBuilder::new()
-        .set_capset_names("gfxstream-vulkan".into())
-        .set_renderer_features("VulkanAllocateHostVisibleAsUdmabuf:disabled".into())
-        .set_gpu_socket(Some(KUMQUAT_SOCKET_PATH.into()))
-        .build()
-    {
-        Ok(k) => k,
-        Err(e) => {
-            error!("kumquat: build failed: {:?}", e);
-            return;
-        }
-    };
-
-    info!("kumquat: listening on {}", KUMQUAT_SOCKET_PATH);
-    loop {
-        if let Err(e) = kumquat.run() {
-            // The fork already drops per-client errors inside
-            // Kumquat::run (rutabaga-patches/02-keep-server-alive-on-
-            // client-error). Anything reaching here is the wait_ctx
-            // itself failing, which is unrecoverable — log and exit
-            // the thread.
-            error!("kumquat: wait_ctx failed: {:?}; thread exiting", e);
-            return;
-        }
-    }
-}
 } // mod android

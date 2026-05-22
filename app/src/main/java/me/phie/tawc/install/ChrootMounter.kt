@@ -40,9 +40,8 @@ object ChrootMounter {
      * `ROOTFS`, `MOUNTS`, `is_mounted`, and `mount_if_needed` defined for
      * the rest of the script to use.
      */
-    fun mountScript(rootfs: String): String {
+    fun mountScript(rootfs: String, tawcShare: String): String {
         val emulator = isEmulator
-        val tawcShare = "/data/data/me.phie.tawc/share"
         val guestShare = TawcrootMethod.GUEST_TAWC_SHARE_DIR
 
         val sb = StringBuilder()

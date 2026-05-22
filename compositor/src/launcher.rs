@@ -1,7 +1,7 @@
 //! Desktop-entry scanner for the in-app launcher.
 //!
 //! Walks the standard XDG `applications/` directories *inside* a given
-//! rootfs (e.g. `/data/data/me.phie.tawc/distros/<id>/rootfs/usr/share/applications`)
+//! rootfs (e.g. `<appData>/distros/<id>/rootfs/usr/share/applications`)
 //! and returns parsed `.desktop` entries. The list is consumed by Kotlin
 //! via JNI in `lib.rs`; entries are JSON-encoded so the Java boundary
 //! stays trivially small.
@@ -177,7 +177,7 @@ pub fn resolve_metadata_for_app_id(app_id: &str) -> Option<DesktopAppMetadata> {
 }
 
 fn installed_rootfs_dirs() -> Vec<PathBuf> {
-    let distros = Path::new("/data/data/me.phie.tawc/distros");
+    let distros = Path::new(&crate::app_paths::get().distros_dir);
     let mut out = Vec::new();
     let Ok(read_dir) = std::fs::read_dir(distros) else {
         return out;

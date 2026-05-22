@@ -251,8 +251,9 @@ as the pkg-config sysroot for downstream stages.
 All patches are tiny (≤30 lines each) and cleanly forward-port from
 termux's pinned versions to our slightly-newer upstream tags. The
 `@TAWC_TMP_PREFIX@` placeholder is substituted at apply time to
-`/data/data/me.phie.tawc/xtmp` (where the compositor mkdirs `.X11-unix/`,
-`.X11-pipe/`, etc.).
+`share/xtmp`, relative to the app data cwd that the compositor sets before
+spawning Xwayland. That is where the compositor mkdirs `.X11-unix/`,
+`.X11-pipe/`, etc.
 
 | Lib | Patch | Reason |
 | --- | --- | --- |
@@ -647,7 +648,7 @@ EACCES when fork+exec actually fires:
 
 ```
 avc: denied { execute_no_trans }
-  for path="/data/data/me.phie.tawc/files/xwayland/bin/Xwayland"
+  for path="<appData>/files/xwayland/bin/Xwayland"
   scontext=u:r:untrusted_app:...  tcontext=u:object_r:app_data_file:...
   tclass=file permissive=0
 ```
@@ -743,15 +744,19 @@ Gradle splits Xwayland's tree across two output paths:
    `app/src/main/assets/xwayland/share.tar`. We can't flatten this
    into jniLibs because Xwayland reads it via fopen at the baked-in
    `-Dxkb_dir` path and the files cross-reference each other by
-   relative path inside the tree.
+   relative path inside the tree. The baked XKB and socket prefixes are
+   relative to `<appData>`; `xwayland::start_xwayland` sets Xwayland's
+   cwd there before spawning it so one binary works for Android
+   multi-user/profile app data paths.
 
 On first `CompositorService.onCreate` after install / app upgrade,
 `ensureXwaylandExtracted` extracts `share.tar` into
 `<filesDir>/xwayland/share/` and creates the
 `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks pointing at
 the real binaries in `nativeLibraryDir`. The compositor's
-`xwayland::start_xwayland` then sets `PATH` and `LD_LIBRARY_PATH` so
-the smithay `Command::new("Xwayland")` lookup picks up our copy.
+`xwayland::start_xwayland` then sets cwd, `PATH`, `XDG_RUNTIME_DIR`,
+and `LD_LIBRARY_PATH` so the smithay `Command::new("Xwayland")`
+lookup picks up our copy.
 
 The same packaging path now works for `arm64-v8a` and `x86_64`. On
 x86_64 the libhybris-backed AHB/EGL-on-X11 path is still unavailable,

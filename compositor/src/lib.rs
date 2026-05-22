@@ -14,6 +14,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use wayland_server::Display;
 
 mod ahb_export;
+mod app_paths;
 mod bridge;
 mod egl_android;
 mod gfxstream_present;
@@ -47,16 +48,6 @@ static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 
 /// Cached global ref to NativeBridge class for reverse JNI callbacks.
 static NATIVE_BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
-
-/// Wayland socket path accessible from rootfs.
-///
-/// Lives under `<appData>/share/` so it's exposed inside each rootfs at
-/// `/usr/share/tawc/wayland-0` via the per-method bind of just the
-/// `share/` subdir (we deliberately don't bind the whole appData tree
-/// — that would expose the libhybris asset extract, the proot scratch
-/// dir, and everything else under `<filesDir>` to in-rootfs writes).
-/// See notes/installation.md "/usr/share/tawc" for the rationale.
-const WAYLAND_SOCKET_PATH: &str = "/data/data/me.phie.tawc/share/wayland-0";
 
 /// Global sender for state query requests. Replaced each time the compositor restarts.
 static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Sender<()>>> = Mutex::new(None);
@@ -137,6 +128,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
         std::process::abort();
     }));
     cache_jni_globals(&mut env);
+    app_paths::init_from_env();
 
     if COMPOSITOR_RUNNING.swap(true, Ordering::SeqCst) {
         info!("nativeStartCompositor: already running");
@@ -785,12 +777,13 @@ fn run_compositor(
     // compositor isn't yet running `accept()` — on a slow emulator the
     // ~80ms of GLES/source setup between bind and dispatch is enough to
     // make a freshly-spawned GTK4 client time out its initial roundtrip.
-    let _ = std::fs::remove_file(WAYLAND_SOCKET_PATH);
-    if let Some(parent) = std::path::Path::new(WAYLAND_SOCKET_PATH).parent() {
+    let wayland_socket_path = app_paths::get().wayland_socket_path.clone();
+    let _ = std::fs::remove_file(&wayland_socket_path);
+    if let Some(parent) = std::path::Path::new(&wayland_socket_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     event_loop::run(
-        wl_display, state, WAYLAND_SOCKET_PATH,
+        wl_display, state, &wayland_socket_path,
         touch_channel, text_input_channel, clipboard_channel, state_query_channel, surface_event_channel,
         &RUNNING,
     )

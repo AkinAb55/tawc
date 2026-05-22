@@ -1,6 +1,7 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import me.phie.tawc.AppPaths
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -16,7 +17,7 @@ import java.nio.file.StandardCopyOption
  * varies the id; nothing else here cares.
  */
 class InstallationStore(context: Context) {
-    val baseDir: File = File(context.dataDir, "distros")
+    val baseDir: File = AppPaths.from(context).distrosDir
 
     fun installationDir(id: String): File = File(baseDir, id)
     fun rootfsDir(id: String): File = File(installationDir(id), "rootfs")

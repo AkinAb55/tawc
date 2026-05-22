@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.util.Log
+import me.phie.tawc.AppPaths
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
 import java.io.File
@@ -42,6 +43,9 @@ import java.io.IOException
  * See `notes/tawcroot.md` for the full design + phasing.
  */
 class TawcrootMethod(context: Context) : InstallationMethod {
+    private val appPaths = AppPaths.from(context)
+    private val tawcShare: String = appPaths.shareDir.absolutePath
+
     /** Absolute path to the tawcroot binary on disk. */
     val tawcrootBin: String =
         File(context.applicationInfo.nativeLibraryDir, "libtawcroot.so").absolutePath
@@ -74,7 +78,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      *   /system/bin/setsid <tawcroot> -r <rootfs> \
      *       -b /dev:/dev -b /proc:/proc -b /sys:/sys \
      *       -b /apex:/apex [-b /vendor:/vendor ...] \
-     *       -b /data/data/me.phie.tawc:/data/data/me.phie.tawc \
+     *       -b <appData>/share:/usr/share/tawc \
      *       -- /bin/bash -lc <command>
      *
      * Bind set mirrors [ProotMethod] minus the proot-only tweaks
@@ -111,8 +115,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         // relying on launch order. The bare /share dir is also mkdir'd
         // so tawcroot can open it as the bind src on a fresh device
         // before the compositor has run.
-        File(TAWC_SHARE).mkdirs()
-        File("$TAWC_SHARE/xtmp/.X11-unix").mkdirs()
+        File(tawcShare).mkdirs()
+        File("$tawcShare/xtmp/.X11-unix").mkdirs()
 
         val argv = buildList {
             add("/system/bin/setsid")
@@ -271,18 +275,13 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         add("/proc" to "/proc")
         add("/sys" to "/sys")
         for (dir in LIBHYBRIS_BIND_DIRS) add(dir to dir)
-        add(TAWC_SHARE to GUEST_TAWC_SHARE_DIR)
-        add("$TAWC_SHARE/xtmp/.X11-unix" to "/tmp/.X11-unix")
+        add(tawcShare to GUEST_TAWC_SHARE_DIR)
+        add("$tawcShare/xtmp/.X11-unix" to "/tmp/.X11-unix")
     }
 
     companion object {
         const val KEY = "tawcroot"
         private const val TAG = "tawc-install"
-        /** Host-side path to the tawc-shared subdir of app data.
-         *  The compositor drops the wayland socket and Xwayland's xtmp
-         *  here. Keep in sync with `WAYLAND_SOCKET_PATH` (compositor
-         *  /lib.rs) and `XWL_RUNTIME_DIR` (compositor /xwayland.rs). */
-        private const val TAWC_SHARE = "/data/data/me.phie.tawc/share"
         /** In-rootfs path the share dir is exposed at. Single source
          *  of truth — also referenced by [RootfsEnv] (WAYLAND_DISPLAY)
          *  and the chroot/proot install methods. */

@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Context
 import me.phie.tawc.GraphicsBackend
+import me.phie.tawc.AppPaths
 import me.phie.tawc.Settings
 import java.io.File
 
@@ -16,8 +17,9 @@ import java.io.File
  * pipeline method-agnostic (and in particular keeps [ProotMethod] from
  * accidentally inheriting root assumptions).
  */
-object ChrootMethod : InstallationMethod {
-    const val KEY = "chroot"
+class ChrootMethod(context: Context) : InstallationMethod {
+    private val appPaths = AppPaths.from(context)
+
     override val key: String = KEY
     override val displayName: String = "chroot (root)"
     override val requiresRoot: Boolean = true
@@ -53,7 +55,7 @@ object ChrootMethod : InstallationMethod {
             .start()
         val script = buildString {
             appendLine("set -eu")
-            appendLine(ChrootMounter.mountScript(rootfs))
+            appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath))
             // Quote rootfs and (if present) the user command into the
             // script. Both go through shellQuote so paths with quotes
             // can't break out. The in-rootfs bash starts under
@@ -103,5 +105,9 @@ object ChrootMethod : InstallationMethod {
     /** Delegates to [RootfsCleaner.wipe] (the historical path). */
     override fun wipe(installDir: File, log: (String) -> Unit) {
         RootfsCleaner.wipe(installDir, log)
+    }
+
+    companion object {
+        const val KEY = "chroot"
     }
 }

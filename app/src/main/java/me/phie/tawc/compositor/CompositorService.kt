@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.system.Os
 import android.util.Log
 import androidx.core.app.ServiceCompat
+import me.phie.tawc.AppPaths
 import me.phie.tawc.BuildConfig
 import java.io.File
 import java.lang.ref.WeakReference
@@ -51,6 +52,7 @@ class CompositorService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "CompositorService onCreate")
+        val appPaths = AppPaths.from(this)
 
         ensureNotificationChannel()
         // Foreground type "specialUse" is the correct fit on Android 14+ —
@@ -104,6 +106,13 @@ class CompositorService : Service() {
         // libxcb.so, …) alongside the binary in apk_data_file context.
         Os.setenv("TAWC_XWAYLAND_ENABLED", if (xwaylandAvailable) "1" else "0", true)
         Os.setenv("TAWC_NATIVE_LIB_DIR", applicationInfo.nativeLibraryDir, true)
+        Os.setenv("TAWC_APP_DATA_DIR", appPaths.dataDir.absolutePath, true)
+        Os.setenv("TAWC_APP_FILES_DIR", appPaths.filesDir.absolutePath, true)
+        Os.setenv("TAWC_APP_SHARE_DIR", appPaths.shareDir.absolutePath, true)
+        Os.setenv("TAWC_DISTROS_DIR", appPaths.distrosDir.absolutePath, true)
+        Os.setenv("TAWC_XWAYLAND_DIR", appPaths.xwaylandDir.absolutePath, true)
+        Os.setenv("TAWC_XWAYLAND_RUNTIME_DIR", appPaths.xwaylandRuntimeDir.absolutePath, true)
+        Os.setenv("TAWC_XKB_CONFIG_ROOT", appPaths.xkbDir.absolutePath, true)
 
         // Hand the application context + service to NativeBridge so its
         // reverse-JNI spawnActivity/finishActivity entry points work even

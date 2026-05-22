@@ -6,12 +6,12 @@
 //! as `jniLibs/<abi>/lib*.so` so they end up in `nativeLibraryDir`,
 //! which has the `apk_data_file` SELinux type — the only on-disk place
 //! `untrusted_app` is allowed to exec from on Android 10+.
-//! `CompositorService.ensureXwaylandExtracted` (Kotlin) lays down
-//! symlinks at `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` pointing at
-//! those real files, exports the dir to us via `TAWC_NATIVE_LIB_DIR`,
-//! and extracts the XKB data tree (read by fopen via Xwayland's
-//! baked-in `-Dxkb_dir`) into `<filesDir>/xwayland/share/`. We just
-//! have to put `<install>/bin` on `PATH` for
+//! `CompositorService.ensureXwaylandExtracted` (Kotlin) lays down symlinks at
+//! `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` pointing at those real files,
+//! exports the dir to us via `TAWC_NATIVE_LIB_DIR`, and extracts the XKB data
+//! tree into `<filesDir>/xwayland/share/`. We set Xwayland's cwd to
+//! `<appData>` so the relative XKB paths baked by `scripts/build-xwayland.sh`
+//! resolve correctly, and put `<install>/bin` on `PATH` for
 //! `Command::new("Xwayland")` and point `LD_LIBRARY_PATH` at
 //! nativeLibraryDir so the linker finds the bionic-built `.so` deps.
 //!
@@ -48,14 +48,6 @@ use smithay::wayland::selection::SelectionTarget;
 use crate::compositor::TawcState;
 use crate::host::ActivityId;
 
-/// Where Xwayland's listening socket / lockfile live. Patched smithay
-/// reads `TAWC_XWL_RUNTIME_DIR` from env; cross-compiled libxcb /
-/// xtrans have this baked in (see `scripts/build-xwayland.sh`).
-pub const XWL_RUNTIME_DIR: &str = "/data/data/me.phie.tawc/share/xtmp";
-
-/// Where the in-app extractor stages the Xwayland binary + libs.
-pub const XWL_INSTALL_DIR: &str = "/data/data/me.phie.tawc/files/xwayland";
-
 /// Spawn Xwayland and insert it as a calloop event source. On the
 /// `Ready` event the X11 window manager is constructed and stashed on
 /// the state.
@@ -71,29 +63,33 @@ pub fn start_xwayland(
         return;
     }
 
+    let paths = crate::app_paths::get();
+    let xwl_runtime_dir = &paths.xwayland_runtime_dir;
+    let xwl_install_dir = &paths.xwayland_dir;
+
     let handle_for_wm = handle.clone();
     // Make sure <appData>/share/xtmp/.X11-unix/ exists. Patched
     // smithay drops the listening socket here; bionic-built libxcb /
     // xtrans look up :0 here too (from the compositor side — rootfs
     // side gets it at /tmp/.X11-unix via each method's asymmetric bind,
     // see notes/installation.md "/usr/share/tawc").
-    if let Err(e) = std::fs::create_dir_all(format!("{}/.X11-unix", XWL_RUNTIME_DIR)) {
-        warn!("xwayland: mkdir {}: {}", XWL_RUNTIME_DIR, e);
+    if let Err(e) = std::fs::create_dir_all(format!("{}/.X11-unix", xwl_runtime_dir)) {
+        warn!("xwayland: mkdir {}: {}", xwl_runtime_dir, e);
     }
     // Best-effort cleanup of stale lockfiles from a previous compositor
     // run. Smithay's lock-grab logic recovers from a stale PID lock too,
     // but that path is slower.
     for n in 0..3 {
-        let _ = std::fs::remove_file(format!("{}/.X{}-lock", XWL_RUNTIME_DIR, n));
-        let _ = std::fs::remove_file(format!("{}/.X11-unix/X{}", XWL_RUNTIME_DIR, n));
+        let _ = std::fs::remove_file(format!("{}/.X{}-lock", xwl_runtime_dir, n));
+        let _ = std::fs::remove_file(format!("{}/.X11-unix/X{}", xwl_runtime_dir, n));
     }
 
     // Tell our patched smithay where to put X11 sockets.
-    std::env::set_var("TAWC_XWL_RUNTIME_DIR", XWL_RUNTIME_DIR);
+    std::env::set_var("TAWC_XWL_RUNTIME_DIR", xwl_runtime_dir);
     // PATH is consumed by `Command::new("Xwayland")` lookup.
     let path_with_xwl = match std::env::var("PATH") {
-        Ok(p) => format!("{}/bin:{}", XWL_INSTALL_DIR, p),
-        Err(_) => format!("{}/bin", XWL_INSTALL_DIR),
+        Ok(p) => format!("{}/bin:{}", xwl_install_dir, p),
+        Err(_) => format!("{}/bin", xwl_install_dir),
     };
     std::env::set_var("PATH", &path_with_xwl);
 
@@ -116,15 +112,18 @@ pub fn start_xwayland(
     // will fail; logged here so the cause is obvious.
     let lib_dir = std::env::var("TAWC_NATIVE_LIB_DIR").unwrap_or_else(|_| {
         warn!("xwayland: TAWC_NATIVE_LIB_DIR not set; Xwayland will likely fail to load its .so deps");
-        format!("{xwl}/lib", xwl = XWL_INSTALL_DIR)
+        format!("{xwl}/lib", xwl = xwl_install_dir)
     });
-    let envs: Vec<(String, String)> = vec![("LD_LIBRARY_PATH".to_string(), lib_dir)];
+    let envs: Vec<(String, String)> = vec![
+        ("LD_LIBRARY_PATH".to_string(), lib_dir),
+        ("XDG_RUNTIME_DIR".to_string(), xwl_runtime_dir.clone()),
+    ];
 
     // Pipe Xwayland's stderr/stdout to a log file under our xtmp dir so
     // we can post-mortem startup failures (Stdio::null() drops them on
     // the floor and android_logger is JVM-only). This is a debug
     // convenience; can be removed once Xwayland is stable.
-    let log_path = format!("{}/xwayland.log", XWL_RUNTIME_DIR);
+    let log_path = format!("{}/xwayland.log", xwl_runtime_dir);
     let (stdout, stderr): (Stdio, Stdio) = match std::fs::File::create(&log_path) {
         Ok(f) => {
             let f2 = f.try_clone().unwrap_or_else(|_| std::fs::File::create(&log_path).unwrap());
@@ -136,7 +135,12 @@ pub fn start_xwayland(
         }
     };
 
-    let (xwayland, client) = match XWayland::spawn(
+    let old_cwd = std::env::current_dir().ok();
+    if let Err(e) = std::env::set_current_dir(&paths.data_dir) {
+        error!("xwayland: chdir {} failed: {}", paths.data_dir, e);
+        return;
+    }
+    let spawn_result = XWayland::spawn(
         &dh,
         None,
         envs,
@@ -144,7 +148,11 @@ pub fn start_xwayland(
         stdout,
         stderr,
         |_| (),
-    ) {
+    );
+    if let Some(old_cwd) = old_cwd {
+        let _ = std::env::set_current_dir(old_cwd);
+    }
+    let (xwayland, client) = match spawn_result {
         Ok(pair) => pair,
         Err(e) => {
             error!("xwayland: failed to spawn Xwayland: {}", e);

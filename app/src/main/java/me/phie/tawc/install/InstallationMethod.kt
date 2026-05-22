@@ -183,7 +183,7 @@ interface InstallationMethod {
          * still cleanable.
          */
         fun forKey(context: Context, key: String): InstallationMethod? = when (key) {
-            ChrootMethod.KEY -> if (EnabledMethods.chroot) ChrootMethod else null
+            ChrootMethod.KEY -> if (EnabledMethods.chroot) ChrootMethod(context) else null
             ProotMethod.KEY -> if (EnabledMethods.proot) ProotMethod(context) else null
             TawcrootMethod.KEY -> if (EnabledMethods.tawcroot) TawcrootMethod(context) else null
             else -> null
@@ -200,7 +200,7 @@ interface InstallationMethod {
         fun defaultForHost(context: Context): InstallationMethod {
             if (EnabledMethods.tawcroot) return TawcrootMethod(context)
             if (EnabledMethods.proot) return ProotMethod(context)
-            if (EnabledMethods.chroot && Su.rootAvailable()) return ChrootMethod
+            if (EnabledMethods.chroot && Su.rootAvailable()) return ChrootMethod(context)
             error("no install methods enabled — check BuildConfig.METHOD_*_ENABLED")
         }
     }
