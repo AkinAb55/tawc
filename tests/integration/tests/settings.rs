@@ -7,8 +7,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
-    assert_broker_ok, assert_compositor_clean, start_wayland_debug_scale, TIMEOUT,
+    assert_broker_ok, assert_compositor_clean, ensure_wayland_debug_app,
+    start_wayland_debug_scale, start_wayland_debug_touch, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, compositor, GraphicsBackend};
@@ -94,6 +96,62 @@ impl Drop for Gtk3BrokenMenusWorkaroundGuard {
     fn drop(&mut self) {
         let _ = adb::set_gtk3_broken_menus_workaround(self.previous);
     }
+}
+
+fn payload_for_line<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
+    if line == tag {
+        Some("")
+    } else {
+        line.strip_prefix(&format!("{tag}:"))
+    }
+}
+
+fn first_payload_with_tag(lines: &[String], tag: &str) -> Option<String> {
+    lines
+        .iter()
+        .find_map(|line| payload_for_line(line, tag).map(str::to_string))
+}
+
+fn first_tag_index(lines: &[String], tag: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| payload_for_line(line, tag).is_some())
+}
+
+fn parse_i32_pair(payload: &str) -> (i32, i32) {
+    let values: Vec<i32> = payload
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("parse i32 pair payload {payload:?}: {e}"));
+    let [a, b] = values.as_slice() else {
+        panic!("expected i32 pair payload, got {payload:?}");
+    };
+    (*a, *b)
+}
+
+fn first_i32_pair_with_tag(app: &DebugApp, tag: &str) -> (i32, i32) {
+    let payload = app
+        .payloads_with_tag(tag)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("missing {tag} payload"));
+    parse_i32_pair(&payload)
+}
+
+fn assert_first_configure_size_matches_state(app: &DebugApp, label: &str) {
+    let state = compositor::query_state(TIMEOUT)
+        .unwrap_or_else(|e| panic!("query compositor state for {label}: {e}"));
+    let size = first_i32_pair_with_tag(app, "CONFIGURE_SIZE");
+    assert!(
+        size.0 > 0 && size.1 > 0,
+        "{label} first configure size must be positive, got {size:?}"
+    );
+    assert_eq!(
+        size,
+        (state.output_logical_w, state.output_logical_h),
+        "{label} first configure size should match compositor logical output"
+    );
 }
 
 fn parse_anchor_rect(line: &str) -> Option<AnchorRect> {
@@ -307,6 +365,76 @@ fn test_fractional_scale_updates_reach_wayland_client() {
     assert_compositor_clean();
 }
 
+#[test]
+fn test_initial_configure_waits_for_real_host_size() {
+    let _restore = OutputScaleGuard::set(2.0);
+    let binary = ensure_wayland_debug_app();
+    let state_before = compositor::query_state(TIMEOUT)
+        .expect("query compositor state before initial configure test");
+
+    let mut app = DebugApp::start(BACKEND, &binary, "initial-configure", "")
+        .expect("start initial-configure debug app");
+    app.wait_for("INITIAL_OUTPUT_GLOBALS", TIMEOUT)
+        .expect("initial registry marker");
+    app.wait_for_tag_value("CONFIGURE_STATE", "maximized", TIMEOUT)
+        .expect("initial configure should include maximized state");
+    app.wait_for_tag_value("CONFIGURE_ACTIVE", "1", TIMEOUT)
+        .expect("initial configure should include pending active focus state");
+    app.wait_for_tag_value("DECORATION_MODE", "server-side", TIMEOUT)
+        .expect("initial configure should include pending server-side decoration");
+    app.wait_for_tag_count("CONFIGURE_BOUNDS", 1, TIMEOUT)
+        .expect("initial configure should include bounds");
+    app.wait_ready()
+        .expect("initial-configure debug app did not become ready");
+
+    let lines = app.lines();
+    let initial_idx = first_tag_index(&lines, "INITIAL_OUTPUT_GLOBALS")
+        .expect("missing INITIAL_OUTPUT_GLOBALS");
+    let configure_idx = first_tag_index(&lines, "CONFIGURE_SIZE")
+        .expect("missing CONFIGURE_SIZE");
+    assert!(
+        initial_idx < configure_idx,
+        "client received a toplevel configure before the pre-Activity registry phase: {lines:?}"
+    );
+
+    let initial_output_globals = first_payload_with_tag(&lines, "INITIAL_OUTPUT_GLOBALS")
+        .expect("missing INITIAL_OUTPUT_GLOBALS payload")
+        .parse::<u32>()
+        .expect("parse INITIAL_OUTPUT_GLOBALS payload");
+    if !state_before.output_advertised {
+        assert_eq!(
+            initial_output_globals, 0,
+            "fresh compositor should not advertise wl_output before Activity surface registration"
+        );
+        let output_global_idx = first_tag_index(&lines, "OUTPUT_GLOBAL")
+            .expect("missing post-registration OUTPUT_GLOBAL");
+        assert!(
+            initial_idx < output_global_idx,
+            "wl_output global arrived before the pre-Activity registry phase: {lines:?}"
+        );
+    }
+
+    let state = compositor::query_state(TIMEOUT)
+        .expect("query compositor state after initial configure");
+    assert!(state.output_advertised, "output should be advertised after host size");
+    let configure_size = first_i32_pair_with_tag(&app, "CONFIGURE_SIZE");
+    let configure_bounds = first_i32_pair_with_tag(&app, "CONFIGURE_BOUNDS");
+    assert_eq!(
+        configure_size,
+        (state.output_logical_w, state.output_logical_h),
+        "first configure should use the Activity logical size"
+    );
+    assert_eq!(
+        configure_bounds,
+        (state.output_logical_w, state.output_logical_h),
+        "first configure bounds should use the Activity logical size"
+    );
+
+    app.stop()
+        .expect("initial-configure debug app failed to stop cleanly");
+    assert_compositor_clean();
+}
+
 fn set_scale_and_expect(app: &tawc_integration::debug_app::DebugApp, scale: f32) {
     let before = app.count_with_tag("SCALE_CHANGED");
     let expected = format!("{scale:.2}");
@@ -319,6 +447,40 @@ fn set_scale_and_expect(app: &tawc_integration::debug_app::DebugApp, scale: f32)
         .cloned()
         .unwrap_or_default();
     assert_eq!(last, expected, "latest client scale event");
+}
+
+#[test]
+fn test_xdg_configure_state_maximized_vs_fullscreen() {
+    let binary = ensure_wayland_debug_app();
+
+    let mut normal = DebugApp::start(BACKEND, &binary, "scale", "")
+        .expect("start non-fullscreen debug app");
+    normal
+        .wait_for_tag_value("CONFIGURE_STATE", "maximized", TIMEOUT)
+        .expect("non-fullscreen app should be configured maximized");
+    normal
+        .wait_for_tag_value("CONFIGURE_ACTIVE", "1", TIMEOUT)
+        .expect("non-fullscreen app should be configured active");
+    assert_first_configure_size_matches_state(&normal, "non-fullscreen app");
+    assert!(
+        normal.payloads_with_tag("CONFIGURE_STATE").iter().all(|s| s != "fullscreen"),
+        "non-fullscreen app received fullscreen configure"
+    );
+    normal.stop().expect("normal debug app failed to stop cleanly");
+    assert_compositor_clean();
+
+    let mut fullscreen = start_wayland_debug_touch(BACKEND, "");
+    fullscreen
+        .wait_for_tag_value("CONFIGURE_STATE", "fullscreen", TIMEOUT)
+        .expect("fullscreen-requesting app should be configured fullscreen");
+    fullscreen
+        .wait_for_tag_value("CONFIGURE_ACTIVE", "1", TIMEOUT)
+        .expect("fullscreen-requesting app should be configured active");
+    assert_first_configure_size_matches_state(&fullscreen, "fullscreen-requesting app");
+    fullscreen
+        .stop()
+        .expect("fullscreen debug app failed to stop cleanly");
+    assert_compositor_clean();
 }
 
 #[test]

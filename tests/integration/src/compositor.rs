@@ -15,6 +15,11 @@ pub struct CompositorState {
     /// Number of toplevels visible in the last rendered frame.
     /// If this is non-zero while toplevels is zero, the screen shows a stale frame.
     pub rendered_toplevels: u32,
+    pub output_physical_w: i32,
+    pub output_physical_h: i32,
+    pub output_logical_w: i32,
+    pub output_logical_h: i32,
+    pub output_advertised: bool,
 }
 
 /// Query the compositor's current state via broadcast intent.
@@ -83,6 +88,11 @@ fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
     let mut surfaces_shm = None;
     let mut frames = None;
     let mut rendered_toplevels = None;
+    let mut output_physical_w = None;
+    let mut output_physical_h = None;
+    let mut output_logical_w = None;
+    let mut output_logical_h = None;
+    let mut output_advertised = None;
     for part in payload.split_whitespace() {
         if let Some((key, val)) = part.split_once('=') {
             match key {
@@ -92,6 +102,11 @@ fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
                 "surfaces_shm" => surfaces_shm = Some(val.parse().ok()?),
                 "frames" => frames = Some(val.parse().ok()?),
                 "rendered_toplevels" => rendered_toplevels = Some(val.parse().ok()?),
+                "output_physical_w" => output_physical_w = Some(val.parse().ok()?),
+                "output_physical_h" => output_physical_h = Some(val.parse().ok()?),
+                "output_logical_w" => output_logical_w = Some(val.parse().ok()?),
+                "output_logical_h" => output_logical_h = Some(val.parse().ok()?),
+                "output_advertised" => output_advertised = Some(val.parse().ok()?),
                 _ => {}
             }
         }
@@ -103,6 +118,11 @@ fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
         surfaces_shm: surfaces_shm?,
         frames: frames?,
         rendered_toplevels: rendered_toplevels?,
+        output_physical_w: output_physical_w.unwrap_or_default(),
+        output_physical_h: output_physical_h.unwrap_or_default(),
+        output_logical_w: output_logical_w.unwrap_or_default(),
+        output_logical_h: output_logical_h.unwrap_or_default(),
+        output_advertised: output_advertised.unwrap_or_default(),
     })
 }
 

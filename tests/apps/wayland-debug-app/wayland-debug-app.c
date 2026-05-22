@@ -24,6 +24,7 @@
  *   popup                       Fullscreen toplevel with a touchable xdg_popup
  *   popup-switch                Two touch-opened grabbed xdg_popups
  *   scale                       Report wp_fractional_scale_v1 changes
+ *   initial-configure           Report initial output/configure sequencing
  */
 
 #define _GNU_SOURCE
@@ -47,6 +48,7 @@
 
 #include "text-input-unstable-v3-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #ifndef MFD_CLOEXEC
@@ -167,6 +169,13 @@ static void debug_emit_u32(const char *tag, uint32_t value)
     debug_emit(tag, buf);
 }
 
+static void debug_emit_i32_pair(const char *tag, int32_t a, int32_t b)
+{
+    char buf[64];
+    checked_snprintf(buf, sizeof(buf), "%d %d", a, b);
+    debug_emit(tag, buf);
+}
+
 /* --- App state ---------------------------------------------------------- */
 
 struct app;
@@ -234,6 +243,7 @@ struct app {
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
+    struct wl_output *output;
     struct wl_surface *child_surface;
     struct wl_subsurface *child_subsurface;
     struct wl_callback *child_ready_callback;
@@ -247,6 +257,8 @@ struct app {
     struct zwp_text_input_v3 *text_input;
     struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
     struct wp_fractional_scale_v1 *fractional_scale;
+    struct zxdg_decoration_manager_v1 *decoration_manager;
+    struct zxdg_toplevel_decoration_v1 *decoration;
 
     int running;
     int configured;
@@ -259,6 +271,7 @@ struct app {
     int touch_debug;
     int fullscreen;
     int report_scale;
+    int request_decoration;
     int use_data_device;
     int copy_clipboard_on_focus;
     int paste_clipboard_on_selection;
@@ -274,6 +287,7 @@ struct app {
     int popup_configure_w;
     int popup_configure_h;
     int popup_switch_created;
+    int output_global_count;
     uint32_t last_preferred_scale;
     int win_w;
     int win_h;
@@ -310,6 +324,7 @@ struct wayland_mode {
     int touch_debug;
     int fullscreen;
     int report_scale;
+    int request_decoration;
     int use_data_device;
     const char *clipboard_copy_text;
     int clipboard_paste;
@@ -1306,6 +1321,103 @@ static const struct wp_fractional_scale_v1_listener fractional_scale_listener = 
     .preferred_scale = fractional_scale_preferred_scale,
 };
 
+static void output_geometry(
+    void *data,
+    struct wl_output *output,
+    int32_t x,
+    int32_t y,
+    int32_t physical_width,
+    int32_t physical_height,
+    int32_t subpixel,
+    const char *make,
+    const char *model,
+    int32_t transform)
+{
+    (void)data;
+    (void)output;
+    (void)x;
+    (void)y;
+    (void)physical_width;
+    (void)physical_height;
+    (void)subpixel;
+    (void)make;
+    (void)model;
+    (void)transform;
+}
+
+static void output_mode(
+    void *data,
+    struct wl_output *output,
+    uint32_t flags,
+    int32_t width,
+    int32_t height,
+    int32_t refresh)
+{
+    (void)data;
+    (void)output;
+    (void)refresh;
+    if (flags & WL_OUTPUT_MODE_CURRENT)
+        debug_emit_i32_pair("OUTPUT_MODE", width, height);
+}
+
+static void output_done(void *data, struct wl_output *output)
+{
+    (void)data;
+    (void)output;
+}
+
+static void output_scale(void *data, struct wl_output *output, int32_t factor)
+{
+    (void)data;
+    (void)output;
+    debug_emit_u32("OUTPUT_SCALE", (uint32_t)factor);
+}
+
+static void output_name(void *data, struct wl_output *output, const char *name)
+{
+    (void)data;
+    (void)output;
+    (void)name;
+}
+
+static void output_description(
+    void *data,
+    struct wl_output *output,
+    const char *description)
+{
+    (void)data;
+    (void)output;
+    (void)description;
+}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry,
+    .mode = output_mode,
+    .done = output_done,
+    .scale = output_scale,
+    .name = output_name,
+    .description = output_description,
+};
+
+static void decoration_configure(
+    void *data,
+    struct zxdg_toplevel_decoration_v1 *decoration,
+    uint32_t mode)
+{
+    (void)data;
+    (void)decoration;
+    const char *name = "unknown";
+    if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE)
+        name = "client-side";
+    else if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE)
+        name = "server-side";
+    debug_emit("DECORATION_MODE", name);
+}
+
+static const struct zxdg_toplevel_decoration_v1_listener decoration_listener = {
+    .configure = decoration_configure,
+};
+
 static void create_scene_child(struct app *app);
 
 static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
@@ -1362,15 +1474,20 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
     uint32_t *state;
     int maximized = 0;
     int fullscreen = 0;
+    int activated = 0;
     (void)toplevel;
     wl_array_for_each(state, states) {
         if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
             maximized = 1;
         else if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN)
             fullscreen = 1;
+        else if (*state == XDG_TOPLEVEL_STATE_ACTIVATED)
+            activated = 1;
     }
     debug_emit("CONFIGURE_STATE",
                fullscreen ? "fullscreen" : (maximized ? "maximized" : "other"));
+    debug_emit_u32("CONFIGURE_ACTIVE", activated ? 1 : 0);
+    debug_emit_i32_pair("CONFIGURE_SIZE", width, height);
     if (width > 0 && height > 0) {
         app->win_w = width;
         app->win_h = height;
@@ -1387,10 +1504,9 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
 static void toplevel_configure_bounds(void *data, struct xdg_toplevel *toplevel,
                                       int32_t width, int32_t height)
 {
-    (void)data;
     (void)toplevel;
-    (void)width;
-    (void)height;
+    debug_emit_i32_pair("CONFIGURE_BOUNDS", width, height);
+    (void)data;
 }
 
 static void toplevel_wm_capabilities(void *data, struct xdg_toplevel *toplevel,
@@ -2102,7 +2218,7 @@ static void registry_global(void *data, struct wl_registry *registry,
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         require_true(app->wm_base == NULL, "duplicate xdg_wm_base global");
         app->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface,
-                                        1);
+                                        version >= 4 ? 4 : version);
         require_true(app->wm_base != NULL, "bind xdg_wm_base failed");
         xdg_wm_base_add_listener(app->wm_base, &wm_base_listener, app);
     } else if (strcmp(interface, zwp_text_input_manager_v3_interface.name) == 0) {
@@ -2119,6 +2235,22 @@ static void registry_global(void *data, struct wl_registry *registry,
             registry, name, &wp_fractional_scale_manager_v1_interface, 1);
         require_true(app->fractional_scale_manager != NULL,
                      "bind wp_fractional_scale_manager_v1 failed");
+    } else if (strcmp(interface, wl_output_interface.name) == 0) {
+        app->output_global_count++;
+        debug_emit_u32("OUTPUT_GLOBAL", app->output_global_count);
+        if (app->output == NULL) {
+            app->output = wl_registry_bind(
+                registry, name, &wl_output_interface, version >= 4 ? 4 : version);
+            require_true(app->output != NULL, "bind wl_output failed");
+            wl_output_add_listener(app->output, &output_listener, app);
+        }
+    } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+        require_true(app->decoration_manager == NULL,
+                     "duplicate zxdg_decoration_manager_v1 global");
+        app->decoration_manager = wl_registry_bind(
+            registry, name, &zxdg_decoration_manager_v1_interface, 1);
+        require_true(app->decoration_manager != NULL,
+                     "bind zxdg_decoration_manager_v1 failed");
     }
 }
 
@@ -2163,6 +2295,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
                      mode->clipboard_copy_text, "clipboard copy text");
         app->copy_clipboard_on_focus = 1;
     }
+    app->request_decoration = mode->request_decoration;
     app->win_w = WIN_W;
     app->win_h = WIN_H;
     app->display = wl_display_connect(NULL);
@@ -2176,6 +2309,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
         fatal("initial registry roundtrip failed: %s", strerror(errno));
     if (wl_display_roundtrip(app->display) < 0)
         fatal("seat/global roundtrip failed: %s", strerror(errno));
+    debug_emit_u32("INITIAL_OUTPUT_GLOBALS", (uint32_t)app->output_global_count);
 
     require_true(app->compositor != NULL, "missing wl_compositor");
     require_true(app->shm != NULL, "missing wl_shm");
@@ -2191,6 +2325,9 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     if (mode->report_scale)
         require_true(app->fractional_scale_manager != NULL,
                      "missing wp_fractional_scale_manager_v1");
+    if (mode->request_decoration)
+        require_true(app->decoration_manager != NULL,
+                     "missing zxdg_decoration_manager_v1");
     if (mode->use_data_device)
         require_true(app->data_device_manager != NULL,
                      "missing wl_data_device_manager");
@@ -2208,6 +2345,17 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
     xdg_toplevel_set_title(app->toplevel, mode->title);
     xdg_toplevel_set_app_id(app->toplevel, mode->app_id);
+    if (app->request_decoration) {
+        app->decoration =
+            zxdg_decoration_manager_v1_get_toplevel_decoration(
+                app->decoration_manager, app->toplevel);
+        require_true(app->decoration != NULL,
+                     "get_toplevel_decoration returned NULL");
+        zxdg_toplevel_decoration_v1_add_listener(
+            app->decoration, &decoration_listener, app);
+        zxdg_toplevel_decoration_v1_set_mode(
+            app->decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
     if (mode->fullscreen)
         xdg_toplevel_set_fullscreen(app->toplevel, NULL);
     else
@@ -2284,6 +2432,8 @@ static void teardown_wayland(struct app *app)
         wl_callback_destroy(app->child_ready_callback);
     if (app->child_surface)
         wl_surface_destroy(app->child_surface);
+    if (app->decoration)
+        zxdg_toplevel_decoration_v1_destroy(app->decoration);
     if (app->toplevel)
         xdg_toplevel_destroy(app->toplevel);
     if (app->xdg_surface)
@@ -2294,6 +2444,8 @@ static void teardown_wayland(struct app *app)
         zwp_text_input_manager_v3_destroy(app->text_input_manager);
     if (app->fractional_scale_manager)
         wp_fractional_scale_manager_v1_destroy(app->fractional_scale_manager);
+    if (app->decoration_manager)
+        zxdg_decoration_manager_v1_destroy(app->decoration_manager);
     if (app->data_device_manager)
         wl_data_device_manager_destroy(app->data_device_manager);
     if (app->wm_base)
@@ -2306,6 +2458,8 @@ static void teardown_wayland(struct app *app)
         wl_subcompositor_destroy(app->subcompositor);
     if (app->compositor)
         wl_compositor_destroy(app->compositor);
+    if (app->output)
+        wl_output_destroy(app->output);
     if (app->registry)
         wl_registry_destroy(app->registry);
     if (app->display)
@@ -2529,6 +2683,22 @@ static int cmd_scale(int argc, char **argv)
     return 0;
 }
 
+static int cmd_initial_configure(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland initial configure debug",
+        .app_id = "wayland-debug-app-initial-configure",
+        .use_text_input = 0,
+        .editable = 0,
+        .provide_surrounding = 0,
+        .request_decoration = 1,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
 static int run_scene_command(const struct wayland_mode *mode)
 {
     struct app app;
@@ -2642,6 +2812,8 @@ static const struct command commands[] = {
       cmd_clipboard_paste },
     { "touch", "Fullscreen touch visualizer", cmd_touch },
     { "scale", "Report fractional scale changes", cmd_scale },
+    { "initial-configure", "Report initial output/configure sequencing",
+      cmd_initial_configure },
     { "subsurface", "Fullscreen toplevel with a touchable subsurface",
       cmd_subsurface },
     { "subsurface-input-empty",

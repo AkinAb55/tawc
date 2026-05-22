@@ -344,6 +344,11 @@ impl DebugApp {
             .collect()
     }
 
+    /// Snapshot all received TAWC_DEBUG payload lines.
+    pub fn lines(&self) -> Vec<String> {
+        self.lines.lock().unwrap().clone()
+    }
+
     /// Wait until at least `expected` lines with `tag` have arrived.
     pub fn wait_for_tag_count(
         &self,

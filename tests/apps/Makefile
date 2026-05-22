@@ -28,6 +28,7 @@ WAYLAND_PROTOCOLS_DIR := $(SYSROOT)/usr/share/wayland-protocols
 XDG_SHELL_XML := $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml
 TEXT_INPUT_XML := $(WAYLAND_PROTOCOLS_DIR)/unstable/text-input/text-input-unstable-v3.xml
 FRACTIONAL_SCALE_XML := $(WAYLAND_PROTOCOLS_DIR)/staging/fractional-scale/fractional-scale-v1.xml
+XDG_DECORATION_XML := $(WAYLAND_PROTOCOLS_DIR)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
 
 CFLAGS_SYSROOT := --sysroot=$(SYSROOT) -B$(SYSROOT)/usr/lib -L$(SYSROOT)/usr/lib -L$(SYSROOT)/lib -O2 -g
 LDFLAGS_SYSROOT := --sysroot=$(SYSROOT) -Wl,-rpath-link,$(SYSROOT)/usr/lib -Wl,-rpath-link,$(SYSROOT)/usr/lib/hybris
@@ -59,7 +60,7 @@ sysroot:
 		"$(REPO)/scripts/build-host-sysroot.sh" "--abi=$(ABI)" "--distro=$(DISTRO)" --profile=full; \
 	fi
 
-$(XDG_SHELL_XML) $(TEXT_INPUT_XML) $(FRACTIONAL_SCALE_XML): | sysroot
+$(XDG_SHELL_XML) $(TEXT_INPUT_XML) $(FRACTIONAL_SCALE_XML) $(XDG_DECORATION_XML): | sysroot
 	@test -f "$@" || { echo "ERROR: missing $@ after sysroot setup" >&2; exit 1; }
 
 $(OUT_ROOT)/wayland-debug-app/xdg-shell-client-protocol.h: $(XDG_SHELL_XML) | sysroot $(OUT_ROOT)/wayland-debug-app/
@@ -80,18 +81,27 @@ $(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-client-protocol.h: $(FRACTIONA
 $(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-protocol.c: $(FRACTIONAL_SCALE_XML) | sysroot $(OUT_ROOT)/wayland-debug-app/
 	wayland-scanner private-code "$<" "$@"
 
+$(OUT_ROOT)/wayland-debug-app/xdg-decoration-unstable-v1-client-protocol.h: $(XDG_DECORATION_XML) | sysroot $(OUT_ROOT)/wayland-debug-app/
+	wayland-scanner client-header "$<" "$@"
+
+$(OUT_ROOT)/wayland-debug-app/xdg-decoration-unstable-v1-protocol.c: $(XDG_DECORATION_XML) | sysroot $(OUT_ROOT)/wayland-debug-app/
+	wayland-scanner private-code "$<" "$@"
+
 $(OUT_ROOT)/wayland-debug-app/wayland-debug-app: wayland-debug-app/wayland-debug-app.c \
 		$(OUT_ROOT)/wayland-debug-app/xdg-shell-client-protocol.h \
 		$(OUT_ROOT)/wayland-debug-app/xdg-shell-protocol.c \
 		$(OUT_ROOT)/wayland-debug-app/text-input-unstable-v3-client-protocol.h \
 		$(OUT_ROOT)/wayland-debug-app/text-input-unstable-v3-protocol.c \
 		$(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-client-protocol.h \
-		$(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-protocol.c
+		$(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-protocol.c \
+		$(OUT_ROOT)/wayland-debug-app/xdg-decoration-unstable-v1-client-protocol.h \
+		$(OUT_ROOT)/wayland-debug-app/xdg-decoration-unstable-v1-protocol.c
 	$(CC) $(CFLAGS_SYSROOT) -I"$(OUT_ROOT)/wayland-debug-app" -o "$@" \
 		wayland-debug-app/wayland-debug-app.c \
 		$(OUT_ROOT)/wayland-debug-app/xdg-shell-protocol.c \
 		$(OUT_ROOT)/wayland-debug-app/text-input-unstable-v3-protocol.c \
 		$(OUT_ROOT)/wayland-debug-app/fractional-scale-v1-protocol.c \
+		$(OUT_ROOT)/wayland-debug-app/xdg-decoration-unstable-v1-protocol.c \
 		$$($(PC) --cflags wayland-client cairo) $$($(PC) --libs wayland-client cairo) \
 		$(LDFLAGS_SYSROOT) -std=c11 -Wall -Wextra -Werror
 

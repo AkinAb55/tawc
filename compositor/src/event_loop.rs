@@ -673,7 +673,7 @@ pub fn run(
                 .filter(|h| h.egl_surface.is_some())
                 .count();
             info!(
-                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2}",
+                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
                 clients,
                 data.toplevels.len(),
                 data.surface_wlegl.len(),
@@ -683,6 +683,11 @@ pub fn run(
                 data.hosts.len(),
                 bound_hosts,
                 data.output_scale.fractional(),
+                data.output_physical_size.0,
+                data.output_physical_size.1,
+                data.output_logical_size.0,
+                data.output_logical_size.1,
+                data.output_advertised,
             );
         }
     })?;
