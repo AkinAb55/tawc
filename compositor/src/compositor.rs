@@ -257,10 +257,12 @@ pub struct TawcState {
     pub xdisplay: Option<u32>,
 
     pub render: crate::render::RenderState,
-    /// The single `wl_output` global advertised today. Mode / scale are
-    /// updated when the primary host's geometry changes; multi-output
-    /// support is left to a later phase (see `notes/multi-activity.md`).
+    /// The single output object tracked today. Its `wl_output` global is
+    /// advertised only after the first real Activity surface size arrives;
+    /// multi-output support is left to a later phase (see
+    /// `notes/multi-activity.md`).
     pub output: smithay::output::Output,
+    pub output_advertised: bool,
     pub start_time: std::time::Instant,
     pub frame_count: u64,
     /// Set when buffer contents change; cleared after rendering.
@@ -392,6 +394,7 @@ impl TawcState {
             xdisplay: None,
             render,
             output,
+            output_advertised: false,
             start_time: std::time::Instant::now(),
             frame_count: 0,
             needs_render: true,

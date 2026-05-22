@@ -11,7 +11,6 @@ use log::info;
 
 use smithay::backend::egl::EGLContext;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::utils::Transform;
 use wayland_server::Display;
 
 mod ahb_export;
@@ -782,7 +781,7 @@ fn run_compositor(
     // service-side display-size guesses.
     let mut wl_display: Display<TawcState> = Display::new()?;
     let scale = OutputScale::new(initial_scale);
-    // --- Output (geometry updated when first Activity surface arrives) ---
+    // --- Output (global advertised when first Activity surface arrives) ---
     let output = smithay::output::Output::new(
         "tawc-0".to_string(),
         smithay::output::PhysicalProperties {
@@ -793,16 +792,6 @@ fn run_compositor(
             serial_number: String::new(),
         },
     );
-    let initial_mode_size: smithay::utils::Size<i32, smithay::utils::Physical> =
-        (1, 1).into();
-    output.change_current_state(
-        Some(smithay::output::Mode { size: initial_mode_size, refresh: 60_000 }),
-        Some(Transform::Normal),
-        Some(scale.smithay_scale()),
-        Some((0, 0).into()),
-    );
-    // GlobalId is not RAII — the global lives as long as the Display.
-    let _output_global = output.create_global::<TawcState>(&wl_display.handle());
 
     let state = TawcState::new(
         &mut wl_display,

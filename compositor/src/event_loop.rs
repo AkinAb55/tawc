@@ -897,6 +897,10 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 Some((0, 0).into()),
             );
             data.output.set_preferred(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 });
+            if !data.output_advertised {
+                data.output.create_global::<TawcState>(&data.display_handle);
+                data.output_advertised = true;
+            }
             // Reconfigure existing toplevels with the new logical size.
             reconfigure_all_toplevels(data);
             data.needs_render = true;
