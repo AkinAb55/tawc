@@ -1,4 +1,4 @@
-# Verify libhybris AHB alpha
+# Verify libhybris AHB Alpha
 
 We previously assumed libhybris/GTK AHB alpha could be `0` even when RGB content
 was valid, and papered over that by forcing alpha to `1` for every libhybris
@@ -19,7 +19,7 @@ Android formats are forced opaque.
   Firefox black-screen evidence was mixed with compositor render scheduling and
   surface-state reentry bugs.
 
-## Still Worth Testing
+## Plan
 
 - Add a tiny libhybris GLES client that draws known RGBA pixels, then verify the
   compositor samples/combines alpha correctly.
@@ -28,7 +28,7 @@ Android formats are forced opaque.
   corrupting alpha.
 - Confirm which GTK apps use explicit no-alpha Android formats versus RGBA.
 
-## Repro
+## Verification
 
 1. Build and install tawc.
 2. Launch a GTK/libhybris client with known transparent content.
