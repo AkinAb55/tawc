@@ -11,11 +11,13 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.system.Os
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import java.io.File
 import java.lang.ref.WeakReference
+import kotlinx.coroutines.flow.StateFlow
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 /**
@@ -37,6 +39,9 @@ class CompositorService : Service() {
 
     private val binder = LocalBinder()
     private val activities = mutableMapOf<String, WeakReference<CompositorActivity>>()
+    private val windowRegistry = WindowRegistry()
+
+    val openWindows: StateFlow<List<OpenWindow>> = windowRegistry.windows
 
     inner class LocalBinder : Binder() {
         fun getService(): CompositorService = this@CompositorService
@@ -130,18 +135,51 @@ class CompositorService : Service() {
         NativeBridge.nativeStopCompositor()
         NativeBridge.detachService()
         activities.clear()
+        windowRegistry.clear()
         super.onDestroy()
     }
 
     fun registerActivity(activityId: String, activity: CompositorActivity) {
         activities[activityId] = WeakReference(activity)
         activity.setFullscreenFromCompositor(NativeBridge.fullscreenForActivity(activityId))
+        windowRegistry.get(activityId)?.let { activity.setTaskMetadata(it) }
         Log.d(TAG, "Registered activity $activityId (count=${activities.size})")
     }
 
     fun unregisterActivity(activityId: String) {
         activities.remove(activityId)
         Log.d(TAG, "Unregistered activity $activityId (count=${activities.size})")
+    }
+
+    fun removeWindow(activityId: String) {
+        windowRegistry.remove(activityId)
+    }
+
+    fun updateWindowMetadata(
+        activityId: String,
+        title: String,
+        appId: String,
+        desktopId: String,
+        desktopName: String,
+        iconPath: String,
+    ) {
+        val window = windowRegistry.updateMetadata(
+            activityId = activityId,
+            title = title,
+            appId = appId,
+            desktopId = desktopId,
+            desktopName = desktopName,
+            iconPath = iconPath,
+        )
+        getActivity(activityId)?.setTaskMetadata(window)
+    }
+
+    fun setWindowFocused(activityId: String, focused: Boolean) {
+        windowRegistry.setFocused(activityId, focused, SystemClock.uptimeMillis())
+    }
+
+    fun setWindowFullscreen(activityId: String, fullscreen: Boolean) {
+        windowRegistry.setFullscreen(activityId, fullscreen)
     }
 
     /** Look up an alive Activity by id. Returns null if it was GC'd. */

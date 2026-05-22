@@ -815,6 +815,7 @@ pub fn run(
             let still_used = data.toplevel_to_host.values().any(|h| h == &host_id);
             if !still_used {
                 already_finished.insert(host_id.clone());
+                data.window_metadata.remove(&host_id);
                 crate::finish_activity_from_native(&host_id);
             }
         }
@@ -1040,6 +1041,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 info!("Host {} removed (closed {} toplevels)", activity_id, assigned.len());
             }
             data.host_fullscreen.remove(&activity_id);
+            data.window_metadata.remove(&activity_id);
             if data.foreground_host.as_ref() == Some(&activity_id) {
                 data.foreground_host = None;
             }

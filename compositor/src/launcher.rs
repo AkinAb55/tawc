@@ -57,21 +57,21 @@ const ICON_SIZES: &[&str] = &["128x128", "96x96", "256x256", "64x64", "48x48"];
 const KNOWN_ICON_EXTS: &[&str] = &["png", "svg", "xpm", "jpg", "jpeg"];
 
 /// One launchable application, ready to ship to Kotlin.
-struct Entry {
+pub struct Entry {
     /// Filename minus `.desktop` — stable id used by `find_app_by_id`.
-    id: String,
-    name: String,
-    comment: String,
+    pub id: String,
+    pub name: String,
+    pub comment: String,
     /// Raw `Exec=` line. Field codes (`%f`, `%u`, …) stripped because we
     /// don't pass URIs at launch time; everything else (quoting, env
     /// vars) is left for `bash -lc` to handle.
-    exec: String,
-    terminal: bool,
+    pub exec: String,
+    pub terminal: bool,
     /// Absolute path to the resolved icon file (always PNG), inside the
     /// rootfs. Empty string if no icon was findable. Kotlin loads this
     /// via `BitmapFactory.decodeFile`; the rootfs is app-uid-owned for
     /// proot/tawcroot installs so direct read works.
-    icon_path: String,
+    pub icon_path: String,
 }
 
 /// Scan [rootfs] for launchable apps. Returns entries sorted by name
@@ -79,6 +79,10 @@ struct Entry {
 /// `/usr/share` if both ship the same id, matching desktop-environment
 /// convention.
 fn scan(rootfs: &Path) -> Vec<Entry> {
+    scan_entries(rootfs, true)
+}
+
+fn scan_entries(rootfs: &Path, launchable_only: bool) -> Vec<Entry> {
     let dirs: Vec<PathBuf> = APPS_SUBDIRS
         .iter()
         .map(|sub| rootfs.join(sub))
@@ -92,7 +96,10 @@ fn scan(rootfs: &Path) -> Vec<Entry> {
             Ok(de) => de,
             Err(_) => continue,
         };
-        if !is_launchable(&de) {
+        if launchable_only && !is_launchable(&de) {
+            continue;
+        }
+        if !launchable_only && !is_metadata_candidate(&de) {
             continue;
         }
         let exec = match de.exec() {
@@ -139,6 +146,71 @@ fn scan(rootfs: &Path) -> Vec<Entry> {
     entries
 }
 
+/// Desktop entry metadata useful outside the launcher.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DesktopAppMetadata {
+    pub desktop_id: String,
+    pub name: String,
+    pub icon_path: String,
+}
+
+/// Resolve a Wayland app_id / XWayland WM_CLASS against every installed
+/// rootfs. Returns the first launchable desktop entry whose id is a
+/// plausible match, with its already-resolved PNG icon path.
+pub fn resolve_metadata_for_app_id(app_id: &str) -> Option<DesktopAppMetadata> {
+    let query = app_id.trim();
+    if query.is_empty() {
+        return None;
+    }
+    for rootfs in installed_rootfs_dirs() {
+        for entry in scan_entries(&rootfs, false) {
+            if desktop_id_matches_app_id(&entry.id, query) {
+                return Some(DesktopAppMetadata {
+                    desktop_id: entry.id,
+                    name: entry.name,
+                    icon_path: entry.icon_path,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn installed_rootfs_dirs() -> Vec<PathBuf> {
+    let distros = Path::new("/data/data/me.phie.tawc/distros");
+    let mut out = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(distros) else {
+        return out;
+    };
+    for entry in read_dir.flatten() {
+        let rootfs = entry.path().join("rootfs");
+        if rootfs.is_dir() {
+            out.push(rootfs);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn desktop_id_matches_app_id(desktop_id: &str, app_id: &str) -> bool {
+    let id = normalize_desktop_id(desktop_id);
+    let app = normalize_desktop_id(app_id);
+    if id == app {
+        return true;
+    }
+
+    let id_tail = id.rsplit('.').next().unwrap_or(&id);
+    let app_tail = app.rsplit('.').next().unwrap_or(&app);
+    id_tail == app || id == app_tail || id_tail == app_tail
+}
+
+fn normalize_desktop_id(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches(".desktop")
+        .to_ascii_lowercase()
+}
+
 /// JSON-encode the scan result for the JNI boundary. Each element is an
 /// object: `{id, name, comment, exec, terminal, iconPath}`. Always
 /// returns a valid JSON array (empty `[]` if the rootfs has no apps).
@@ -162,6 +234,10 @@ pub fn scan_json(rootfs: &Path) -> String {
 
 fn is_launchable(de: &DesktopEntry) -> bool {
     de.type_() == Some("Application") && !de.no_display() && !de.hidden()
+}
+
+fn is_metadata_candidate(de: &DesktopEntry) -> bool {
+    de.type_() == Some("Application") && !de.hidden()
 }
 
 /// Find an absolute on-device path for [icon] inside [rootfs], or None.
@@ -270,4 +346,3 @@ fn current_locales() -> Vec<String> {
     }
     out
 }
-

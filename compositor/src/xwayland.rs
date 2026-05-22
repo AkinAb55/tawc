@@ -35,7 +35,7 @@ use log::{error, info, warn};
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::{
-    xwm::{Reorder, ResizeEdge, XwmId},
+    xwm::{Reorder, ResizeEdge, WmWindowProperty, XwmId},
     X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
 };
 use smithay::reexports::wayland_server::Resource;
@@ -241,6 +241,7 @@ impl XwmHandler for TawcState {
         // pending host on the X11Surface's user_data so we don't lose
         // it.
         window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host.clone()))));
+        self.update_host_window_metadata(&host, window.title(), window.class());
         self.toplevels_changed = true;
         if spawn_activity {
             crate::spawn_activity_from_native(&host);
@@ -252,6 +253,7 @@ impl XwmHandler for TawcState {
         let (host, spawn_activity) = pick_host_for_x11(self, &window);
         self.x11_surfaces.push(window.clone());
         window.user_data().insert_if_missing(|| PendingHost(std::cell::RefCell::new(Some(host.clone()))));
+        self.update_host_window_metadata(&host, window.title(), window.class());
         self.toplevels_changed = true;
         if spawn_activity {
             crate::spawn_activity_from_native(&host);
@@ -276,6 +278,16 @@ impl XwmHandler for TawcState {
         }
         self.x11_surfaces.retain(|w| w != &window);
         self.toplevels_changed = true;
+    }
+
+    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        if !matches!(property, WmWindowProperty::Title | WmWindowProperty::Class) {
+            return;
+        }
+        let Some(host) = x11_host(self, &window) else {
+            return;
+        };
+        self.update_host_window_metadata(&host, window.title(), window.class());
     }
 
     fn configure_request(
@@ -433,20 +445,24 @@ impl XwmHandler for TawcState {
 /// `state.x11_to_host`.
 pub struct PendingHost(pub std::cell::RefCell<Option<ActivityId>>);
 
+fn x11_host(state: &TawcState, surface: &X11Surface) -> Option<ActivityId> {
+    if let Some(wl) = surface.wl_surface() {
+        if let Some(h) = state.x11_to_host.get(&wl) {
+            return Some(h.clone());
+        }
+    }
+    surface
+        .user_data()
+        .get::<PendingHost>()
+        .and_then(|p| p.0.borrow().clone())
+}
+
 /// Look up the host an existing X11Surface is on. Tries the live
 /// wl_surface→host map first, falls back to the `PendingHost` user_data
 /// stamped at `map_window_request` time (for surfaces that have a host
 /// reserved but haven't yet had their wl_surface bound).
 fn parent_host(state: &TawcState, parent: &X11Surface) -> Option<ActivityId> {
-    if let Some(wl) = parent.wl_surface() {
-        if let Some(h) = state.x11_to_host.get(&wl) {
-            return Some(h.clone());
-        }
-    }
-    parent
-        .user_data()
-        .get::<PendingHost>()
-        .and_then(|p| p.0.borrow().clone())
+    x11_host(state, parent)
 }
 
 /// Pick a host for a freshly-mapped X11 surface, mirroring the

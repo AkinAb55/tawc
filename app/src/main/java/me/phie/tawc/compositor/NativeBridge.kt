@@ -292,7 +292,9 @@ object NativeBridge {
     fun finishActivity(activityId: String) {
         Log.d(TAG, "finishActivity from native: $activityId")
         mainHandler.post {
-            val activity = serviceRef?.get()?.getActivity(activityId)
+            val service = serviceRef?.get() ?: return@post
+            service.removeWindow(activityId)
+            val activity = service.getActivity(activityId)
             if (activity == null) {
                 Log.d(TAG, "finishActivity($activityId): no live Activity")
                 return@post
@@ -311,8 +313,31 @@ object NativeBridge {
             fullscreenByActivity[activityId] = fullscreen
         }
         mainHandler.post {
-            serviceRef?.get()?.getActivity(activityId)
-                ?.setFullscreenFromCompositor(fullscreen)
+            val service = serviceRef?.get() ?: return@post
+            service.setWindowFullscreen(activityId, fullscreen)
+            service.getActivity(activityId)?.setFullscreenFromCompositor(fullscreen)
+        }
+    }
+
+    @JvmStatic
+    fun updateWindowMetadata(
+        activityId: String,
+        title: String,
+        appId: String,
+        desktopId: String,
+        desktopName: String,
+        iconPath: String,
+    ) {
+        Log.d(TAG, "updateWindowMetadata from native: $activityId title=$title appId=$appId desktopId=$desktopId icon=$iconPath")
+        mainHandler.post {
+            serviceRef?.get()?.updateWindowMetadata(
+                activityId = activityId,
+                title = title,
+                appId = appId,
+                desktopId = desktopId,
+                desktopName = desktopName,
+                iconPath = iconPath,
+            )
         }
     }
 

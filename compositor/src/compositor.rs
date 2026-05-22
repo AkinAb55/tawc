@@ -52,6 +52,7 @@ use smithay::wayland::shell::kde::decoration::{
 };
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    XdgToplevelSurfaceData,
 };
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shm::{ShmHandler, ShmState};
@@ -60,6 +61,7 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
 
 use crate::host::{ActivityId, OutputHost};
+use crate::launcher;
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
 use crate::protocol::tawc_gfxstream::server::tawc_gfxstream::TawcGfxstream;
 use crate::scale::OutputScale;
@@ -109,6 +111,15 @@ pub struct SurfaceShmState {
     pub buffer_scale: i32,
     /// `wp_viewport.set_destination` size in logical surface coords.
     pub viewport_dst: Option<(i32, i32)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct WindowMetadata {
+    pub title: String,
+    pub app_id: String,
+    pub desktop_id: String,
+    pub desktop_name: String,
+    pub icon_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +229,14 @@ pub struct TawcState {
     /// Canonical fullscreen state per ActivityId, retained even before
     /// the Activity registers its SurfaceView.
     pub host_fullscreen: HashMap<ActivityId, bool>,
+
+    /// Last Android-facing metadata sent for each Activity. Used for
+    /// recents labels/icons and as the seed for a future in-app switcher.
+    pub window_metadata: HashMap<ActivityId, WindowMetadata>,
+
+    /// Rootfs desktop-entry lookup cache. Includes misses so repeated
+    /// title updates for unmatched app ids never rescan the filesystem.
+    pub app_metadata_cache: HashMap<String, Option<launcher::DesktopAppMetadata>>,
 
     /// Text input protocol state.
     pub text_input_state: TextInputState,
@@ -383,6 +402,8 @@ impl TawcState {
             hosts: HashMap::new(),
             toplevel_to_host: HashMap::new(),
             host_fullscreen: HashMap::new(),
+            window_metadata: HashMap::new(),
+            app_metadata_cache: HashMap::new(),
             // Phase 5: default to multi-window. Each non-child toplevel
             // gets its own Android task / recents card.
             single_activity_mode: false,
@@ -539,6 +560,83 @@ impl TawcState {
             .or_else(|| self.hosts.get(host_id).map(|host| host.fullscreen))
             .unwrap_or(false)
     }
+
+    pub fn update_wayland_window_metadata(&mut self, toplevel: &ToplevelSurface) {
+        let Some(host_id) = self.toplevel_to_host.get(toplevel.wl_surface()).cloned() else {
+            return;
+        };
+        let (title, app_id) = xdg_toplevel_metadata(toplevel);
+        self.update_host_window_metadata(&host_id, title, app_id);
+    }
+
+    pub fn update_host_window_metadata(
+        &mut self,
+        host_id: &ActivityId,
+        title: String,
+        app_id: String,
+    ) {
+        let old = self.window_metadata.get(host_id);
+        let desktop = if old.is_some_and(|m| m.app_id == app_id) {
+            old.and_then(|m| {
+                (!m.desktop_id.is_empty() || !m.desktop_name.is_empty() || !m.icon_path.is_empty())
+                    .then(|| launcher::DesktopAppMetadata {
+                        desktop_id: m.desktop_id.clone(),
+                        name: m.desktop_name.clone(),
+                        icon_path: m.icon_path.clone(),
+                    })
+            })
+        } else {
+            self.resolve_cached_app_metadata(&app_id)
+        };
+        let metadata = WindowMetadata {
+            title,
+            app_id,
+            desktop_id: desktop
+                .as_ref()
+                .map(|d| d.desktop_id.clone())
+                .unwrap_or_default(),
+            desktop_name: desktop
+                .as_ref()
+                .map(|d| d.name.clone())
+                .unwrap_or_default(),
+            icon_path: desktop
+                .map(|d| d.icon_path)
+                .unwrap_or_default(),
+        };
+
+        if self.window_metadata.get(host_id) == Some(&metadata) {
+            return;
+        }
+        self.window_metadata.insert(host_id.clone(), metadata.clone());
+        crate::update_window_metadata_from_native(host_id, &metadata);
+    }
+
+    fn resolve_cached_app_metadata(&mut self, app_id: &str) -> Option<launcher::DesktopAppMetadata> {
+        let key = app_id.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        if !self.app_metadata_cache.contains_key(&key) {
+            self.app_metadata_cache
+                .insert(key.clone(), launcher::resolve_metadata_for_app_id(app_id));
+        }
+        self.app_metadata_cache.get(&key).cloned().flatten()
+    }
+}
+
+fn xdg_toplevel_metadata(toplevel: &ToplevelSurface) -> (String, String) {
+    compositor::with_states(toplevel.wl_surface(), |states| {
+        let attributes = states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .unwrap()
+            .lock()
+            .unwrap();
+        (
+            attributes.title.clone().unwrap_or_default(),
+            attributes.app_id.clone().unwrap_or_default(),
+        )
+    })
 }
 
 pub fn set_toplevel_fullscreen_state(
@@ -737,8 +835,12 @@ impl XdgShellHandler for TawcState {
         let new_focus = host_is_foreground.then(|| surface.wl_surface().clone());
         self.toplevels.push(surface);
         self.toplevels_changed = true;
+        let metadata_toplevel = self.toplevels.last().cloned();
         if let Some(focus) = new_focus.as_ref() {
             self.set_input_focus(Some(focus));
+        }
+        if let Some(toplevel) = metadata_toplevel {
+            self.update_wayland_window_metadata(&toplevel);
         }
 
         // Reverse-JNI side effects after the &mut self borrow is released.
@@ -830,6 +932,14 @@ impl XdgShellHandler for TawcState {
             set_toplevel_fullscreen_state(&surface, false, None);
             surface.send_pending_configure();
         }
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.update_wayland_window_metadata(&surface);
+    }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.update_wayland_window_metadata(&surface);
     }
 }
 

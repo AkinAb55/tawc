@@ -1,6 +1,9 @@
 # Task Icons And Window Index
 
-Status: design note. Not implemented yet.
+Status: base path implemented. Rust mirrors xdg title/app_id and XWayland
+title/class to Kotlin, resolves matching `.desktop` PNG icons from installed
+rootfses, and Kotlin applies them through `Activity.setTaskDescription`.
+Launch hints and an in-app switcher remain future work.
 
 ## Goal
 

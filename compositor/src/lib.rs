@@ -541,26 +541,39 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeLauncherS
 /// Call a static void method on NativeBridge from any thread.
 /// Attaches to the JVM if needed.
 pub fn call_native_bridge_void(method: &str, sig: &str, args: &[JValue]) {
+    with_native_bridge(method, |env, class| {
+        env.call_static_method(class, method, sig, args)?;
+        Ok(())
+    });
+}
+
+fn with_native_bridge(
+    context: &str,
+    f: impl FnOnce(&mut JNIEnv, JClass) -> jni::errors::Result<()>,
+) {
     let vm = match JAVA_VM.get() {
         Some(vm) => vm,
-        None => { log::error!("JavaVM not cached"); return; }
+        None => { log::error!("JavaVM not cached for {}", context); return; }
     };
     let class_ref = match NATIVE_BRIDGE_CLASS.get() {
         Some(r) => r,
-        None => { log::error!("NativeBridge class not cached"); return; }
+        None => { log::error!("NativeBridge class not cached for {}", context); return; }
     };
-
-    // AttachCurrentThread is idempotent — safe to call if already attached
     let mut env = match vm.attach_current_thread() {
         Ok(env) => env,
-        Err(e) => { log::error!("Failed to attach JNI thread: {}", e); return; }
+        Err(e) => { log::error!("attach_current_thread failed for {}: {}", context, e); return; }
     };
 
-    // GlobalRef::as_obj() returns &JObject<'static>; we need a JClass.
-    // The underlying jobject is a jclass, so this reinterpret is safe.
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(class, method, sig, args) {
-        log::error!("Reverse JNI call {}({}) failed: {}", method, sig, e);
+    let local_class = match env.new_local_ref(class_ref.as_obj()) {
+        Ok(class) => class,
+        Err(e) => {
+            log::error!("new_local_ref(NativeBridge) failed for {}: {}", context, e);
+            return;
+        }
+    };
+    let class = unsafe { JClass::from_raw(local_class.as_raw()) };
+    if let Err(e) = f(&mut env, class) {
+        log::error!("Reverse JNI {} failed: {}", context, e);
     }
 }
 
@@ -570,31 +583,16 @@ pub fn call_native_bridge_void(method: &str, sig: &str, args: &[JValue]) {
 /// commits a `set_surrounding_text`. `sel_start`/`sel_end` are UTF-16
 /// code-unit offsets within `text` (Android's native editor measure).
 pub fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
-    let vm = match JAVA_VM.get() {
-        Some(vm) => vm,
-        None => return,
-    };
-    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
-        Some(r) => r,
-        None => return,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
-    };
-    let text_jstr = match env.new_string(text) {
-        Ok(s) => s,
-        Err(e) => { log::error!("new_string for editable text failed: {}", e); return; }
-    };
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "onUpdateEditableText",
-        "(Ljava/lang/String;II)V",
-        &[(&text_jstr).into(), JValue::Int(sel_start), JValue::Int(sel_end)],
-    ) {
-        log::error!("onUpdateEditableText reverse-JNI failed: {}", e);
-    }
+    with_native_bridge("onUpdateEditableText", |env, class| {
+        let text_jstr = env.new_string(text)?;
+        env.call_static_method(
+            class,
+            "onUpdateEditableText",
+            "(Ljava/lang/String;II)V",
+            &[(&text_jstr).into(), JValue::Int(sel_start), JValue::Int(sel_end)],
+        )?;
+        Ok(())
+    });
 }
 
 /// Reverse-JNI: push compositor/Wayland-owned text into Android's real
@@ -602,37 +600,16 @@ pub fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
 /// bounce so the Wayland owner is not immediately replaced by our own
 /// Android mirror.
 pub fn set_android_clipboard_text(text: &str) {
-    let vm = match JAVA_VM.get() {
-        Some(vm) => vm,
-        None => return,
-    };
-    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
-        Some(r) => r,
-        None => return,
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => {
-            log::error!("attach_current_thread failed: {}", e);
-            return;
-        }
-    };
-    let text_jstr = match env.new_string(text) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("new_string for clipboard text failed: {}", e);
-            return;
-        }
-    };
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "onSetAndroidClipboardText",
-        "(Ljava/lang/String;)V",
-        &[(&text_jstr).into()],
-    ) {
-        log::error!("onSetAndroidClipboardText reverse-JNI failed: {}", e);
-    }
+    with_native_bridge("onSetAndroidClipboardText", |env, class| {
+        let text_jstr = env.new_string(text)?;
+        env.call_static_method(
+            class,
+            "onSetAndroidClipboardText",
+            "(Ljava/lang/String;)V",
+            &[(&text_jstr).into()],
+        )?;
+        Ok(())
+    });
 }
 
 /// Reverse-JNI: ask Kotlin to start a new `CompositorActivity` for the
@@ -642,91 +619,77 @@ pub fn set_android_clipboard_text(text: &str) {
 /// Phase 3 wires this up; phase 5 starts using it (single_activity_mode
 /// is true through phase 4 so this path isn't taken yet).
 pub fn spawn_activity_from_native(activity_id: &str) {
-    let vm = match JAVA_VM.get() {
-        Some(vm) => vm,
-        None => { log::error!("JavaVM not cached for spawnActivity"); return; }
-    };
-    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
-        Some(r) => r,
-        None => { log::error!("NativeBridge class not cached for spawnActivity"); return; }
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
-    };
-    let id_jstr = match env.new_string(activity_id) {
-        Ok(s) => s,
-        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
-    };
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "spawnActivity",
-        "(Ljava/lang/String;)V",
-        &[(&id_jstr).into()],
-    ) {
-        log::error!("Reverse JNI spawnActivity({}) failed: {}", activity_id, e);
-    }
+    with_native_bridge("spawnActivity", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "spawnActivity",
+            "(Ljava/lang/String;)V",
+            &[(&id_jstr).into()],
+        )?;
+        Ok(())
+    });
 }
 
 /// Reverse-JNI: ask Kotlin to finish (and remove from recents) the
 /// `CompositorActivity` for the given activity_id.
 pub fn finish_activity_from_native(activity_id: &str) {
-    let vm = match JAVA_VM.get() {
-        Some(vm) => vm,
-        None => { log::error!("JavaVM not cached for finishActivity"); return; }
-    };
-    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
-        Some(r) => r,
-        None => { log::error!("NativeBridge class not cached for finishActivity"); return; }
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
-    };
-    let id_jstr = match env.new_string(activity_id) {
-        Ok(s) => s,
-        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
-    };
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "finishActivity",
-        "(Ljava/lang/String;)V",
-        &[(&id_jstr).into()],
-    ) {
-        log::error!("Reverse JNI finishActivity({}) failed: {}", activity_id, e);
-    }
+    with_native_bridge("finishActivity", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "finishActivity",
+            "(Ljava/lang/String;)V",
+            &[(&id_jstr).into()],
+        )?;
+        Ok(())
+    });
 }
 
 /// Reverse-JNI: set the Android fullscreen/immersive-bars mode for one
 /// compositor Activity.
 pub fn set_activity_fullscreen_from_native(activity_id: &str, fullscreen: bool) {
-    let vm = match JAVA_VM.get() {
-        Some(vm) => vm,
-        None => { log::error!("JavaVM not cached for setActivityFullscreen"); return; }
-    };
-    let class_ref = match NATIVE_BRIDGE_CLASS.get() {
-        Some(r) => r,
-        None => { log::error!("NativeBridge class not cached for setActivityFullscreen"); return; }
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => { log::error!("attach_current_thread failed: {}", e); return; }
-    };
-    let id_jstr = match env.new_string(activity_id) {
-        Ok(s) => s,
-        Err(e) => { log::error!("new_string({}) failed: {}", activity_id, e); return; }
-    };
-    let class = unsafe { JClass::from_raw(class_ref.as_obj().as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "setActivityFullscreen",
-        "(Ljava/lang/String;Z)V",
-        &[(&id_jstr).into(), JValue::Bool(if fullscreen { 1 } else { 0 })],
-    ) {
-        log::error!("Reverse JNI setActivityFullscreen({}, {}) failed: {}", activity_id, fullscreen, e);
-    }
+    with_native_bridge("setActivityFullscreen", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "setActivityFullscreen",
+            "(Ljava/lang/String;Z)V",
+            &[(&id_jstr).into(), JValue::Bool(if fullscreen { 1 } else { 0 })],
+        )?;
+        Ok(())
+    });
+}
+
+/// Reverse-JNI: update Android recents/task metadata for one compositor
+/// Activity. Kotlin decodes the PNG path off the UI thread and falls
+/// back to TAWC's app icon if no rootfs icon was found.
+pub fn update_window_metadata_from_native(
+    activity_id: &str,
+    metadata: &compositor::WindowMetadata,
+) {
+    with_native_bridge("updateWindowMetadata", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        let title_jstr = env.new_string(&metadata.title)?;
+        let app_id_jstr = env.new_string(&metadata.app_id)?;
+        let desktop_id_jstr = env.new_string(&metadata.desktop_id)?;
+        let desktop_name_jstr = env.new_string(&metadata.desktop_name)?;
+        let icon_path_jstr = env.new_string(&metadata.icon_path)?;
+        env.call_static_method(
+            class,
+            "updateWindowMetadata",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                (&id_jstr).into(),
+                (&title_jstr).into(),
+                (&app_id_jstr).into(),
+                (&desktop_id_jstr).into(),
+                (&desktop_name_jstr).into(),
+                (&icon_path_jstr).into(),
+            ],
+        )?;
+        Ok(())
+    });
 }
 
 /// Default output scale used while no Activity has registered its size.

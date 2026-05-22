@@ -1,10 +1,13 @@
 package me.phie.tawc.compositor
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -27,7 +30,14 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.phie.tawc.Settings
+import java.io.File
 
 /**
  * Hosts the Rust Wayland compositor on a SurfaceView. All interaction
@@ -52,6 +62,9 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
      *  cleanup against the early-return path when intent.data is missing. */
     private var initialized = false
     private var compositorFullscreen = false
+    private val metadataScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val taskIconCache = HashMap<String, Bitmap?>()
+    private var taskMetadataVersion = 0
 
     private var compositorService: CompositorService? = null
     private var backCallback: Any? = null
@@ -120,6 +133,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         if (initialized) {
             unregisterBackCallback()
+            metadataScope.cancel()
             if (NativeBridge.activeInputConnection?.targetsView(surfaceView) == true) {
                 NativeBridge.activeInputConnection = null
             }
@@ -128,6 +142,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             }
             NativeBridge.nativeOnActivityDestroyed(activityId)
             compositorService?.unregisterActivity(activityId)
+            compositorService?.removeWindow(activityId)
             try {
                 unbindService(serviceConnection)
             } catch (e: IllegalArgumentException) {
@@ -172,6 +187,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         super.onWindowFocusChanged(hasFocus)
         if (!initialized) return
         if (hasFocus) applyCompositorFullscreen(compositorFullscreen)
+        compositorService?.setWindowFocused(activityId, hasFocus)
         NativeBridge.nativeOnActivityFocusChanged(activityId, hasFocus)
     }
 
@@ -186,6 +202,32 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         applyCompositorFullscreen(fullscreen)
+    }
+
+    fun setTaskMetadata(window: OpenWindow) {
+        if (!initialized || window.activityId != activityId) return
+        val label = window.title.ifBlank {
+            window.desktopName.ifBlank {
+                window.appId.ifBlank { getString(me.phie.tawc.R.string.app_name) }
+            }
+        }
+        val iconPath = window.iconPath
+        val version = ++taskMetadataVersion
+        metadataScope.launch {
+            val icon = if (iconPath.isBlank()) {
+                null
+            } else if (taskIconCache.containsKey(iconPath)) {
+                taskIconCache[iconPath]
+            } else {
+                withContext(Dispatchers.IO) { decodeTaskIcon(iconPath, taskIconSizePx()) }
+                    .also { taskIconCache[iconPath] = it }
+            }
+            if (!initialized || version != taskMetadataVersion || isFinishing || isDestroyed) {
+                return@launch
+            }
+            @Suppress("DEPRECATION")
+            setTaskDescription(ActivityManager.TaskDescription(label, icon))
+        }
     }
 
     private fun applyCompositorFullscreen(fullscreen: Boolean) {
@@ -214,6 +256,8 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         } else {
             insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
         }
+
+    private fun taskIconSizePx(): Int = (TASK_ICON_SIZE_DP * resources.displayMetrics.density).toInt()
 
     private fun registerBackCallback() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
@@ -451,5 +495,23 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
 
     companion object {
         private const val TAG = "tawc"
+        private const val TASK_ICON_SIZE_DP = 96
+
+        private fun decodeTaskIcon(path: String, targetPx: Int): Bitmap? {
+            val f = File(path)
+            if (!f.isFile) return null
+            return runCatching {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(path, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+                var sample = 1
+                val shorter = minOf(bounds.outWidth, bounds.outHeight)
+                while (shorter / (sample * 2) >= targetPx) sample *= 2
+                BitmapFactory.decodeFile(
+                    path,
+                    BitmapFactory.Options().apply { inSampleSize = sample },
+                )
+            }.getOrNull()
+        }
     }
 }
