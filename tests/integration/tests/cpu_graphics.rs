@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, assert_renders_via_shm,
-    require_compositor, saw_ahb_import, saw_shm_import, TIMEOUT,
+    has_shm_surface, require_compositor, saw_ahb_import, saw_shm_import, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, compositor, GraphicsBackend};
@@ -85,7 +85,7 @@ fn test_weston_simple_shm_renders_via_shm() {
             panic!("weston-simple-shm crashed/exited before rendering");
         }
         let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_shm_import(&logs) {
+        if saw_shm_import(&logs) || has_shm_surface() {
             saw_buffer = true;
             break;
         }
@@ -111,6 +111,14 @@ fn test_weston_simple_shm_renders_via_shm() {
         state.toplevels >= 1,
         "Compositor should see at least 1 toplevel, got {:?}",
         state
+    );
+    assert_eq!(
+        state.surfaces_shm, 1,
+        "weston-simple-shm should have one SHM-backed surface: {state:?}"
+    );
+    assert_eq!(
+        state.surfaces_wlegl, 0,
+        "weston-simple-shm should not attach AHB buffers: {state:?}"
     );
 
     assert_client_animating("weston-simple-shm", Duration::from_millis(1500), 10);

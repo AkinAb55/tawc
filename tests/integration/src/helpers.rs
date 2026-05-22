@@ -221,6 +221,14 @@ pub fn saw_ahb_import(logs: &str) -> bool {
     logs.contains("wlegl: imported ANativeWindowBuffer as texture")
 }
 
+/// True if the compositor currently has at least one android_wlegl/AHB-backed
+/// surface.
+pub fn has_ahb_surface() -> bool {
+    compositor::query_state(Duration::from_secs(2))
+        .map(|state| state.surfaces_wlegl >= 1)
+        .unwrap_or(false)
+}
+
 /// Assert that an animating client is actually committing new frames, not
 /// stuck on its swapchain. The compositor's `frames` counter only advances
 /// when a client commits — either via a new buffer import or a re-attach
@@ -250,6 +258,18 @@ pub fn assert_client_animating(name: &str, window: Duration, min_frames: u64) {
 /// True if compositor logcat shows an SHM buffer import.
 pub fn saw_shm_import(logs: &str) -> bool {
     logs.contains("SHM buffer imported")
+}
+
+/// True if the compositor currently has at least one SHM-backed surface.
+///
+/// This is a stronger signal than the SHM import log for long-lived
+/// compositor test runs: the renderer logs each wl_buffer id only once,
+/// so a later client can render through SHM without producing a fresh
+/// post-logcat-clear import line if object ids are reused.
+pub fn has_shm_surface() -> bool {
+    compositor::query_state(Duration::from_secs(2))
+        .map(|state| state.surfaces_shm >= 1)
+        .unwrap_or(false)
 }
 
 /// Assert the compositor has no connected clients or toplevels, and that
@@ -388,7 +408,7 @@ pub fn launch_and_wait_for_ahb(
             panic!("{name} crashed/exited before rendering");
         }
         let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_ahb_import(&logs) {
+        if saw_ahb_import(&logs) || has_ahb_surface() {
             saw_ahb = true;
             break;
         }
@@ -433,7 +453,7 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
             panic!("{name} crashed/exited before rendering");
         }
         let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_shm_import(&logs) {
+        if saw_shm_import(&logs) || has_shm_surface() {
             saw = true;
             break;
         }
@@ -446,7 +466,7 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
 
     assert!(
         saw,
-        "{name} did not produce SHM buffer imports within {timeout:?}"
+        "{name} did not produce SHM buffer imports or an attached SHM surface within {timeout:?}"
     );
 
     let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
@@ -468,6 +488,15 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
     assert!(
         state.toplevels >= 1,
         "compositor sees no toplevel for {name}: {state:?}"
+    );
+    assert!(
+        state.surfaces_shm >= 1,
+        "compositor sees no SHM-backed surface for {name}: {state:?}"
+    );
+    assert!(
+        state.surfaces_wlegl == 0,
+        "{name} attached an AHB surface under backend={:?}: {state:?}",
+        backend,
     );
 
     app.stop()
@@ -495,6 +524,10 @@ pub fn assert_renders_via_ahb(backend: GraphicsBackend, cmd: &str, name: &str, t
     assert!(
         state.toplevels >= 1,
         "compositor sees no toplevel for {name}: {state:?}"
+    );
+    assert!(
+        state.surfaces_wlegl >= 1,
+        "compositor sees no AHB-backed surface for {name}: {state:?}"
     );
     app.stop()
         .unwrap_or_else(|e| panic!("{name} failed to stop cleanly: {e}"));

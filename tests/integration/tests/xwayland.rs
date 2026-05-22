@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use tawc_integration::helpers::{assert_compositor_clean, require_compositor};
+use tawc_integration::helpers::{assert_compositor_clean, has_shm_surface, require_compositor};
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, rootfs, GraphicsBackend};
 
@@ -54,7 +54,7 @@ fn test_xwayland_xclock_renders_via_shm() {
             panic!("xclock crashed/exited before rendering — Xwayland startup failed?");
         }
         let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if tawc_integration::helpers::saw_shm_import(&logs) {
+        if tawc_integration::helpers::saw_shm_import(&logs) || has_shm_surface() {
             saw_buffer = true;
             break;
         }
