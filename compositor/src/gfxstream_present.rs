@@ -17,6 +17,7 @@ unsafe fn tawc_gfxstream_lookup_ahb(_handle: u32) -> *mut ndk_sys::AHardwareBuff
 }
 
 use log::{error, info};
+use smithay::backend::renderer::ExternalBufferData;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
@@ -47,7 +48,7 @@ impl GlobalDispatch<TawcGfxstream, ()> for TawcState {
 
 impl Dispatch<TawcGfxstream, ()> for TawcState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &TawcGfxstream,
         request: tawc_gfxstream::Request,
@@ -80,8 +81,8 @@ impl Dispatch<TawcGfxstream, ()> for TawcState {
                 }
                 // Adopt the AHB ref; WleglBufferData releases it when
                 // the wl_buffer is destroyed.
-                let data = WleglBufferData::from_ahb(ahb, width, height);
-                let buffer = data_init.init(id, data);
+                let data = WleglBufferData::from_ahb(ahb, width, height, state.render.importer);
+                let buffer = data_init.init(id, ExternalBufferData::new(data));
                 info!(
                     "gfxstream_present: bound colorbuffer_id={} as wl_buffer id={} {}x{} fmt=0x{:08x}",
                     colorbuffer_id,
@@ -100,5 +101,5 @@ impl Dispatch<TawcGfxstream, ()> for TawcState {
     }
 }
 
-// `crate::wlegl` provides Dispatch<WlBuffer, WleglBufferData>; both
-// AHB-backed protocols share that userdata type.
+// `crate::wlegl` provides Dispatch<WlBuffer, ExternalBufferData>; both
+// AHB-backed protocols share that userdata wrapper.

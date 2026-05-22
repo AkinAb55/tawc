@@ -143,9 +143,9 @@ fn test_tawc_dri_ahb_present_round_trip() {
          &logs[logs.len().saturating_sub(4096)..],
     );
     // Also verify the AHB completed the trip into a GL texture on the
-    // compositor side — this is the line `import_shm_buffers`-style
-    // path won't produce. Catches a regression where the AHB import
-    // succeeds but the GL bind fails (e.g. format/usage mismatch).
+    // compositor side. A pure SHM fallback path won't produce this line.
+    // Catches a regression where the AHB import succeeds but the GL bind
+    // fails (e.g. format/usage mismatch).
     assert!(
         logs.contains("wlegl: imported ANativeWindowBuffer as texture 320x240"),
         "compositor imported the AHB metadata but never bound it as a GL \
@@ -280,11 +280,12 @@ fn test_eglx11_renders_via_ahb() {
     adb::logcat_clear().expect("logcat clear");
 
     let bin = rootfs::ensure_eglx11_test().expect("build eglx11-test");
-    // 30 frames is plenty to surface init failures and to give the
-    // compositor's per-X11 SurfaceView time to attach (same race the
-    // `tawc-dri-test` HOLD_SECS dance handles).
+    // The swap loop can finish before the compositor's next frame tick.
+    // Keep the window mapped briefly so Smithay's lazy render-element import
+    // has time to bind at least one AHB as a texture.
     let cmd = format!(
-        "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 TAWC_EGLX11_FRAMES=30 {}",
+        "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 TAWC_EGLX11_FRAMES=30 \
+         TAWC_EGLX11_HOLD_SECS=1 {}",
         bin
     );
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run eglx11-test");

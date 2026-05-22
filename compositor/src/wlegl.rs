@@ -18,13 +18,17 @@ use std::sync::Mutex;
 
 use log::info;
 
-use smithay::backend::renderer::gles::GlesTexture;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::{ExternalBuffer, ExternalBufferData, ExternalBufferImportError};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::utils::{Buffer as BufferCoord, Rectangle, Size};
+use smithay::wayland::compositor::SurfaceData;
 
 use crate::compositor::TawcState;
+use crate::gl_import::AhbTextureImporter;
 use crate::protocol::android_wlegl::server::{
     android_wlegl::{self, AndroidWlegl},
     android_wlegl_handle::{self, AndroidWleglHandle},
@@ -105,6 +109,7 @@ pub struct WleglBufferData {
     pub height: i32,
     pub has_alpha: bool,
     pub origin: BufferOrigin,
+    importer: AhbTextureImporter,
     /// Imported on first render; reused thereafter.
     pub texture: Mutex<Option<GlesTexture>>,
 }
@@ -131,15 +136,75 @@ impl WleglBufferData {
     /// Not used by the android_wlegl path, which has its own
     /// gralloc1-import construction via `tawc_wlegl_import` and tags
     /// the resulting buffer with [`BufferOrigin::Hybris`] inline.
-    pub fn from_ahb(ahb: *mut ndk_sys::AHardwareBuffer, width: i32, height: i32) -> Self {
+    pub fn from_ahb(
+        ahb: *mut ndk_sys::AHardwareBuffer,
+        width: i32,
+        height: i32,
+        importer: AhbTextureImporter,
+    ) -> Self {
         Self {
             ahb,
             width,
             height,
             has_alpha: true,
             origin: BufferOrigin::Gfxstream,
+            importer,
             texture: Mutex::new(None),
         }
+    }
+}
+
+impl ExternalBuffer for WleglBufferData {
+    fn dimensions(&self) -> Size<i32, BufferCoord> {
+        Size::from((self.width, self.height))
+    }
+
+    fn has_alpha(&self) -> Option<bool> {
+        Some(self.has_alpha)
+    }
+
+    fn y_inverted(&self) -> Option<bool> {
+        Some(false)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn import_gles(
+        &self,
+        renderer: &mut GlesRenderer,
+        _surface: Option<&SurfaceData>,
+        _damage: &[Rectangle<i32, BufferCoord>],
+    ) -> Option<Result<GlesTexture, ExternalBufferImportError>> {
+        if let Some(texture) = self.texture.lock().unwrap().clone() {
+            return Some(Ok(texture));
+        }
+
+        let texture = (|| {
+            unsafe {
+                renderer
+                    .egl_context()
+                    .make_current()
+                    .map_err(|err| -> ExternalBufferImportError { Box::new(err) })?;
+            }
+            let display = renderer.egl_context().display().get_display_handle();
+            self.importer
+                .import_ahb(renderer, **display, self.ahb_raw(), self.width, self.height)
+                .map_err(|err| -> ExternalBufferImportError {
+                    std::io::Error::new(std::io::ErrorKind::Other, err).into()
+                })
+        })();
+        let texture = match texture {
+            Ok(texture) => texture,
+            Err(err) => return Some(Err(err)),
+        };
+        *self.texture.lock().unwrap() = Some(texture.clone());
+        info!(
+            "wlegl: imported ANativeWindowBuffer as texture {}x{}",
+            self.width, self.height
+        );
+        Some(Ok(texture))
     }
 }
 
@@ -163,7 +228,9 @@ unsafe impl Sync for WleglBufferData {}
 
 /// Look up the WleglBufferData user-data attached to a wl_buffer, if any.
 pub fn wlegl_buffer_data(buffer: &WlBuffer) -> Option<&WleglBufferData> {
-    buffer.data::<WleglBufferData>()
+    buffer
+        .data::<ExternalBufferData>()
+        .and_then(|data| data.get::<WleglBufferData>())
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +253,7 @@ impl GlobalDispatch<AndroidWlegl, ()> for TawcState {
 
 impl Dispatch<AndroidWlegl, ()> for TawcState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &AndroidWlegl,
         request: android_wlegl::Request,
@@ -291,9 +358,10 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                     height,
                     has_alpha: android_format_has_alpha(fmt_u),
                     origin: BufferOrigin::Hybris,
+                    importer: state.render.importer,
                     texture: Mutex::new(None),
                 };
-                data_init.init(id, data);
+                data_init.init(id, ExternalBufferData::new(data));
                 info!(
                     "wlegl: create_buffer {}x{} stride={} fmt={} usage=0x{:x}",
                     width, height, stride, format, usage_u64
@@ -339,13 +407,13 @@ impl Dispatch<AndroidWleglHandle, WleglHandleData> for TawcState {
 }
 
 // wl_buffer dispatch — protocol requires it since we `new_id` one here.
-impl Dispatch<WlBuffer, WleglBufferData> for TawcState {
+impl Dispatch<WlBuffer, ExternalBufferData> for TawcState {
     fn request(
         _state: &mut Self,
         _client: &Client,
         _resource: &WlBuffer,
         _request: smithay::reexports::wayland_server::protocol::wl_buffer::Request,
-        _data: &WleglBufferData,
+        _data: &ExternalBufferData,
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {

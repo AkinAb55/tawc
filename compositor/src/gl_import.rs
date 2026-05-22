@@ -30,6 +30,7 @@ type FnGlEGLImageTargetTexture2DOES = unsafe extern "C" fn(u32, *const c_void);
 type FnGlGetError = unsafe extern "C" fn() -> u32;
 
 /// Loaded EGL/GL extension function pointers for texture import and creation.
+#[derive(Clone, Copy)]
 pub struct AhbTextureImporter {
     egl_get_native_client_buffer: FnEglGetNativeClientBufferANDROID,
     gl_gen_textures: FnGlGenTextures,

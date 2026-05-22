@@ -25,6 +25,7 @@ mod protocol;
 mod wlegl;
 mod clipboard;
 mod compositor;
+mod desktop;
 mod render;
 mod scale;
 mod event_loop;
@@ -733,8 +734,6 @@ fn run_compositor(
         importer,
         plain_shader,
         tint_shader,
-        raw_egl_display: raw_display,
-        raw_egl_context: raw_context,
         egl_display,
         egl_pixel_format,
         egl_config_id,

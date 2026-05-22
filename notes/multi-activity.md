@@ -119,28 +119,27 @@ GL-context-wide and shared across hosts). `TawcState` gains:
 
 ```rust
 hosts: HashMap<ActivityId, OutputHost>,
-toplevel_to_host: HashMap<WlSurface, ActivityId>,
+desktop: DesktopRegistry,
 ```
 
-The render loop iterates hosts, makes each one's `EGLSurface` current, draws
-the toplevels whose `wl_surface` maps to that host, and swaps.
-`eglMakeCurrent` per-host is fine — Android has done this for years; the
-cost is one pipeline flush per switch and we render at most 2-3 hosts per
-frame in practice (the foreground host, plus maybe its parent if a child
-dialog is up).
+The desktop registry owns surface -> host assignment and persistent per-host
+`Space<Window>` projections. The render loop renders only the foreground host's
+projection. Background hosts retain their window assignments but have no output
+mapped into their space, receive no frame callbacks, and do not trigger hidden
+texture imports.
 
 ### Rust: the policy lives in `XdgShellHandler::new_toplevel`
 
 ```text
 on new_toplevel(t):
-    if t has parent p and toplevel_to_host[p] is alive:
-        toplevel_to_host[t] = toplevel_to_host[p]      # ride on parent's host
+    if t has parent p and desktop.assigned_host(p) is alive:
+        desktop.assign(t, desktop.assigned_host(p))    # ride on parent's host
     else:
         new_id = fresh ActivityId
         hosts.insert(new_id, OutputHost::pending(new_id))
-        toplevel_to_host[t] = new_id
+        desktop.assign(t, new_id)
         spawn_activity(new_id)                          # reverse-JNI to Kotlin
-    configure t with hosts[toplevel_to_host[t]].logical_size
+    configure t with hosts[desktop.assigned_host(t)].logical_size
 ```
 
 Single-Activity mode is the same function with a one-line change: always
@@ -186,9 +185,10 @@ Kotlin-side state.
   `intent.data?.lastPathSegment`. JNI-friendly (`jstring`); resilient to
   Activity recreation across config changes.
 - `OutputHost` keys: `HashMap<ActivityId, OutputHost>` in `TawcState`.
-- `toplevel_to_host`: `HashMap<WlSurface, ActivityId>` in `TawcState`.
-- Subsurfaces and popups are not in `toplevel_to_host`. The renderer derives
-  their host from their root toplevel's assignment, exactly the way it
+- `DesktopRegistry`: owns the shared surface -> host assignment map for
+  Wayland and X11 root surfaces.
+- Subsurfaces and popups are not assigned directly. The renderer derives
+  their host from their root surface's assignment, exactly the way it
   derives their position from the root today.
 
 ### Threading
@@ -273,9 +273,8 @@ external displays, we move to one wl_output per OutputHost.
   matches the host's physical size 1:1 thanks to immersive fullscreen).
   `event_loop.rs` divides by `output_scale` to get logical coords; this
   stays the same — `output_scale` is global. The compositor maps the touch
-  to "the foreground toplevel of this host." The current "first alive
-  toplevel" heuristic in `event_loop.rs:118` becomes "first alive toplevel
-  whose `toplevel_to_host[t] == activityId`."
+  to the first alive toplevel whose root surface is assigned to that
+  `activityId` in `DesktopRegistry`.
 - Keyboard focus follows whichever Activity Android currently shows. When an
   Activity gains focus (`onWindowFocusChanged(true)`), the compositor sets
   keyboard focus to that host's foreground toplevel and marks the host
@@ -446,9 +445,9 @@ The frame-timer cleanup pass already prunes dead toplevels. It gains:
 - For each host: if its Activity weak-ref is gone AND it has no remaining
   toplevels assigned, drop the host record. Release the `EGLSurface` and
   `ANativeWindow`.
-- For each `toplevel_to_host` entry: if the toplevel is dead, remove it.
-  If the host no longer exists, log + drop the entry (should not happen
-  in practice; defensive cleanup).
+- For each desktop-registry assignment: if the root surface is dead, remove it.
+  If the host no longer exists, log + drop the entry (should not happen in
+  practice; defensive cleanup).
 - Hosts that lost their Activity but still have alive toplevels stay in
   the table (the "client refused close" case). They render to nothing
   (`egl_surface = None`) until the toplevel finally dies.
@@ -513,9 +512,9 @@ Each phase is independently testable; nothing assumes a future phase exists.
    `output_size` and `RenderState.egl_surface` move into
    `TawcState.hosts: HashMap<ActivityId, OutputHost>` (length 1, with a
    hardcoded default `ActivityId` for the initial Activity).
-2. **`toplevel_to_host` assignment table.** Single host still, but the
-   render loop reads from `toplevel_to_host` instead of iterating
-   `state.toplevels` directly. Verifies that the bookkeeping doesn't
+2. **Desktop-registry assignment table.** Single host still, but the
+   render loop reads host projections from `DesktopRegistry` instead of
+   iterating `state.toplevels` directly. Verifies that the bookkeeping doesn't
    regress single-window behaviour.
 3. **Policy + reverse-JNI to spawn Activities (still no-op).** Add the
    `XdgShellHandler::new_toplevel` policy function and
@@ -560,10 +559,12 @@ Files of interest:
   set/clear via `set_host_foreground`, per-host render loop
   iteration, `first_alive_toplevel_of_host` for touch fallback,
   `finishActivity` cleanup when a host loses its last toplevel.
-- `compositor/src/compositor.rs` — `TawcState::hosts` /
-  `toplevel_to_host` / `single_activity_mode` / `foreground_host`,
-  `assign_toplevel_to_host` policy returning `HostAssignment`,
+- `compositor/src/compositor.rs` — `TawcState::hosts`,
+  `single_activity_mode`, `assign_toplevel_to_host` policy returning `HostAssignment`,
   per-host configure sizing in `new_toplevel`.
+- `compositor/src/desktop.rs` — `DesktopRegistry` host assignment,
+  foreground/visible projection, and persistent per-host `Space<Window>`
+  updates.
 - `app/src/main/java/me/phie/tawc/compositor/CompositorService.kt`
   — foreground-service shell, posts `specialUse` notification, holds
   the Activity registry.
@@ -614,15 +615,17 @@ unsets `XdgState::Activated` + `XdgState::Suspended` in their pending
 state, then `send_configure`. Smithay short-circuits no-op configures,
 so toggling is cheap and idempotent.
 
-Render loop iterates `hosts.iter().filter(|(_, h)| h.egl_surface.is_some()
-&& h.foreground)`. Frame callbacks check the same predicate per
-toplevel via `toplevel_to_host` lookup. Backgrounded clients stop
-producing frames as soon as Smithay-aware clients (GTK4, recent
-Firefox, Qt6) honour `Suspended`; legacy clients see only cleared
-`Activated` and behave as if minimised. We don't import textures for
-backgrounded surfaces — the calloop frame timer just leaves their
-`buffer_commit_pending` flag pending until the host returns to
-foreground.
+Render loop draws only the foreground host's assigned windows to that host's
+EGL surface. The foreground `Space<Window>` drives output enter/leave, frame
+callbacks, and input hit-testing; when Android has not reported a foreground
+host, there is no visible desktop projection. Frame callbacks are sent through
+Smithay `Window::send_frame` for windows mapped in that foreground space.
+Backgrounded clients stop producing frames as soon as Smithay-aware
+clients (GTK4, recent Firefox, Qt6) honour `Suspended`; legacy clients
+see only cleared `Activated` and behave as if minimised. Commits from
+backgrounded surfaces can still mark the compositor dirty, but Smithay
+only imports textures for windows when the foreground desktop render
+path asks for render elements.
 
 ### Activity cleanup on last toplevel
 

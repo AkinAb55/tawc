@@ -50,8 +50,8 @@ pub struct OutputHost {
 
     /// True iff Android currently shows this Activity in the foreground.
     /// Drives `Activated`/`Suspended` configure events on assigned
-    /// toplevels and gates per-frame work (rendering, frame callbacks)
-    /// so backgrounded clients stop drawing. Updated by
+    /// toplevels and Smithay `Space<Window>` visibility so backgrounded
+    /// clients stop drawing. Updated by
     /// `SurfaceEvent::FocusChanged`. Defaults to `false` — the FocusChanged
     /// event arrives within ms of `Register` and flips it on for hosts
     /// Android has actually given focus.
@@ -172,7 +172,7 @@ pub enum SurfaceEvent {
     ActivityDestroyed { activity_id: ActivityId },
     /// `onWindowFocusChanged`. The Activity's window has gained or lost
     /// the system focus. The compositor uses this to track which host is
-    /// `foreground_host` for input routing (touch fallback, keyboard
+    /// the foreground host for input routing (touch fallback, keyboard
     /// focus). Phase 7 extends this to drive `Activated`/`Suspended`
     /// configures.
     FocusChanged { activity_id: ActivityId, has_focus: bool },

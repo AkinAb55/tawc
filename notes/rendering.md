@@ -20,7 +20,7 @@ a configure. The PopupManager handles the popup tree hierarchy and provides popu
 relative to their toplevel root.
 
 **Note:** Firefox uses wl_subsurface (not xdg_popup) for its dropdown menus. Both paths go
-through the same surface tree drawing code.
+through Smithay's desktop window surface collection.
 
 ## Wayland subsurface z-order
 
@@ -31,13 +31,61 @@ chrome + page content from the Renderer thread. The subsurface is above the
 toplevel by default (Wayland z-order), so the subsurface's pixels must overlap
 the toplevel's placeholder.
 
-Both wlegl and SHM surfaces use a unified drawing path: `collect_surface_draws`
-walks each toplevel tree plus its popups with `with_surface_tree_downward`,
-which invokes its processor post-order (children first, then parent). Each tree
-is independently **reversed** before drawing so parents are drawn first (behind)
-and subsurfaces last (on top). Without the reverse, Firefox renders as a black
-rectangle because the toplevel's placeholder buffer occludes WebRender's output.
-Popup trees are appended after their parent toplevel so they draw on top.
+Both wlegl and SHM surfaces now use Smithay's desktop render-element path.
+`Space<Window>::render_elements_for_region` asks each mapped window for
+`WaylandSurfaceRenderElement`s, so Smithay owns the parent/subsurface/popup
+ordering. Firefox must still render the WebRender subsurface above the
+toplevel placeholder; the integration pixel tests cover this through the
+Smithay element path rather than tawc's old reversed draw list.
+
+## Smithay Renderer State
+
+tawc feeds committed renderable buffers into Smithay's `RendererSurfaceState`
+with `on_commit_buffer_handler`. The Smithay fork has a compositor-provided
+external buffer hook under
+`smithay::backend::renderer`: tawc wraps `android_wlegl` and
+`tawc_gfxstream` AHB buffers in `ExternalBufferData`, reports their size,
+alpha, and y-inversion metadata, and imports them through
+`GlesRenderer::import_buffer`.
+
+AHB import still lives in tawc. `WleglBufferData` owns the
+`AHardwareBuffer`, carries an `AhbTextureImporter`, and creates the GL texture
+from `ExternalGlesBuffer::import_gles`. This keeps Smithay generic: it sees a
+renderable external `wl_buffer`, not Android allocation details.
+
+SHM buffers also use Smithay's renderer import helper. tawc no longer keeps
+parallel per-surface SHM or WLEGL texture maps; diagnostics that need attached
+buffer counts read Smithay renderer surface state for mapped desktop windows.
+
+Rendering asks a host-local Smithay `Space<Window>` projection for that
+host's render elements, then wraps each `WaylandSurfaceRenderElement` in tawc's custom
+`RenderElement<GlesRenderer>` to preserve SHM/AHB tinting and forced-opaque
+shader policy. Smithay owns window ordering, popup/subsurface collection,
+surface geometry, viewport handling, and damage inside those elements; tawc
+still owns Android host selection and the final shader uniforms. The
+frame/output transform owns the framebuffer Y flip; the wrapper leaves Smithay
+element geometry and buffer transforms intact.
+
+tawc maintains one `Space<Window>` projection per Android host for xdg and X11
+windows. Android foreground/background events map the advertised Smithay
+`Output` only into the foreground host's space and keep that output sized to
+the foreground host. The render loop draws only that foreground host; frame
+callbacks are sent only through `Window::send_frame` for windows in that visible
+space. Smithay owns popup/subsurface traversal and output visibility
+bookkeeping while tawc keeps Android Activity policy.
+
+Smithay `Space` locations are window-geometry locations. tawc maps each window
+at `window.geometry().loc` so the underlying `wl_surface` origin remains at
+the Android output origin; this preserves popup placement for clients that set
+non-zero xdg window geometry.
+
+For input, touch picking asks the mapped Smithay desktop windows via
+`Window::surface_under(WindowSurfaceType::ALL)`. Keyboard and text-input focus
+policy remains tawc-owned after the surface has been picked.
+
+`tests/integration/tests/rendering.rs` contains a raw-screenshot pixel test
+for a deterministic SHM pattern. It catches output-scale, y-orientation, and
+basic placement regressions in the Smithay element path.
 
 ## Coordinate System
 
@@ -48,13 +96,11 @@ Popup trees are appended after their parent toplevel so they draw on top.
    The renderer works in physical pixels. Convert logical edges through
    `OutputScale` and round the physical edges.
 
-2. **Y-axis flip:** Smithay's GlesRenderer uses a GL projection where Y=0 is at the
-   **bottom** of the screen, not the top, so we compute
-   `physical_y = screen_h - round((logical_y + logical_h) * output_scale)`. The buffer
-   itself is also Y-down (Wayland convention) vs. Y-up (GL), so we pass
-   `Transform::Flipped180` to `Frame::render_texture_from_to`. Both are
-   needed — Firefox and the `weston-simple-egl` triangle expose the bug if
-   either is missing.
+2. **Y-axis flip:** tawc creates the `GlesFrame` with
+   `Transform::Flipped180`, so Smithay render-element geometry stays in normal
+   top-left desktop coordinates. Do not flip each element's destination rect.
+   Per-surface buffer transforms stay owned by `WaylandSurfaceRenderElement`
+   and are passed through when the wrapper draws with tawc's tint shader.
 
 3. **Surface size follows the wl_surface spec:**
    - `surface_logical_size = wp_viewport.dst` if set, otherwise
@@ -78,9 +124,8 @@ Popup trees are appended after their parent toplevel so they draw on top.
    viewporter Firefox triggers `FEATURE_FAILURE_REQUIRES_WPVIEWPORTER` and
    ends up with a 2×-oversized surface.
 
-   `buffer_scale` and `viewport_dst` live on `SurfaceWleglState` /
-   `SurfaceShmState`; the `logical_size` helper in `render.rs` applies the
-   precedence rule.
+   Smithay renderer surface state applies this size model for rendering and
+   hit testing.
 
 The canonical output scale factor lives in `TawcState::output_scale` as an
 `OutputScale`, not an integer. Do not hardcode a scale elsewhere.
@@ -95,8 +140,9 @@ EGL fallback paths all use `wl_shm`.
 `GlesTexProgram` shader. This is intentional -- it makes it visually obvious when a client
 falls back to SHM instead of using hardware-accelerated AHB buffers.
 
-The SHM path is tracked separately from AHB: `surface_shm` HashMap holds `SurfaceShmState`
-per surface. Surfaces using the AHB channel protocol are never checked for SHM buffers.
+The render wrapper detects SHM buffers from Smithay's `buffer_type` metadata
+and applies tawc's magenta shader policy. AHB buffers are detected from
+`WleglBufferData` attached to the `wl_buffer`.
 
 ## Alpha and Opaque Regions
 

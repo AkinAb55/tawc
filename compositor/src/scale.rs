@@ -37,9 +37,6 @@ impl OutputScale {
         physical / self.fractional
     }
 
-    pub fn physical_edge(self, logical: i32) -> i32 {
-        (logical as f64 * self.fractional).round() as i32
-    }
 }
 
 fn logical_extent(physical: i32, scale: f64) -> i32 {

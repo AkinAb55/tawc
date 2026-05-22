@@ -16,7 +16,8 @@
  * via X11.
  *
  * Mode selection (env vars):
- *   TAWC_EGLX11_FRAMES=N   render N frames at vsync, then exit (default 60)
+ *   TAWC_EGLX11_FRAMES=N      render N frames, then exit (default 60)
+ *   TAWC_EGLX11_HOLD_SECS=N   keep the mapped window alive after swaps
  *
  * Exit codes:
  *   0  success
@@ -50,10 +51,14 @@ static void log_egl_error(const char *what)
 int main(void)
 {
     int frames = 60;
+    int hold_secs = 0;
     {
         const char *f = getenv("TAWC_EGLX11_FRAMES");
         if (f) frames = atoi(f);
         if (frames <= 0) frames = 60;
+        const char *h = getenv("TAWC_EGLX11_HOLD_SECS");
+        if (h) hold_secs = atoi(h);
+        if (hold_secs < 0) hold_secs = 0;
     }
 
     /* X11 setup */
@@ -167,6 +172,10 @@ int main(void)
     }
 
     fprintf(stderr, "eglx11-test: rendered %d frames\n", frames);
+    if (hold_secs > 0) {
+        fprintf(stderr, "eglx11-test: holding window for %d seconds\n", hold_secs);
+        sleep((unsigned int)hold_secs);
+    }
     eglMakeCurrent(edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(edpy, esurf);
     eglDestroyContext(edpy, ectx);

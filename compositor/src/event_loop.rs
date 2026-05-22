@@ -14,9 +14,8 @@ use log::{error, info};
 use smithay::reexports::wayland_server::Resource;
 
 use smithay::backend::input::TouchSlot;
-use smithay::backend::renderer::{buffer_type, BufferType};
 use smithay::backend::input::KeyState;
-use smithay::desktop::PopupManager;
+use smithay::desktop::{PopupManager, WindowSurfaceType};
 use smithay::desktop::PopupUngrabStrategy;
 use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
@@ -27,10 +26,9 @@ use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::{
-    get_parent, get_role, with_states, with_surface_tree_downward, BufferAssignment,
-    SubsurfaceCachedState, SurfaceAttributes, SurfaceData, TraversalAction, SUBSURFACE_ROLE,
+    get_parent, get_role, SUBSURFACE_ROLE,
 };
-use smithay::wayland::shell::xdg::{SurfaceCachedState, XDG_POPUP_ROLE};
+use smithay::wayland::shell::xdg::XDG_POPUP_ROLE;
 use wayland_server::{Display, ListeningSocket};
 
 use crate::host::{ActivityId, OutputHost, SurfaceEvent};
@@ -41,14 +39,6 @@ use crate::clipboard::ClipboardEvent;
 
 use crate::compositor::{ClientState, TawcState};
 use crate::render;
-
-struct HitSurface {
-    surface: WlSurface,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-}
 
 enum KeyboardFocusAction {
     Set(WlSurface),
@@ -62,144 +52,28 @@ struct TouchResolution {
     keyboard_focus: KeyboardFocusAction,
 }
 
-fn xdg_window_geometry_loc(surface: &WlSurface) -> Point<i32, Logical> {
-    with_states(surface, |states| {
-        states
-            .cached_state
-            .get::<SurfaceCachedState>()
-            .current()
-            .geometry
-            .map(|geometry| geometry.loc)
-            .unwrap_or_default()
-    })
-}
-
-fn surface_logical_size_from_states(
-    data: &TawcState,
-    surface: &WlSurface,
-    states: &SurfaceData,
-) -> Option<(i32, i32)> {
-    if let Some(ws) = data.surface_wlegl.get(surface) {
-        return Some(render::logical_size(
-            ws.committed_width,
-            ws.committed_height,
-            ws.buffer_scale,
-            ws.viewport_dst,
-        ));
-    }
-
-    if let Some(ss) = data.surface_shm.get(surface) {
-        return Some(render::logical_size(
-            ss.committed_width,
-            ss.committed_height,
-            ss.buffer_scale,
-            ss.viewport_dst,
-        ));
-    }
-
-    let mut guard = states.cached_state.get::<SurfaceAttributes>();
-    let attrs = guard.current();
-    let buffer_scale = attrs.buffer_scale.max(1);
-    let buffer = match &attrs.buffer {
-        Some(BufferAssignment::NewBuffer(buf))
-            if matches!(buffer_type(buf), Some(BufferType::Shm)) =>
-        {
-            Some(buf.clone())
-        }
-        _ => None,
-    };
-    drop(guard);
-
-    let mut vp_guard = states
-        .cached_state
-        .get::<smithay::wayland::viewporter::ViewportCachedState>();
-    let viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
-    let buffer = buffer?;
-    let dims = smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
-        (data.width, data.height)
-    });
-    dims.ok()
-        .map(|(w, h)| render::logical_size(w, h, buffer_scale, viewport_dst))
-}
-
-fn collect_tree_hits(
-    data: &TawcState,
-    root: &WlSurface,
-    offset_x: i32,
-    offset_y: i32,
-) -> Vec<HitSurface> {
-    let mut hits = Vec::new();
-    with_surface_tree_downward(
-        root,
-        (offset_x, offset_y),
-        |_surf, states, &(px, py)| {
-            let loc = states
-                .cached_state
-                .get::<SubsurfaceCachedState>()
-                .current()
-                .location;
-            TraversalAction::DoChildren((px + loc.x, py + loc.y))
-        },
-        |surf, states, &(base_x, base_y)| {
-            if let Some((w, h)) = surface_logical_size_from_states(data, surf, states) {
-                let loc = states
-                    .cached_state
-                    .get::<SubsurfaceCachedState>()
-                    .current()
-                    .location;
-                hits.push(HitSurface {
-                    surface: surf.clone(),
-                    x: base_x + loc.x,
-                    y: base_y + loc.y,
-                    w,
-                    h,
-                });
-            }
-        },
-        |_, _, _| true,
-    );
-    hits.reverse();
-    hits
-}
-
 fn touch_focus_at(
     data: &TawcState,
     activity_id: &ActivityId,
     location: Point<f64, Logical>,
 ) -> Option<(WlSurface, Point<f64, Logical>)> {
-    let mut hits = Vec::new();
+    if data.desktop_visible_host_id().as_ref() != Some(activity_id) {
+        return None;
+    }
 
-    for toplevel in &data.toplevels {
-        let root = toplevel.wl_surface();
-        match data.toplevel_to_host.get(root) {
-            Some(assigned) if assigned == activity_id => {}
-            _ => continue,
-        }
-
-        hits.extend(collect_tree_hits(data, root, 0, 0));
-        let parent_geometry_loc = xdg_window_geometry_loc(root);
-        for (popup, location) in PopupManager::popups_for_surface(root) {
-            let popup_geometry_loc = popup.geometry().loc;
-            let popup_offset = parent_geometry_loc + location - popup_geometry_loc;
-            hits.extend(collect_tree_hits(
-                data,
-                popup.wl_surface(),
-                popup_offset.x,
-                popup_offset.y,
+    let Some(visible_space) = data.desktop.visible_space(&data.hosts) else {
+        return None;
+    };
+    if let Some((window, window_location)) = visible_space.element_under(location) {
+        let window_point = location - window_location.to_f64();
+        if let Some((surface, origin)) = window.surface_under(window_point, WindowSurfaceType::ALL) {
+            return Some((
+                surface,
+                Point::from((origin.x as f64, origin.y as f64)),
             ));
         }
     }
-
-    hits.into_iter().rev().find_map(|hit| {
-        let within_x = location.x >= hit.x as f64 && location.x < (hit.x + hit.w) as f64;
-        let within_y = location.y >= hit.y as f64 && location.y < (hit.y + hit.h) as f64;
-        let origin = Point::from((hit.x as f64, hit.y as f64));
-        if within_x && within_y && surface_accepts_touch_at(&hit.surface, location - origin) {
-            Some((hit.surface, origin))
-        } else {
-            None
-        }
-    })
+    None
 }
 
 fn is_in_xdg_popup_tree(surface: &WlSurface) -> bool {
@@ -255,13 +129,16 @@ fn apply_keyboard_focus_action(data: &mut TawcState, action: KeyboardFocusAction
 fn host_for_surface(data: &TawcState, surface: &WlSurface) -> Option<ActivityId> {
     let mut current = Some(surface.clone());
     while let Some(surface) = current {
-        if let Some(host) = data.toplevel_to_host.get(&surface) {
+        if let Some(host) = data.desktop.assigned_host(&surface) {
             return Some(host.clone());
         }
         current = get_parent(&surface);
     }
 
-    for (root, host) in &data.toplevel_to_host {
+    for root in data.toplevels.iter().map(|t| t.wl_surface()) {
+        let Some(host) = data.desktop.assigned_host(root) else {
+            continue;
+        };
         for (popup, _) in PopupManager::popups_for_surface(root) {
             if popup.wl_surface() == surface {
                 return Some(host.clone());
@@ -326,7 +203,7 @@ fn dismiss_topmost_grabbing_popup(data: &mut TawcState, activity_id: &ActivityId
 }
 
 fn handle_back_pressed(data: &mut TawcState, activity_id: &ActivityId) {
-    if data.foreground_host.as_ref() != Some(activity_id) || !data.hosts.contains_key(activity_id) {
+    if data.desktop.foreground_host() != Some(activity_id) || !data.hosts.contains_key(activity_id) {
         info!("Ignoring BackPressed for non-foreground/unknown host {}", activity_id);
         return;
     }
@@ -387,8 +264,8 @@ fn dismiss_host_popups_if_touch_is_outside_popup(
         .iter()
         .map(|t| t.wl_surface())
         .filter(|root| {
-            data.toplevel_to_host
-                .get(*root)
+            data.desktop
+                .assigned_host(root)
                 .is_some_and(|assigned| assigned == activity_id)
         })
         .cloned()
@@ -401,18 +278,6 @@ fn dismiss_host_popups_if_touch_is_outside_popup(
             }
         }
     }
-}
-
-fn surface_accepts_touch_at(surface: &WlSurface, local: Point<f64, Logical>) -> bool {
-    with_states(surface, |states| {
-        let mut guard = states.cached_state.get::<SurfaceAttributes>();
-        let attrs = guard.current();
-        attrs
-            .input_region
-            .as_ref()
-            .map(|region| region.contains(local.to_i32_round()))
-            .unwrap_or(true)
-    })
 }
 
 /// Set up and run the calloop event loop. Returns when `running` becomes false.
@@ -672,12 +537,13 @@ pub fn run(
                 .values()
                 .filter(|h| h.egl_surface.is_some())
                 .count();
+            let (surfaces_wlegl, surfaces_shm) = data.attached_buffer_counts();
             info!(
                 "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
                 clients,
                 data.toplevels.len(),
-                data.surface_wlegl.len(),
-                data.surface_shm.len(),
+                surfaces_wlegl,
+                surfaces_shm,
                 data.frame_count,
                 data.last_rendered_toplevels,
                 data.hosts.len(),
@@ -706,8 +572,8 @@ pub fn run(
 
     // --- Source 7: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
-    //   1. Import new buffers (AHB and SHM) as GL textures
-    //   2. Render the frame for each bound host
+    //   1. Update pending XWayland host associations
+    //   2. Render one frame for the visible bound host
     //   3. Send frame-done callbacks
     //   4. Flush outgoing events to clients
     //   5. Clean up dead toplevels
@@ -727,31 +593,32 @@ pub fn run(
             data.needs_render = true;
         }
 
-        // 1. Import buffers (marks dirty if new content arrived)
-        if render::import_wlegl_buffers(data) {
+        // 1. Catch up on XWayland surface ↔ host associations that can land
+        // after the first wl_surface commit.
+        if crate::xwayland::associate_pending_x11_surfaces(data) {
             data.needs_render = true;
         }
-        // Re-attaches of an already-imported wl_buffer (the hot path once
-        // libhybris's buffer pool has been fully mapped) don't re-import, so
-        // the commit handler signals via buffer_commit_pending instead.
+        // Surface commits use Smithay's renderer state now. The actual texture
+        // import happens when Smithay creates render elements; this flag only
+        // wakes the render loop for new buffers, damage, viewport changes, or
+        // re-attaches of an already-imported wl_buffer.
         if data.buffer_commit_pending {
             data.buffer_commit_pending = false;
             data.needs_render = true;
         }
-        if render::import_shm_buffers(data) {
-            data.needs_render = true;
-        }
 
-        // 2. Render — once per bound host. Hosts without an EGLSurface
-        // (Activity backgrounded / surfaceDestroyed) are skipped.
+        // 2. Render only the foreground bound host. Background hosts neither
+        // render nor get frame callbacks; hidden commits can mark the
+        // compositor dirty without triggering hidden texture imports.
         if data.needs_render {
-            if render_bound_hosts(data) {
+            if render_visible_host(data) {
                 data.needs_render = false;
             }
         }
 
-        // 3. Frame callbacks (always sent so clients can
-        // submit new buffers even when we skipped rendering).
+        // 3. Frame callbacks for the visible host only. They are still sent
+        // on idle ticks so visible clients can submit new buffers even when
+        // we skipped rendering.
         let time = data.start_time.elapsed().as_millis() as u32;
         render::send_frame_callbacks(data, time);
 
@@ -774,7 +641,7 @@ pub fn run(
             .filter(|t| !t.alive())
             .map(|t| {
                 let surf = t.wl_surface().clone();
-                let host = data.toplevel_to_host.get(&surf).cloned();
+                let host = data.desktop.assigned_host(&surf).cloned();
                 (surf, host)
             })
             .collect();
@@ -783,11 +650,11 @@ pub fn run(
         }
         for (wl, _) in &dead {
             info!("Removing dead toplevel");
-            data.surface_shm.remove(wl);
-            data.surface_wlegl.remove(wl);
-            data.toplevel_to_host.remove(wl);
+            data.desktop.remove_wayland_toplevel(wl);
         }
         data.toplevels.retain(|t| t.alive());
+        data.desktop.retain_live_windows();
+        data.sync_desktop_hosts();
 
         // Cap the rendered-toplevels counter at the live count: once a host
         // has been torn down, no further frames render here, and otherwise
@@ -798,12 +665,7 @@ pub fn run(
             data.last_rendered_toplevels = data.toplevels.len();
         }
 
-        // Clean up wlegl/SHM entries for surfaces whose client disconnected.
-        // The toplevel cleanup above only removes entries keyed by the toplevel's
-        // wl_surface, but subsurfaces (e.g. Firefox WebRender) live separately.
-        data.surface_wlegl.retain(|surface, _| surface.is_alive());
-        data.surface_shm.retain(|surface, _| surface.is_alive());
-        data.toplevel_to_host.retain(|surface, _| surface.is_alive());
+        data.desktop.retain_live_assignments();
 
         // For each host that just lost a window: if neither Wayland nor
         // Xwayland still has windows assigned to it, finish the matching
@@ -841,12 +703,13 @@ pub fn run(
         // compositor is idle (no foreground host means rendering is
         // skipped entirely and frame_count stays at 0 forever).
         if data.frame_count > 0 && data.frame_count.is_multiple_of(300) {
+            let (surfaces_wlegl, surfaces_shm) = data.attached_buffer_counts();
             info!(
                 "Compositor: {} frames, {} toplevels, {} wlegl, {} shm, {} hosts",
                 data.frame_count,
                 data.toplevels.len(),
-                data.surface_wlegl.len(),
-                data.surface_shm.len(),
+                surfaces_wlegl,
+                surfaces_shm,
                 data.hosts.len(),
             );
         }
@@ -895,35 +758,36 @@ pub fn run(
     Ok(())
 }
 
-fn render_bound_hosts(data: &mut TawcState) -> bool {
-    let mut rendered_any = false;
-    // Snapshot keys so we don't hold a borrow on data.hosts across the render
-    // call. Render every bound EGL host: the SurfaceView can be registered
-    // before Android delivers focus, and skipping that first paint leaves the
-    // task black.
-    let host_ids: Vec<ActivityId> = data
-        .hosts
-        .iter()
-        .filter(|(_, h)| h.egl_surface.is_some())
-        .map(|(k, _)| k.clone())
-        .collect();
-    for id in host_ids {
-        // Take the host out of the map so render_frame can hold a
-        // `&mut OutputHost` while still passing `&mut TawcState`.
-        if let Some(mut host) = data.hosts.remove(&id) {
-            if let Err(e) = render::render_frame(data, &mut host) {
-                error!("Render error on host {}: {}", id, e);
-            } else {
-                rendered_any = true;
-            }
-            data.hosts.insert(id, host);
-        }
+fn render_visible_host(data: &mut TawcState) -> bool {
+    let Some(id) = data.desktop_visible_host_id() else {
+        return false;
+    };
+    let Some(host) = data.hosts.get(&id) else {
+        return false;
+    };
+    if host.egl_surface.is_none() {
+        return false;
     }
-    if rendered_any {
+
+    // Take the host out of the map so render_frame can hold a
+    // `&mut OutputHost` while still passing `&mut TawcState`.
+    let Some(mut host) = data.hosts.remove(&id) else {
+        return false;
+    };
+    let rendered = match render::render_frame(data, &mut host) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Render error on host {}: {}", id, e);
+            false
+        }
+    };
+    data.hosts.insert(id, host);
+
+    if rendered {
         data.frame_count += 1;
         data.last_rendered_toplevels = data.toplevels.len();
     }
-    rendered_any
+    rendered
 }
 
 // ---------------------------------------------------------------------------
@@ -950,28 +814,14 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 data.render.attach_host_surface(host);
             }
             let fullscreen = data.host_fullscreen(&activity_id);
-            let foreground = data.foreground_host.as_ref() == Some(&activity_id);
+            let foreground = data.desktop.foreground_host() == Some(&activity_id);
             if let Some(host) = data.hosts.get_mut(&activity_id) {
                 host.fullscreen = fullscreen;
                 host.foreground = foreground;
             }
             crate::set_activity_fullscreen_from_native(&activity_id, fullscreen);
-            // Update primary-output mode + the cached logical_size that
-            // configure events use. Phase 0/1 advertises only one
-            // wl_output, so we just track the first/most recent host.
-            data.output_physical_size = (width, height);
-            data.output_logical_size = scale.logical_size(width, height);
-            data.output.change_current_state(
-                Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
-                Some(smithay::utils::Transform::Normal),
-                Some(scale.smithay_scale()),
-                Some((0, 0).into()),
-            );
-            data.output.set_preferred(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 });
-            if !data.output_advertised {
-                data.output.create_global::<TawcState>(&data.display_handle);
-                data.output_advertised = true;
-            }
+            data.sync_advertised_output_to_host_if_visible(&activity_id);
+            data.sync_desktop_hosts();
             // Reconfigure existing toplevels with the new logical size.
             reconfigure_all_toplevels(data);
             data.needs_render = true;
@@ -981,7 +831,7 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 data.hosts.get(&activity_id).map(|h| h.egl_surface.is_some()).unwrap_or(false),
                 data.hosts.len(),
             );
-            if render_bound_hosts(data) {
+            if render_visible_host(data) {
                 data.needs_render = false;
             }
         }
@@ -993,15 +843,11 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
                 info!("SurfaceChanged for unknown host {}", activity_id);
                 return;
             }
-            data.output_physical_size = (width, height);
-            data.output_logical_size = scale.logical_size(width, height);
-            data.output.change_current_state(
-                Some(smithay::output::Mode { size: (width, height).into(), refresh: 60_000 }),
-                None, None, None,
-            );
+            data.sync_advertised_output_to_host_if_visible(&activity_id);
+            data.sync_desktop_hosts();
             reconfigure_all_toplevels(data);
             data.needs_render = true;
-            if render_bound_hosts(data) {
+            if render_visible_host(data) {
                 data.needs_render = false;
             }
         }
@@ -1022,9 +868,11 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             }
             data.host_fullscreen.remove(&activity_id);
             data.window_metadata.remove(&activity_id);
-            if data.foreground_host.as_ref() == Some(&activity_id) {
-                data.foreground_host = None;
+            data.desktop.clear_foreground_host_if(&activity_id);
+            if data.advertised_output_host.as_ref() == Some(&activity_id) {
+                data.advertised_output_host = None;
             }
+            data.sync_desktop_hosts();
             data.toplevels_changed = true;
         }
         SurfaceEvent::FocusChanged { activity_id, has_focus } => {
@@ -1033,14 +881,16 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
             // Refresh wider TawcState bookkeeping (foreground_host pointer,
             // keyboard / text input focus).
             if has_focus {
-                data.foreground_host = Some(activity_id.clone());
+                data.desktop.set_foreground_host(Some(activity_id.clone()));
+                data.sync_advertised_output_to_host_if_visible(&activity_id);
                 let target = first_alive_toplevel_of_host(data, &activity_id);
                 data.set_input_focus(target.as_ref());
                 data.needs_render = true;
-            } else if data.foreground_host.as_ref() == Some(&activity_id) {
-                data.foreground_host = None;
+            } else if data.desktop.foreground_host() == Some(&activity_id) {
+                data.desktop.set_foreground_host(None);
                 data.set_input_focus(None);
             }
+            data.sync_desktop_hosts();
         }
         SurfaceEvent::OutputScaleChanged { scale } => {
             apply_output_scale(data, OutputScale::new(scale));
@@ -1068,15 +918,25 @@ fn apply_output_scale(state: &mut TawcState, scale: OutputScale) {
         host.update_scale(scale);
     }
 
-    let (pw, ph) = state.output_physical_size;
-    state.output_logical_size = scale.logical_size(pw, ph);
-    let mode_size = if pw > 0 && ph > 0 { (pw, ph) } else { (1, 1) };
-    state.output.change_current_state(
-        Some(smithay::output::Mode { size: mode_size.into(), refresh: 60_000 }),
-        None,
-        Some(scale.smithay_scale()),
-        None,
-    );
+    if let Some(host_id) = state
+        .desktop
+        .foreground_host()
+        .cloned()
+        .or_else(|| state.advertised_output_host.clone())
+    {
+        state.sync_advertised_output_to_host_if_visible(&host_id);
+    } else {
+        let (pw, ph) = state.output_physical_size;
+        state.output_logical_size = scale.logical_size(pw, ph);
+        let mode_size = if pw > 0 && ph > 0 { (pw, ph) } else { (1, 1) };
+        state.output.change_current_state(
+            Some(smithay::output::Mode { size: mode_size.into(), refresh: 60_000 }),
+            None,
+            Some(scale.smithay_scale()),
+            None,
+        );
+    }
+    state.sync_desktop_hosts();
 
     for surface in live_surfaces(state) {
         state.send_surface_scale(&surface);
@@ -1093,23 +953,12 @@ fn apply_output_scale(state: &mut TawcState, scale: OutputScale) {
 
 fn live_surfaces(state: &TawcState) -> Vec<WlSurface> {
     let mut surfaces = Vec::new();
-    for surface in state.surface_wlegl.keys().chain(state.surface_shm.keys()) {
-        if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == surface) {
-            surfaces.push(surface.clone());
-        }
-    }
-    for toplevel in &state.toplevels {
-        let surface = toplevel.wl_surface();
-        if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == surface) {
-            surfaces.push(surface.clone());
-        }
-    }
-    for x11 in &state.x11_surfaces {
-        if let Some(surface) = x11.wl_surface() {
-            if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == &surface) {
+    for window in state.desktop.windows() {
+        window.with_surfaces(|surface, _| {
+            if surface.is_alive() && !surfaces.iter().any(|s: &WlSurface| s == surface) {
                 surfaces.push(surface.clone());
             }
-        }
+        });
     }
     surfaces
 }
@@ -1128,7 +977,7 @@ fn set_host_foreground(state: &mut TawcState, host_id: &crate::host::ActivityId,
     let toplevels: Vec<_> = state
         .toplevels
         .iter()
-        .filter(|t| state.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+        .filter(|t| state.desktop.assigned_host(t.wl_surface()) == Some(host_id))
         .cloned()
         .collect();
     for t in toplevels {
@@ -1164,7 +1013,7 @@ fn first_alive_toplevel_of_host(
         .toplevels
         .iter()
         .filter(|t| t.alive())
-        .find(|t| state.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+        .find(|t| state.desktop.assigned_host(t.wl_surface()) == Some(host_id))
         .map(|t| t.wl_surface().clone())
 }
 
@@ -1182,8 +1031,8 @@ fn reconfigure_all_toplevels(state: &mut TawcState) {
     let toplevels = state.toplevels.clone();
     for toplevel in &toplevels {
         let Some(host_id) = state
-            .toplevel_to_host
-            .get(toplevel.wl_surface())
+            .desktop
+            .assigned_host(toplevel.wl_surface())
         else {
             continue;
         };

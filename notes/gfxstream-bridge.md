@@ -914,10 +914,10 @@ eglinfo) is gated on the GL/GLES work tracked in
      `DmabufFeedbackBuilder` / `(dev, ino)` registry / `DMABUF_AHB_BUFFERS`
      side table — all removed.
    * `zwp_linux_dmabuf_v1` global removed from `TawcState::new`.
-   * `compositor/src/render.rs::import_wlegl_buffers` and
-     `render_frame`'s `wlegl_draws` closure simplified — both paths
-     attach via the same `WleglBufferData` user-data, so they each
-     do one lookup instead of two.
+   * The old local `dmabuf` and WLEGL split render paths are gone.
+     Both libhybris and gfxstream buffers attach the same
+     `WleglBufferData` user-data and import through Smithay's
+     renderer surface state.
    * AHB export hook moved to `compositor/src/ahb_export.rs` (the
      keepers from the old `dmabuf.rs`).
 

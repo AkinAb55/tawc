@@ -29,12 +29,14 @@ The compositor (`compositor/src/`) is split into:
   file I/O, safe to call from any thread.
 - **text_input.rs** -- `zwp_text_input_v3` server impl bridging Android InputConnection.
 - **compositor.rs** -- `TawcState` (Wayland protocol state, including `hosts`,
-  `toplevel_to_host`, `single_activity_mode`, `foreground_host`) and all Smithay handler
-  trait impls including `assign_toplevel_to_host` (the multi-window policy). Does NOT
-  hold rendering state.
+  `single_activity_mode`, and all Smithay handler trait impls including
+  `assign_toplevel_to_host` (the multi-window policy). Does NOT hold rendering state.
+- **desktop.rs** -- `DesktopRegistry`: owns Smithay desktop windows, surface -> host
+  assignment, foreground-host selection, and persistent per-host `Space<Window>`
+  projections.
 - **render.rs** -- `RenderState` (GPU/EGL state), buffer import (AHB + SHM -> GL textures),
-  per-host frame rendering, foreground-gated frame callbacks, the SHM magenta tint /
-  wlegl-opaque shaders, and `create_egl_surface_for_window` for binding new hosts.
+  foreground-host frame rendering, Smithay `Window::send_frame` callback dispatch, the SHM
+  magenta tint / wlegl-opaque shaders, and `create_egl_surface_for_window` for binding new hosts.
   Each frame is cleared to `BACKGROUND_COLOR` (Material3 dark surface, matches the
   rest of the app's UI) before any surfaces are drawn.
 - **egl_android.rs** -- Raw EGL context creation (with `EGL_KHR_surfaceless_context`
@@ -89,9 +91,10 @@ Kotlin side (`app/src/main/java/me/phie/tawc/`):
 - `dispatch_clients()` runs only from the Wayland fd `Generic` source; the frame
   timer flushes pending writes but does not dispatch. Smithay's calloop integration
   wakes the fd source whenever a client message arrives.
-- Per-surface state structs (`SurfaceWleglState`, `SurfaceShmState`) live in
-  `TawcState` but contain texture fields written by `render.rs`. This cross-cutting
-  is intentional (avoids duplicate lookup tables).
+- Renderable xdg and X11 windows live in Smithay `Window`s mapped into
+  `Space<Window>`. Smithay renderer surface state owns committed buffer
+  metadata and texture import; tawc wraps the resulting render elements only
+  to preserve Android buffer tinting and forced-opaque shader policy.
 
 ## Wayland Protocols Implemented
 
@@ -119,15 +122,18 @@ cargo build` requires running `scripts/ensure-deps.sh smithay` first.
 **Features:** `wayland_frontend`, `renderer_gl`, `desktop`. Avoids all Linux-specific
 backends (DRM, GBM, libinput, udev, libseat).
 
-**Patch:** `libEGL.so.1` -> `libEGL.so` for Android (in `src/backend/egl/ffi.rs`).
+**Patches:** Android loads `libEGL.so` instead of `libEGL.so.1`
+(`src/backend/egl/ffi.rs`), and tawc adds a generic external-buffer renderer
+hook so AHB-backed `wl_buffer`s can populate Smithay renderer state without
+Smithay linking Android APIs.
 
 **wayland-rs:** Pure Rust Wayland protocol implementation (do NOT enable `server_system`
 feature -- no `libwayland-server.so` needed).
 
 **Key APIs used:**
 - `EGLContext::from_raw(display, config_id, context)` -- wraps pre-existing EGL context
-- `GlesRenderer` -- composites GL textures. Has `ImportDma` for dmabufs but NO
-  AHardwareBuffer support -- our `gl_import.rs` handles AHB import manually.
+- `GlesRenderer` -- composites GL textures. AHB import still lives in tawc
+  (`gl_import.rs`), exposed to Smithay as an external buffer import hook.
 - `DisplayHandle::insert_client(stream, data)` -- accepts new Wayland client connections
 
 **Native dependencies:**

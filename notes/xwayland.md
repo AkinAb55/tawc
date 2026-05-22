@@ -593,8 +593,10 @@ toplevels (see [multi-activity.md](multi-activity.md)) — every X11
 toplevel gets its own Android task, except for child-style windows
 that ride on a parent.
 
-Policy in `pick_host_for_x11`, mirroring Wayland's
-`assign_toplevel_to_host`:
+X11-specific code only translates X11 parent/transient state into an
+optional parent host. The final choice uses
+`DesktopRegistry::choose_host`, the same parent/single-activity/new-
+activity policy used for Wayland toplevels:
 
 - **Override-redirect popups** (menus, tooltips, dropdowns, splash
   screens) ride on the parent toplevel's host. These are
@@ -634,10 +636,9 @@ up".
 
 Fix: `associate_pending_x11_surfaces(state)` scans *all*
 x11_surfaces every commit, picking up any whose wl_surface is now
-set but whose host entry is missing. The same helper also runs
-once per render frame from `import_shm_buffers`, so the gap is
-closed even if no further commits fire after smithay's belated
-binding.
+set but whose host entry is missing. The same helper also runs from
+the frame timer before rendering, so the gap is closed even if no
+further commits fire after smithay's belated binding.
 
 ## SELinux: app exec of bundled binaries
 
@@ -681,13 +682,15 @@ that Kotlin exports before `nativeStartCompositor`. No `su`, no
 - `[patch.crates-io] smithay = { path = "../deps/smithay" }` pulls
   in the fork; the commit is pinned in `deps/deps.list`.
 - `TawcState` gained `xwayland_shell_state`, `xwm`,
-  `x11_surfaces: Vec<X11Surface>`, `x11_to_host: HashMap<…>`, and
-  `xdisplay`. `CompositorHandler::client_compositor_state` now
+  `x11_surfaces: Vec<X11Surface>`, and `xdisplay`. X11 wl_surface host
+  assignments live in `DesktopRegistry`'s shared surface -> host map.
+  `CompositorHandler::client_compositor_state` now
   handles `XWaylandClientData` clients (anvil pattern).
-- `render::collect_surface_draws`, `import_shm_buffers`, and
-  `send_frame_callbacks` all walk `state.x11_surfaces` alongside
-  `state.toplevels` so X11 windows render and tick alongside Wayland
-  ones. AHB path doesn't touch them — Xwayland is software-only here.
+- X11 surfaces are wrapped as Smithay `Window::new_x11_window(...)`
+  entries and mapped into the same per-host `Space<Window>` projections
+  as xdg toplevels, so they render and receive frame callbacks through the
+  desktop path.
+  AHB path doesn't touch them — Xwayland is software-only here.
 - All three install methods surface `<tawc-data>/xtmp/.X11-unix` at
   `/tmp/.X11-unix` inside the rootfs so X clients find `:0` at the
   standard path: `ChrootMounter` does a real bind-mount; tawcroot and

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info, warn};
 
-use smithay::backend::renderer::gles::GlesTexture;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::backend::renderer::{buffer_type, BufferType};
 use smithay::delegate_dispatch2;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::input::dnd::DndGrabHandler;
@@ -44,7 +45,7 @@ use smithay::wayland::selection::data_device::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use std::os::fd::OwnedFd;
 use smithay::desktop::{
-    find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
+    find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupManager, PopupPointerGrab, Window,
 };
 use smithay::input::pointer::Focus as PointerFocusMode;
 use smithay::wayland::shell::kde::decoration::{
@@ -68,50 +69,6 @@ use crate::scale::OutputScale;
 use crate::text_input::TextInputState;
 use crate::wlegl;
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
-
-// ---------------------------------------------------------------------------
-// Per-surface state
-// ---------------------------------------------------------------------------
-
-/// Per-surface state for an attached android_wlegl (AHB-backed) buffer.
-///
-/// Written by the CompositorHandler::commit callback when a wlegl wl_buffer
-/// is attached. Texture import happens lazily in render.rs, cached on the
-/// buffer's WleglBufferData user-data so reattaches reuse it.
-///
-/// `current_buffer` stays set until the client attaches a different buffer,
-/// at which point Smithay's `SurfaceAttributes::merge_into` sends
-/// `wl_buffer.release` for the old buffer as part of commit processing. We
-/// therefore keep reading `current_buffer`'s texture every frame knowing the
-/// client can't be overwriting it — it only learns the buffer is free on the
-/// replacing commit, which already swapped `current_buffer` to the new one.
-pub struct SurfaceWleglState {
-    pub current_buffer: Option<wl_buffer::WlBuffer>,
-    /// Buffer dimensions in buffer pixels (`wl_buffer.width/height`).
-    pub committed_width: i32,
-    pub committed_height: i32,
-    /// `wl_surface.set_buffer_scale` value at last commit (default 1).
-    pub buffer_scale: i32,
-    /// `wp_viewport.set_destination` size in logical surface coords. When set
-    /// it overrides `buffer / buffer_scale` for computing the on-screen size.
-    pub viewport_dst: Option<(i32, i32)>,
-}
-
-/// Per-surface SHM buffer state.
-///
-/// The current_buffer field tracks which wl_buffer we last imported, so we
-/// can detect new buffers and release old ones. Texture field is written by
-/// render.rs during import_shm_buffers().
-pub struct SurfaceShmState {
-    pub texture: Option<GlesTexture>,
-    pub current_buffer: Option<wl_buffer::WlBuffer>,
-    pub committed_width: i32,
-    pub committed_height: i32,
-    /// `wl_surface.set_buffer_scale` value at last commit (default 1).
-    pub buffer_scale: i32,
-    /// `wp_viewport.set_destination` size in logical surface coords.
-    pub viewport_dst: Option<(i32, i32)>,
-}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct WindowMetadata {
@@ -157,13 +114,11 @@ pub struct TawcState {
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
 
-    /// Per-surface android_wlegl (AHB-backed GPU) buffer state.
-    pub surface_wlegl: HashMap<WlSurface, SurfaceWleglState>,
-    /// Per-surface SHM state, keyed by WlSurface.
-    pub surface_shm: HashMap<WlSurface, SurfaceShmState>,
-
     /// Toplevel surfaces tracked for rendering and lifecycle.
     pub toplevels: Vec<ToplevelSurface>,
+    /// Smithay desktop windows, host assignments, and per-host render
+    /// projections.
+    pub desktop: crate::desktop::DesktopRegistry,
 
     /// Popup manager for tracking xdg_popup surfaces and their positions.
     pub popup_manager: PopupManager,
@@ -184,14 +139,12 @@ pub struct TawcState {
     /// of truth — lib.rs sets this at startup and render.rs reads it back.
     pub output_scale: OutputScale,
 
-    /// Logical output size (physical pixels / scale), used to configure toplevels.
-    /// Tracks the primary display's geometry; per-host sizing is handled by
-    /// each `OutputHost.logical_size`. Phase 0/1 always uses the primary
-    /// display's metrics for both.
+    /// Logical size of the host currently backing the single advertised output.
+    /// Per-host configure sizing comes from each `OutputHost.logical_size`.
     pub output_logical_size: (i32, i32),
 
-    /// Physical size behind the single advertised output. This lets runtime
-    /// scale changes recompute logical size even before a new surface event.
+    /// Physical size behind the single advertised output. This follows the
+    /// foreground host after startup, not arbitrary background host resizes.
     pub output_physical_size: (i32, i32),
 
     /// Per-Activity render targets. One entry per Android `CompositorActivity`
@@ -202,29 +155,12 @@ pub struct TawcState {
     /// See `notes/multi-activity.md`.
     pub hosts: HashMap<ActivityId, OutputHost>,
 
-    /// Toplevel → host assignment. Looked up by the render loop to decide
-    /// which host's `EGLSurface` a given toplevel paints into. Subsurfaces
-    /// and popups are NOT in this map — the renderer derives their host
-    /// from their root toplevel.
-    ///
-    /// Populated by `assign_toplevel_to_host` from
-    /// `XdgShellHandler::new_toplevel`. Cleaned up alongside dead toplevels
-    /// in the frame timer.
-    pub toplevel_to_host: HashMap<WlSurface, ActivityId>,
-
     /// When true, the policy assigns every toplevel to the same Activity
     /// (the existing host or the hardcoded `"primary"` if none exists yet)
     /// rather than spawning a new Activity per toplevel. Defaults to false
     /// (multi-window) since phase 5; will be exposed as a SharedPreference
     /// in the polish pass.
     pub single_activity_mode: bool,
-
-    /// ActivityId of the host Android currently shows in the foreground.
-    /// Used by per-host input / focus dispatch. Updated on
-    /// `SurfaceEvent::FocusChanged`. None when no Activity has reported
-    /// focus yet (e.g. cold start before the first
-    /// `onWindowFocusChanged(true)`).
-    pub foreground_host: Option<ActivityId>,
 
     /// Canonical fullscreen state per ActivityId, retained even before
     /// the Activity registers its SurfaceView.
@@ -249,12 +185,10 @@ pub struct TawcState {
     /// after updating focus. Avoids per-frame focus scans when nothing changed.
     pub toplevels_changed: bool,
 
-    /// Set by the compositor commit handler when a wlegl/AHB surface attaches
-    /// a buffer whose texture is already cached (re-attach of an existing
-    /// wl_buffer object with fresh Adreno-written content). Without this,
-    /// import_wlegl_buffers returns false on every commit after the first,
-    /// needs_render stays false, and we stop redrawing even though the client
-    /// keeps producing frames.
+    /// Set by the compositor commit handler when any surface commits. Smithay
+    /// imports textures while building render elements; this flag only wakes
+    /// tawc's render loop for new buffers, damage, viewport changes, or
+    /// same-buffer reattaches with fresh client-written content.
     pub buffer_commit_pending: bool,
 
     /// XWayland state. The shell state global is created on startup and
@@ -267,10 +201,6 @@ pub struct TawcState {
     /// menus) live here too — the renderer doesn't yet stack them
     /// separately above their parent.
     pub x11_surfaces: Vec<X11Surface>,
-    /// X11Surface's wl_surface → host id, mirror of `toplevel_to_host`
-    /// for X11. Populated when an X11Surface gets a backing wl_surface
-    /// (commit-time association via xwayland_shell_v1).
-    pub x11_to_host: HashMap<WlSurface, ActivityId>,
     /// X display number Xwayland is listening on. None until the
     /// XWayland Ready event arrives.
     pub xdisplay: Option<u32>,
@@ -282,6 +212,9 @@ pub struct TawcState {
     /// `notes/multi-activity.md`).
     pub output: smithay::output::Output,
     pub output_advertised: bool,
+    /// Host whose dimensions currently back the single advertised output.
+    /// None until the first visible/bootstrap host registers.
+    pub advertised_output_host: Option<ActivityId>,
     pub start_time: std::time::Instant,
     pub frame_count: u64,
     /// Set when buffer contents change; cleared after rendering.
@@ -386,9 +319,8 @@ impl TawcState {
             data_device_state,
             seat_state,
             seat,
-            surface_wlegl: HashMap::new(),
-            surface_shm: HashMap::new(),
             toplevels: Vec::new(),
+            desktop: crate::desktop::DesktopRegistry::new(),
             popup_manager: PopupManager::default(),
             active_popup_grab: None,
             gtk3_broken_menus_workaround_enabled,
@@ -400,22 +332,20 @@ impl TawcState {
             toplevels_changed: false,
             buffer_commit_pending: false,
             hosts: HashMap::new(),
-            toplevel_to_host: HashMap::new(),
             host_fullscreen: HashMap::new(),
             window_metadata: HashMap::new(),
             app_metadata_cache: HashMap::new(),
             // Phase 5: default to multi-window. Each non-child toplevel
             // gets its own Android task / recents card.
             single_activity_mode: false,
-            foreground_host: None,
             xwayland_shell_state,
             xwm: None,
             x11_surfaces: Vec::new(),
-            x11_to_host: HashMap::new(),
             xdisplay: None,
             render,
             output,
             output_advertised: false,
+            advertised_output_host: None,
             start_time: std::time::Instant::now(),
             frame_count: 0,
             needs_render: true,
@@ -470,8 +400,8 @@ impl TawcState {
     }
 
     pub fn toplevel_host_ready(&self, toplevel: &ToplevelSurface) -> bool {
-        self.toplevel_to_host
-            .get(toplevel.wl_surface())
+        self.desktop
+            .assigned_host(toplevel.wl_surface())
             .and_then(|host_id| self.host_logical_size(host_id))
             .is_some()
     }
@@ -498,37 +428,16 @@ impl TawcState {
     /// and whether the policy decided a fresh Activity needs to be
     /// spawned for it. Phase 5+ uses `spawn_activity` to fire the
     /// reverse-JNI call after the borrow on `TawcState` is released.
-    pub fn assign_toplevel_to_host(&mut self, toplevel: &ToplevelSurface) -> HostAssignment {
-        let surface = toplevel.wl_surface().clone();
-
-        // Children of an existing toplevel always share that toplevel's
-        // host (e.g. a dialog opens in the same Android task as its parent).
-        if let Some(parent_surf) = toplevel.parent() {
-            if let Some(parent_host) = self.toplevel_to_host.get(&parent_surf).cloned() {
-                self.toplevel_to_host.insert(surface, parent_host.clone());
-                return HostAssignment { host: parent_host, spawn_activity: false };
-            }
-        }
-
-        if self.single_activity_mode {
-            // Collapse all toplevels onto the first existing host. If no
-            // Activity has registered yet, mint a fresh id and ask Kotlin
-            // to spawn one — single-Activity mode still needs at least
-            // one CompositorActivity to render into.
-            let (id, spawn_activity) = match self.hosts.keys().next().cloned() {
-                Some(id) => (id, false),
-                None => (crate::host::new_activity_id(), true),
-            };
-            self.toplevel_to_host.insert(surface, id.clone());
-            HostAssignment { host: id, spawn_activity }
-        } else {
-            // Multi-window: stage a fresh host id and ask Kotlin to spawn
-            // an Activity for it. The Activity will register its surface
-            // asynchronously via `nativeRegisterActivitySurface`.
-            let new_id = crate::host::new_activity_id();
-            self.toplevel_to_host.insert(surface, new_id.clone());
-            HostAssignment { host: new_id, spawn_activity: true }
-        }
+    pub fn assign_toplevel_to_host(
+        &mut self,
+        toplevel: &ToplevelSurface,
+    ) -> crate::desktop::HostAssignment {
+        self.desktop.assign_wayland_toplevel(
+            toplevel.wl_surface().clone(),
+            toplevel.parent(),
+            self.single_activity_mode,
+            self.hosts.keys().next().cloned(),
+        )
     }
 
     pub fn set_host_fullscreen(&mut self, host_id: &ActivityId, fullscreen: bool) {
@@ -541,7 +450,7 @@ impl TawcState {
         let toplevels: Vec<_> = self
             .toplevels
             .iter()
-            .filter(|t| self.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+            .filter(|t| self.desktop.assigned_host(t.wl_surface()) == Some(host_id))
             .cloned()
             .collect();
 
@@ -561,8 +470,85 @@ impl TawcState {
             .unwrap_or(false)
     }
 
+    pub fn desktop_visible_host_id(&self) -> Option<ActivityId> {
+        self.desktop.visible_host_id(&self.hosts)
+    }
+
+    pub fn sync_primary_output_to_host(&mut self, host_id: &ActivityId) {
+        let Some(host) = self.hosts.get(host_id) else {
+            return;
+        };
+        let size = host.physical_size;
+        self.output_physical_size = (size.w, size.h);
+        self.output_logical_size = host.logical_size;
+        let mode = smithay::output::Mode { size, refresh: 60_000 };
+        self.output.change_current_state(
+            Some(mode),
+            Some(smithay::utils::Transform::Normal),
+            Some(self.output_scale.smithay_scale()),
+            Some((0, 0).into()),
+        );
+        self.output.set_preferred(mode);
+        self.advertised_output_host = Some(host_id.clone());
+    }
+
+    pub fn sync_advertised_output_to_host_if_visible(&mut self, host_id: &ActivityId) {
+        if !self.hosts.contains_key(host_id) {
+            return;
+        }
+        let foreground = self.desktop.foreground_host();
+        let bootstrap = foreground.is_none()
+            && self
+                .advertised_output_host
+                .as_ref()
+                .is_none_or(|advertised| advertised == host_id);
+        if foreground != Some(host_id) && !bootstrap {
+            return;
+        }
+
+        self.sync_primary_output_to_host(host_id);
+        if !self.output_advertised {
+            self.output.create_global::<TawcState>(&self.display_handle);
+            self.output_advertised = true;
+        }
+    }
+
+    pub fn sync_desktop_hosts(&mut self) {
+        self.desktop
+            .sync_hosts(&self.hosts, &self.output);
+    }
+
+    pub fn attached_buffer_counts(&self) -> (usize, usize) {
+        let mut surfaces = Vec::new();
+        for window in self.desktop.windows() {
+            window.with_surfaces(|surface, _| {
+                if !surfaces.iter().any(|s: &WlSurface| s == surface) {
+                    surfaces.push(surface.clone());
+                }
+            });
+        }
+
+        let mut wlegl = 0;
+        let mut shm = 0;
+        for surface in surfaces {
+            let Some(buffer) = with_renderer_surface_state(&surface, |renderer_state| {
+                renderer_state.buffer().cloned()
+            })
+            .flatten()
+            else {
+                continue;
+            };
+            if wlegl::wlegl_buffer_data(&buffer).is_some() {
+                wlegl += 1;
+            } else if matches!(buffer_type(&buffer), Some(BufferType::Shm)) {
+                shm += 1;
+            }
+        }
+        (wlegl, shm)
+    }
+
     pub fn update_wayland_window_metadata(&mut self, toplevel: &ToplevelSurface) {
-        let Some(host_id) = self.toplevel_to_host.get(toplevel.wl_surface()).cloned() else {
+        let Some(host_id) = self.desktop.assigned_host(toplevel.wl_surface()).cloned() else {
             return;
         };
         let (title, app_id) = xdg_toplevel_metadata(toplevel);
@@ -571,7 +557,7 @@ impl TawcState {
 
     pub fn x11_surface_host(&self, surface: &X11Surface) -> Option<ActivityId> {
         if let Some(wl) = surface.wl_surface() {
-            if let Some(h) = self.x11_to_host.get(&wl) {
+            if let Some(h) = self.desktop.assigned_host(&wl) {
                 return Some(h.clone());
             }
         }
@@ -582,8 +568,7 @@ impl TawcState {
     }
 
     pub fn host_has_windows(&self, host_id: &ActivityId) -> bool {
-        self.toplevel_to_host.values().any(|h| h == host_id)
-            || self.x11_to_host.values().any(|h| h == host_id)
+        self.desktop.any_window_for_host(host_id)
             || self
                 .x11_surfaces
                 .iter()
@@ -613,10 +598,12 @@ impl TawcState {
             || self.host_fullscreen.contains_key(host_id);
         self.window_metadata.remove(host_id);
         self.host_fullscreen.remove(host_id);
-        if self.foreground_host.as_ref() == Some(host_id) {
-            self.foreground_host = None;
+        self.desktop.clear_foreground_host_if(host_id);
+        if self.advertised_output_host.as_ref() == Some(host_id) {
+            self.advertised_output_host = None;
         }
         self.hosts.remove(host_id);
+        self.sync_desktop_hosts();
         if should_finish_activity {
             crate::finish_activity_from_native(host_id);
         }
@@ -627,7 +614,7 @@ impl TawcState {
         let toplevels: Vec<_> = self
             .toplevels
             .iter()
-            .filter(|t| self.toplevel_to_host.get(t.wl_surface()) == Some(host_id))
+            .filter(|t| self.desktop.assigned_host(t.wl_surface()) == Some(host_id))
             .cloned()
             .collect();
         for toplevel in toplevels {
@@ -740,14 +727,6 @@ pub fn set_toplevel_fullscreen_state(
     });
 }
 
-/// Result of `TawcState::assign_toplevel_to_host`. Caller owns the
-/// reverse-JNI side-effect so it happens outside the `&mut TawcState`
-/// borrow.
-pub struct HostAssignment {
-    pub host: ActivityId,
-    pub spawn_activity: bool,
-}
-
 // ---------------------------------------------------------------------------
 // Smithay handler impls
 // ---------------------------------------------------------------------------
@@ -790,84 +769,14 @@ impl CompositorHandler for TawcState {
 
     fn commit(&mut self, surface: &WlSurface) {
         self.popup_manager.commit(surface);
-        // Catch up on any X11Surface ↔ wl_surface ↔ host associations
-        // that smithay's xwayland_shell handler has resolved since the
-        // last commit. Helper scans all x11_surfaces internally — it
-        // doesn't need the committed wl_surface to do its work.
-        crate::xwayland::associate_pending_x11_surfaces(self);
-        // Mirror the current AHB-backed attachment for the renderer.
-        // Smithay has already sent release for the previous buffer.
-        use smithay::wayland::compositor::{with_states, SurfaceAttributes};
-        use smithay::wayland::compositor::BufferAssignment;
-
-        let mut new_buf_info: Option<(wl_buffer::WlBuffer, i32, i32)> = None;
-        let mut removed = false;
-        let mut commit_buffer_scale: i32 = 1;
-        let mut viewport_dst: Option<(i32, i32)> = None;
-        with_states(surface, |surf_states| {
-            let mut guard = surf_states.cached_state.get::<SurfaceAttributes>();
-            let attrs = guard.current();
-            commit_buffer_scale = attrs.buffer_scale.max(1);
-            match &attrs.buffer {
-                Some(BufferAssignment::NewBuffer(buf)) => {
-                    // android_wlegl and tawc_gfxstream both use
-                    // WleglBufferData userdata.
-                    if let Some(data) = wlegl::wlegl_buffer_data(buf) {
-                        new_buf_info = Some((buf.clone(), data.width, data.height));
-                    }
-                }
-                Some(BufferAssignment::Removed) => removed = true,
-                None => {}
-            }
-            drop(guard);
-            let mut vp_guard = surf_states
-                .cached_state
-                .get::<smithay::wayland::viewporter::ViewportCachedState>();
-            viewport_dst = vp_guard.current().dst.map(|s| (s.w, s.h));
-        });
-
-        if let Some((buf, w, h)) = new_buf_info {
-            self.surface_wlegl.insert(
-                surface.clone(),
-                SurfaceWleglState {
-                    current_buffer: Some(buf),
-                    committed_width: w,
-                    committed_height: h,
-                    buffer_scale: commit_buffer_scale,
-                    viewport_dst,
-                },
-            );
-            // A wlegl surface replaces any prior SHM attachment.
-            self.surface_shm.remove(surface);
-            self.buffer_commit_pending = true;
-        } else if removed {
-            // wl_surface.attach(NULL): drop both wlegl and SHM state for this
-            // surface. Without the SHM removal an SHM-only surface that
-            // unmaps via a null commit would keep its last texture rendering
-            // until the surface itself dies.
-            self.surface_wlegl.remove(surface);
-            self.surface_shm.remove(surface);
-            self.buffer_commit_pending = true;
-        } else {
-            // No buffer change — but buffer_scale or viewport may have moved.
-            // Refresh both on whichever surface entry exists, and request a
-            // redraw if anything actually changed (a viewport-only commit
-            // wouldn't otherwise wake the renderer).
-            if let Some(ws) = self.surface_wlegl.get_mut(surface) {
-                if ws.buffer_scale != commit_buffer_scale || ws.viewport_dst != viewport_dst {
-                    ws.buffer_scale = commit_buffer_scale;
-                    ws.viewport_dst = viewport_dst;
-                    self.buffer_commit_pending = true;
-                }
-            }
-            if let Some(ss) = self.surface_shm.get_mut(surface) {
-                if ss.buffer_scale != commit_buffer_scale || ss.viewport_dst != viewport_dst {
-                    ss.buffer_scale = commit_buffer_scale;
-                    ss.viewport_dst = viewport_dst;
-                    self.buffer_commit_pending = true;
-                }
-            }
-        }
+        // Catch up only the X11Surface backed by this committed
+        // wl_surface. The frame timer does the wider Xwayland race-closing
+        // scan without making unrelated commits mutate other windows.
+        crate::xwayland::associate_committed_x11_surface(self, surface);
+        smithay::backend::renderer::utils::on_commit_buffer_handler::<TawcState>(surface);
+        self.desktop.commit_surface(surface);
+        self.sync_desktop_hosts();
+        self.buffer_commit_pending = true;
     }
 }
 
@@ -879,7 +788,7 @@ impl XdgShellHandler for TawcState {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         info!("New toplevel surface: {:?}", surface.wl_surface().id());
 
-        // Run the assignment policy (which inserts into toplevel_to_host).
+        // Run the desktop registry's assignment policy.
         // The result tells us whether to spawn a new Activity (phase 5+).
         let assignment = self.assign_toplevel_to_host(&surface);
 
@@ -909,12 +818,16 @@ impl XdgShellHandler for TawcState {
         // focus during the brief startup window, fall back to "the
         // first host" when foreground_host is unset — that matches the
         // pre-multi-window behaviour and keeps text input working.
-        let host_is_foreground = match &self.foreground_host {
+        let host_is_foreground = match self.desktop.foreground_host() {
             Some(fg) => *fg == assignment.host,
             None => self.hosts.keys().next() == Some(&assignment.host),
         };
         let new_focus = host_is_foreground.then(|| surface.wl_surface().clone());
+        let window = Window::new_wayland_window(surface.clone());
+        self.desktop
+            .add_wayland_window(surface.wl_surface().clone(), window);
         self.toplevels.push(surface);
+        self.sync_desktop_hosts();
         self.toplevels_changed = true;
         let metadata_toplevel = self.toplevels.last().cloned();
         if let Some(focus) = new_focus.as_ref() {
@@ -994,7 +907,7 @@ impl XdgShellHandler for TawcState {
     }
 
     fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<wl_output::WlOutput>) {
-        let host_id = self.toplevel_to_host.get(surface.wl_surface()).cloned();
+        let host_id = self.desktop.assigned_host(surface.wl_surface()).cloned();
         if let Some(host_id) = host_id {
             self.set_host_fullscreen(&host_id, true);
             crate::set_activity_fullscreen_from_native(&host_id, true);
@@ -1005,7 +918,7 @@ impl XdgShellHandler for TawcState {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        let host_id = self.toplevel_to_host.get(surface.wl_surface()).cloned();
+        let host_id = self.desktop.assigned_host(surface.wl_surface()).cloned();
         if let Some(host_id) = host_id {
             self.set_host_fullscreen(&host_id, false);
             crate::set_activity_fullscreen_from_native(&host_id, false);

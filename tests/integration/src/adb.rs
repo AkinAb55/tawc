@@ -57,6 +57,70 @@ pub fn shell(cmd: &str) -> io::Result<Output> {
     Command::new("adb").args(["shell", cmd]).output()
 }
 
+/// Raw Android framebuffer screenshot from `adb exec-out screencap`.
+pub struct RawScreenshot {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    data_offset: usize,
+    data: Vec<u8>,
+}
+
+impl RawScreenshot {
+    pub fn pixel_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = self.data_offset + (((y * self.width + x) * 4) as usize);
+        Some([
+            *self.data.get(idx)?,
+            *self.data.get(idx + 1)?,
+            *self.data.get(idx + 2)?,
+            *self.data.get(idx + 3)?,
+        ])
+    }
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
+}
+
+/// Capture a raw screenshot. Android prefixes raw RGBA data with width,
+/// height, pixel format, and on newer releases a dataspace word.
+pub fn screencap_raw() -> io::Result<RawScreenshot> {
+    let output = Command::new("adb").args(["exec-out", "screencap"]).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "screencap failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let data = output.stdout;
+    let width = le_u32(&data, 0).ok_or_else(|| io::Error::other("screencap missing width"))?;
+    let height = le_u32(&data, 4).ok_or_else(|| io::Error::other("screencap missing height"))?;
+    let format = le_u32(&data, 8).ok_or_else(|| io::Error::other("screencap missing format"))?;
+    let pixel_bytes = width as usize * height as usize * 4;
+    let data_offset = if data.len() >= 16 + pixel_bytes {
+        16
+    } else if data.len() >= 12 + pixel_bytes {
+        12
+    } else {
+        return Err(io::Error::other(format!(
+            "screencap too short: {} bytes for {}x{}",
+            data.len(),
+            width,
+            height
+        )));
+    };
+    Ok(RawScreenshot {
+        width,
+        height,
+        format,
+        data_offset,
+        data,
+    })
+}
+
 /// Execute a command on the device as the app uid (no `su`, no
 /// `run-as`) via the dev exec broker. Same address-space + SELinux
 /// domain (`untrusted_app`) as the running app.

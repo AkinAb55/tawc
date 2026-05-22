@@ -4,6 +4,7 @@ mod cpu_graphics;
 mod gfxstream;
 mod libhybris;
 mod libhybris_zink;
+mod rendering;
 mod settings;
 mod tawcroot;
 mod text_input;

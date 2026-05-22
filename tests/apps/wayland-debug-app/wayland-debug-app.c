@@ -23,6 +23,7 @@
  *   subsurface                  Fullscreen toplevel with a touchable subsurface
  *   popup                       Fullscreen toplevel with a touchable xdg_popup
  *   popup-switch                Two touch-opened grabbed xdg_popups
+ *   render-pattern              Fullscreen deterministic SHM color pattern
  *   scale                       Report wp_fractional_scale_v1 changes
  *   initial-configure           Report initial output/configure sequencing
  */
@@ -271,6 +272,7 @@ struct app {
     int touch_debug;
     int fullscreen;
     int report_scale;
+    int render_pattern;
     int request_decoration;
     int use_data_device;
     int copy_clipboard_on_focus;
@@ -324,6 +326,7 @@ struct wayland_mode {
     int touch_debug;
     int fullscreen;
     int report_scale;
+    int render_pattern;
     int request_decoration;
     int use_data_device;
     const char *clipboard_copy_text;
@@ -1164,6 +1167,33 @@ static void draw_touch_debug(struct app *app, cairo_t *cr)
     }
 }
 
+static void draw_render_pattern(struct app *app, cairo_t *cr)
+{
+    const double inset = 96.0;
+    const double size = 80.0;
+    double right = app->win_w - inset - size;
+    double bottom = app->win_h - inset - size;
+
+    cairo_set_source_rgb(cr, 0.12, 0.10, 0.14);
+    cairo_paint(cr);
+
+    cairo_set_source_rgb(cr, 0.92, 0.12, 0.10);
+    cairo_rectangle(cr, inset, inset, size, size);
+    cairo_fill(cr);
+
+    cairo_set_source_rgb(cr, 0.10, 0.72, 0.20);
+    cairo_rectangle(cr, right, inset, size, size);
+    cairo_fill(cr);
+
+    cairo_set_source_rgb(cr, 0.15, 0.25, 0.92);
+    cairo_rectangle(cr, inset, bottom, size, size);
+    cairo_fill(cr);
+
+    cairo_set_source_rgb(cr, 0.92, 0.84, 0.12);
+    cairo_rectangle(cr, right, bottom, size, size);
+    cairo_fill(cr);
+}
+
 static void attach_labeled_buffer(struct app *app, struct wl_surface *surface,
                                   int width, int height, const char *label,
                                   double r, double g, double b)
@@ -1265,7 +1295,9 @@ static void request_redraw(struct app *app)
                  "cairo context failed: %s",
                  cairo_status_to_string(cairo_status(cr)));
 
-    if (app->touch_debug) {
+    if (app->render_pattern) {
+        draw_render_pattern(app, cr);
+    } else if (app->touch_debug) {
         draw_touch_debug(app, cr);
     } else {
         cairo_set_source_rgb(cr, 0.96, 0.96, 0.94);
@@ -2285,6 +2317,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->touch_debug = mode->touch_debug;
     app->fullscreen = mode->fullscreen;
     app->report_scale = mode->report_scale;
+    app->render_pattern = mode->render_pattern;
     app->use_data_device = mode->use_data_device;
     app->paste_clipboard_on_selection = mode->clipboard_paste;
     app->scene_kind = mode->scene_kind;
@@ -2683,6 +2716,23 @@ static int cmd_scale(int argc, char **argv)
     return 0;
 }
 
+static int cmd_render_pattern(int argc, char **argv)
+{
+    static const struct wayland_mode mode = {
+        .title = "tawc wayland render pattern",
+        .app_id = "wayland-debug-app-render-pattern",
+        .use_text_input = 0,
+        .editable = 0,
+        .provide_surrounding = 0,
+        .fullscreen = 1,
+        .render_pattern = 1,
+    };
+
+    (void)argc;
+    (void)argv;
+    return run_scene_command(&mode);
+}
+
 static int cmd_initial_configure(int argc, char **argv)
 {
     static const struct wayland_mode mode = {
@@ -2811,6 +2861,8 @@ static const struct command commands[] = {
     { "clipboard-paste", "Read focused wl_data_device clipboard text",
       cmd_clipboard_paste },
     { "touch", "Fullscreen touch visualizer", cmd_touch },
+    { "render-pattern", "Fullscreen deterministic SHM color pattern",
+      cmd_render_pattern },
     { "scale", "Report fractional scale changes", cmd_scale },
     { "initial-configure", "Report initial output/configure sequencing",
       cmd_initial_configure },

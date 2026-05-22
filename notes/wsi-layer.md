@@ -164,7 +164,8 @@ Flow:
    usage) to the C helper, which calls
    `AHardwareBuffer_createFromHandle(REGISTER)`. On success
    `mem::forget` the `OwnedFd`s (REGISTER takes ownership), stash the
-   `*mut AHardwareBuffer` in `WleglBufferData` as user-data on the new
+   `*mut AHardwareBuffer` in `WleglBufferData`, wrap it in Smithay
+   `ExternalBufferData`, and attach that as user-data on the new
    `wl_buffer`.
 
 The C helper (`compositor/native/wlegl_import.c`) is ~50 lines:
@@ -173,13 +174,16 @@ and returns the AHB. On `WleglBufferData::drop` we call
 `tawc_wlegl_buffer_release` → `AHardwareBuffer_release`, which closes
 the fds and frees the backing gralloc buffer.
 
-Texture import is lazy: `render::import_wlegl_buffers` walks
-`state.surface_wlegl`, finds attached buffers without a cached
-`GlesTexture`, and runs the import (`AhbTextureImporter::import_ahb` →
-`eglGetNativeClientBufferANDROID` →
+Texture import is lazy and goes through Smithay's renderer import path while
+Smithay builds `WaylandSurfaceRenderElement`s for mapped desktop windows.
+Smithay recognizes tawc's external buffer, calls
+`WleglBufferData::import_gles`, and tawc runs
+`AhbTextureImporter::import_ahb` (`eglGetNativeClientBufferANDROID` →
 `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` →
 `glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES)`). The texture
-is cached on the buffer's `WleglBufferData` so re-attaches reuse it.
+is cached on `WleglBufferData` so re-attaches reuse it, and Smithay's
+renderer state also gets the dimensions/viewport data needed by
+desktop hit testing.
 
 ## `wl_buffer.release` for libhybris's pool
 
