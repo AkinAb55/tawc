@@ -13,6 +13,7 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 ## Runtime Architecture
 
 - [architecture.md](architecture.md) - compositor module layout and Smithay integration.
+- [smithay-desktop-refactor.md](smithay-desktop-refactor.md) - speculative plan for adopting more Smithay desktop/window abstractions.
 - [android.md](android.md) - Android platform integration, sockets, SELinux, app-private state.
 - [exec-broker.md](exec-broker.md) - debug broker protocol, host helper, action model, security.
 - [rendering.md](rendering.md) - window management, coordinates, SHM/AHB rendering behavior.
