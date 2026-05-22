@@ -498,7 +498,7 @@ Add to `tests/integration/`:
   pacman?). Icon lookup is its own subproject; v1 ships with an app
   generic icon and the title.
 
-## Implementation phases
+## Original implementation phases
 
 Each phase is independently testable; nothing assumes a future phase exists.
 

@@ -1,7 +1,7 @@
 # Desktop GL via Mesa+Zink, dispatched in libhybris's libEGL
 
 **Status:** design only, not implemented. Likely superseded by
-[`libhybris-zink.md`](libhybris-zink.md), which gets the same
+[`libhybris-zink.md`](../notes/libhybris-zink.md), which gets the same
 desktop-GL capability via configuration alone (~30 LOC of Kotlin + one
 JSON file) at the cost of routing GLES through Zink too. Keep this doc
 as the fallback if Zink-on-libhybris-vulkan's GLES overhead turns out

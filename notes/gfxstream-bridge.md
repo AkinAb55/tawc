@@ -10,9 +10,8 @@ compositor imports the resolved AHB through the existing
 android_wlegl texture path. The production/default physical-device GPU
 path is still libhybris, which works on all tested devices. Phase 5
 (real-world AVD validation) and Phase 6 (Zink-on-gfxstream-vk for
-GL/GLES) still TODO — see
-§"WSI plan: custom Vulkan WSI" for design and §"GL/GLES under custom
-WSI" for the GL gap.
+GL/GLES) still TODO; see
+[`gfxstream-bridge-remaining-work.md`](../plans/gfxstream-bridge-remaining-work.md).
 
 ## Orientation for future readers
 
@@ -187,7 +186,7 @@ entirely. The chroot ships only a u32 `colorbuffer_id` over a
 custom `tawc_gfxstream` Wayland protocol; the compositor (same
 process as the gfxstream renderer) resolves the id to an AHB via
 `tawc_gfxstream_lookup_ahb` (a one-liner C entry point in our
-gfxstream patch). See §"WSI plan: custom Vulkan WSI" below.
+gfxstream patch). See "Custom Vulkan WSI" below.
 
 ## Cost vs libhybris
 
@@ -520,7 +519,7 @@ attempt routed AHBs through `zwp_linux_dmabuf_v1` (using Mesa wsi
 unchanged) which got us through `vulkaninfo` but hit a wall on
 swapchain image creation. The final design is a custom Vulkan WSI
 that ships ColorBuffer ids over a custom Wayland protocol — see
-§"WSI plan: custom Vulkan WSI" below.
+§"Custom Vulkan WSI" below.
 
 ## Distro Mesa is half the story (May 2026)
 
@@ -601,7 +600,7 @@ Why Zink over native gfxstream-GL:
   command-buffer submits, which is exactly the access pattern
   gfxstream's protocol amortizes well. So Zink isn't just GL
   fallback — it's the right answer to the IPC-cost question.
-- **Already in our notes.** `notes/desktop-gl-dispatch.md` is the
+- **Already in our plans.** `plans/desktop-gl-dispatch.md` is the
   libhybris-side version of the same idea (Zink-on-libhybris-vulkan
   for desktop GL). Bridge inherits it for free.
 - **Distros already ship Zink** as part of Mesa, no extra packaging.
@@ -875,8 +874,8 @@ End-to-end Vulkan-via-AHB works:
 `gfxstream::test_vkcube_renders_via_ahb` passes against the physical
 Adreno 660 device. Phase 4 is done; the rest of the `gfxstream::`
 integration suite (gtk*/firefox/supertuxkart/weston-simple-egl/
-eglinfo) is gated on Phase 6 — Zink-on-gfxstream-vk routing for
-GL/EGL apps.
+eglinfo) is gated on the GL/GLES work tracked in
+[`gfxstream-bridge-remaining-work.md`](../plans/gfxstream-bridge-remaining-work.md).
 
 **Done:**
 
@@ -1000,8 +999,8 @@ GL/EGL apps.
 
 12. **(Optional, deferred)** Sentinel-fd optimisation on the kumquat
     server for DEVICE_LOCAL allocations. See §"Sentinel-fd
-    optimisation" in the WSI plan below. Tiny memory savings; not
-    on the critical path.
+    optimisation" in the deferred work plan. Tiny memory savings;
+    not on the critical path.
 
 **Other patches we keep:**
 
@@ -1025,7 +1024,7 @@ builds request `--profile=prod`; test-app builds request
 
 There is no device-rootfs sysroot pull path anymore.
 
-## WSI plan: custom Vulkan WSI (May 2026, current direction)
+## Custom Vulkan WSI (May 2026)
 
 **The dmabuf-v1 path is a dead end. The right architecture is to
 replace Mesa wsi with a custom Vulkan WSI layer that bypasses Mesa's
@@ -1235,29 +1234,7 @@ Don't add it speculatively.
 
 ### GL/GLES under custom WSI
 
-Zink translates GL to Vulkan. For GL apps to use our custom WSI,
-Mesa's EGL/GLX layer must drive presentation through Vulkan WSI (i.e.
-create a `VkSurfaceKHR`/`VkSwapchainKHR`, render via Zink, present via
-`vkQueuePresentKHR`) instead of allocating its own wl_buffers via GBM.
-
-Two ways this might work:
-
-- **Path A — EGL over Vulkan WSI**: Mesa configurations exist where EGL
-  is layered on top of Vulkan with Zink as the GL backend. The EGL
-  surface backs onto a Vulkan swapchain; `eglSwapBuffers` invokes
-  `vkQueuePresentKHR`. If we can configure our distro Mesa to take
-  this path, GL apps automatically ride our custom WSI for free. Needs
-  Mesa build config investigation + possibly env vars in `RootfsEnv.kt`.
-
-- **Path B — write our own libEGL shim**: a minimal `libEGL.so` that
-  implements just enough EGL Wayland to back surfaces onto our Vulkan
-  WSI. Heavier lift but fully under our control.
-
-Neither is needed for Phase 4 (the Vulkan-native swapchain). Investigate
-when getting to Phase 6 (GL/GLES). Today's blocker for GL under
-gfxstream (the `egl: failed to create dri2 screen` from our test
-output) is a separate issue from the Vulkan WSI failure and stays
-unblocked by Phase 4.
+Deferred GL/GLES routing work lives in [gfxstream-bridge-remaining-work.md](../plans/gfxstream-bridge-remaining-work.md).
 
 ### Why `GfxStreamVulkanMapper` is unusable in our setup
 
@@ -1294,69 +1271,12 @@ bypasses Mesa wsi. Of the gfxstream architectures upstream supports,
 only the AOSP/AVF VM case has a guest-kernel virtio-gpu DRM driver
 that Mesa wsi can rely on. Our kumquat-userspace transport doesn't
 have that, and there's no kumquat-aware shortcut in Mesa wsi. The
-only structural fix is to replace Mesa wsi (see "WSI plan: custom
-Vulkan WSI" above).
+only structural fix is to replace Mesa wsi (see "Custom Vulkan WSI"
+above).
 
-## Next implementation work
+## Deferred work
 
-Phase 4 is done; vkcube renders via AHB end-to-end on the physical
-Adreno 660. The remaining work is:
-
-1. Investigate the GL path (Phase 6). Plain
-   `MESA_LOADER_DRIVER_OVERRIDE=zink` is not enough while Mesa's EGL
-   Wayland path still tries to open `/dev/dri/cardN`; either make
-   EGL ride Vulkan WSI or write a small EGL shim. Until this lands,
-   the rest of the `gfxstream::` integration suite (gtk*/firefox/
-   supertuxkart/weston-simple-egl/eglinfo) stays red.
-2. Validate the same path on the x86_64 AVD (Phase 7). Build
-   pipeline is symmetric with aarch64 and compiles cleanly; the
-   chroot connects, vulkaninfo enumerates the device. **Two
-   distinct AVD-only bugs were observed in a brief poke (2026-05-11)
-   and not pursued — see "AVD blockers" below.** Don't expect this
-   to land soon.
-
-## AVD blockers (2026-05-11)
-
-Two separate failures on the x86_64 AVD, both happen *upstream* of
-our code in the chained chain
-`vulkan.ranchu.so → AVD-host gfxstream → AMD radv`. Recording the
-symptoms so we don't re-derive them.
-
-1. **Host-visible `vkAllocateMemory` rejected.** Default kumquat
-   config enables `ExternalBlob`, which makes our gfxstream-backend
-   tag every host-visible alloc with `VkExportMemoryAllocateInfo
-   {handleTypes=AHB}` and hand it to vulkan.ranchu. vulkan.ranchu
-   returns `VK_ERROR_OUT_OF_HOST_MEMORY`. (Confirmed by adding a
-   diag log around `vk->vkAllocateMemory` in
-   `vk_decoder_global_state.cpp::on_vkAllocateMemory`; vulkan.ranchu
-   advertises `VK_ANDROID_external_memory_android_hardware_buffer`
-   but not `VK_KHR_external_memory_fd` or `VK_EXT_external_memory_dma_buf`,
-   per `cmd gpu vkjson`.) Adreno tolerates the same request; AVD
-   doesn't. Plausible workaround: `KumquatBuilder::set_renderer_features
-   ("SystemBlob:enabled")`, which switches to `VK_EXT_external_memory_host`
-   memfd-import instead. Was not committed because (a) it puts physical
-   Adreno on an untested code path the gfxstream maintainers
-   explicitly warn about (`vk_common_operations.cpp:150` "tested only
-   on Windows"), and (b) blocker #2 still applies.
-
-2. **Compositor's EGL_NATIVE_BUFFER_ANDROID texture samples as
-   `(0,0,0,0)`.** Even when the allocation path is unblocked (via
-   `SystemBlob:enabled`) so vkcube reaches its render loop and
-   presents frames via our custom WSI, the AHB content doesn't
-   round-trip: the compositor's `gfxstream_present.rs` binds the
-   colorbuffer, `gl_import.rs` builds an `EXTERNAL_OES` texture,
-   `screencap` shows the SurfaceView dirty and `frame=N`-bumping
-   — but a cyan-on-zero shader probe shows every pixel of the
-   imported texture is zero. Where the writes are lost in the
-   chained chain wasn't pinned down; would need visibility into
-   vulkan.ranchu / the AVD-host gfxstream.
-
-The build/install/connect/enumerate half of Phase 7 is done. The
-remaining work is non-trivial and probably needs either
-gfxstream-internal changes or a workaround that bypasses the
-chained chain (e.g. CPU readback via gfxstream's `readColorBuffer`,
-which would also avoid `VkImportColorBufferGOOGLE`'s memory
-aliasing). Not blocking the libhybris-native physical path.
+Remaining GL/GLES and x86_64 AVD work lives in [gfxstream-bridge-remaining-work.md](../plans/gfxstream-bridge-remaining-work.md).
 
 ## Relation to existing notes
 
@@ -1374,7 +1294,7 @@ aliasing). Not blocking the libhybris-native physical path.
   stay needed for users on the `libhybris` backend (which we ship
   indefinitely alongside the bridge — see "Coexistence with
   libhybris" above).
-- `notes/desktop-gl-dispatch.md` — design for routing desktop-GL
+- `plans/desktop-gl-dispatch.md` — design for routing desktop-GL
   apps through Zink-on-Vulkan. Originally framed against
   libhybris-vulkan; under the bridge backend the same routing maps
   onto Zink-on-gfxstream-vk and is in fact the *primary* GL path

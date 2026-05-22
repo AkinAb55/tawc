@@ -9,7 +9,7 @@ binds like `/data/data/me.phie.tawc/share`.
 
 We've worked around this for the moment by **copying** APK-shipped
 files into each rootfs (`TawcInstaller`) instead of binding them — see
-`notes/installation.md` "Why copy, not bind". That keeps libhybris and
+[`installation.md`](../notes/installation.md) "Why copy, not bind". That keeps libhybris and
 the glvnd vendor JSON per-rootfs-owned. The remaining shared-write
 exposure is just the wayland socket dir + Xwayland's xtmp dir under
 `<appData>/share/`, surfaced as `/usr/share/tawc/`.

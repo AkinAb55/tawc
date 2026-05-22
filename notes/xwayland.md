@@ -201,10 +201,10 @@ call once we worked through Phase 2 carefully:
   reverted on 2026-04-29 once the Phase 2 design clarified what the
   server actually has to do.
 
-The "Glibc alternative (not used)" section near the bottom preserves
-the V4 toolchain-swap, seccomp binary patches, and packaging so we
-don't have to re-derive any of it if a future workload ever needs a
-glibc X server inside the APK.
+The parked [glibc alternative](../plans/xwayland-glibc-alternative.md)
+preserves the V4 toolchain-swap, seccomp binary patches, and packaging
+so we don't have to re-derive any of it if a future workload ever needs
+a glibc X server inside the APK.
 
 ## Architecture: bionic-build Xwayland into the APK
 
@@ -307,7 +307,7 @@ termux's pinned versions to our slightly-newer upstream tags. The
 small generic `libdrm.so` (no vendor drivers) for the few struct
 definitions Xwayland needs at the type level.
 
-## Buffer transport plan: AHB-everywhere, GBM nowhere
+## Buffer transport architecture: AHB-everywhere, GBM nowhere
 
 The original plan's "Phase 1 = GLAMOR + Phase 2 = EGL-on-X11" framing
 chased a desktop-Linux abstraction (GBM render-nodes, dmabuf-fds,
@@ -517,24 +517,7 @@ What can land in parallel without blocking:
 
 ### Phase 3 (probably never). Server-side GL acceleration.
 
-i.e. the original "GLAMOR" idea — the X server holds an EGL context
-and renders RENDER glyphs / cursor / Cairo ops onto AHB-backed
-pixmaps server-side. The set of apps that benefit is small and
-shrinking (xterm, GIMP-2.10's pre-GTK3 paths, KDE-3-era stuff). The
-buffer-transport piece is already solved by `xwayland-tawc.c`; what
-Phase 3 adds is "give the X server an EGL context with no rooted
-window/device". libhybris doesn't currently expose that without a
-`wl_display` or `ANativeWindow`, and the upstream-Linux idiom for
-it (`EGL_PLATFORM_GBM`) doesn't apply.
-
-If we ever need this, the cleanest path is to give Xwayland its
-own bonus `wl_display` — Xwayland is already a Wayland client and
-already has one — and use `EGL_PLATFORM_WAYLAND_KHR` against
-libhybris-loaded-into-the-server to get an EGL display, then render
-to FBOs on AHB-backed EGLImages. No GBM needed; just an extra chunk
-in `xwayland-tawc.c` and a vtable rerouting in `xwayland-glamor.c`.
-But: if Phase 2 lands and the modern-app set works at native
-speed, Phase 3 has no addressable bottleneck.
+Parked future work lives in [xwayland-server-side-gl.md](../plans/xwayland-server-side-gl.md).
 
 ### What this lets us delete from the plan
 
@@ -795,7 +778,7 @@ it at the bottom of the script. Each stage clones into
 `./deps/xwayland-src/<name>/`, optionally applies patches from
 `./deps/xwayland-patches/<name>/`, and installs into the shared `$PREFIX`.
 
-## Project policies that constrain the plan
+## Project policies
 
 **No desktop GL.** Our devices don't support it, so X clients don't
 get it. GLES via EGL is the only client GL. This matches
@@ -816,159 +799,11 @@ server CPU-rendered. xclock-with-software-Render appearing magenta
 is *correct and informative* — it's the signal that a code path
 hasn't been GPU-accelerated yet.
 
-**Phase 1 = transport + plumbing. Phase 2 = client GL. Phase 3 =
-optional server-side GL acceleration that we may never bother
-with.** See "Buffer transport plan" above for the file-by-file
-shape.
+**Phase 1 = transport + plumbing. Phase 2 = client GL. Phase 3 = optional server-side GL acceleration that we may never bother with.** See "Buffer transport architecture" above for the file-by-file shape; the parked Phase 3 plan lives in [xwayland-server-side-gl.md](../plans/xwayland-server-side-gl.md).
 
-## Glibc alternative (not used, documented for the future)
+## Glibc alternative
 
-Recording the V4 toolchain-swap so a future workload that genuinely
-needs a glibc binary in the APK doesn't have to re-derive any of
-this. **Not the path we're on.** The bionic substrate above is
-simpler for Phase 2 (direct AHB API access in the server, no
-seccomp binary patches) and that's what's currently shipping.
-
-### Toolchain swap
-
-Cross-compile against `aarch64-linux-gnu-gcc` (the same toolchain as
-`scripts/build-libhybris.sh`), not the NDK. Set
-`CFLAGS=-D_GNU_SOURCE` not `-DANDROID`. Drop the bionic-only patches
-(`libxfont2/01-bionic-open-max`, `xorgproto/01-xos_r-android-passwd`,
-the FIONREAD-inline form of the libx11 patch) and replace them with
-a smaller libx11 patch that pulls `<sys/ioctl.h>` out from under
-`#ifdef XTHREADS` so the include fires regardless of libc.
-
-### Glibc sysroot in the APK
-
-Bundle the cross toolchain's loader + libc alongside the binaries:
-
-- `lib/glibc/ld-linux-aarch64.so.1`
-- `lib/glibc/libc.so.6`
-- `lib/glibc/libstdc++.so.6`
-- `lib/glibc/libgcc_s.so.1`
-- `lib/glibc/libpthread.so.0`, `libdl.so.2`, `libm.so.6`,
-  `libresolv.so.2`, `librt.so.1`
-
-Strip aggressively — `libstdc++.so.6` is ~20 MB unstripped. Total
-glibc sysroot weight after `--strip-unneeded` was ~11 MB on top of
-the otherwise-bionic-sized X11 dep tree.
-
-### patchelf the binaries
-
-The compositor exec's `Xwayland` directly — no chroot crossing, no
-ld.so.conf tweaking. So set the ELF interpreter and rpath at build
-time:
-
-- `PT_INTERP` → `<install>/lib/glibc/ld-linux-aarch64.so.1`
-- `DT_RUNPATH` → `<install>/lib:<install>/lib/glibc:<libhybris>/lib`
-
-Apply the same to `bin/xkbcomp` (which Xwayland exec's at startup to
-build its keymap) and to every `lib/*.so` that has a baked-in
-RUNPATH from libtool/meson.
-
-### Seccomp binary patches: the actual blocker
-
-When the V4 toolchain swap first landed, `Xwayland` spawned by the
-compositor (i.e. inheriting the Android app seccomp filter) died
-within ~1 ms with `signal: 31 (SIGSYS)`.
-
-How chroot and proot avoid this:
-
-- The **chroot** path runs everything via Magisk `su`. Magisk's su
-  daemon forks fresh from its own non-app context, so su's children
-  never inherit the app filter. Pure escape hatch.
-- **proot** runs as the app uid with the app filter intact, but
-  attaches as a ptrace tracer to every tracee. Android's
-  `untrusted_app` filter uses `SECCOMP_RET_TRAP` for the deprecated
-  syscalls glibc still emits — `RET_TRAP` raises a *catchable*
-  SIGSYS. Termux's proot fork ships a SIGSYS handler that, on each
-  trap, reads the tracee's registers, rewrites the syscall number
-  to its `*at`-equivalent, and resumes. See `notes/proot.md`.
-
-The compositor's `Command::new("Xwayland")` is neither — it inherits
-the app filter and runs glibc, no su, no ptrace tracer. So the trap
-fires in glibc's early init and there's no handler to catch it,
-and the child dies.
-
-**Diagnosis.** `strace -f` couldn't catch the offender (the child
-dies before any syscall can be intercepted; status 0x1f = WIFSIGNALED
-SIGSYS). Bisection via raw-asm single-syscall test binaries
-identified four offenders that glibc 2.43 emits during early init /
-first thread setup / first X client accept, and that aren't in the
-app-zygote BPF allowlist:
-
-| syscall | nr | when |
-| --- | --- | --- |
-| `set_robust_list` | 99 | every `__libc_start_main` and `_Fork` |
-| `rseq` | 293 | every `__libc_start_main` (and the dynamic loader) |
-| `clone3` | 435 | first `pthread_create` |
-| `accept` | 202 | every accept of an X11 client connection |
-
-bionic doesn't issue any of those on the main thread, so the filter
-never had to whitelist them.
-
-**Fix.** Binary-patch the cross-toolchain's `libc.so.6` and
-`ld-linux-aarch64.so.1` at build time, in `stage_glibc_sysroot`.
-Driver was `client/build-xwayland-patch-glibc-seccomp.py` (deleted
-along with V4 — re-derive from this section if needed).
-
-| Patch | Replacement | Why |
-| --- | --- | --- |
-| `set_robust_list` `svc #0` (×2 in libc, ×1 in ld) | `mov x0, #0` | glibc ignores the return value; robust futexes work fine without registration as long as nothing tries to recover from a thread crashing while holding one (we don't). |
-| `rseq` `svc #0` (×1 in libc, ×1 in ld) | `mov x0, #-ENOSYS` | engages glibc's "kernel doesn't support rseq" fallback path; restartable sequences are an optimisation, not a requirement. |
-| `clone3` `svc #0` (×1 in libc) | `mov x0, #-ENOSYS` | glibc falls back to legacy `clone` for thread creation when clone3 returns ENOSYS. |
-| `accept` entry: `mov x6, #0xca` | `mov x6, #0xf2` | retargets glibc's `accept()` libc wrapper at syscall 242 (`accept4`) instead of 202. The wrappers' arg layouts only differ by a `flags=0` that the wrapper already loads into x3. |
-
-That's 7 four-byte patches across two ELFs. The patcher disassembles
-both files via `aarch64-linux-gnu-objdump`, locates the three svc
-sites by their preceding `mov x8, #imm`, locates the accept-entry
-patch via the `--disassemble=accept` symbol view, and rewrites in
-place. Re-running on a fresh extract is safe — assert expected bytes
-before writing.
-
-### Approaches considered and rejected for the seccomp problem
-
-- **LD_PRELOAD shim.** Tried `accept` → `accept4` as an LD_PRELOAD
-  shim first; it broke because Xwayland Popens the system shell
-  (bionic) which inherited LD_LIBRARY_PATH/LD_PRELOAD and tried
-  to load our glibc lib and the shim into the bionic linker, which
-  errored on the version-script symbols. Binary-patching libc keeps
-  the env clean for child processes.
-- **Rebuild glibc.** Considered a glibc fork that strips the
-  offending calls at the source level. The binary patch is two
-  orders of magnitude smaller.
-- **proot's approach (SIGSYS-handler in a tracer).** Fully general,
-  handles every future deprecated syscall automatically. But
-  requires Xwayland to be a ptrace tracee of a tawc-owned tracer
-  process — extra moving part, extra performance cost (every syscall
-  stops the tracee at signal-stop), and we'd need to bring the
-  tracer up before exec. The four-instruction patch handled the
-  actual offenders Xwayland 24.1 issued.
-- **Pre-init SIGSYS handler in DT_NEEDED library.** Attempted (early
-  on) — DT_NEEDED'd a tiny shim that runs in DT_INIT, installs a
-  SIGSYS handler with raw `rt_sigaction`, and modifies
-  `ucontext->uc_mcontext.regs[0] / .pc` to fake a return. Two
-  reasons it lost out:
-
-  * ld-linux runs *before* any DT_INIT processes, so its own startup
-    syscalls (`set_robust_list`, `rseq`) still have to be statically
-    patched.
-  * Once ld-linux's two syscalls are patched into "lie to glibc
-    about kernel support", glibc and the kernel disagree on whether
-    those features are registered. For a `printf("hello"); exit;`
-    binary the disagreement is invisible. For xkbcomp's keymap
-    compile pass, glibc segfaults somewhere downstream of that
-    state mismatch (and not via SIGSYS, so the handler doesn't
-    even run).
-
-  Patching `libc.so.6` directly with the same NOPs avoids the
-  ld.so-vs-libc state divergence: libc never thinks the syscall
-  happened.
-
-The list of svcs to patch is empirical — if a future Xwayland code
-path SIGSYSes on some other syscall, the fix is to add it to the
-patcher script alongside the existing four.
+The parked glibc-built Xwayland approach lives in [xwayland-glibc-alternative.md](../plans/xwayland-glibc-alternative.md).
 
 ## Alternatives considered and rejected
 

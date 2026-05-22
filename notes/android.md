@@ -122,4 +122,4 @@ the compositor or install packages.
 
 Audio forwarding from the rootfs to Android is not implemented yet. The current
 plan is a PipeWire-first rootfs stack bridged through app-owned endpoints under
-`/usr/share/tawc/`; see [audio.md](audio.md).
+`/usr/share/tawc/`; see [audio.md](../plans/audio.md).

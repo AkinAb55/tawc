@@ -3,7 +3,8 @@
 Status: base path implemented. Rust mirrors xdg title/app_id and XWayland
 title/class to Kotlin, resolves matching `.desktop` PNG icons from installed
 rootfses, and Kotlin applies them through `Activity.setTaskDescription`.
-Launch hints and an in-app switcher remain future work.
+Launch hints and an in-app switcher are tracked in
+[`task-icons-window-switcher.md`](../plans/task-icons-window-switcher.md).
 
 ## Goal
 
@@ -11,8 +12,7 @@ Make each Linux toplevel feel like a native Android task:
 
 - the recents card label follows the Wayland title/app metadata;
 - the recents card icon uses the app icon from inside the rootfs when possible;
-- Kotlin keeps a live index of open windows so a future in-app window switcher
-  can be built without re-discovering compositor state.
+- Kotlin receives Android-facing metadata updates for each Activity.
 
 This builds on the existing multi-Activity model: each Wayland toplevel already
 maps to one `CompositorActivity` task. Rust remains the source of truth for
@@ -40,9 +40,8 @@ Preferred flow:
 Wayland / Xwayland metadata
   -> Rust host/toplevel policy
   -> reverse-JNI metadata update
-  -> Kotlin WindowRegistry
   -> CompositorActivity.setTaskDescription(...)
-  -> future WindowSwitcher UI
+  -> Android recents card
 ```
 
 Rust should send updates whenever any of these change:
@@ -70,12 +69,8 @@ First-pass matching:
 - match Xwayland `WM_CLASS` / class against desktop ids where available;
 - fall back to title-only metadata and TAWC's default icon.
 
-Later improvement:
-
-- when launching from `LauncherActivity`, register a short-lived launch hint
-  containing the selected desktop-entry id/name/icon;
-- assign that hint to the first toplevel created by the launched process when
-  app_id/class matching is weak.
+Launch hints for weak app_id/class matching are future work; see
+[`task-icons-window-switcher.md`](../plans/task-icons-window-switcher.md).
 
 SVG-only icons can stay out of scope for this feature. The launcher already
 returns only PNG paths because Android `BitmapFactory` cannot decode SVG/XPM
@@ -126,45 +121,10 @@ private fun postForActivity(activityId: String, op: (CompositorActivity) -> Unit
 `finishActivity`, `setActivityFullscreen`, and task-description updates can all
 use this lookup pattern.
 
-## Kotlin Window Registry
-
-Add a small Kotlin-side registry owned near `CompositorService` / `NativeBridge`.
-It is a mirror, not authority.
-
-Suggested data:
-
-```kotlin
-data class OpenWindow(
-    val activityId: String,
-    val title: String,
-    val appId: String,
-    val desktopId: String,
-    val iconPath: String,
-    val focused: Boolean,
-    val fullscreen: Boolean,
-    val lastFocusedAtMillis: Long,
-)
-```
-
-Expose it as a `StateFlow<List<OpenWindow>>` or equivalent observable. The
-future window switcher can render this directly, including decoded/cached icons,
-without asking Rust for a fresh snapshot.
-
-Lifecycle:
-
-- `spawnActivity` or first metadata update creates/updates a record;
-- metadata updates merge into the record;
-- focus updates mark the focused window and update `lastFocusedAtMillis`;
-- `finishActivity` / `nativeOnActivityDestroyed` removes the record;
-- if Kotlin misses an Activity instance but still has metadata, keep the record
-  only if Rust still reports the host as alive.
-
 ## Open Questions
 
 - Whether task-description update should take `iconPath` and decode on Kotlin,
   or take pre-scaled PNG/bitmap bytes from Rust. Prefer `iconPath` first because
   Kotlin already decodes launcher icons from paths.
-- Whether the registry should live in `NativeBridge` or `CompositorService`.
-  Prefer service-owned state if the first consumer is a switcher Activity.
 - How much dedupe belongs in Rust. Rust should avoid spamming unchanged metadata,
   but Kotlin should still tolerate repeated identical updates.

@@ -1,6 +1,6 @@
 # Notes Index
 
-Start here when looking for durable project context. `AGENTS.md` keeps only always-needed operating rules; detailed design/build/test information belongs in these notes.
+Start here when looking for durable project context. `AGENTS.md` keeps only always-needed operating rules; detailed design/build/test information belongs in these notes. Future-work plans live in [`../plans/`](../plans/).
 
 ## Build, Install, Test
 
@@ -13,15 +13,13 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 ## Runtime Architecture
 
 - [architecture.md](architecture.md) - compositor module layout and Smithay integration.
-- [smithay-desktop-refactor.md](smithay-desktop-refactor.md) - speculative plan for adopting more Smithay desktop/window abstractions.
 - [android.md](android.md) - Android platform integration, sockets, SELinux, app-private state.
 - [exec-broker.md](exec-broker.md) - debug broker protocol, host helper, action model, security.
 - [rendering.md](rendering.md) - window management, coordinates, SHM/AHB rendering behavior.
 - [rootfs-sessions.md](rootfs-sessions.md) - session invariant for rootfs entry paths.
-- [audio.md](audio.md) - planned PipeWire/PulseAudio bridge to Android audio.
 - [log-screen.md](log-screen.md) - shared operation/log-screen UI abstraction.
 - [launcher.md](launcher.md) - distro launcher and `.desktop` scanner.
-- [multi-activity.md](multi-activity.md) - planned one-Android-task-per-window design.
+- [multi-activity.md](multi-activity.md) - one-Android-task-per-window design and implementation notes.
 - [task-icons-window-index.md](task-icons-window-index.md) - task recents icons/labels and Kotlin open-window metadata mirror.
 
 ## Graphics Backends
@@ -30,7 +28,6 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 - [wsi-layer.md](wsi-layer.md) - libhybris Wayland EGL/Vulkan WSI details.
 - [gfxstream-bridge.md](gfxstream-bridge.md) - experimental gfxstream/kumquat backend; Vulkan via AHB works on physical hardware, but it is partial and not production-ready.
 - [libhybris-zink.md](libhybris-zink.md) - implemented libhybris+Zink backend; blocked on currently available Vulkan 1.1 hardware.
-- [desktop-gl-dispatch.md](desktop-gl-dispatch.md) - older dispatcher design; likely superseded by libhybris-zink.
 - [xwayland.md](xwayland.md) - bionic-built Xwayland, TAWC-DRI, and X11 client support.
 
 ## Input And Apps
@@ -43,7 +40,6 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 ## Rootfs Methods And Distros
 
 - [tawcroot.md](tawcroot.md) - systrap-based rootless runtime architecture and implementation notes.
-- [tawcroot-readonly-binds.md](tawcroot-readonly-binds.md) - design notes for future readonly bind support.
 - [proot.md](proot.md) - debug-only Termux/proot install method.
 - [chroot.md](chroot.md) - debug-only root `chroot(2)` install method.
 - [distro-abstraction.md](distro-abstraction.md) - distro definition/refactor notes.
@@ -54,3 +50,4 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 - Keep notes factual and current. Prefer correcting stale prose over adding warnings around it.
 - Move long historical logs out of current-state sections when they start obscuring the present design.
 - Link issues only for active unresolved work. When an issue is solved, delete it and move still-useful context here.
+- Keep future-work plans in [`../plans/`](../plans/) instead of mixing them into current-state notes.

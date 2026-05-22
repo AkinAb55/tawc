@@ -32,6 +32,11 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - Create/update issues for nontrivial problems discovered during other work.
 - Delete confirmed-solved issues; move still-useful context into notes first.
 
+## Plans
+- Future plans live in `plans/`. Do not execute them unless asked.
+- Do not write new plans unless asked.
+- Like issues, delete them and integrate their contents into your notes when they are complete.
+
 ## Device Safety
 - The physical phone is precious: do not reboot it unless explicitly asked.
 - Emulator management is fair game, but always use `scripts/emulator.sh start|stop [rooted|rootless]`; never launch qemu/emulator directly.

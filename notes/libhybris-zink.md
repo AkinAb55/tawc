@@ -26,7 +26,8 @@ The existing `Hybris` backend stays untouched as the GLES fast path.
 `Hybris` is GLES-only; desktop-GL apps (kitty, alacritty, supertuxkart,
 anything with `#version 140` shaders) fail to render. The `gl-shims/`
 trick papers over linkage but can't make a GLES driver run desktop-GL
-shaders. `desktop-gl-dispatch.md` proposed a per-context dispatcher in
+shaders. [`desktop-gl-dispatch.md`](../plans/desktop-gl-dispatch.md)
+proposed a per-context dispatcher in
 libhybris's libEGL — ~1k LOC of new C with a long bug tail.
 
 Zink translates desktop GL *and* GLES to Vulkan inside Mesa. If we
@@ -226,7 +227,7 @@ app landing as AHB via libhybris's Vulkan WSI).
   it from `LD_LIBRARY_PATH`. We delete `gl-shims/` outright only if
   `LIBHYBRIS_ZINK` replaces `LIBHYBRIS` as the default.
 
-## Relationship to `desktop-gl-dispatch.md`
+## Relationship to the desktop GL dispatcher plan
 
 The dispatcher plan exists to add desktop-GL **without** regressing
 GLES, by routing per-context. This plan accepts a small GLES
@@ -235,7 +236,7 @@ regression in exchange for ~1k LOC of complexity going away.
 The question is empirical: how much does Zink-on-libhybris-vulkan
 actually cost on GLES workloads? If it's small (<5% on realistic apps),
 `LIBHYBRIS_ZINK` replaces both the dispatcher plan and the `gl-shims/`
-hack outright, and `desktop-gl-dispatch.md` dies. If GLES regression is
-unacceptable, the dispatcher plan comes back. We can't measure this
+hack outright, and the [desktop GL dispatcher plan](../plans/desktop-gl-dispatch.md)
+dies. If GLES regression is unacceptable, the dispatcher plan comes back. We can't measure this
 yet — no device exposes a Zink-capable Vulkan to libhybris — but the
 plumbing is in place for the day one does.
