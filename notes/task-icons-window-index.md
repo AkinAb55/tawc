@@ -1,10 +1,9 @@
 # Task Icons And Window Index
 
-Status: base path implemented. Rust mirrors xdg title/app_id and XWayland
-title/class to Kotlin, resolves matching `.desktop` PNG icons from installed
-rootfses, and Kotlin applies them through `Activity.setTaskDescription`.
-Launch hints and an in-app switcher are tracked in
-[`task-icons-window-switcher.md`](../plans/task-icons-window-switcher.md).
+Status: implemented. Rust mirrors xdg title/app_id and XWayland title/class to
+Kotlin, resolves matching `.desktop` PNG icons from installed rootfses, Kotlin
+applies them through `Activity.setTaskDescription`, and `CompositorService`
+maintains an observable open-window metadata mirror.
 
 ## Goal
 
@@ -69,8 +68,8 @@ First-pass matching:
 - match Xwayland `WM_CLASS` / class against desktop ids where available;
 - fall back to title-only metadata and TAWC's default icon.
 
-Launch hints for weak app_id/class matching are future work; see
-[`task-icons-window-switcher.md`](../plans/task-icons-window-switcher.md).
+Weak app_id/class matching falls back to title-only metadata and TAWC's default
+icon.
 
 SVG-only icons can stay out of scope for this feature. The launcher already
 returns only PNG paths because Android `BitmapFactory` cannot decode SVG/XPM
