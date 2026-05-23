@@ -81,12 +81,32 @@ const WAYLAND_TAP_COORDS: InputTapCoords = InputTapCoords {
 };
 
 const WAYLAND_DEBUG_ENV: &str = "";
+const ANDROID_TYPE_CLASS_TEXT: i32 = 0x0000_0001;
+const ANDROID_TYPE_TEXT_VARIATION_URI: i32 = 0x0000_0010;
 
 fn inject_tap(x: f32, y: f32, label: &str) {
     assert_broker_ok(
         adb::inject_touch_logical(x, y).unwrap_or_else(|e| panic!("{label}: {e}")),
         label,
     );
+}
+
+fn wait_for_editor_input_type(expected: i32, label: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    let mut last = None;
+    loop {
+        if let Ok((input_type, _ime_options)) = adb::focused_editor_info() {
+            last = Some(input_type);
+            if input_type == expected {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: editor inputType never reached 0x{expected:x}; last={last:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 // --- Scenes -----------------------------------------------------------------
@@ -593,6 +613,68 @@ fn test_focus_leave_clears_pending_preedit_without_committing() {
     text_app
         .stop()
         .expect("text debug app crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+#[test]
+fn test_keyboard_retargets_when_switching_back_to_previous_activity() {
+    tawc_integration::helpers::test_init();
+    let mut first = start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
+    let first_activity_id = adb::focused_activity_id().expect("focused activity id for first app");
+    wait_for_editor_input_type(ANDROID_TYPE_CLASS_TEXT, "first normal editor info");
+
+    adb::ic_commit_text("first").expect("commit into first activity");
+    first
+        .wait_for_text_cursor("first", TIMEOUT)
+        .expect("first app text");
+
+    let first_leave_count = first.count_with_tag("TEXT_INPUT_LEAVE");
+    let mut second = start_wayland_debug_text_input(
+        INPUT_BACKEND,
+        "TAWC_DEBUG_CONTENT_PURPOSE=url",
+    );
+    first
+        .wait_for_tag_count("TEXT_INPUT_LEAVE", first_leave_count + 1, TIMEOUT)
+        .expect("first activity lost text-input focus");
+    wait_for_editor_input_type(
+        ANDROID_TYPE_CLASS_TEXT | ANDROID_TYPE_TEXT_VARIATION_URI,
+        "second URL editor info",
+    );
+
+    adb::ic_commit_text("second").expect("commit into second activity");
+    second
+        .wait_for_text_cursor("second", TIMEOUT)
+        .expect("second app text");
+    assert_eq!(
+        first.last_text().as_deref(),
+        Some("first"),
+        "focused second activity should not receive input through first app"
+    );
+
+    assert_broker_ok(
+        adb::focus_activity(&first_activity_id).expect("focus first activity"),
+        "focus first activity",
+    );
+    adb::wait_for_active_input_connection(TIMEOUT)
+        .expect("first activity did not regain an active InputConnection");
+    wait_for_editor_input_type(ANDROID_TYPE_CLASS_TEXT, "first restored editor info");
+
+    adb::ic_commit_text(" back").expect("commit after returning to first activity");
+    first
+        .wait_for_text_cursor("first back", TIMEOUT)
+        .expect("first app received input after switching back");
+    assert_eq!(
+        second.last_text().as_deref(),
+        Some("second"),
+        "refocused first activity should not send input to second app"
+    );
+
+    second
+        .stop()
+        .expect("second debug app crashed or failed to stop cleanly");
+    first
+        .stop()
+        .expect("first debug app crashed or failed to stop cleanly");
     assert_compositor_clean();
 }
 

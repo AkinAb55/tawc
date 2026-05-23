@@ -279,6 +279,41 @@ pub fn wait_for_active_input_connection(timeout: Duration) -> Result<(), String>
     }
 }
 
+pub fn focused_activity_id() -> io::Result<String> {
+    let output = broker_action("focused-activity-id", &[])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let id = stdout.trim();
+    if id.is_empty() {
+        Err(io::Error::other("focused-activity-id returned empty stdout"))
+    } else {
+        Ok(id.to_string())
+    }
+}
+
+pub fn focus_activity(activity_id: &str) -> io::Result<Output> {
+    broker_action("focus-activity", &[("activityId", activity_id)])
+}
+
+pub fn focused_editor_info() -> io::Result<(i32, i32)> {
+    let output = broker_action("focused-editor-info", &[])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut input_type = None;
+    let mut ime_options = None;
+    for part in stdout.split_whitespace() {
+        if let Some((key, value)) = part.split_once('=') {
+            match key {
+                "inputType" => input_type = value.parse().ok(),
+                "imeOptions" => ime_options = value.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    match (input_type, ime_options) {
+        (Some(input_type), Some(ime_options)) => Ok((input_type, ime_options)),
+        _ => Err(io::Error::other(format!("parse focused-editor-info: {stdout:?}"))),
+    }
+}
+
 // ---- IC drivers ----------------------------------------------------------
 //
 // These mirror the [android.view.inputmethod.InputConnection] surface that

@@ -144,10 +144,24 @@ With `fullEditor=true`, `mFallbackMode=false`, so `sendCurrentText()` is a no-op
 
 ### Showing/hiding the keyboard
 
-- When any text input instance is enabled: `InputMethodManager.showSoftInput()`.
-- When no instances are enabled: `InputMethodManager.hideSoftInputFromWindow()`.
-- Keyboard visibility is tracked to avoid redundant calls and handle rapid disable+enable cycles (e.g., cursor movement within a text field may trigger disable+enable in quick succession).
-- `NativeBridge.pendingKeyboardShown` is sticky: it records the compositor's most recent show/hide request and is replayed when `inputView` registers. Required because clients that map + enable text-input faster than Android brings the Activity up (lxterminal/VTE was the canonical case) would otherwise see `onShowKeyboard` no-op against a null `inputView` and the IMM would never call `onCreateInputConnection`, leaving no bound `TawcInputConnection`.
+- When the focused text input instance is enabled and has a host Activity:
+  `onShowKeyboard(activityId)` → matching Activity's
+  `InputMethodManager.showSoftInput()`.
+- When that target disappears or disables text input:
+  `onHideKeyboard(activityId)` → matching Activity's
+  `InputMethodManager.hideSoftInputFromWindow()`.
+- Keyboard visibility is tracked as `keyboard_target: Option<ActivityId>`,
+  not as a process-global boolean. Retargeting from one Android task to
+  another emits `hide(old)` + `show(new)` even if text input remains
+  logically enabled.
+- `NativeBridge.pendingKeyboardShownByActivity` is sticky by Activity:
+  it records show/hide requests that arrive before that exact
+  `CompositorActivity` registers with `CompositorService`, then replays
+  only that Activity's pending show on registration and again when the
+  Activity gains window focus. Required because clients that map + enable
+  text-input faster than Android brings the Activity up (lxterminal/VTE
+  was the canonical case) would otherwise see the show request no-op and
+  the IMM would never call `onCreateInputConnection`.
 
 ### Cursor change notification
 
@@ -212,10 +226,10 @@ Compositor processes commit:
 
 | Trigger | Android action |
 |---|---|
-| Any instance enabled (via sync_keyboard_visibility) | `InputMethodManager.showSoftInput()` |
-| No instances enabled | `InputMethodManager.hideSoftInputFromWindow()` |
+| Focused enabled instance has activity target (via `sync_keyboard_target`) | `onShowKeyboard(activityId)` → matching Activity's `InputMethodManager.showSoftInput()` |
+| Focused target disables/disappears | `onHideKeyboard(activityId)` → matching Activity's `InputMethodManager.hideSoftInputFromWindow()` |
 | Focused client commits a `set_surrounding_text` (any cause) | `onUpdateEditableText(activityId, text, selStart, selEnd)` → matching Activity's `TawcInputConnection.updateFromCompositor(...)` — replaces Editable contents and selection AND pokes `IMM.updateSelection` so the IME drops any composing region |
-| Resolved EditorInfo for the focused instance changes | `onContentTypeChanged(inputType, imeFlags)` → `restartInput`, so the next `onCreateInputConnection` carries the new fields |
+| Resolved EditorInfo for the focused instance changes | `onContentTypeChanged(activityId, inputType, imeFlags)` → matching Activity `restartInput`, so the next `onCreateInputConnection` carries the new fields |
 
 ### Input Focus
 
@@ -277,13 +291,18 @@ Three units are in play and they don't all agree:
 
 For surrounding-text round-trips, `byte_offset_to_utf16_count` converts the client's UTF-8 byte cursor/anchor into the UTF-16 code-unit counts Android wants. For the combined commit-with-delete path, `utf16_units_to_bytes` walks the stored surrounding text counting UTF-16 units (`char::len_utf16`) and accumulates UTF-8 bytes (`char::len_utf8`), falling back to 1:1 mapping when no surrounding text is available. For standalone deletion, `unitsToKeyPlan` (Kotlin) walks the Editable mirror at `wireCursor` to convert UTF-16 unit counts into Backspace key counts — one keypress per codepoint, so a surrogate-pair emoji becomes one Backspace, not two.
 
-### Keyboard visibility deferred
+### Keyboard target deferred
 
-`sync_keyboard_visibility()` checks the final enabled state of all instances and only shows/hides the keyboard when the state actually changes. This prevents rapid disable+enable cycles (common during cursor movement within a text field) from causing keyboard flicker or failed re-show.
+`sync_keyboard_target()` derives the final target from the focused enabled
+text-input instance and its `activityId`, then only calls Android when the
+target changes. This prevents rapid disable+enable cycles (common during
+cursor movement within a text field) from causing keyboard flicker or
+failed re-show, while still retargeting correctly when focus moves between
+Android tasks.
 
 ### Content type → EditorInfo
 
-`set_content_type(hint, purpose)` is double-buffered like the rest of the per-cycle state: pending values are stored in `InstanceState` and applied on `commit`. After commit, if the committing instance is on the focused client and the resolved Android EditorInfo differs from what we last pushed, the compositor calls reverse-JNI `onContentTypeChanged(inputType, imeFlags)`. `NativeBridge` caches the values and triggers `InputMethodManager.restartInput`, which makes `TawcSurfaceView.onCreateInputConnection` rebuild its `EditorInfo` with the new fields. The same push runs on `enter` so a focus move to a client that doesn't re-enable still gets the right keyboard.
+`set_content_type(hint, purpose)` is double-buffered like the rest of the per-cycle state: pending values are stored in `InstanceState` and applied on `commit`. After commit, if the committing instance is on the focused client and the resolved Android EditorInfo differs from what we last pushed for that Activity, the compositor calls reverse-JNI `onContentTypeChanged(activityId, inputType, imeFlags)`. `NativeBridge` caches the values by Activity and triggers `InputMethodManager.restartInput` on the matching Activity, which makes `TawcSurfaceView.onCreateInputConnection` rebuild its `EditorInfo` with the new fields.
 
 Translation lives in `compositor/src/text_input.rs::wayland_content_to_android_input_type`. Highlights:
 

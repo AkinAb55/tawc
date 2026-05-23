@@ -6,7 +6,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
-import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.core.net.toUri
 import java.lang.ref.WeakReference
@@ -15,36 +14,10 @@ object NativeBridge {
     private const val TAG = "tawc"
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Weak ref to the view for keyboard show/hide. Set by CompositorActivity.
-     *  Phase 6 will replace this with a per-Activity lookup via CompositorService. */
-    private var inputViewRef: WeakReference<View>? = null
-
-    /** Whether the compositor most recently asked for the keyboard to be
-     *  shown (vs. hidden). Sticky so that an activity which registers its
-     *  view *after* the Wayland client enabled text-input — e.g. when the
-     *  client maps + enables text-input faster than Android brings up the
-     *  Activity — still gets the keyboard request replayed once the view
-     *  is available. Without this the request silently no-ops and the
-     *  view never gains focus, so IMM never calls `onCreateInputConnection`
-     *  and no `TawcInputConnection` is ever bound. */
-    @Volatile private var pendingKeyboardShown: Boolean = false
-
-    var inputView: View?
-        get() = inputViewRef?.get()
-        set(value) {
-            inputViewRef = value?.let { WeakReference(it) }
-            // Replay the last keyboard-show on register so a late-arriving
-            // Activity catches up with the compositor's current state.
-            if (value != null && pendingKeyboardShown) {
-                mainHandler.post {
-                    val v = inputView ?: return@post
-                    if (pendingKeyboardShown) {
-                        v.requestFocus()
-                        imeOutput.showSoftInput(v)
-                    }
-                }
-            }
-        }
+    /** Sticky keyboard visibility by Activity. A show can arrive before the
+     *  corresponding CompositorActivity has registered with the Service; the
+     *  Service replays only that Activity's pending show on registration. */
+    private val pendingKeyboardShownByActivity = mutableMapOf<String, Boolean>()
 
     /** The currently active TawcInputConnection. Set by TawcInputConnection's
      *  init, cleared by closeConnection. The Wayland-to-Android Editable sync
@@ -64,18 +37,13 @@ object NativeBridge {
      *  to `updateSelection`. See [ImeOutput] kdoc. */
     @Volatile var imeOutput: ImeOutput = RealImeOutput
 
-    /** `(EditorInfo.inputType, extraImeOptionsFlags)` for the focused
+    /** `(EditorInfo.inputType, extraImeOptionsFlags)` by Activity for the focused
      *  Wayland text-input field. Driven by the Wayland client via
      *  text-input-v3's `set_content_type`, pushed up by
      *  [onContentTypeChanged], read by `onCreateInputConnection` on the
-     *  next IC build. Stored as a single `@Volatile` reference so concurrent
-     *  reads always see a consistent pair — `restartInput` makes the typical
-     *  read happen-after the write, but other paths (system focus changes,
-     *  configuration changes) also rebuild the IC and don't share that
-     *  ordering. */
-    @Volatile var imeEditorInfo: Pair<Int, Int> =
-        EditorInfo.TYPE_CLASS_TEXT to 0
-        private set
+     *  next IC build. Guarded by a small lock because reverse-JNI writes and
+     *  Activity-side IC creation can happen on different threads. */
+    private val imeEditorInfoByActivity = mutableMapOf<String, Pair<Int, Int>>()
 
     /** Application context, captured by CompositorService.onCreate so the
      *  reverse-JNI `spawnActivity` callback can `startActivity(...)` even
@@ -97,6 +65,12 @@ object NativeBridge {
         ClipboardBridge.detach()
         appContext = null
         serviceRef = null
+        synchronized(pendingKeyboardShownByActivity) {
+            pendingKeyboardShownByActivity.clear()
+        }
+        synchronized(imeEditorInfoByActivity) {
+            imeEditorInfoByActivity.clear()
+        }
     }
 
     /**
@@ -111,6 +85,29 @@ object NativeBridge {
         synchronized(pendingFinishActivities) {
             pendingFinishActivities.remove(activityId)
         }
+
+    fun imeEditorInfoForActivity(activityId: String): Pair<Int, Int> =
+        synchronized(imeEditorInfoByActivity) {
+            imeEditorInfoByActivity[activityId] ?: (EditorInfo.TYPE_CLASS_TEXT to 0)
+        }
+
+    fun replayPendingKeyboardForActivity(activityId: String, activity: CompositorActivity) {
+        val shouldShow = synchronized(pendingKeyboardShownByActivity) {
+            pendingKeyboardShownByActivity[activityId] == true
+        }
+        if (shouldShow) {
+            activity.showKeyboardFromCompositor()
+        }
+    }
+
+    fun clearActivityImeState(activityId: String) {
+        synchronized(pendingKeyboardShownByActivity) {
+            pendingKeyboardShownByActivity.remove(activityId)
+        }
+        synchronized(imeEditorInfoByActivity) {
+            imeEditorInfoByActivity.remove(activityId)
+        }
+    }
 
     init {
         System.loadLibrary("compositor")
@@ -250,24 +247,29 @@ object NativeBridge {
 
     /** Called from native when a Wayland client enables text input. */
     @JvmStatic
-    fun onShowKeyboard() {
-        Log.d(TAG, "onShowKeyboard (from compositor)")
-        pendingKeyboardShown = true
+    fun onShowKeyboard(activityId: String) {
+        Log.d(TAG, "onShowKeyboard (from compositor): $activityId")
+        synchronized(pendingKeyboardShownByActivity) {
+            pendingKeyboardShownByActivity[activityId] = true
+        }
         mainHandler.post {
-            val view = inputView ?: return@post
-            view.requestFocus()
-            imeOutput.showSoftInput(view)
+            serviceRef?.get()
+                ?.getActivity(activityId)
+                ?.showKeyboardFromCompositor()
         }
     }
 
     /** Called from native when a Wayland client disables text input. */
     @JvmStatic
-    fun onHideKeyboard() {
-        Log.d(TAG, "onHideKeyboard (from compositor)")
-        pendingKeyboardShown = false
+    fun onHideKeyboard(activityId: String) {
+        Log.d(TAG, "onHideKeyboard (from compositor): $activityId")
+        synchronized(pendingKeyboardShownByActivity) {
+            pendingKeyboardShownByActivity[activityId] = false
+        }
         mainHandler.post {
-            val view = inputView ?: return@post
-            imeOutput.hideSoftInput(view)
+            serviceRef?.get()
+                ?.getActivity(activityId)
+                ?.hideKeyboardFromCompositor()
         }
     }
 
@@ -386,12 +388,15 @@ object NativeBridge {
      * here.
      */
     @JvmStatic
-    fun onContentTypeChanged(inputType: Int, imeFlags: Int) {
-        Log.d(TAG, "onContentTypeChanged inputType=0x${Integer.toHexString(inputType)} imeFlags=0x${Integer.toHexString(imeFlags)}")
-        imeEditorInfo = inputType to imeFlags
+    fun onContentTypeChanged(activityId: String, inputType: Int, imeFlags: Int) {
+        Log.d(TAG, "onContentTypeChanged $activityId inputType=0x${Integer.toHexString(inputType)} imeFlags=0x${Integer.toHexString(imeFlags)}")
+        synchronized(imeEditorInfoByActivity) {
+            imeEditorInfoByActivity[activityId] = inputType to imeFlags
+        }
         mainHandler.post {
-            val view = inputView ?: return@post
-            imeOutput.restartInput(view)
+            serviceRef?.get()
+                ?.getActivity(activityId)
+                ?.restartInputFromCompositor()
         }
     }
 

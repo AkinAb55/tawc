@@ -110,7 +110,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         CompositorService.ensureRunning(this)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        surfaceView = TawcSurfaceView(this)
+        surfaceView = TawcSurfaceView(this, activityId)
         rootView = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(surfaceView, FrameLayout.LayoutParams(
@@ -128,7 +128,6 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.isFocusable = true
         surfaceView.isFocusableInTouchMode = true
         surfaceView.setOnTouchListener { _, event -> dispatchTouchToCompositor(event) }
-        NativeBridge.inputView = surfaceView
         applyCompositorFullscreen(NativeBridge.fullscreenForActivity(activityId))
         registerBackCallback()
 
@@ -142,9 +141,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             if (NativeBridge.activeInputConnection?.targetsView(surfaceView) == true) {
                 NativeBridge.activeInputConnection = null
             }
-            if (NativeBridge.inputView === surfaceView) {
-                NativeBridge.inputView = null
-            }
+            NativeBridge.clearActivityImeState(activityId)
             NativeBridge.nativeOnActivityDestroyed(activityId)
             compositorService?.unregisterActivity(activityId)
             compositorService?.removeWindow(activityId)
@@ -194,6 +191,9 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         if (hasFocus) applyCompositorFullscreen(compositorFullscreen)
         compositorService?.setWindowFocused(activityId, hasFocus)
         NativeBridge.nativeOnActivityFocusChanged(activityId, hasFocus)
+        if (hasFocus) {
+            NativeBridge.replayPendingKeyboardForActivity(activityId, this)
+        }
     }
 
     internal fun focusedInputConnectionForDev(): TawcInputConnection? {
@@ -201,11 +201,30 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         return ic.takeIf { it.targetsView(surfaceView) }
     }
 
+    internal fun activityIdForDev(): String = activityId
+
     internal fun updateEditableTextFromCompositor(text: String, selStart: Int, selEnd: Int) {
         val ic = NativeBridge.activeInputConnection ?: return
         if (ic.targetsView(surfaceView)) {
             ic.updateFromCompositor(text, selStart, selEnd)
         }
+    }
+
+    internal fun showKeyboardFromCompositor() {
+        if (!initialized) return
+        surfaceView.requestFocus()
+        if (!hasWindowFocus()) return
+        NativeBridge.imeOutput.showSoftInput(surfaceView)
+    }
+
+    internal fun hideKeyboardFromCompositor() {
+        if (!initialized) return
+        NativeBridge.imeOutput.hideSoftInput(surfaceView)
+    }
+
+    internal fun restartInputFromCompositor() {
+        if (!initialized) return
+        NativeBridge.imeOutput.restartInput(surfaceView)
     }
 
     fun setFullscreenFromCompositor(fullscreen: Boolean) {
@@ -302,11 +321,14 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
      * Custom SurfaceView that provides our InputConnection to the IME.
      * This makes the view act as a text input target for Gboard.
      */
-    private class TawcSurfaceView(context: Context) : SurfaceView(context) {
+    private class TawcSurfaceView(
+        context: Context,
+        private val activityId: String,
+    ) : SurfaceView(context) {
         override fun onCheckIsTextEditor(): Boolean = true
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-            val (inputType, extraFlags) = NativeBridge.imeEditorInfo
+            val (inputType, extraFlags) = NativeBridge.imeEditorInfoForActivity(activityId)
             outAttrs.inputType = inputType
             outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
                 EditorInfo.IME_ACTION_NONE or extraFlags

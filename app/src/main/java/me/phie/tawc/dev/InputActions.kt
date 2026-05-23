@@ -1,15 +1,18 @@
 package me.phie.tawc.dev
 
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.inputmethod.CompletionInfo
 import android.view.inputmethod.CorrectionInfo
+import androidx.core.net.toUri
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import me.phie.tawc.Settings
 import me.phie.tawc.compositor.ClipboardBridge
+import me.phie.tawc.compositor.CompositorActivity
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.compositor.RecordingImeOutput
 import me.phie.tawc.compositor.TawcInputConnection
@@ -77,6 +80,9 @@ import me.phie.tawc.tasks.ProcessScanner
  * | Action | Calls |
  * |--------|-------|
  * | `input-ready` | succeeds only when the focused Activity has an active IC |
+ * | `focused-editor-info` | returns the last test-created EditorInfo input fields |
+ * | `focused-activity-id` | returns the currently focused compositor Activity id |
+ * | `focus-activity` | brings an existing compositor Activity document task forward |
  * | `test-init` | enter in-memory test settings, enable test input, close current client windows |
  *
  * Observational:
@@ -107,6 +113,9 @@ internal object InputActions {
 
         ActionRegistry.register("query-state", QueryStateAction)
         ActionRegistry.register("input-ready", InputReadyAction)
+        ActionRegistry.register("focused-editor-info", FocusedEditorInfoAction)
+        ActionRegistry.register("focused-activity-id", FocusedActivityIdAction)
+        ActionRegistry.register("focus-activity", FocusActivityAction)
         ActionRegistry.register("clipboard-set-text", ClipboardSetTextAction)
         ActionRegistry.register("clipboard-get-text", ClipboardGetTextAction)
         ActionRegistry.register("clipboard-debug-state", ClipboardDebugStateAction)
@@ -418,6 +427,49 @@ internal object InputActions {
                 ctx.out("ready")
                 true
             }
+        }
+    }
+
+    private object FocusedActivityIdAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            return withFocusedActivity(ctx) {
+                ctx.out(it.activityIdForDev())
+            }
+        }
+    }
+
+    private object FocusedEditorInfoAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val info = (NativeBridge.imeOutput as? RecordingImeOutput)
+                ?.lastEditorInfoForDev()
+                ?: return ctx.fail("focused-editor-info: no test EditorInfo recorded")
+            ctx.out("inputType=${info.first} imeOptions=${info.second}")
+            return 0
+        }
+    }
+
+    private object FocusActivityAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val activityId = args["activityId"]
+                ?: return ctx.fail("focus-activity: --arg activityId=... required")
+            val service = NativeBridge.serviceRefForDev()
+                ?: return ctx.fail("no CompositorService running (cold start the app first)")
+            var ok = false
+            val ran = onMainBlocking {
+                if (service.getActivity(activityId) == null) {
+                    ctx.err("focus-activity: no live Activity for $activityId")
+                    return@onMainBlocking
+                }
+                val intent = Intent(ctx.appContext, CompositorActivity::class.java).apply {
+                    action = Intent.ACTION_VIEW
+                    data = "tawc://activity/$activityId".toUri()
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+                }
+                ctx.appContext.startActivity(intent)
+                ok = true
+            }
+            if (!ran) return ctx.fail("main loop did not run focus-activity within 5s")
+            return if (ok) 0 else 1
         }
     }
 

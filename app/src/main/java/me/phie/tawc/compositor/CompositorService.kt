@@ -204,6 +204,7 @@ class CompositorService : Service() {
         activities[activityId] = WeakReference(activity)
         activity.setFullscreenFromCompositor(NativeBridge.fullscreenForActivity(activityId))
         windowRegistry.get(activityId)?.let { activity.setTaskMetadata(it) }
+        NativeBridge.replayPendingKeyboardForActivity(activityId, activity)
         Log.d(TAG, "Registered activity $activityId (count=${activities.size})")
     }
 

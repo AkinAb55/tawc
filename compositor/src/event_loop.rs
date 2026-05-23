@@ -668,7 +668,11 @@ pub fn run(
         {
             data.active_popup_grab = None;
         }
-        data.text_input_state.cleanup();
+        let focused_text_surface = data.text_input_state.focused_surface.clone();
+        let focused_activity_id = focused_text_surface
+            .as_ref()
+            .and_then(|surface| data.desktop.host_for_surface(surface));
+        data.text_input_state.cleanup(focused_activity_id.as_ref());
 
         // Update keyboard and text input focus only when toplevels changed.
         // Both focuses move together: a dead focused surface would otherwise

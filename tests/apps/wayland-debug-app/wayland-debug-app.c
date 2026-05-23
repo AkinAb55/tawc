@@ -271,6 +271,8 @@ struct app {
     uint32_t text_input_commit_serial;
     int editable;
     int provide_surrounding;
+    uint32_t content_hint;
+    uint32_t content_purpose;
     int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
@@ -328,6 +330,8 @@ struct wayland_mode {
     int use_text_input;
     int editable;
     int provide_surrounding;
+    uint32_t content_hint;
+    uint32_t content_purpose;
     int stale_trailing_newline_cursor;
     int touch_debug;
     int fullscreen;
@@ -1760,8 +1764,7 @@ static void text_input_enter(void *data, struct zwp_text_input_v3 *text_input,
     app->text_input_enabled = 1;
     zwp_text_input_v3_enable(app->text_input);
     zwp_text_input_v3_set_content_type(
-        app->text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE,
-        ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL);
+        app->text_input, app->content_hint, app->content_purpose);
     zwp_text_input_v3_set_cursor_rectangle(app->text_input, (int32_t)TEXT_X,
                                            (int32_t)(TEXT_Y - FONT_SIZE),
                                            2, (int32_t)(FONT_SIZE + 8.0));
@@ -2345,6 +2348,8 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->held_clipboard_fd = -1;
     app->editable = mode->editable;
     app->provide_surrounding = mode->provide_surrounding;
+    app->content_hint = mode->content_hint;
+    app->content_purpose = mode->content_purpose;
     app->stale_trailing_newline_cursor = mode->stale_trailing_newline_cursor;
     app->touch_debug = mode->touch_debug;
     app->fullscreen = mode->fullscreen;
@@ -2541,14 +2546,28 @@ static void teardown_wayland(struct app *app)
 
 /* --- Commands ----------------------------------------------------------- */
 
+static uint32_t text_input_content_purpose_from_env(void)
+{
+    const char *value = getenv("TAWC_DEBUG_CONTENT_PURPOSE");
+    if (!value || !value[0] || strcmp(value, "normal") == 0)
+        return ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL;
+    if (strcmp(value, "url") == 0)
+        return ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_URL;
+    if (strcmp(value, "password") == 0)
+        return ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PASSWORD;
+    fatal("unknown TAWC_DEBUG_CONTENT_PURPOSE=%s", value);
+    return ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL;
+}
+
 static int cmd_text_input(int argc, char **argv)
 {
-    static const struct wayland_mode mode = {
+    struct wayland_mode mode = {
         .title = "tawc wayland text-input debug",
         .app_id = "wayland-debug-app",
         .use_text_input = 1,
         .editable = 1,
         .provide_surrounding = 1,
+        .content_purpose = text_input_content_purpose_from_env(),
     };
 
     (void)argc;

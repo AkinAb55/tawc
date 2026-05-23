@@ -60,8 +60,8 @@ Resolution: introduce `CompositorService` (an Android foreground Service) that:
 - Runs the Rust compositor thread (`nativeStartCompositor()`) on
   `onCreate`. Wayland socket is created here, decoupled from any Activity's
   lifetime.
-- Holds the global JNI reverse-call hooks (replaces `inputViewRef` with a
-  `HashMap<ActivityId, WeakReference<CompositorActivity>>`).
+- Holds the Activity registry used by activity-scoped JNI reverse-call
+  hooks (`HashMap<ActivityId, WeakReference<CompositorActivity>>`).
 - Posts a sticky notification (foreground-service requirement on
   Android 8+).
 - Started by `MainActivity` (or by the first `CompositorActivity` if
@@ -286,7 +286,10 @@ external displays, we move to one wl_output per OutputHost.
   target the focused Activity's view, not a global `inputViewRef`. The
   call signature gains an `activityId`; the Service-side singleton looks
   up the matching `CompositorActivity` (weak ref) and calls
-  `showSoftInput`/`hideSoftInputFromWindow` on its `SurfaceView`.
+  `showSoftInput`/`hideSoftInputFromWindow` on its `SurfaceView`. The Rust
+  side tracks the current keyboard target as `Option<ActivityId>` so moving
+  focus between Android tasks emits a retarget even if text input remains
+  enabled. Kotlin keeps the late-view replay sticky per Activity.
 - text-input-v3 state stays single-instance for now: only one toplevel can
   have IME focus at a time, and that's the foreground host's foreground
   toplevel. Per-host text-input state is a possible future refinement but

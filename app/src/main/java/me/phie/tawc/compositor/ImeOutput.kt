@@ -81,6 +81,7 @@ class RecordingImeOutput : ImeOutput {
         data object ShowSoftInput : Call()
         data object HideSoftInput : Call()
         data object RestartInput : Call()
+        data class BindInputConnection(val inputType: Int, val imeOptions: Int) : Call()
     }
 
     private val _calls = mutableListOf<Call>()
@@ -90,7 +91,11 @@ class RecordingImeOutput : ImeOutput {
 
     private fun bindTestInputConnection(view: View) {
         hiddenInputConnection = testInputConnection ?: hiddenInputConnection
-        testInputConnection = view.onCreateInputConnection(EditorInfo()) as? TawcInputConnection
+        val editorInfo = EditorInfo()
+        testInputConnection = view.onCreateInputConnection(editorInfo) as? TawcInputConnection
+        synchronized(_calls) {
+            _calls += Call.BindInputConnection(editorInfo.inputType, editorInfo.imeOptions)
+        }
     }
 
     internal fun clearTestInputConnection() {
@@ -104,6 +109,14 @@ class RecordingImeOutput : ImeOutput {
         val ok = ic.finishComposingText()
         return ok
     }
+
+    internal fun lastEditorInfoForDev(): Pair<Int, Int>? =
+        synchronized(_calls) {
+            _calls.asReversed()
+                .filterIsInstance<Call.BindInputConnection>()
+                .firstOrNull()
+                ?.let { it.inputType to it.imeOptions }
+        }
 
     override fun updateSelection(view: View, selStart: Int, selEnd: Int, composingStart: Int, composingEnd: Int) {
         synchronized(_calls) { _calls += Call.UpdateSelection(selStart, selEnd, composingStart, composingEnd) }

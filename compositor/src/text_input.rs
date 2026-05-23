@@ -90,14 +90,14 @@ pub fn send_text_input_event(event: TextInputEvent) {
 // Compositor → Android (reverse JNI calls)
 // ---------------------------------------------------------------------------
 
-fn show_keyboard() {
-    info!("text_input: requesting keyboard show");
-    crate::call_native_bridge_void("onShowKeyboard", "()V", &[]);
+fn show_keyboard(activity_id: &str) {
+    info!("text_input: requesting keyboard show for {}", activity_id);
+    crate::show_keyboard_from_native(activity_id);
 }
 
-fn hide_keyboard() {
-    info!("text_input: requesting keyboard hide");
-    crate::call_native_bridge_void("onHideKeyboard", "()V", &[]);
+fn hide_keyboard(activity_id: &str) {
+    info!("text_input: requesting keyboard hide for {}", activity_id);
+    crate::hide_keyboard_from_native(activity_id);
 }
 
 /// Push the Wayland client's text + selection up to the Android side so
@@ -116,19 +116,12 @@ fn update_editable_text(activity_id: &str, text: &str, sel_start: i32, sel_end: 
 /// flags the compositor wants OR'd in) to Android. The Android side
 /// caches the values and calls `InputMethodManager.restartInput` so the
 /// next `onCreateInputConnection` builds an `EditorInfo` carrying them.
-fn push_input_type_to_android(input_type: i32, ime_flags: i32) {
+fn push_input_type_to_android(activity_id: &str, input_type: i32, ime_flags: i32) {
     debug!(
-        "text_input: pushing inputType=0x{:x} imeFlags=0x{:x}",
-        input_type, ime_flags
+        "text_input: pushing inputType=0x{:x} imeFlags=0x{:x} to {}",
+        input_type, ime_flags, activity_id
     );
-    crate::call_native_bridge_void(
-        "onContentTypeChanged",
-        "(II)V",
-        &[
-            jni::objects::JValue::Int(input_type),
-            jni::objects::JValue::Int(ime_flags),
-        ],
-    );
+    crate::update_ime_content_type_from_native(activity_id, input_type, ime_flags);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,13 +185,14 @@ pub struct TextInputState {
     instance_state: HashMap<ObjectId, InstanceState>,
     /// The surface that currently has text input focus.
     pub focused_surface: Option<WlSurface>,
-    /// Whether the Android keyboard is currently shown.
-    /// Tracked to avoid redundant show/hide calls and handle rapid toggling.
-    keyboard_visible: bool,
-    /// Last `(input_type, ime_flags)` pushed to Android via
+    /// Activity whose Android keyboard is currently requested visible.
+    /// Tracked by target rather than a boolean so focus retargets from one
+    /// Android task to another still produce a hide(old)+show(new) pair.
+    keyboard_target: Option<ActivityId>,
+    /// Last `(activity_id, input_type, ime_flags)` pushed to Android via
     /// `onContentTypeChanged`. Used to dedupe — `restartInput` tears the
     /// IME's IC down and rebuilds it, so we only call it on real changes.
-    last_pushed_input_type: Option<(i32, i32)>,
+    last_pushed_input_type: Option<(ActivityId, i32, i32)>,
 }
 
 impl TextInputState {
@@ -207,7 +201,7 @@ impl TextInputState {
             instances: Vec::new(),
             instance_state: HashMap::new(),
             focused_surface: None,
-            keyboard_visible: false,
+            keyboard_target: None,
             last_pushed_input_type: None,
         }
     }
@@ -224,10 +218,10 @@ impl TextInputState {
         self.instances.push(ti);
     }
 
-    pub fn remove_instance(&mut self, id: &ObjectId) {
+    pub fn remove_instance(&mut self, id: &ObjectId, focused_activity_id: Option<&ActivityId>) {
         self.instances.retain(|ti| ti.id() != *id);
         self.instance_state.remove(id);
-        self.sync_keyboard_visibility();
+        self.sync_keyboard_target(focused_activity_id);
     }
 
     // --- Client request handlers (called from protocol dispatch) ---
@@ -380,7 +374,7 @@ impl TextInputState {
 
         // Push EditorInfo to Android (deduped). Drives the IME's keyboard
         // layout — URL bars get the URL keyboard, etc.
-        self.push_focused_input_type_if_changed();
+        self.push_focused_input_type_if_changed(focused_activity_id);
 
         // Tell the client to drop its preedit if the cursor moved out-of-band
         // while we had one tracked. This is reactive cleanup: unlike the old
@@ -394,14 +388,17 @@ impl TextInputState {
         }
 
         // Update keyboard visibility based on whether any instance is enabled.
-        self.sync_keyboard_visibility();
+        self.sync_keyboard_target(focused_activity_id);
     }
 
     /// Compute the Android EditorInfo for whichever instance is focused
     /// and enabled, and push it (deduped). No-op when no focused instance
     /// is enabled — we leave the last value cached so the next time the
     /// IME comes up it sees something sensible.
-    fn push_focused_input_type_if_changed(&mut self) {
+    fn push_focused_input_type_if_changed(&mut self, focused_activity_id: Option<&ActivityId>) {
+        let Some(activity_id) = focused_activity_id else {
+            return;
+        };
         let focused_client = match &self.focused_surface {
             Some(s) => s.id(),
             None => return,
@@ -417,25 +414,48 @@ impl TextInputState {
             Some(wayland_content_to_android_input_type(inst.content_hint, inst.content_purpose))
         });
         if let Some(t) = resolved {
-            if self.last_pushed_input_type != Some(t) {
-                push_input_type_to_android(t.0, t.1);
-                self.last_pushed_input_type = Some(t);
+            let next = (activity_id.clone(), t.0, t.1);
+            if self.last_pushed_input_type.as_ref() != Some(&next) {
+                push_input_type_to_android(activity_id, t.0, t.1);
+                self.last_pushed_input_type = Some(next);
             }
         }
     }
 
-    /// Show/hide Android keyboard to match the current enabled state.
-    /// Avoids redundant calls and handles rapid disable+enable gracefully.
-    fn sync_keyboard_visibility(&mut self) {
-        let any_enabled = self.instance_state.values().any(|s| s.enabled);
-        if any_enabled != self.keyboard_visible {
-            if any_enabled {
-                show_keyboard();
-            } else {
-                hide_keyboard();
-            }
-            self.keyboard_visible = any_enabled;
+    fn focused_instance_enabled(&self) -> bool {
+        let focused_client = match &self.focused_surface {
+            Some(s) => s.id(),
+            None => return false,
+        };
+        self.instances.iter().any(|ti| {
+            ti.id().same_client_as(&focused_client)
+                && self
+                    .instance_state
+                    .get(&ti.id())
+                    .is_some_and(|inst| inst.enabled)
+        })
+    }
+
+    /// Show/hide Android keyboard to match the focused enabled text input.
+    /// The target Activity is part of the state so focus changes between
+    /// Android tasks retarget the IME even when text-input remains enabled.
+    fn sync_keyboard_target(&mut self, focused_activity_id: Option<&ActivityId>) {
+        let desired = if self.focused_instance_enabled() {
+            focused_activity_id.cloned()
+        } else {
+            None
+        };
+        if self.keyboard_target == desired {
+            return;
         }
+
+        if let Some(old) = self.keyboard_target.take() {
+            hide_keyboard(&old);
+        }
+        if let Some(new) = desired.as_ref() {
+            show_keyboard(new);
+        }
+        self.keyboard_target = desired;
     }
 
     // --- Focus management ---
@@ -486,8 +506,9 @@ impl TextInputState {
         }
     }
 
-    pub fn update_focus(&mut self, new_focus: Option<&WlSurface>) {
+    pub fn update_focus(&mut self, new_focus: Option<&WlSurface>, focused_activity_id: Option<&ActivityId>) {
         if self.focused_surface.as_ref() == new_focus {
+            self.sync_keyboard_target(focused_activity_id);
             return;
         }
         if let Some(old) = self.focused_surface.clone() {
@@ -496,6 +517,7 @@ impl TextInputState {
         if let Some(new) = new_focus {
             self.enter(new);
         }
+        self.sync_keyboard_target(focused_activity_id);
     }
 
     // --- Android IME event handling ---
@@ -608,7 +630,7 @@ impl TextInputState {
     }
 
     /// Clean up instances for dead resources.
-    pub fn cleanup(&mut self) {
+    pub fn cleanup(&mut self, focused_activity_id: Option<&ActivityId>) {
         let dead_ids: Vec<_> = self.instances.iter()
             .filter(|ti| !ti.is_alive())
             .map(|ti| ti.id())
@@ -620,7 +642,7 @@ impl TextInputState {
             self.instance_state.remove(id);
         }
         self.instances.retain(|ti| ti.is_alive());
-        self.sync_keyboard_visibility();
+        self.sync_keyboard_target(focused_activity_id);
     }
 }
 
@@ -914,7 +936,12 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for TawcState {
                 state.text_input_state.commit(&id, focused_activity_id.as_ref());
             }
             zwp_text_input_v3::Request::Destroy => {
-                state.text_input_state.remove_instance(&id);
+                let focused_activity_id = state
+                    .text_input_state
+                    .focused_surface
+                    .as_ref()
+                    .and_then(|surface| state.desktop.host_for_surface(surface));
+                state.text_input_state.remove_instance(&id, focused_activity_id.as_ref());
             }
             _ => {}
         }

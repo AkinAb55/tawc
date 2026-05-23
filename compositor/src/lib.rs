@@ -668,6 +668,53 @@ pub fn update_editable_text(activity_id: &str, text: &str, sel_start: i32, sel_e
     });
 }
 
+/// Reverse-JNI: show the Android soft keyboard for one compositor Activity.
+pub fn show_keyboard_from_native(activity_id: &str) {
+    with_native_bridge("onShowKeyboard", |env, class| {
+        let activity_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "onShowKeyboard",
+            "(Ljava/lang/String;)V",
+            &[(&activity_jstr).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Reverse-JNI: hide the Android soft keyboard for one compositor Activity.
+pub fn hide_keyboard_from_native(activity_id: &str) {
+    with_native_bridge("onHideKeyboard", |env, class| {
+        let activity_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "onHideKeyboard",
+            "(Ljava/lang/String;)V",
+            &[(&activity_jstr).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Reverse-JNI: update the EditorInfo cached for one compositor Activity and
+/// restart that Activity's input connection if it is live.
+pub fn update_ime_content_type_from_native(activity_id: &str, input_type: i32, ime_flags: i32) {
+    with_native_bridge("onContentTypeChanged", |env, class| {
+        let activity_jstr = env.new_string(activity_id)?;
+        env.call_static_method(
+            class,
+            "onContentTypeChanged",
+            "(Ljava/lang/String;II)V",
+            &[
+                (&activity_jstr).into(),
+                JValue::Int(input_type),
+                JValue::Int(ime_flags),
+            ],
+        )?;
+        Ok(())
+    });
+}
+
 /// Reverse-JNI: push compositor/Wayland-owned text into Android's real
 /// ClipboardManager. Kotlin suppresses the resulting clipboard listener
 /// bounce so the Wayland owner is not immediately replaced by our own

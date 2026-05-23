@@ -381,7 +381,8 @@ impl TawcState {
         }
         let target_client = target.and_then(|surface| surface.client());
         set_data_device_focus(&self.display_handle, &self.seat, target_client);
-        self.text_input_state.update_focus(target);
+        let target_activity_id = target.and_then(|surface| self.desktop.host_for_surface(surface));
+        self.text_input_state.update_focus(target, target_activity_id.as_ref());
     }
 
     /// Advertise the current scale to one surface through both scale paths:
