@@ -1,13 +1,16 @@
 package me.phie.tawc.install
 
 import android.graphics.Typeface
+import android.content.Context
 import android.os.Bundle
 import android.text.InputType
 import android.text.format.Formatter
 import android.view.KeyEvent
+import android.view.WindowManager
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -201,6 +204,7 @@ class DistroInfoActivity : AppCompatActivity() {
                 if (cmd.isNotEmpty()) RunCommandOp.start(this, installation, cmd)
             }
             .show()
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
         // Default Material3 paints both buttons in colorPrimary, which
         // makes Cancel look like a recommended path. Tone it down to
         // colorOnSurfaceVariant so Run reads as the action.
@@ -221,6 +225,11 @@ class DistroInfoActivity : AppCompatActivity() {
             }
         }
         input.requestFocus()
+        input.post {
+            input.requestFocus()
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     private fun confirmUninstall(installation: Installation) {
