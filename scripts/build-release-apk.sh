@@ -24,7 +24,7 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 KEYSTORE_PATH="${KEYSTORE_PATH:-$HOME/Android/keystore.jks}"
 
 DO_BUILD=1
-GRAPHICS="${TAWC_RELEASE_GRAPHICS:-libhybris,libhybris-zink,cpu}"
+GRAPHICS="${TAWC_RELEASE_GRAPHICS:-libhybris,cpu}"
 for arg in "$@"; do
     case "$arg" in
         --no-build) DO_BUILD=0 ;;

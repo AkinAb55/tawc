@@ -415,10 +415,9 @@ wrapper flags `--no-gfxstream` and `--no-mesa`. Disabling gfxstream
 also disables the compositor crate's kumquat/gfxstream Cargo feature
 and drops `libgfxstream_backend.so`; disabling both gfxstream and
 libhybris-zink skips `scripts/build-mesa-gfxstream.sh` entirely.
-`scripts/build-release-apk.sh` defaults to
-`libhybris,libhybris-zink,cpu` so production APKs do not ship
-gfxstream/kumquat unless `--graphics=...` or `TAWC_RELEASE_GRAPHICS`
-opts it back in.
+`scripts/build-release-apk.sh` defaults to `libhybris,cpu` so
+production APKs do not ship libhybris-zink or gfxstream/kumquat unless
+`--graphics=...` or `TAWC_RELEASE_GRAPHICS` opts them back in.
 
 ## Install and launch
 
