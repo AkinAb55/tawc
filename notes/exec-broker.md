@@ -168,7 +168,7 @@ small and reversible:
 
 It's a no-op for any value that contains none of those three chars
 (the common case for ASCII shell commands), so normal text passes
-through unchanged. See `tools/tawc-exec/src/main.rs::encode_value`
+through unchanged. See `tests/integration/src/exec_broker.rs::encode_value`
 (host) and `ExecBrokerSession.kt::decodeValue` (device).
 
 Programmatic identifiers — `ACTION` name, `RUNINSIDE` install id, and
@@ -384,10 +384,11 @@ the UID-wide kill is the actual safety net for orphaned descendants.
 
 ## Host helper
 
-`tawc-exec` is a small Rust binary at `tools/tawc-exec/`. Host scripts
-call `scripts/tawc-exec.sh`, which rebuilds the helper when sources are
-newer, caches it at `build/tawc-exec/tawc-exec`, and then execs the
-cached binary. Use `scripts/tawc-exec.sh --clean` to force a rebuild.
+`tawc-exec` is a small Rust binary target in `tests/integration/`. Host
+scripts call `scripts/tawc-exec.sh`, which rebuilds the helper when
+sources are newer, caches it at `build/tawc-exec/tawc-exec`, and then
+execs the cached binary. Use `scripts/tawc-exec.sh --clean` to force a
+rebuild.
 
 Usage:
 
@@ -466,5 +467,6 @@ through the broker.
 - `app/src/main/java/me/phie/tawc/dev/ExecBroker.kt` — the listener.
 - `app/src/main/java/me/phie/tawc/dev/ExecBrokerSession.kt` — per-
   connection logic (header parsing, frame routing, descendant kill).
-- `tools/tawc-exec/` — host helper.
+- `tests/integration/src/exec_broker.rs` — host helper library.
+- `tests/integration/src/bin/tawc-exec.rs` — CLI wrapper for scripts.
 - `scripts/tawc-exec.sh` — host-side wrapper that auto-builds the helper.

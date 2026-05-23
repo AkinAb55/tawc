@@ -591,7 +591,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
 
     /**
      * Decode a header-line value's escape sequences. Mirrors the
-     * encoding in `tools/tawc-exec/src/main.rs::encode_value`. Applied
+     * encoding in `tests/integration/src/exec_broker.rs::encode_value`. Applied
      * uniformly to every value-bearing field (ARGV / ENV value / CWD /
      * ARG / CMD / OP_TITLE) so a literal `\n` anywhere in user-supplied
      * input doesn't terminate the header line early.
@@ -735,7 +735,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
 
     companion object {
         // Stream IDs — kept in sync with notes/exec-broker.md and
-        // tools/tawc-exec/src/main.rs.
+        // tests/integration/src/exec_broker.rs.
         const val STREAM_STDIN = 0
         const val STREAM_STDOUT = 1
         const val STREAM_STDERR = 2

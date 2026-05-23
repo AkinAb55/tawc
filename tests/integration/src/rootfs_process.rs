@@ -1,8 +1,8 @@
 use std::io;
-use std::process::{ChildStderr, ChildStdout};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::exec_broker::{BrokerChild, BrokerPipe};
 use crate::{adb, GraphicsBackend};
 
 /// How long to wait for the process group to die after SIGKILL.
@@ -31,8 +31,8 @@ fn pidfile_helper_device() -> String {
 /// lookup. The PGID is read from /proc/PID/stat on the host. `stop()` kills
 /// the entire process tree via process group signals.
 pub struct RootfsProcess {
-    /// The local adb shell process.
-    child: std::process::Child,
+    /// The local broker session.
+    child: BrokerChild,
     /// Path to the pidfile on the device (accessible from host and chroot).
     pidfile_device: String,
     /// PID from the pidfile (the command process after exec).
@@ -132,14 +132,14 @@ impl RootfsProcess {
         );
     }
 
-    /// Take stdout from the underlying adb process (can only be called once).
-    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.child.stdout.take()
+    /// Take stdout from the underlying broker session (can only be called once).
+    pub fn take_stdout(&mut self) -> Option<BrokerPipe> {
+        self.child.take_stdout()
     }
 
-    /// Take stderr from the underlying adb process (can only be called once).
-    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        self.child.stderr.take()
+    /// Take stderr from the underlying broker session (can only be called once).
+    pub fn take_stderr(&mut self) -> Option<BrokerPipe> {
+        self.child.take_stderr()
     }
 
     /// Check if the chroot process is still running by probing /proc/PID.
@@ -169,7 +169,7 @@ impl RootfsProcess {
             kill_process_tree(pid, STOP_TIMEOUT)?;
         }
 
-        // Also kill the local adb shell process
+        // Also close the local broker session.
         let _ = self.child.kill();
         let _ = self.child.wait();
 

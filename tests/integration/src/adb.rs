@@ -18,37 +18,12 @@
 //! IC bypass — touches don't go through the IC in production either.
 
 use std::io;
-use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::exec_broker::{self, BrokerChild, Invocation, Request};
 use crate::GraphicsBackend;
-
-/// Path to the host-side tawc-exec helper. Absolute path lets tests
-/// invoke it without needing it on $PATH. Built by `scripts/tawc-exec.sh`.
-/// Override via `TAWC_EXEC_BIN`.
-fn tawc_exec_bin() -> &'static str {
-    static B: OnceLock<String> = OnceLock::new();
-    B.get_or_init(|| {
-        if let Ok(env) = std::env::var("TAWC_EXEC_BIN") {
-            return env;
-        }
-        // CARGO_MANIFEST_DIR is `tests/integration`; the binary lives
-        // at <repo>/build/tawc-exec/tawc-exec.
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        repo.join("build")
-            .join("tawc-exec")
-            .join("tawc-exec")
-            .to_string_lossy()
-            .into_owned()
-    })
-    .as_str()
-}
 
 /// Run an adb shell command, wait for completion, return output.
 pub fn shell(cmd: &str) -> io::Result<Output> {
@@ -128,7 +103,15 @@ pub fn screencap_raw() -> io::Result<RawScreenshot> {
 /// if needed by using the broker directly. For these tests the helper
 /// is mainly used to copy files into the rootfs.
 pub fn rootfs_host_exec(argv: &[&str]) -> io::Result<Output> {
-    Command::new(tawc_exec_bin()).args(argv).output()
+    exec_broker::run_capture(Invocation {
+        foreground_app: false,
+        request: Request::Exec {
+            argv: argv.iter().map(|s| (*s).to_string()).collect(),
+            env: Vec::new(),
+            cwd: None,
+            op_title: None,
+        },
+    })
 }
 
 /// Run a command inside the in-app Linux install on the phone.
@@ -141,7 +124,7 @@ pub fn rootfs_host_exec(argv: &[&str]) -> io::Result<Output> {
 /// Uses whatever graphics backend the user picked in Settings. Tests
 /// that want a specific backend should call [rootfs_run_with] instead.
 pub fn rootfs_run(cmd: &str) -> io::Result<Output> {
-    run_inside_argv(None, cmd).output()
+    rootfs_run_inner(None, cmd)
 }
 
 /// Same as [rootfs_run] but pins the in-rootfs [GraphicsBackend] for
@@ -149,53 +132,62 @@ pub fn rootfs_run(cmd: &str) -> io::Result<Output> {
 /// on the RUNINSIDE form (see notes/exec-broker.md); the persisted
 /// `Settings.graphicsBackend` is untouched.
 pub fn rootfs_run_with(backend: GraphicsBackend, cmd: &str) -> io::Result<Output> {
-    run_inside_argv(Some(backend), cmd).output()
+    rootfs_run_inner(Some(backend), cmd)
 }
 
 /// Spawn a command in the chroot with piped stdout/stderr (non-blocking).
-/// Returns the Child process. Caller is responsible for reading output.
+/// Returns a broker child handle. Caller is responsible for reading output.
 ///
 /// Same broker dispatch as [rootfs_run]. The rootfs-session invariant
 /// (notes/rootfs-sessions.md) is enforced inside
 /// [InstallationMethod.startInside] — no caller-side `setsid` needed.
-pub fn rootfs_spawn(cmd: &str) -> io::Result<std::process::Child> {
-    run_inside_argv(None, cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+pub fn rootfs_spawn(cmd: &str) -> io::Result<BrokerChild> {
+    rootfs_spawn_inner(None, cmd)
 }
 
 /// Backend-pinned variant of [rootfs_spawn]. See [rootfs_run_with].
-pub fn rootfs_spawn_with(backend: GraphicsBackend, cmd: &str) -> io::Result<std::process::Child> {
-    run_inside_argv(Some(backend), cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+pub fn rootfs_spawn_with(backend: GraphicsBackend, cmd: &str) -> io::Result<BrokerChild> {
+    rootfs_spawn_inner(Some(backend), cmd)
 }
 
-/// Build the `tawc-exec --in-rootfs … [--graphics …] -- <cmd>` Command.
-/// Shared by `rootfs_run` / `rootfs_run_with` / spawn variants — only
-/// the stdio piping and `.output()` vs `.spawn()` differs.
-fn run_inside_argv(backend: Option<GraphicsBackend>, cmd: &str) -> Command {
-    let mut c = Command::new(tawc_exec_bin());
-    c.args(["--in-rootfs", &crate::install_id()]);
-    if let Some(b) = backend {
-        c.args(["--graphics", b.as_key()]);
-    }
-    c.args(["--", cmd]);
-    c
+fn rootfs_run_inner(backend: Option<GraphicsBackend>, cmd: &str) -> io::Result<Output> {
+    exec_broker::run_capture(Invocation {
+        foreground_app: false,
+        request: Request::RunInside {
+            install_id: crate::install_id(),
+            cmd: cmd.to_string(),
+            op_title: None,
+            graphics: backend.map(|b| b.as_key().to_string()),
+        },
+    })
 }
 
-/// Run a broker action via tawc-exec. `args` are passed as repeated
-/// `--arg key=value`. Returns the helper's exit status + captured stdio,
+fn rootfs_spawn_inner(backend: Option<GraphicsBackend>, cmd: &str) -> io::Result<BrokerChild> {
+    exec_broker::spawn(Invocation {
+        foreground_app: false,
+        request: Request::RunInside {
+            install_id: crate::install_id(),
+            cmd: cmd.to_string(),
+            op_title: None,
+            graphics: backend.map(|b| b.as_key().to_string()),
+        },
+    })
+}
+
+/// Run a broker action. `args` are sent as `ARG key=value` header lines.
+/// Returns the broker exit status + captured stdio,
 /// same shape as [shell].
 fn broker_action_raw(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
-    let mut cmd = Command::new(tawc_exec_bin());
-    cmd.args(["--action", name]);
-    for (k, v) in args {
-        cmd.args(["--arg", &format!("{k}={v}")]);
-    }
-    cmd.output()
+    exec_broker::run_capture(Invocation {
+        foreground_app: false,
+        request: Request::Action {
+            name: name.to_string(),
+            args: args
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        },
+    })
 }
 
 /// Run a broker action and fail the caller if the broker returned non-zero.

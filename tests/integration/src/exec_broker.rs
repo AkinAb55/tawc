@@ -8,9 +8,13 @@
 
 use std::env;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Command, ExitCode, Stdio};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
@@ -23,27 +27,7 @@ const STREAM_EXIT: u8 = 3;
 const STREAM_STDIN_EOF: u8 = 4;
 const STREAM_ERR: u8 = 5;
 
-fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let invocation = match parse_args(&args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("tawc-exec: {e}");
-            print_usage();
-            return ExitCode::from(2);
-        }
-    };
-
-    match run(invocation) {
-        Ok(code) => map_exit(code),
-        Err(e) => {
-            eprintln!("tawc-exec: {e}");
-            ExitCode::from(255)
-        }
-    }
-}
-
-fn print_usage() {
+pub fn print_usage() {
     eprintln!("usage: tawc-exec [--foreground-app] [--cwd DIR] [--env K=V ...] [--op-title TITLE] -- ARGV0 [ARG ...]");
     eprintln!("       tawc-exec [--foreground-app] --action NAME [--arg K=V ...]");
     eprintln!("       tawc-exec [--foreground-app] --in-rootfs ID [--graphics libhybris|gfxstream|cpu|libhybris-zink] [--op-title TITLE] [-- CMD ...]");
@@ -57,7 +41,7 @@ fn print_usage() {
 /// `op_title` (Exec / RunInside): when present, the broker mirrors
 /// process stdio into an in-app log screen titled with this string.
 /// `--op-title` on the host CLI controls it.
-enum Parsed {
+pub enum Request {
     Exec {
         argv: Vec<String>,
         env: Vec<String>,
@@ -83,12 +67,12 @@ enum Parsed {
     },
 }
 
-struct Invocation {
-    foreground_app: bool,
-    parsed: Parsed,
+pub struct Invocation {
+    pub foreground_app: bool,
+    pub request: Request,
 }
 
-fn parse_args(args: &[String]) -> Result<Invocation, String> {
+pub fn parse_args(args: &[String]) -> Result<Invocation, String> {
     let mut env = Vec::new();
     let mut cwd: Option<String> = None;
     let mut action_name: Option<String> = None;
@@ -197,7 +181,7 @@ fn parse_args(args: &[String]) -> Result<Invocation, String> {
         };
         return Ok(Invocation {
             foreground_app,
-            parsed: Parsed::RunInside {
+            request: Request::RunInside {
                 install_id: id,
                 cmd,
                 op_title,
@@ -226,7 +210,7 @@ fn parse_args(args: &[String]) -> Result<Invocation, String> {
         }
         return Ok(Invocation {
             foreground_app,
-            parsed: Parsed::Action {
+            request: Request::Action {
                 name,
                 args: action_args,
             },
@@ -245,7 +229,7 @@ fn parse_args(args: &[String]) -> Result<Invocation, String> {
     }
     Ok(Invocation {
         foreground_app,
-        parsed: Parsed::Exec {
+        request: Request::Exec {
             argv,
             env,
             cwd,
@@ -254,7 +238,83 @@ fn parse_args(args: &[String]) -> Result<Invocation, String> {
     })
 }
 
-fn run(invocation: Invocation) -> io::Result<i32> {
+pub fn run_stdio(invocation: Invocation) -> io::Result<i32> {
+    let (sock, _fwd) = connect(&invocation)?;
+    pump_stdio(sock)
+}
+
+pub fn run_capture(invocation: Invocation) -> io::Result<Output> {
+    let (sock, _fwd) = connect(&invocation)?;
+    let (code, stdout, stderr) = pump_capture(sock)?;
+    Ok(Output {
+        status: exit_status_from_broker(code),
+        stdout,
+        stderr,
+    })
+}
+
+pub type BrokerPipe = UnixStream;
+
+pub struct BrokerChild {
+    stdout: Option<BrokerPipe>,
+    stderr: Option<BrokerPipe>,
+    control: TcpStream,
+    exit_rx: mpsc::Receiver<io::Result<i32>>,
+    reader: Option<thread::JoinHandle<()>>,
+    _fwd: AdbForward,
+}
+
+impl BrokerChild {
+    pub fn take_stdout(&mut self) -> Option<BrokerPipe> {
+        self.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<BrokerPipe> {
+        self.stderr.take()
+    }
+
+    pub fn kill(&mut self) -> io::Result<()> {
+        self.control.shutdown(Shutdown::Both)
+    }
+
+    pub fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        let code = self
+            .exit_rx
+            .recv()
+            .map_err(|_| io::Error::other("broker session ended without an exit status"))??;
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        Ok(exit_status_from_broker(code))
+    }
+}
+
+pub fn spawn(invocation: Invocation) -> io::Result<BrokerChild> {
+    let (mut sock, fwd) = connect(&invocation)?;
+    let control = sock.try_clone()?;
+    let (stdout_read, stdout_write) = UnixStream::pair()?;
+    let (stderr_read, stderr_write) = UnixStream::pair()?;
+    let (exit_tx, exit_rx) = mpsc::channel();
+
+    let eof = [STREAM_STDIN_EOF, 0, 0, 0, 0];
+    let _ = sock.write_all(&eof);
+
+    let reader = thread::spawn(move || {
+        let result = pump_pipes(sock, stdout_write, stderr_write);
+        let _ = exit_tx.send(result);
+    });
+
+    Ok(BrokerChild {
+        stdout: Some(stdout_read),
+        stderr: Some(stderr_read),
+        control,
+        exit_rx,
+        reader: Some(reader),
+        _fwd: fwd,
+    })
+}
+
+fn connect(invocation: &Invocation) -> io::Result<(TcpStream, AdbForward)> {
     // Pick a free port on 127.0.0.1, drop the listener immediately so
     // adbd can bind. Race window is tiny and the port is otherwise
     // unbound; if it loses we error loudly.
@@ -273,7 +333,7 @@ fn run(invocation: Invocation) -> io::Result<i32> {
     // Cheaper to ask up front.
     let was_running = app_running(serial.as_deref());
     let foreground_app =
-        invocation.foreground_app || matches!(invocation.parsed, Parsed::RunInside { .. });
+        invocation.foreground_app || matches!(invocation.request, Request::RunInside { .. });
     if foreground_app || !was_running {
         if was_running {
             eprintln!("tawc-exec: bringing MainActivity foreground...");
@@ -308,16 +368,14 @@ fn run(invocation: Invocation) -> io::Result<i32> {
     let mut sock = TcpStream::connect(("127.0.0.1", port))?;
     sock.set_nodelay(true)?;
 
-    write_header(&mut sock, &invocation.parsed)?;
+    write_header(&mut sock, &invocation.request)?;
     // Make sure the header lands as a single TCP segment before any
     // frame bytes follow. flush() doesn't actually push past Nagle on
     // its own, but TCP_NODELAY above + a tiny header means the kernel
     // sends it now.
     sock.flush()?;
 
-    let exit = pump(sock)?;
-    drop(fwd);
-    Ok(exit)
+    Ok((sock, fwd))
 }
 
 fn start_main_activity(serial: Option<&str>) -> io::Result<()> {
@@ -335,7 +393,7 @@ fn start_main_activity(serial: Option<&str>) -> io::Result<()> {
     }
 }
 
-fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
+fn write_header(s: &mut TcpStream, p: &Request) -> io::Result<()> {
     let mut h = String::new();
     h.push_str("TAWCEXEC 1\n");
     // Action and install id are programmatic identifiers — registered
@@ -344,7 +402,7 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
     // and goes through [encode_value] so a `\n` doesn't terminate the
     // header line early. The device side decodes in [decodeValue].
     match p {
-        Parsed::Exec {
+        Request::Exec {
             argv,
             env,
             cwd,
@@ -371,7 +429,7 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
                 h.push('\n');
             }
         }
-        Parsed::Action { name, args } => {
+        Request::Action { name, args } => {
             h.push_str("ACTION ");
             h.push_str(name);
             h.push('\n');
@@ -383,7 +441,7 @@ fn write_header(s: &mut TcpStream, p: &Parsed) -> io::Result<()> {
                 h.push('\n');
             }
         }
-        Parsed::RunInside {
+        Request::RunInside {
             install_id,
             cmd,
             op_title,
@@ -446,7 +504,7 @@ fn encode_value(v: &str) -> String {
 /// Stream local stdio against the socket, returning the broker's
 /// reported exit code. -1 if the broker errored out before exit, -2 if
 /// the socket closed without any exit frame.
-fn pump(sock: TcpStream) -> io::Result<i32> {
+fn pump_stdio(sock: TcpStream) -> io::Result<i32> {
     let alive = Arc::new(AtomicBool::new(true));
 
     // stdin → frame stream
@@ -545,6 +603,102 @@ fn pump(sock: TcpStream) -> io::Result<i32> {
     Ok(exit_code)
 }
 
+/// Run a non-interactive broker request and collect stdout/stderr.
+fn pump_capture(mut sock: TcpStream) -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
+    let eof = [STREAM_STDIN_EOF, 0, 0, 0, 0];
+    let _ = sock.write_all(&eof);
+
+    let mut exit_code: i32 = -2;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    'recv: loop {
+        let mut hdr = [0u8; 5];
+        match read_exact(&mut sock, &mut hdr) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+        let stream = hdr[0];
+        let len = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+        if len > 16 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame too large: stream={stream} len={len}"),
+            ));
+        }
+        let mut payload = vec![0u8; len];
+        read_exact(&mut sock, &mut payload)?;
+        match stream {
+            STREAM_STDOUT => stdout.extend_from_slice(&payload),
+            STREAM_STDERR | STREAM_ERR => stderr.extend_from_slice(&payload),
+            STREAM_EXIT => {
+                if payload.len() != 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("exit frame payload len={}", payload.len()),
+                    ));
+                }
+                exit_code = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                break 'recv;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected server stream {other}"),
+                ));
+            }
+        }
+    }
+    Ok((exit_code, stdout, stderr))
+}
+
+fn pump_pipes(
+    mut sock: TcpStream,
+    mut stdout: UnixStream,
+    mut stderr: UnixStream,
+) -> io::Result<i32> {
+    let mut exit_code: i32 = -2;
+    'recv: loop {
+        let mut hdr = [0u8; 5];
+        match read_exact(&mut sock, &mut hdr) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+        let stream = hdr[0];
+        let len = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+        if len > 16 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame too large: stream={stream} len={len}"),
+            ));
+        }
+        let mut payload = vec![0u8; len];
+        read_exact(&mut sock, &mut payload)?;
+        match stream {
+            STREAM_STDOUT => stdout.write_all(&payload)?,
+            STREAM_STDERR | STREAM_ERR => stderr.write_all(&payload)?,
+            STREAM_EXIT => {
+                if payload.len() != 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("exit frame payload len={}", payload.len()),
+                    ));
+                }
+                exit_code = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                break 'recv;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected server stream {other}"),
+                ));
+            }
+        }
+    }
+    Ok(exit_code)
+}
+
 /// True if the tawc app process is alive on the device. Uses `pidof`
 /// over plain `adb shell` (no privilege needed — pidof walks /proc).
 fn app_running(serial: Option<&str>) -> bool {
@@ -633,7 +787,23 @@ impl Drop for AdbForward {
 /// Map the broker's i32 exit code into a process exit code.
 /// >=0: normal exit, take the low 8 bits. <0: signal; mimic shell's
 /// 128 + signum so callers can detect.
-fn map_exit(code: i32) -> ExitCode {
+fn exit_status_from_broker(code: i32) -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        if code < 0 {
+            std::process::ExitStatus::from_raw(-code)
+        } else {
+            std::process::ExitStatus::from_raw((code as i32 & 0xff) << 8)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = code;
+        unimplemented!("tawc integration tests require a Unix host")
+    }
+}
+
+pub fn map_exit(code: i32) -> ExitCode {
     if code < 0 {
         let n = (-code) as u8;
         ExitCode::from(128u8.saturating_add(n))

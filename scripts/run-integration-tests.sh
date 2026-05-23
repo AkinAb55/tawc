@@ -35,7 +35,6 @@ done
 
 # shellcheck source=../scripts/lib/select-device.sh
 source "$ROOT_DIR/scripts/lib/select-device.sh"
-export TAWC_EXEC_BIN="$ROOT_DIR/build/tawc-exec/tawc-exec"
 
 echo "=== Checking adb connection ($ANDROID_SERIAL) ==="
 adb get-state >/dev/null 2>&1 || { echo "ERROR: No adb device connected"; exit 1; }

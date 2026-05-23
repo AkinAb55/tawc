@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN="$ROOT_DIR/build/tawc-exec/tawc-exec"
-SRC="$ROOT_DIR/tools/tawc-exec"
+SRC="$ROOT_DIR/tests/integration"
 OUT_DIR="$ROOT_DIR/build/tawc-exec"
 DO_CLEAN=0
 
@@ -29,11 +29,12 @@ needs_build() {
 
 build_helper() {
     if [ "$DO_CLEAN" = "1" ]; then
-        rm -rf "$OUT_DIR" "$SRC/target"
+        rm -rf "$OUT_DIR"
     fi
     mkdir -p "$OUT_DIR"
     cargo build --release \
         --manifest-path "$SRC/Cargo.toml" \
+        --bin tawc-exec \
         --target-dir "$OUT_DIR/target"
     cp "$OUT_DIR/target/release/tawc-exec" "$BIN"
     echo "built: $BIN"

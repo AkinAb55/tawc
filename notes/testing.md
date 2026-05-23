@@ -182,7 +182,7 @@ Host (cargo test)                    Phone
   ├─ adb shell (start client) ─────────┤──→ wayland-debug-app / stock apps / …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
   │                                    │
-  ├─ tawc-exec --action ic-commit-text ┤──→ ExecBroker / InputActions
+  ├─ broker action ic-commit-text ─────┤──→ ExecBroker / InputActions
   │                                    │     └─ TawcInputConnection.commitText
   │                                    │       └─ nativeCommitText
   │                                    │         └─ text_input_v3
@@ -201,7 +201,7 @@ Host (cargo test)                    Phone
 
 ### Key Modules
 
-- **`adb.rs`**: Shell commands, chroot execution, broker-action-based test reset and input injection (`test_init`, `ic_commit_text`, …; all routed through `tawc-exec --action`)
+- **`adb.rs`**: Shell commands, chroot execution, broker-action-based test reset and input injection (`test_init`, `ic_commit_text`, …; routed through the shared broker client)
 - **`rootfs.rs`**: `ensure_wayland_debug_app` / `ensure_tawc_dri_test` /
   `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
   inside the rootfs and returns its path. Tests do **not** compile

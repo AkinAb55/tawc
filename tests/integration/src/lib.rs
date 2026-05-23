@@ -1,6 +1,7 @@
 pub mod adb;
 pub mod compositor;
 pub mod debug_app;
+pub mod exec_broker;
 pub mod helpers;
 pub mod rootfs;
 pub mod rootfs_process;

@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use tawc_integration::debug_app::DebugApp;
+use tawc_integration::exec_broker::BrokerPipe;
 use tawc_integration::helpers::{
     assert_broker_ok, assert_compositor_clean, ensure_wayland_debug_app,
     start_wayland_debug_scale, start_wayland_debug_touch, TIMEOUT,
@@ -162,7 +163,7 @@ fn opened_menu_from_final_anchor(touch: TouchPoint, anchor: AnchorRect) -> Gtk3M
     }
 }
 
-fn spawn_relevant_stderr_reader(stderr: std::process::ChildStderr) -> mpsc::Receiver<String> {
+fn spawn_relevant_stderr_reader(stderr: BrokerPipe) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let reader = BufReader::new(stderr);

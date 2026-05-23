@@ -24,3 +24,7 @@ doctest = false
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[bin]]
+name = "tawc-exec"
+path = "src/bin/tawc-exec.rs"

@@ -7,6 +7,7 @@ design, build, and operational notes in [`../notes/`](../notes/).
 - [desktop-gl-dispatch.md](desktop-gl-dispatch.md) - older desktop-GL dispatcher design, likely superseded by libhybris-zink unless GLES-over-Zink overhead is unacceptable.
 - [external-storage-binds.md](external-storage-binds.md) - plan for persistent shared-storage rootfs binds via all-files access, plus a later SAF-backed virtual directory bridge.
 - [gfxstream-bridge-remaining-work.md](gfxstream-bridge-remaining-work.md) - remaining GL/GLES and x86_64 AVD work for the gfxstream bridge backend.
+- [integration-test-host-transport.md](integration-test-host-transport.md) - plan to remove per-test adb/logcat/tawc-exec process churn from integration tests.
 - [lazy-init-compositor.md](lazy-init-compositor.md) - defer compositor GPU/Wayland initialization until the first client connects.
 - [lazy-init-kumquat.md](lazy-init-kumquat.md) - defer gfxstream/kumquat GPU initialization until the first gfxstream client connects.
 - [smithay-desktop-refactor.md](smithay-desktop-refactor.md) - speculative plan for adopting more Smithay desktop/window abstractions.

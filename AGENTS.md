@@ -14,7 +14,7 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 ## Current Project Shape
 - Install methods: `tawcroot` is default and the only release-supported method. `proot` and `chroot` are debug-only dev-loop options.
 - Graphics backends: `libhybris`, `libhybris-zink`, `gfxstream`, and `cpu` ship by default. `libhybris` works on all tested physical devices and is the production/default path. `gfxstream` is experimental/partial; it is the x86_64 emulator default only because libhybris is unsupported there. See [notes/gpu-strategy.md](notes/gpu-strategy.md), [notes/libhybris-zink.md](notes/libhybris-zink.md), and [notes/gfxstream-bridge.md](notes/gfxstream-bridge.md).
-- The debug exec broker is the normal host-to-app command path. Host helper: `tools/tawc-exec/`; wrapper: `scripts/tawc-exec.sh`; protocol notes: [notes/exec-broker.md](notes/exec-broker.md).
+- The debug exec broker is the normal host-to-app command path. Host helper binary: `tests/integration/src/bin/tawc-exec.rs`; wrapper: `scripts/tawc-exec.sh`; protocol notes: [notes/exec-broker.md](notes/exec-broker.md).
 - SHM buffers are intentionally tinted magenta by default to expose fallback paths. Do not remove this unless explicitly asked.
 
 ## Operating Rules
