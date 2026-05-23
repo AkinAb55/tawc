@@ -411,9 +411,7 @@ fn ensure_broker_ready(invocation: &Invocation, serial: Option<&str>) -> io::Res
     let foreground_app =
         invocation.foreground_app || matches!(invocation.request, Request::RunInside { .. });
     if foreground_app || !was_running {
-        if was_running {
-            eprintln!("tawc-exec: bringing MainActivity foreground...");
-        } else {
+        if !was_running {
             eprintln!("tawc-exec: app process down, starting MainActivity...");
         }
         start_main_activity(serial.as_deref())?;
