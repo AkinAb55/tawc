@@ -243,4 +243,78 @@ object ProcessScanner {
             for (p in survivors) log("survivor pid=${p.pid} (${p.comm})")
         }
     }
+
+    /**
+     * Exit-time sweep across every installed rootfs plus orphan slots
+     * still visible under `<distros>`. Delegates each target to
+     * [killAllInRootfs], so this follows the same repeated scan/KILL
+     * semantics as task-manager "Stop all" and uninstall cleanup.
+     */
+    fun killAllKnownRootfs(context: Context, log: (String) -> Unit) {
+        val store = InstallationStore(context)
+        val installs = store.list()
+        val targets = LinkedHashMap<String, RootfsSweepTarget>()
+
+        fun addTarget(id: String, includeChroot: Boolean) {
+            if (!Installation.isValidId(id)) {
+                log("skip invalid rootfs id '$id'")
+                return
+            }
+            val rootfsPath = store.rootfsDir(id).absolutePath
+            val key = canonicalize(rootfsPath)
+            val existing = targets[key]
+            targets[key] = RootfsSweepTarget(
+                rootfsPath = rootfsPath,
+                installId = id,
+                includeChroot = includeChroot || existing?.includeChroot == true,
+            )
+        }
+
+        for (inst in installs) {
+            addTarget(inst.id, inst.method == ChrootMethod.KEY)
+        }
+        val hasChrootInstalls = installs.any { it.method == ChrootMethod.KEY }
+
+        // Catch slots with no readable metadata: failed/cancelled
+        // deletes can leave a rootfs directory that task-manager still
+        // reports as an orphan.
+        val knownIds = installs.mapTo(HashSet()) { it.id }
+        store.baseDir.listFiles { f -> f.isDirectory }
+            ?.map { it.name }
+            ?.forEach { id ->
+                if (id in knownIds) return@forEach
+                if (store.rootfsDir(id).exists()) addTarget(id, includeChroot = hasChrootInstalls)
+            }
+
+        // Also include orphan ids currently referenced by running
+        // app-uid processes, even if the rootfs directory itself has
+        // already been deleted.
+        val scan = runCatching { scan(context, installs) }.getOrElse { t ->
+            log("warning: process scan failed before exit sweep: ${t.message}")
+            ScanResult(emptyList())
+        }
+        for (proc in scan.orphans()) {
+            proc.orphanRootfsId?.let { addTarget(it, includeChroot = hasChrootInstalls) }
+        }
+
+        if (targets.isEmpty()) {
+            log("no rootfs targets to sweep")
+            return
+        }
+        for (target in targets.values) {
+            log("sweep ${target.installId}: ${target.rootfsPath}")
+            killAllInRootfs(
+                rootfsPath = target.rootfsPath,
+                installId = target.installId,
+                includeChroot = target.includeChroot,
+                log = { log("${target.installId}: $it") },
+            )
+        }
+    }
+
+    private data class RootfsSweepTarget(
+        val rootfsPath: String,
+        val installId: String,
+        val includeChroot: Boolean,
+    )
 }

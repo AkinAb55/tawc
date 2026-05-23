@@ -656,6 +656,7 @@ pub fn run(
         // leave the keyboard pointed at it (events go nowhere) until the
         // next FocusChanged event arrives.
         if toplevels_changed {
+            crate::update_toplevel_count_from_native(client_toplevel_count(data));
             let new_focus = data
                 .desktop_visible_host_id()
                 .and_then(|host| data.first_toplevel_for_host(&host));
@@ -762,6 +763,10 @@ fn render_visible_host(data: &mut TawcState) -> bool {
 
 fn toplevel_count(data: &TawcState) -> usize {
     data.xdg_shell_state.toplevel_surfaces().len()
+}
+
+fn client_toplevel_count(data: &TawcState) -> usize {
+    toplevel_count(data) + data.x11_surfaces.len()
 }
 
 // ---------------------------------------------------------------------------

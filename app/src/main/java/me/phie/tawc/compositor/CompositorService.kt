@@ -3,11 +3,13 @@ package me.phie.tawc.compositor
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -17,9 +19,18 @@ import android.util.Log
 import androidx.core.app.ServiceCompat
 import me.phie.tawc.AppPaths
 import me.phie.tawc.BuildConfig
+import me.phie.tawc.MainActivity
+import me.phie.tawc.tasks.ProcessScanner
 import java.io.File
 import java.lang.ref.WeakReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 /**
@@ -42,6 +53,10 @@ class CompositorService : Service() {
     private val binder = LocalBinder()
     private val activities = mutableMapOf<String, WeakReference<CompositorActivity>>()
     private val windowRegistry = WindowRegistry()
+    private val toplevelCount = MutableStateFlow(0)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var lifecycle = Lifecycle.STOPPED
+    private var restartAfterStop = false
 
     val openWindows: StateFlow<List<OpenWindow>> = windowRegistry.windows
 
@@ -52,6 +67,26 @@ class CompositorService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "CompositorService onCreate")
+        serviceScope.launch {
+            toplevelCount.collect { count ->
+                if (!lifecycle.postsNotification) return@collect
+                val nm = getSystemService(NotificationManager::class.java) ?: return@collect
+                nm.notify(NOTIFICATION_ID, buildNotification(count))
+            }
+        }
+        ensureCompositorRunning()
+    }
+
+    private fun ensureCompositorRunning() {
+        when (lifecycle) {
+            Lifecycle.STARTING, Lifecycle.RUNNING -> return
+            Lifecycle.STOPPING -> {
+                restartAfterStop = true
+                return
+            }
+            Lifecycle.STOPPED -> Unit
+        }
+        lifecycle = Lifecycle.STARTING
         val appPaths = AppPaths.from(this)
 
         ensureNotificationChannel()
@@ -67,7 +102,7 @@ class CompositorService : Service() {
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
-            buildNotification(),
+            buildNotification(windowCount = 0),
             foregroundType,
         )
 
@@ -133,9 +168,15 @@ class CompositorService : Service() {
         NativeBridge.nativeSetOutputScale(me.phie.tawc.Settings.outputScale)
         NativeBridge.nativeSetXwaylandEnabled(me.phie.tawc.Settings.xwayland)
         NativeBridge.nativeSetGtk3BrokenMenusWorkaround(me.phie.tawc.Settings.gtk3BrokenMenusWorkaround)
+        lifecycle = Lifecycle.RUNNING
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_EXIT) {
+            exitFromNotification(startId)
+            return START_NOT_STICKY
+        }
+        ensureCompositorRunning()
         // START_STICKY: the system recreates the service after a kill so the
         // compositor comes back even if every Activity has been destroyed.
         return START_STICKY
@@ -145,10 +186,12 @@ class CompositorService : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, "CompositorService onDestroy — stopping compositor")
+        serviceScope.cancel()
         NativeBridge.nativeStopCompositor()
         NativeBridge.detachService()
         activities.clear()
         windowRegistry.clear()
+        lifecycle = Lifecycle.STOPPED
         super.onDestroy()
     }
 
@@ -200,6 +243,10 @@ class CompositorService : Service() {
         windowRegistry.setFullscreen(activityId, fullscreen)
     }
 
+    fun updateToplevelCount(count: Int) {
+        toplevelCount.value = count.coerceAtLeast(0)
+    }
+
     /** Look up an alive Activity by id. Returns null if it was GC'd. */
     fun getActivity(activityId: String): CompositorActivity? {
         val ref = activities[activityId] ?: return null
@@ -233,6 +280,41 @@ class CompositorService : Service() {
             }
         }
         return null
+    }
+
+    private fun exitFromNotification(startId: Int) {
+        if (lifecycle == Lifecycle.STOPPING) return
+        lifecycle = Lifecycle.STOPPING
+        restartAfterStop = false
+        serviceScope.launch {
+            Log.i(TAG, "Notification exit requested")
+            NativeBridge.nativeStopCompositor()
+            toplevelCount.value = 0
+            windowRegistry.clear()
+            finishCompositorActivities()
+            withContext(Dispatchers.IO) {
+                ProcessScanner.killAllKnownRootfs(this@CompositorService) {
+                    Log.d(TAG, "notification-exit: $it")
+                }
+            }
+            if (restartAfterStop) {
+                lifecycle = Lifecycle.STOPPED
+                restartAfterStop = false
+                ensureCompositorRunning()
+            } else {
+                lifecycle = Lifecycle.STOPPED
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelfResult(startId)
+            }
+        }
+    }
+
+    private fun finishCompositorActivities() {
+        val liveActivities = activities.values.mapNotNull { it.get() }
+        activities.clear()
+        for (activity in liveActivities) {
+            activity.finishAndRemoveTask()
+        }
     }
 
     private fun ensureXkbDataExtracted() {
@@ -274,20 +356,66 @@ class CompositorService : Service() {
         nm.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(windowCount: Int): Notification {
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("TAWC compositor")
-            .setContentText("Wayland compositor is running")
+            .setContentTitle("TAWC running")
+            .setContentText("$windowCount Linux windows open")
             .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setContentIntent(homePendingIntent())
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                    "Exit",
+                    exitPendingIntent(),
+                ).build(),
+            )
             .build()
+    }
+
+    private fun homePendingIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        return PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun exitPendingIntent(): PendingIntent {
+        val intent = Intent(this, CompositorService::class.java)
+            .setAction(ACTION_EXIT)
+        return PendingIntent.getService(
+            this,
+            1,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private enum class Lifecycle {
+        STOPPED,
+        STARTING,
+        RUNNING,
+        STOPPING;
+
+        val postsNotification: Boolean
+            get() = this == STARTING || this == RUNNING
     }
 
     companion object {
         private const val TAG = "tawc"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "tawc_compositor"
+        private const val ACTION_EXIT = "me.phie.tawc.compositor.EXIT"
 
         /** Lock for [ensureLibhybrisExtracted] — see method KDoc. */
         private val LIBHYBRIS_EXTRACT_LOCK = Any()

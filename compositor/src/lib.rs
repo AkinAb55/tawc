@@ -728,6 +728,20 @@ pub fn update_window_metadata_from_native(
     });
 }
 
+/// Reverse-JNI: publish the current compositor toplevel/window count for
+/// the persistent Android notification.
+pub fn update_toplevel_count_from_native(count: usize) {
+    with_native_bridge("onToplevelCountChanged", |env, class| {
+        env.call_static_method(
+            class,
+            "onToplevelCountChanged",
+            "(I)V",
+            &[JValue::Int(count as jint)],
+        )?;
+        Ok(())
+    });
+}
+
 /// Default output scale used while no Activity has registered its size.
 /// Fractional by default so the normal dev path exercises the fractional
 /// scale protocol and rendering math.

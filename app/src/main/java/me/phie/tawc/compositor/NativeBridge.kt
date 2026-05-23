@@ -366,6 +366,13 @@ object NativeBridge {
         }
     }
 
+    @JvmStatic
+    fun onToplevelCountChanged(count: Int) {
+        mainHandler.post {
+            serviceRef?.get()?.updateToplevelCount(count)
+        }
+    }
+
     /**
      * Called from native when the focused Wayland text-input instance's
      * `(content_hint, content_purpose)` resolves to a new Android
