@@ -57,12 +57,12 @@ const BACKGROUND_COLOR: Color32F = Color32F::new(0.1059, 0.1059, 0.1333, 1.0);
 pub static TINT_BUFFERS_BY_TYPE: AtomicBool = AtomicBool::new(true);
 static LOGGED_SHM_BUFFERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// Width (in framebuffer pixels) of the band along each screen edge
+/// Width, as a fraction of the buffer, of the band along each buffer edge
 /// over which the buffer-type tint fades from full strength at the
 /// very edge to zero. Picked to be large enough to read the colour
 /// at a glance but narrow enough that the centre of every window
 /// renders untinted.
-const TINT_EDGE_FADE_PX: f32 = 150.0;
+const TINT_EDGE_FADE: f32 = 0.10;
 
 /// What kind of buffer is backing a surface for this frame. Drives the
 /// renderer's per-surface choice of debug tint colour. SHM is its own variant
@@ -188,12 +188,10 @@ pub fn compile_plain_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgra
 ///  - `force_opaque` (`1.0`/`0.0`): same as the plain shader.
 ///  - `tint_color` (`vec3`): hue to wash the sampled colour toward.
 ///    Channels at `1.0` get boosted, channels at `0.0` get suppressed.
-///  - `screen_size` (`vec2`, framebuffer pixels): used together with
-///    `gl_FragCoord` to compute distance to the nearest screen edge.
-///  - `edge_fade_px` (`float`): the tint is at full strength on the
-///    very edge of the framebuffer and fades linearly to zero `edge_fade_px`
-///    pixels in. Set to `0` (or below) to skip the fade and tint the
-///    whole frame.
+///  - `edge_fade` (`float`): the tint is at full strength on the
+///    very edge of the buffer and fades linearly to zero at this
+///    normalized texture-coordinate distance. Set to `0` (or below) to
+///    skip the fade and tint the whole frame.
 ///
 /// The tint formula generalises the original SHM-only magenta wash:
 /// each channel is multiplied by `mix(0.4, 1.0, tint_color[c])` and
@@ -206,8 +204,7 @@ pub fn compile_tint_shader(renderer: &mut GlesRenderer) -> Option<GlesTexProgram
         &[
             UniformName::new("force_opaque", UniformType::_1f),
             UniformName::new("tint_color", UniformType::_3f),
-            UniformName::new("screen_size", UniformType::_2f),
-            UniformName::new("edge_fade_px", UniformType::_1f),
+            UniformName::new("edge_fade", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -279,8 +276,7 @@ uniform sampler2D tex;
 uniform float alpha;
 uniform float force_opaque;
 uniform vec3 tint_color;
-uniform vec2 screen_size;
-uniform float edge_fade_px;
+uniform float edge_fade;
 varying vec2 v_coords;
 
 #if defined(DEBUG_FLAGS)
@@ -295,15 +291,13 @@ void main() {
         color = color * alpha;
     }
 
-    // Distance (in framebuffer pixels) to the nearest screen edge.
-    // gl_FragCoord shares the framebuffer's coordinate system with
-    // screen_size, so this works regardless of the surface's position.
-    vec2 d2 = min(gl_FragCoord.xy, screen_size - gl_FragCoord.xy);
+    // Distance, in texture coordinates, to the nearest drawn buffer edge.
+    vec2 clamped_coords = clamp(v_coords, vec2(0.0), vec2(1.0));
+    vec2 d2 = min(clamped_coords, vec2(1.0) - clamped_coords);
     float d = min(d2.x, d2.y);
-    // 1.0 right at the edge → 0.0 once we're edge_fade_px in. A
-    // non-positive edge_fade_px collapses to "tint the whole frame".
-    float edge_strength = edge_fade_px > 0.0
-        ? clamp(1.0 - d / edge_fade_px, 0.0, 1.0)
+    // 1.0 right at the edge → 0.0 once we're edge_fade in.
+    float edge_strength = edge_fade > 0.0
+        ? clamp(1.0 - d / edge_fade, 0.0, 1.0)
         : 1.0;
 
     vec3 tinted = color.rgb * mix(vec3(0.4), vec3(1.0), tint_color) + tint_color * 0.3;
@@ -417,8 +411,6 @@ fn surface_kind_for_buffer(buffer: &WlBuffer) -> (SurfaceKind, bool) {
 
 fn wrap_wayland_render_element<'a>(
     inner: WaylandSurfaceRenderElement<GlesRenderer>,
-    screen_w: i32,
-    screen_h: i32,
     plain_shader: Option<&'a GlesTexProgram>,
     tint_shader: Option<&'a GlesTexProgram>,
     tint_enabled: bool,
@@ -432,11 +424,7 @@ fn wrap_wayland_render_element<'a>(
             vec![
                 Uniform::new("force_opaque", UniformValue::_1f(force_opaque)),
                 Uniform::new("tint_color", UniformValue::_3f(r, g, b)),
-                Uniform::new(
-                    "screen_size",
-                    UniformValue::_2f(screen_w as f32, screen_h as f32),
-                ),
-                Uniform::new("edge_fade_px", UniformValue::_1f(TINT_EDGE_FADE_PX)),
+                Uniform::new("edge_fade", UniformValue::_1f(TINT_EDGE_FADE)),
             ],
         )
     } else {
@@ -455,8 +443,6 @@ fn wrap_wayland_render_element<'a>(
 
 fn collect_wayland_render_elements<'a>(
     surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
-    screen_w: i32,
-    screen_h: i32,
     plain_shader: Option<&'a GlesTexProgram>,
     tint_shader: Option<&'a GlesTexProgram>,
     tint_enabled: bool,
@@ -466,8 +452,6 @@ fn collect_wayland_render_elements<'a>(
         .map(|surface| {
             wrap_wayland_render_element(
                 surface,
-                screen_w,
-                screen_h,
                 plain_shader,
                 tint_shader,
                 tint_enabled,
@@ -526,8 +510,6 @@ pub fn render_frame(
     };
     let elements = collect_wayland_render_elements(
         surfaces,
-        screen_w,
-        screen_h,
         plain_shader,
         tint_shader,
         tint_enabled,
