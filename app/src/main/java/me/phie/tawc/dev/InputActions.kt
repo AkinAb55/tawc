@@ -13,6 +13,9 @@ import me.phie.tawc.compositor.ClipboardBridge
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.compositor.RecordingImeOutput
 import me.phie.tawc.compositor.TawcInputConnection
+import me.phie.tawc.install.ChrootMethod
+import me.phie.tawc.install.InstallationStore
+import me.phie.tawc.tasks.ProcessScanner
 
 /**
  * Broker actions that drive compositor input from host tests, registered
@@ -106,6 +109,8 @@ internal object InputActions {
         ActionRegistry.register("input-ready", InputReadyAction)
         ActionRegistry.register("clipboard-set-text", ClipboardSetTextAction)
         ActionRegistry.register("clipboard-get-text", ClipboardGetTextAction)
+        ActionRegistry.register("clipboard-debug-state", ClipboardDebugStateAction)
+        ActionRegistry.register("cleanup-rootfs", CleanupRootfsAction)
         ActionRegistry.register("test-init", TestInitAction)
     }
 
@@ -392,8 +397,7 @@ internal object InputActions {
     // -- Observational + test-mode helpers ----------------------------------
 
     /**
-     * `query-state` — log a `COMPOSITOR_STATE` line via the compositor's
-     * own log channel. Pure native call, no main-loop hop required.
+     * `query-state` — return a compositor-thread state snapshot.
      * Lives on the service rather than an activity so tests can poll it
      * before any client window has focus (e.g. right after compositor
      * boot, before the first GTK app has come up). Observational only —
@@ -401,7 +405,9 @@ internal object InputActions {
      */
     private object QueryStateAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            NativeBridge.nativeQueryState()
+            val state = NativeBridge.nativeQueryState()
+                ?: return ctx.fail("query-state: compositor did not return state")
+            ctx.out(state)
             return 0
         }
     }
@@ -430,6 +436,37 @@ internal object InputActions {
         }
     }
 
+    private object ClipboardDebugStateAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val state = NativeBridge.nativeClipboardDebugState()
+                ?: return ctx.fail("clipboard-debug-state: native state unavailable")
+            ctx.out(state)
+            return 0
+        }
+    }
+
+    private fun cleanupRootfs(ctx: ActionContext, installId: String): Int {
+        val store = InstallationStore(ctx.appContext)
+        val rootfs = store.rootfsDir(installId)
+        val includeChroot = store.load(installId)?.method == ChrootMethod.KEY
+        return ProcessScanner.killAllInRootfs(
+            rootfsPath = rootfs.absolutePath,
+            installId = installId,
+            includeChroot = includeChroot,
+            log = { Log.d(TAG, "rootfs cleanup: $it") },
+        )
+    }
+
+    private object CleanupRootfsAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val installId = args["installId"]
+                ?: return ctx.fail("cleanup-rootfs: --arg installId=... required")
+            val killed = cleanupRootfs(ctx, installId)
+            ctx.out("rootfs_killed=$killed")
+            return 0
+        }
+    }
+
     /**
      * `test-init` — fast per-test reset. Nothing here writes
      * SharedPreferences; app process death restores normal persisted
@@ -437,6 +474,7 @@ internal object InputActions {
      */
     private object TestInitAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val installId = args["installId"]
             val ran = onMainBlocking {
                 Settings.enterTestMode()
                 NativeBridge.nativeSetTintBuffersByType(Settings.tintBuffersByType)
@@ -450,8 +488,13 @@ internal object InputActions {
             if (!ran) return ctx.fail("main loop did not run test-init within 5s")
             val closed = NativeBridge.nativeCloseAllClientsForTest()
             if (closed < 0) return ctx.fail("compositor did not process close-all-clients request")
+            var killedRootfs = 0
+            if (!installId.isNullOrBlank()) {
+                killedRootfs = cleanupRootfs(ctx, installId)
+            }
             ctx.out("closed=$closed")
-            Log.i(TAG, "InputAction test-init: reset in-memory settings and requested close for $closed client windows")
+            ctx.out("rootfs_killed=$killedRootfs")
+            Log.i(TAG, "InputAction test-init: reset in-memory settings, requested close for $closed client windows, killed $killedRootfs rootfs processes")
             return 0
         }
     }

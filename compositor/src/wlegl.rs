@@ -15,6 +15,7 @@
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use log::info;
 
@@ -97,6 +98,30 @@ pub enum BufferOrigin {
     /// client renders with mesa+gfxstream into a kumquat-allocated AHB).
     #[cfg(feature = "gfxstream")]
     Gfxstream,
+}
+
+static WLEGL_CREATE_BUFFER_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WLEGL_IMPORT_TEXTURE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_WLEGL_WIDTH: AtomicU32 = AtomicU32::new(0);
+static LAST_WLEGL_HEIGHT: AtomicU32 = AtomicU32::new(0);
+static LAST_WLEGL_FORMAT: AtomicU32 = AtomicU32::new(0);
+
+pub struct WleglDebugCounters {
+    pub create_buffer_total: u64,
+    pub import_texture_total: u64,
+    pub last_width: u32,
+    pub last_height: u32,
+    pub last_format: u32,
+}
+
+pub fn debug_counters() -> WleglDebugCounters {
+    WleglDebugCounters {
+        create_buffer_total: WLEGL_CREATE_BUFFER_TOTAL.load(Ordering::Relaxed),
+        import_texture_total: WLEGL_IMPORT_TEXTURE_TOTAL.load(Ordering::Relaxed),
+        last_width: LAST_WLEGL_WIDTH.load(Ordering::Relaxed),
+        last_height: LAST_WLEGL_HEIGHT.load(Ordering::Relaxed),
+        last_format: LAST_WLEGL_FORMAT.load(Ordering::Relaxed),
+    }
 }
 
 /// Per-wl_buffer state: an AHardwareBuffer + lazily-imported GlesTexture.
@@ -206,6 +231,7 @@ impl ExternalBuffer for WleglBufferData {
             "wlegl: imported ANativeWindowBuffer as texture {}x{}",
             self.width, self.height
         );
+        WLEGL_IMPORT_TEXTURE_TOTAL.fetch_add(1, Ordering::Relaxed);
         Some(Ok(texture))
     }
 }
@@ -322,6 +348,10 @@ impl Dispatch<AndroidWlegl, ()> for TawcState {
                 let stride_u = stride as u32;
                 let fmt_u = format as u32;
                 let usage_u64 = (usage as u32) as u64;
+                WLEGL_CREATE_BUFFER_TOTAL.fetch_add(1, Ordering::Relaxed);
+                LAST_WLEGL_WIDTH.store(w_u, Ordering::Relaxed);
+                LAST_WLEGL_HEIGHT.store(h_u, Ordering::Relaxed);
+                LAST_WLEGL_FORMAT.store(fmt_u, Ordering::Relaxed);
 
                 let ahb = unsafe {
                     tawc_wlegl_import(

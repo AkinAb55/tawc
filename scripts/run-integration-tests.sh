@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAWC_EXEC="${TAWC_EXEC:-$ROOT_DIR/scripts/tawc-exec.sh}"
+TAWC_EXEC_BROKER_PORT=""
 
 export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -166,20 +167,6 @@ device_file_sha() {
         | head -n1
 }
 
-deploy_pidfile_helper() {
-    # shellcheck source=../scripts/lib/tawc-scratch.sh
-    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
-    local src="$ROOT_DIR/tests/apps/tawc-pidfile-exec.sh"
-    local dst="$ROOTFS_DIR/tmp/tawc-pidfile-exec.sh"
-    if [ "$(host_file_sha "$src")" = "$(device_file_sha "$dst" || true)" ]; then
-        echo "=== pidfile helper already deployed ==="
-        return
-    fi
-    echo "=== Deploying pidfile helper ==="
-    adb push "$src" "$TAWC_SCRATCH/tawc-pidfile-exec.sh" >/dev/null
-    "$TAWC_EXEC" /system/bin/sh -c "cp $TAWC_SCRATCH/tawc-pidfile-exec.sh $dst && chmod +x $dst"
-}
-
 copy_test_app() {
     local name="$1"
     local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
@@ -321,7 +308,6 @@ EOF
     DISTRO_KEY="$(read_distro_key)"
     echo "=== Detected distro: $DISTRO_KEY ==="
     ensure_runtime_packages "$DISTRO_KEY"
-    deploy_pidfile_helper
     build_and_deploy_test_apps "$DISTRO_KEY"
     ensure_tawcroot_device_tests
 fi
@@ -335,23 +321,19 @@ fi
 echo "=== Starting compositor ==="
 adb shell "am force-stop me.phie.tawc"
 sleep 0.3
-adb logcat -c >/dev/null 2>&1 || true
 "$TAWC_EXEC" --in-rootfs "$INSTALL_ID" -- true >/dev/null
 
 # Wait until the tawc process is alive, the wayland socket exists, AND
-# the calloop event loop is dispatching. The compositor binds the
-# socket as its last setup step (see compositor/src/event_loop.rs::run)
-# so a fresh "Entering calloop event loop" log line confirms both — but
-# `am force-stop` leaves the previous run's socket file behind, so the
-# stat alone would falsely match a stale socket while the new
-# compositor is still in early init. The logcat probe disambiguates.
+# the compositor event loop answers a broker state query. `am force-stop`
+# leaves the previous run's socket file behind, so the stat alone would
+# falsely match a stale socket while the new compositor is still in early init.
 COMPOSITOR_READY=0
 for _ in $(seq 1 150); do
     # Wayland socket lives in the app's private data dir; probe via
     # the broker (runs as the app uid).
     if adb shell 'pidof me.phie.tawc >/dev/null' 2>/dev/null && \
        "$TAWC_EXEC" /system/bin/sh -c "test -e /data/data/me.phie.tawc/share/wayland-0" 2>/dev/null && \
-       adb logcat -d -s tawc-native 2>/dev/null | grep -q "Entering calloop event loop"; then
+       "$TAWC_EXEC" --action query-state >/dev/null 2>&1; then
         COMPOSITOR_READY=1
         break
     fi
@@ -362,6 +344,27 @@ if [ "$COMPOSITOR_READY" -ne 1 ]; then
     adb shell am force-stop me.phie.tawc || true
     exit 1
 fi
+
+TAWC_EXEC_BROKER_PORT="$(
+    python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)"
+echo "=== Forwarding exec broker on localhost:$TAWC_EXEC_BROKER_PORT ==="
+adb forward "tcp:$TAWC_EXEC_BROKER_PORT" "localabstract:me.phie.tawc.exec" >/dev/null
+cleanup() {
+    local status=$?
+    if [ -n "${TAWC_EXEC_BROKER_PORT:-}" ]; then
+        adb forward --remove "tcp:$TAWC_EXEC_BROKER_PORT" >/dev/null 2>&1 || true
+    fi
+    adb shell am force-stop me.phie.tawc >/dev/null 2>&1 || true
+    exit "$status"
+}
+trap cleanup EXIT
+export TAWC_EXEC_BROKER_PORT
 
 LIBTEST_ARGS=(--nocapture --test-threads=1)
 if [ -n "$TEST_FILTER" ]; then

@@ -44,21 +44,10 @@ pub fn ensure_wayland_debug_app() -> String {
         .clone()
 }
 
-/// Wait until the compositor reports that the Android keyboard has been shown,
-/// meaning at least one client has enabled text input. Polls the `tawc` logcat
-/// tag for the `onShowKeyboard` message emitted by NativeBridge.
+/// Wait until test-mode input has an active `TawcInputConnection`.
 pub fn wait_for_keyboard_shown(timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let logs = adb::logcat_dump("tawc").expect("Failed to dump logcat");
-        if logs.contains("onShowKeyboard") {
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!("Timeout waiting for onShowKeyboard in logcat");
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    adb::wait_for_active_input_connection(timeout)
+        .expect("TawcInputConnection did not become active");
 }
 
 /// Start the toolkitless Wayland debug app's text-input mode and wait
@@ -67,7 +56,6 @@ pub fn wait_for_keyboard_shown(timeout: Duration) {
 /// full control over text/cursor behaviour.
 pub fn start_wayland_debug_text_input(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "text-input", env)
         .expect("Failed to start wayland debug app");
     app.wait_ready()
@@ -84,7 +72,6 @@ pub fn start_wayland_debug_text_input_no_surrounding(
     env: &str,
 ) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "text-input-no-surrounding", env)
         .expect("Failed to start surrounding-less wayland debug app");
     app.wait_ready()
@@ -102,7 +89,6 @@ pub fn start_wayland_debug_text_input_stale_newline(
     env: &str,
 ) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "text-input-stale-newline", env)
         .expect("Failed to start stale-newline wayland debug app");
     app.wait_ready()
@@ -119,7 +105,6 @@ pub fn start_wayland_debug_clipboard_copy(
     text: &str,
 ) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let subcommand = format!("clipboard-copy '{}'", text.replace('\'', "'\\''"));
     let app = DebugApp::start(backend, &binary, &subcommand, env)
         .expect("Failed to start wayland clipboard-copy debug app");
@@ -147,7 +132,6 @@ fn start_wayland_debug_clipboard_source(
     label: &str,
 ) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, subcommand, env)
         .unwrap_or_else(|e| panic!("Failed to start wayland clipboard-{label} debug app: {e}"));
     app.wait_ready()
@@ -161,7 +145,6 @@ fn start_wayland_debug_clipboard_source(
 
 pub fn start_wayland_debug_clipboard_paste(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "clipboard-paste", env)
         .expect("Failed to start wayland clipboard-paste debug app");
     app.wait_ready()
@@ -174,7 +157,6 @@ pub fn start_wayland_debug_clipboard_paste(backend: GraphicsBackend, env: &str) 
 /// assert on the client's wl_touch events.
 pub fn start_wayland_debug_touch(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "touch", env)
         .expect("Failed to start wayland touch debug app");
     app.wait_ready()
@@ -185,7 +167,6 @@ pub fn start_wayland_debug_touch(backend: GraphicsBackend, env: &str) -> DebugAp
 /// Start wayland-debug-app's fractional-scale reporter.
 pub fn start_wayland_debug_scale(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "scale", env)
         .expect("Failed to start wayland scale debug app");
     app.wait_ready()
@@ -196,7 +177,6 @@ pub fn start_wayland_debug_scale(backend: GraphicsBackend, env: &str) -> DebugAp
 /// Start wayland-debug-app's deterministic fullscreen SHM render pattern.
 pub fn start_wayland_debug_render_pattern(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "render-pattern", env)
         .expect("Failed to start wayland render-pattern debug app");
     app.wait_ready()
@@ -207,7 +187,6 @@ pub fn start_wayland_debug_render_pattern(backend: GraphicsBackend, env: &str) -
 /// Start wayland-debug-app's subsurface touch scene.
 pub fn start_wayland_debug_subsurface(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "subsurface", env)
         .expect("Failed to start wayland subsurface debug app");
     app.wait_ready()
@@ -221,7 +200,6 @@ pub fn start_wayland_debug_subsurface_input_empty(
     env: &str,
 ) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "subsurface-input-empty", env)
         .expect("Failed to start wayland input-empty subsurface debug app");
     app.wait_ready()
@@ -232,7 +210,6 @@ pub fn start_wayland_debug_subsurface_input_empty(
 /// Start wayland-debug-app's xdg_popup touch scene.
 pub fn start_wayland_debug_popup(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "popup", env)
         .expect("Failed to start wayland popup debug app");
     app.wait_ready()
@@ -243,17 +220,11 @@ pub fn start_wayland_debug_popup(backend: GraphicsBackend, env: &str) -> DebugAp
 /// Start wayland-debug-app's grabbed popup switching scene.
 pub fn start_wayland_debug_popup_switch(backend: GraphicsBackend, env: &str) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    adb::logcat_clear().expect("Failed to clear logcat");
     let app = DebugApp::start(backend, &binary, "popup-switch", env)
         .expect("Failed to start wayland popup switch debug app");
     app.wait_ready()
         .expect("Wayland popup switch debug app did not become ready");
     app
-}
-
-/// True if compositor logcat shows a libhybris android_wlegl AHB import.
-pub fn saw_ahb_import(logs: &str) -> bool {
-    logs.contains("wlegl: imported ANativeWindowBuffer as texture")
 }
 
 /// True if the compositor currently has at least one android_wlegl/AHB-backed
@@ -290,17 +261,9 @@ pub fn assert_client_animating(name: &str, window: Duration, min_frames: u64) {
     );
 }
 
-/// True if compositor logcat shows an SHM buffer import.
-pub fn saw_shm_import(logs: &str) -> bool {
-    logs.contains("SHM buffer imported")
-}
-
 /// True if the compositor currently has at least one SHM-backed surface.
 ///
-/// This is a stronger signal than the SHM import log for long-lived
-/// compositor test runs: the renderer logs each wl_buffer id only once,
-/// so a later client can render through SHM without producing a fresh
-/// post-logcat-clear import line if object ids are reused.
+/// This is the test oracle for clients expected to use SHM.
 pub fn has_shm_surface() -> bool {
     compositor::query_state(Duration::from_secs(2))
         .map(|state| state.surfaces_shm >= 1)
@@ -311,6 +274,7 @@ pub fn has_shm_surface() -> bool {
 /// the screen actually shows an empty frame (not a stale frame from the
 /// previous client).
 pub fn assert_compositor_clean() {
+    let _ = adb::cleanup_rootfs();
     let state = compositor::wait_for_state(0, 0, TIMEOUT)
         .expect("Compositor did not return to clean state");
     assert_eq!(
@@ -429,7 +393,6 @@ pub fn launch_and_wait_for_ahb(
     timeout: Duration,
 ) -> RootfsProcess {
     require_compositor();
-    adb::logcat_clear().expect("Failed to clear logcat");
 
     let mut proc = RootfsProcess::spawn_with(backend, cmd)
         .unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
@@ -442,8 +405,7 @@ pub fn launch_and_wait_for_ahb(
             proc.stop().ok();
             panic!("{name} crashed/exited before rendering");
         }
-        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_ahb_import(&logs) || has_ahb_surface() {
+        if has_ahb_surface() {
             saw_ahb = true;
             break;
         }
@@ -474,7 +436,6 @@ pub fn launch_and_wait_for_ahb(
 /// different invariants — the helper handles both.
 pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, timeout: Duration) {
     require_compositor();
-    adb::logcat_clear().expect("Failed to clear logcat");
 
     let mut app = RootfsProcess::spawn_with(backend, cmd)
         .unwrap_or_else(|e| panic!("Failed to spawn {name}: {e}"));
@@ -487,8 +448,7 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
             app.stop().ok();
             panic!("{name} crashed/exited before rendering");
         }
-        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_shm_import(&logs) || has_shm_surface() {
+        if has_shm_surface() {
             saw = true;
             break;
         }
@@ -504,11 +464,12 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
         "{name} did not produce SHM buffer imports or an attached SHM surface within {timeout:?}"
     );
 
-    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    let state =
+        compositor::query_state(TIMEOUT).expect("query compositor state while client running");
     assert!(
-        !saw_ahb_import(&logs),
+        state.surfaces_wlegl == 0,
         "Unexpected AHB import — {name} should not use hardware buffers \
-         under backend={:?}",
+         under backend={:?}: {state:?}",
         backend,
     );
     assert!(
@@ -518,8 +479,6 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
         backend,
     );
 
-    let state =
-        compositor::query_state(TIMEOUT).expect("query compositor state while client running");
     assert!(
         state.toplevels >= 1,
         "compositor sees no toplevel for {name}: {state:?}"

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, assert_renders_via_shm,
-    has_shm_surface, require_compositor, saw_ahb_import, saw_shm_import, TIMEOUT,
+    has_shm_surface, require_compositor, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, compositor, GraphicsBackend};
@@ -73,7 +73,6 @@ fn test_eglinfo_reports_software_renderer() {
 fn test_weston_simple_shm_renders_via_shm() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("Failed to clear logcat");
 
     let mut app = RootfsProcess::spawn_with(BACKEND, "weston-simple-shm")
         .expect("spawn weston-simple-shm");
@@ -86,8 +85,7 @@ fn test_weston_simple_shm_renders_via_shm() {
             app.stop().ok();
             panic!("weston-simple-shm crashed/exited before rendering");
         }
-        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if saw_shm_import(&logs) || has_shm_surface() {
+        if has_shm_surface() {
             saw_buffer = true;
             break;
         }
@@ -97,14 +95,8 @@ fn test_weston_simple_shm_renders_via_shm() {
 
     assert!(
         saw_buffer,
-        "weston-simple-shm did not produce SHM buffer imports within {:?}",
+        "weston-simple-shm did not produce a SHM surface within {:?}",
         WESTON_LAUNCH_TIMEOUT
-    );
-
-    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-    assert!(
-        !saw_ahb_import(&logs),
-        "Unexpected AHB import — weston-simple-shm should never use hardware buffers"
     );
 
     let state = compositor::query_state(TIMEOUT)

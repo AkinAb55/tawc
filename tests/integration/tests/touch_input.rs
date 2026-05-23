@@ -400,6 +400,8 @@ fn test_touch_popup_tap_does_not_move_keyboard_focus_to_popup() {
 fn test_touch_grabbed_popup_switches_to_next_popup() {
     tawc_integration::helpers::test_init();
     with_wayland_popup_switch(|app| {
+        app.wait_for_tag_value("CONFIGURE_STATE", "fullscreen", TIMEOUT)
+            .expect("popup switch toplevel fullscreen before first tap");
         inject_touch("tap-menu-a");
         app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
             .expect("first grabbed popup ready");

@@ -5,7 +5,7 @@
 //! by TawcState because Smithay callbacks use one concrete state type.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info, warn};
 
@@ -181,6 +181,7 @@ pub struct TawcState {
     /// Number of connected Wayland clients. Shared with ClientState instances
     /// so they can increment/decrement from ClientData callbacks.
     pub client_count: Arc<AtomicU32>,
+    pub client_ids: Arc<Mutex<Vec<ClientId>>>,
 
     /// Set when toplevels are added or removed; cleared by the frame timer
     /// after updating focus. Avoids per-frame focus scans when nothing changed.
@@ -331,6 +332,7 @@ impl TawcState {
             output_physical_size,
             text_input_state: TextInputState::new(),
             client_count: Arc::new(AtomicU32::new(0)),
+            client_ids: Arc::new(Mutex::new(Vec::new())),
             toplevels_changed: false,
             buffer_commit_pending: false,
             hosts: HashMap::new(),
@@ -625,11 +627,17 @@ impl TawcState {
     }
 
     pub fn request_close_all_client_windows_for_test(&mut self) -> usize {
-        let mut closed = 0;
+        let ids = self.client_ids.lock().unwrap().clone();
+        let disconnected = ids.len();
+        for id in ids {
+            self.display_handle
+                .backend_handle()
+                .kill_client(id, DisconnectReason::ConnectionClosed);
+        }
+
         for toplevel in self.xdg_shell_state.toplevel_surfaces() {
             if toplevel.alive() {
                 toplevel.send_close();
-                closed += 1;
             }
         }
 
@@ -638,9 +646,8 @@ impl TawcState {
             if let Err(e) = surface.close() {
                 warn!("xwayland: failed to close window {}: {}", surface.window_id(), e);
             }
-            closed += 1;
         }
-        closed
+        disconnected
     }
 
     pub fn update_host_window_metadata(
@@ -1071,24 +1078,28 @@ impl SeatHandler for TawcState {
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
     pub client_count: Arc<AtomicU32>,
+    pub client_ids: Arc<Mutex<Vec<ClientId>>>,
 }
 
 impl ClientState {
-    pub fn new(client_count: Arc<AtomicU32>) -> Self {
+    pub fn new(client_count: Arc<AtomicU32>, client_ids: Arc<Mutex<Vec<ClientId>>>) -> Self {
         Self {
             compositor_state: CompositorClientState::default(),
             client_count,
+            client_ids,
         }
     }
 }
 
 impl ClientData for ClientState {
-    fn initialized(&self, _client_id: ClientId) {
+    fn initialized(&self, client_id: ClientId) {
+        self.client_ids.lock().unwrap().push(client_id);
         self.client_count.fetch_add(1, Ordering::Relaxed);
         info!("Wayland client initialized (total: {})", self.client_count.load(Ordering::Relaxed));
     }
 
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
+        self.client_ids.lock().unwrap().retain(|id| id != &client_id);
         self.client_count.fetch_sub(1, Ordering::Relaxed);
         info!("Wayland client disconnected: {:?} (total: {})", _reason, self.client_count.load(Ordering::Relaxed));
     }

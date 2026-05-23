@@ -10,10 +10,6 @@ Consequences if violated:
 - Daemons spawned inside (notably gpg-agent under `pacman-key`) inherit
   whatever signal mask / pgrp the launcher had, and misbehave: gpg-agent
   spins at 100% CPU in its main loop instead of cleanly daemonising.
-- The integration test framework's `kill -- -<pgid>` cleanup targets
-  whatever PGID was inherited, which on Android is the system zygote's
-  (PID 909) — so a test trying to kill its app would try to signal every
-  other Android app on the device.
 - Controlling-tty inheritance (rare on Android, but the same model).
 
 ## Single Kotlin entry point
@@ -45,9 +41,8 @@ The broker accepts a `RUNINSIDE <install-id>` header (optionally
 followed by `CMD <command>`); see notes/exec-broker.md. The host
 helper exposes this as `tawc-exec --in-rootfs <id> [-- CMD]`.
 
-## Detecting violations
+## Test cleanup
 
-`tests/integration/src/rootfs_process.rs::ensure_pgid` asserts that
-the discovered PGID is not the broker's. A failure surfaces as a clear
-panic message rather than a 10-second `kill -- -<pgid>` timeout that
-looks like flake.
+Integration test cleanup is app-side. The broker `test-init` action
+uses `ProcessScanner.killAllInRootfs` for the selected install instead
+of host pidfiles, PGID reads, `ps`, or `kill -- -PGID`.

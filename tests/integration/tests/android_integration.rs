@@ -91,9 +91,9 @@ fn test_back_restores_fullscreen_then_sends_escape() {
 fn test_back_dismisses_grabbed_popup_before_restoring_fullscreen() {
     tawc_integration::helpers::test_init();
     let mut app = start_wayland_debug_popup_switch(BACKEND, WAYLAND_DEBUG_ENV);
-    inject_touch("tap-menu-a");
     app.wait_for_tag_value("CONFIGURE_STATE", "fullscreen", TIMEOUT)
         .expect("popup switch scene should start fullscreen");
+    inject_touch("tap-menu-a");
     app.wait_for_tag_value("SURFACE_READY", "popup", TIMEOUT)
         .expect("first grabbed popup ready");
     let maximized_before = app

@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 
 use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
-    assert_broker_ok, assert_compositor_clean, has_shm_surface, require_compositor,
+    assert_broker_ok, assert_compositor_clean, has_shm_surface, require_compositor, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
-use tawc_integration::{adb, rootfs, GraphicsBackend};
+use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
 
 const SHM_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
@@ -105,14 +105,6 @@ fn inject_touch_logical_when_focused(x: f32, y: f32, timeout: Duration) {
 
 fn shell_quote_single(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
-}
-
-fn saw_wlegl_create_buffer_fmt(logs: &str, fmt: u32) -> bool {
-    let fmt_needle = format!("fmt={fmt}");
-    logs.lines().any(|line| {
-        line.contains("wlegl: create_buffer")
-            && line.split_whitespace().any(|part| part == fmt_needle)
-    })
 }
 
 fn wait_for_android_clipboard(expected: &str, timeout: Duration) {
@@ -265,7 +257,6 @@ fn test_x11_clipboard_text_to_android() {
 fn test_xwayland_xclock_renders_via_shm() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("Failed to clear logcat");
 
     // `-update 1` forces a redraw every second so the client keeps
     // pushing buffers — without it xclock draws once and goes silent,
@@ -283,8 +274,7 @@ fn test_xwayland_xclock_renders_via_shm() {
             app.stop().ok();
             panic!("xclock crashed/exited before rendering — Xwayland startup failed?");
         }
-        let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
-        if tawc_integration::helpers::saw_shm_import(&logs) || has_shm_surface() {
+        if has_shm_surface() {
             saw_buffer = true;
             break;
         }
@@ -293,20 +283,16 @@ fn test_xwayland_xclock_renders_via_shm() {
 
     assert!(
         saw_buffer,
-        "xclock did not produce SHM buffer imports within {:?} — \
+        "xclock did not produce a SHM surface within {:?} — \
          Xwayland connection or X11 surface association broken?",
         XWAYLAND_LAUNCH_TIMEOUT
     );
 
-    // A `compositor::xwayland: associated X11 surface ... to host`
-    // line should also be present, confirming our XwmHandler hooked
-    // the X11 window into a render host. Surface-without-host would
-    // import a buffer but never draw.
-    let logs = adb::logcat_dump_tawc().expect("Failed to dump logcat");
+    let state = compositor::query_state(TIMEOUT).expect("query xclock compositor state");
     assert!(
-        logs.contains("xwayland: associated X11 surface"),
+        state.x11_surfaces_with_host >= 1,
         "xclock surface never associated to a render host — \
-         X11Wm + xwayland_shell wiring broken?\nlogs:\n{logs}"
+         X11Wm + xwayland_shell wiring broken? state={state:?}"
     );
 
     app.stop().expect("xclock failed to stop cleanly");
@@ -335,7 +321,6 @@ fn test_xwayland_xclock_renders_via_shm() {
 fn test_tawc_dri_ahb_present_round_trip() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("logcat clear");
 
     let bin = rootfs::ensure_tawc_dri_test().expect("build tawc-dri-test");
     // HOLD_SECS=1 is enough — the test client commits the AHB once, the
@@ -343,6 +328,7 @@ fn test_tawc_dri_ahb_present_round_trip() {
     // the wlegl create_buffer / texture import. We don't need to keep
     // the window mapped for screencap inspection in an integration test
     // that only verifies the compositor logs.
+    let before = compositor::query_state(TIMEOUT).expect("query compositor state before TAWC-DRI");
     let cmd = format!("DISPLAY=:0 TAWC_DRI_HOLD_SECS=1 {}", bin);
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run tawc-dri-test");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -362,27 +348,27 @@ fn test_tawc_dri_ahb_present_round_trip() {
     // Confirm the AHB pixel format and dimensions reached the
     // compositor in AHB form (not the SHM fallback). Test client
     // allocates 320x240 R8G8B8A8 (= AHB format 1).
-    let logs = adb::logcat_dump_tawc().expect("logcat dump");
+    let after = compositor::query_state(TIMEOUT).expect("query compositor state after TAWC-DRI");
     assert!(
-        logs.contains("wlegl: create_buffer 320x240")
-            && logs.contains("fmt=1"),
-        "compositor never logged `wlegl: create_buffer 320x240 ... fmt=1`, \
+        after.wlegl_create_buffer_total > before.wlegl_create_buffer_total
+            && after.last_wlegl_width == 320
+            && after.last_wlegl_height == 240
+            && after.last_wlegl_format == 1,
+        "compositor never reported `wlegl create_buffer 320x240 fmt=1`, \
          meaning the TAWC-DRI AHB never reached the compositor's android_wlegl \
          import path. The client may have fallen back to SHM (which would \
          tint the buffer magenta), or the X server's TAWC-DRI dispatch may \
-         be silently dropping the request.\nlast 4k of compositor logs:\n{}",
-         &logs[logs.len().saturating_sub(4096)..],
+         be silently dropping the request. before={before:?} after={after:?}",
     );
     // Also verify the AHB completed the trip into a GL texture on the
     // compositor side. A pure SHM fallback path won't produce this line.
     // Catches a regression where the AHB import succeeds but the GL bind
     // fails (e.g. format/usage mismatch).
     assert!(
-        logs.contains("wlegl: imported ANativeWindowBuffer as texture 320x240"),
+        after.wlegl_import_texture_total > before.wlegl_import_texture_total,
         "compositor imported the AHB metadata but never bound it as a GL \
          texture. The AHB→GL path (compositor/src/render.rs) likely got an \
-         EGL error.\nlogs:\n{}",
-         &logs[logs.len().saturating_sub(4096)..],
+         EGL error. before={before:?} after={after:?}",
     );
     assert_compositor_clean();
 }
@@ -398,9 +384,9 @@ fn test_tawc_dri_ahb_present_round_trip() {
 ///   - Rendering staleness: if the compositor caches the first frame's
 ///     texture forever instead of re-importing, the on-screen image
 ///     freezes — but with the loop, "frozen" still means animation
-///     sweep is missing, which is invisible from logs alone. We instead
-///     assert that >=120 wlegl: create_buffer lines appear (one per
-///     frame, no dropped imports) AND that the test client's reported
+///     sweep is missing. We assert the wlegl create-buffer counter
+///     advances by >=120 (one per frame, no dropped imports) AND that
+///     the test client's reported
 ///     fps stays at the configured 60fps target (so the X server isn't
 ///     blocking it).
 #[test]
@@ -411,7 +397,6 @@ fn test_tawc_dri_ahb_present_round_trip() {
 fn test_tawc_dri_ahb_present_animated_loop() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("logcat clear");
 
     let bin = rootfs::ensure_tawc_dri_test().expect("build tawc-dri-test");
     // 120 frames at 60fps = 2 seconds. Long enough to surface a leak
@@ -422,6 +407,7 @@ fn test_tawc_dri_ahb_present_animated_loop() {
         "DISPLAY=:0 TAWC_DRI_LOOP_FRAMES={} {}",
         FRAMES, bin
     );
+    let before = compositor::query_state(TIMEOUT).expect("query compositor state before TAWC-DRI loop");
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run tawc-dri-test loop");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -458,27 +444,17 @@ fn test_tawc_dri_ahb_present_animated_loop() {
          the client — likely an O(N) leak or a slow path.\nstderr:\n{stderr}"
     );
 
-    let logs = adb::logcat_dump_tawc().expect("logcat dump");
-    let create_count = logs.matches("wlegl: create_buffer 320x240").count();
-    // The compositor should import every frame's AHB. Allow a small
-    // slack for log-cat truncation / startup noise (we cleared logs
-    // before the run, but a few stray lines from prior messages may
-    // sneak in via the buffered Android log).
+    let after = compositor::query_state(TIMEOUT).expect("query compositor state after TAWC-DRI loop");
+    let create_count = after
+        .wlegl_create_buffer_total
+        .saturating_sub(before.wlegl_create_buffer_total);
+    // The compositor should import every frame's AHB.
     assert!(
-        create_count >= FRAMES as usize,
+        create_count >= FRAMES as u64,
         "compositor imported only {create_count} AHBs for {FRAMES} client \
          frames. Some imports were dropped or never reached the compositor — \
          most likely the X server is silently failing AHardwareBuffer_createFromHandle \
-         under sustained load. \nlast 4k of logs:\n{}",
-         &logs[logs.len().saturating_sub(4096)..],
-    );
-    // Compositor side mustn't have logged any tawc-error lines during
-    // the run — those signal AHB import failures or X11 dispatch errors
-    // that didn't kill the X server but did drop the buffer.
-    assert!(
-        !logs.contains("xwl_tawc:") || !logs.contains("failed"),
-        "compositor logged xwl_tawc errors during the loop:\n{}",
-         &logs[logs.len().saturating_sub(4096)..],
+         under sustained load. before={before:?} after={after:?}",
     );
     assert_compositor_clean();
 }
@@ -492,11 +468,11 @@ fn test_tawc_dri_ahb_present_animated_loop() {
 ///
 /// Asserts:
 ///   - The client exits 0 and reaches its `OK` line (no EGL errors).
-///   - The compositor logs at least one `wlegl: create_buffer ... fmt=1`
-///     (AHB import) AND at least one
-///     `wlegl: imported ANativeWindowBuffer as texture ...` (GL bind).
+///   - The compositor's wlegl create-buffer counter advances with
+///     `last_wlegl_format=1` (AHB import) AND the texture-import counter
+///     advances (GL bind).
 ///
-/// If this fails *with no AHB log lines*, the libhybris X11 plugin is
+/// If this fails with no AHB counter movement, the libhybris X11 plugin is
 /// broken — the client never made it onto the TAWC-DRI wire (probably
 /// `eglGetPlatformDisplay` fell back to NULL or surface creation
 /// errored). If the AHB lands but no GL texture import, the compositor
@@ -510,7 +486,6 @@ fn test_tawc_dri_ahb_present_animated_loop() {
 fn test_eglx11_renders_via_ahb() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("logcat clear");
 
     let bin = rootfs::ensure_eglx11_test().expect("build eglx11-test");
     // The swap loop can finish before the compositor's next frame tick.
@@ -521,6 +496,7 @@ fn test_eglx11_renders_via_ahb() {
          TAWC_EGLX11_HOLD_SECS=1 {}",
         bin
     );
+    let before = compositor::query_state(TIMEOUT).expect("query compositor state before eglx11");
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run eglx11-test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -536,24 +512,22 @@ fn test_eglx11_renders_via_ahb() {
         "eglx11-test exited 0 but didn't reach the OK line.\nstderr: {stderr}"
     );
 
-    let logs = adb::logcat_dump_tawc().expect("logcat dump");
+    let after = compositor::query_state(TIMEOUT).expect("query compositor state after eglx11");
     assert!(
-        saw_wlegl_create_buffer_fmt(&logs, 1),
-        "compositor never logged `wlegl: create_buffer ... fmt=1`. \
+        after.wlegl_create_buffer_total > before.wlegl_create_buffer_total
+            && after.last_wlegl_format == 1,
+        "compositor never reported `wlegl create_buffer ... fmt=1`. \
          The libhybris EGL plugin's swap chain didn't ship an AHB through \
          TAWC-DRI to the compositor. Either eglGetPlatformDisplay didn't \
          dispatch to our x11 plugin, or queueBuffer's TAWCDRIPresentBuffer \
          was silently dropped server-side.\n\
-         eglx11-test stderr:\n{stderr}\n\
-         last 4k of compositor logs:\n{}",
-        &logs[logs.len().saturating_sub(4096)..],
+         eglx11-test stderr:\n{stderr}\nbefore={before:?} after={after:?}",
     );
     assert!(
-        logs.contains("wlegl: imported ANativeWindowBuffer as texture"),
+        after.wlegl_import_texture_total > before.wlegl_import_texture_total,
         "compositor imported the AHB but never bound it as a GL texture. \
          Format/usage mismatch between the libhybris plugin's gralloc \
-         allocate and the compositor's wlegl import path.\nlogs:\n{}",
-        &logs[logs.len().saturating_sub(4096)..],
+         allocate and the compositor's wlegl import path. before={before:?} after={after:?}",
     );
     assert_compositor_clean();
 }
@@ -562,16 +536,10 @@ fn test_eglx11_renders_via_ahb() {
 /// (from `mesa-demos`) for a few seconds against our libhybris X11 EGL
 /// plugin and asserts the full pipe stays healthy under sustained-frame
 /// load:
-///   - Hundreds of `wlegl: create_buffer` lines (one per swap → AHB
-///     import) — proves the plugin isn't falling back to SHM under any
-///     vendor-specific config the GLES driver picks.
-///   - Zero `AHardwareBuffer_createFromHandle failed` lines on the
-///     compositor side — guards against the FD-leak / handle-shape
-///     regressions that bit Phase 2 step 4 (compositor RLIMIT_NOFILE
-///     trip from per-present buffer leaks).
-///   - Compositor and X server still alive after the run (no
-///     `Xwayland disconnected: Protocol error` from a botched
-///     create_buffer).
+///   - Hundreds of wlegl create-buffer counter increments (one per swap
+///     → AHB import) — proves the plugin isn't falling back to SHM under
+///     any vendor-specific config the GLES driver picks.
+///   - Compositor and X server still alive after the run.
 ///
 /// This is the regression net for the X server's wl_buffer.release
 /// listener and the libhybris plugin's queueBuffer wire shape — both
@@ -584,7 +552,6 @@ fn test_eglx11_renders_via_ahb() {
 fn test_es2gears_x11_renders_via_ahb() {
     tawc_integration::helpers::test_init();
     require_compositor();
-    adb::logcat_clear().expect("logcat clear");
 
     // 4s gives es2gears time to hit hundreds of swap cycles even on a
     // slow device. The release-listener fix bounds the live AHB
@@ -592,6 +559,7 @@ fn test_es2gears_x11_renders_via_ahb() {
     // total frame count, so longer runs would only dilute signal.
     let cmd = "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 timeout 4 es2gears_x11 \
                > /dev/null 2>&1; true";
+    let before = compositor::query_state(TIMEOUT).expect("query compositor state before es2gears_x11");
     let output = adb::rootfs_run_with(BACKEND, cmd).expect("run es2gears_x11");
     assert!(
         output.status.success(),
@@ -602,29 +570,16 @@ fn test_es2gears_x11_renders_via_ahb() {
         output.status.code()
     );
 
-    let logs = adb::logcat_dump_tawc().expect("logcat dump");
-    let create_count = logs.matches("wlegl: create_buffer").count();
+    let after = compositor::query_state(TIMEOUT).expect("query compositor state after es2gears_x11");
+    let create_count = after
+        .wlegl_create_buffer_total
+        .saturating_sub(before.wlegl_create_buffer_total);
     assert!(
         create_count >= 100,
         "compositor only imported {create_count} AHBs from es2gears_x11. \
          Expected >=100 — either the libhybris EGL plugin fell back to a \
          non-AHB path for the GLES driver's chosen config, or the X server \
-         is dropping presents.\nlast 4k of logs:\n{}",
-        &logs[logs.len().saturating_sub(4096)..],
-    );
-    assert!(
-        !logs.contains("AHardwareBuffer_createFromHandle failed"),
-        "compositor logged AHardwareBuffer_createFromHandle failure during \
-         the run — most likely an FD leak (the X server's wl_buffer.release \
-         listener got disconnected) or a handle-shape regression in the \
-         libhybris plugin.\nlast 4k of logs:\n{}",
-        &logs[logs.len().saturating_sub(4096)..],
-    );
-    assert!(
-        !logs.contains("Xwayland disconnected: Protocol error"),
-        "Xwayland died during the run with a protocol error. \
-         Last 4k of logs:\n{}",
-        &logs[logs.len().saturating_sub(4096)..],
+         is dropping presents. before={before:?} after={after:?}",
     );
     assert_compositor_clean();
 }

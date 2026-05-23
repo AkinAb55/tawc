@@ -209,8 +209,8 @@ object NativeBridge {
      *  the modifier has to stay down while the main key is delivered. */
     external fun nativeSendKeyState(keycode: Int, pressed: Boolean)
 
-    /** Query compositor state (logs COMPOSITOR_STATE line to logcat). */
-    external fun nativeQueryState()
+    /** Query compositor state on the compositor event loop. */
+    external fun nativeQueryState(): String?
 
     /** Toggle the renderer's per-buffer-type tint (today: magenta SHM
      *  wash). Read live by every frame, so the change is visible on the
@@ -232,6 +232,9 @@ object NativeBridge {
 
     /** Forward Android ClipboardManager text changes into the compositor. */
     external fun nativeOnAndroidClipboardText(text: String)
+
+    /** Structured debug counters for clipboard integration tests. */
+    external fun nativeClipboardDebugState(): String?
 
     /**
      * Scan a rootfs for installed `.desktop` apps. Returns a JSON array

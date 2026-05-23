@@ -213,7 +213,8 @@ fn broker_action(name: &str, args: &[(&str, &str)]) -> io::Result<Output> {
 /// Wayland clients to close. Returns the number of client windows that were
 /// asked to close.
 pub fn test_init() -> io::Result<usize> {
-    let output = broker_action("test-init", &[])?;
+    let install_id = crate::install_id();
+    let output = broker_action("test-init", &[("installId", &install_id)])?;
     if !output.status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -229,6 +230,24 @@ pub fn test_init() -> io::Result<usize> {
         .lines()
         .find_map(|line| line.strip_prefix("closed=")?.parse::<usize>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("test-init missing closed count: {stdout:?}")))
+}
+
+pub fn cleanup_rootfs() -> io::Result<usize> {
+    let install_id = crate::install_id();
+    let output = broker_action("cleanup-rootfs", &[("installId", &install_id)])?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "cleanup-rootfs failed with {} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("rootfs_killed=")?.parse::<usize>().ok())
+        .ok_or_else(|| io::Error::other(format!("cleanup-rootfs missing count: {stdout:?}")))
 }
 
 /// Wait until the focused compositor activity has an active
@@ -454,6 +473,18 @@ pub fn clipboard_get_text() -> io::Result<String> {
         .to_string())
 }
 
+pub fn clipboard_pull_timeouts_total() -> io::Result<u64> {
+    let output = broker_action("clipboard-debug-state", &[])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .find_map(|part| {
+            part.strip_prefix("clipboard_pull_timeouts_total=")
+                .and_then(|v| v.parse().ok())
+        })
+        .ok_or_else(|| io::Error::other(format!("missing clipboard timeout counter: {stdout:?}")))
+}
+
 // ---- Touch / observation -------------------------------------------------
 
 /// Send a tap at physical screen coordinates (x, y) via the OS-level
@@ -474,7 +505,7 @@ pub fn input_back() -> io::Result<Output> {
 /// `multitouch`; coordinates are chosen as fractions of the current view
 /// size on device, so callers do not need to know the physical screen size.
 pub fn inject_touch(kind: &str) -> io::Result<Output> {
-    broker_action("inject-touch", &[("kind", kind)])
+    inject_touch_inner(&[("kind", kind)])
 }
 
 /// Inject a tap through the focused compositor SurfaceView at Wayland logical
@@ -483,32 +514,32 @@ pub fn inject_touch(kind: &str) -> io::Result<Output> {
 pub fn inject_touch_logical(x: f32, y: f32) -> io::Result<Output> {
     let x = format!("{x:.2}");
     let y = format!("{y:.2}");
-    broker_action("inject-touch", &[("kind", "tap-logical"), ("x", &x), ("y", &y)])
+    inject_touch_inner(&[("kind", "tap-logical"), ("x", &x), ("y", &y)])
 }
 
-/// Clear the logcat buffer so subsequent reads only show new messages.
-pub fn logcat_clear() -> io::Result<Output> {
-    Command::new("adb").args(["logcat", "-c"]).output()
+fn inject_touch_inner(args: &[(&str, &str)]) -> io::Result<Output> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let output = broker_action_raw("inject-touch", args)?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("no focused CompositorActivity") || Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "broker action inject-touch failed with {} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                stderr
+            )));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
-/// Dump logcat lines matching the tawc-native tag (compositor Rust logs).
-pub fn logcat_dump_tawc() -> io::Result<String> {
-    logcat_dump("tawc-native")
-}
-
-/// Dump logcat lines matching a specific tag.
-pub fn logcat_dump(tag: &str) -> io::Result<String> {
-    let output = Command::new("adb")
-        .args(["logcat", "-d", "-s", tag])
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Trigger the compositor to log its current state via the broker
-/// `query-state` action. Reads as a `COMPOSITOR_STATE …` line under the
-/// `tawc-native` logcat tag. Observational only — doesn't change input
-/// state.
-pub fn broadcast_query_state() -> io::Result<Output> {
+/// Query compositor state via the broker `query-state` action.
+/// Observational only — doesn't change input state.
+pub fn query_state() -> io::Result<Output> {
     broker_action("query-state", &[])
 }
 

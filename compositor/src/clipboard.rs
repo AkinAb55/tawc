@@ -46,6 +46,14 @@ pub enum ClipboardEvent {
 static CLIPBOARD_SENDER: Mutex<Option<channel::Sender<ClipboardEvent>>> = Mutex::new(None);
 static READ_ACTIVE: AtomicBool = AtomicBool::new(false);
 static READ_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PULL_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+pub fn debug_state() -> String {
+    format!(
+        "clipboard_pull_timeouts_total={}",
+        PULL_TIMEOUTS_TOTAL.load(Ordering::Relaxed)
+    )
+}
 
 pub fn create_clipboard_channel() -> channel::Channel<ClipboardEvent> {
     let (sender, ch) = channel::channel();
@@ -174,6 +182,7 @@ fn read_capped_utf8(fd: OwnedFd) -> std::io::Result<Option<String>> {
                 let now = Instant::now();
                 if now >= deadline {
                     warn!("clipboard: timed out waiting for selection source");
+                    PULL_TIMEOUTS_TOTAL.fetch_add(1, Ordering::Relaxed);
                     return Ok(None);
                 }
                 poll_readable(raw_fd, deadline - now)?;

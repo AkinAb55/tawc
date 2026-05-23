@@ -99,7 +99,8 @@ fn inject_tap(x: f32, y: f32, label: &str) {
 /// preedit-then-finish round-trip places the new char at the click site.
 fn scene_click_cursor_positioning(app: &DebugApp, taps: InputTapCoords) {
     adb::ic_commit_text("abcdef").expect("commit 'abcdef'");
-    app.wait_for_text("abcdef", TIMEOUT).expect("'abcdef'");
+    app.wait_for_text_cursor("abcdef", TIMEOUT)
+        .expect("'abcdef'");
 
     let cursor_count_before = app.cursor_pos_count();
     inject_tap(taps.text_mid_x, taps.text_y, "tap mid");
@@ -177,13 +178,14 @@ fn scene_full_compose_loop_with_click_in_middle(app: &DebugApp, taps: InputTapCo
     }
     adb::ic_finish_composing().expect("finish word 1");
     adb::ic_commit_text(" ").expect("commit ' '");
-    app.wait_for_text("hello ", TIMEOUT).expect("'hello '");
+    app.wait_for_text_cursor("hello ", TIMEOUT)
+        .expect("'hello '");
 
     for prefix in ["w", "wo", "wor", "worl", "world"] {
         adb::ic_set_composing_text(prefix).expect("setComposingText");
     }
     adb::ic_finish_composing().expect("finish word 2");
-    app.wait_for_text("hello world", TIMEOUT)
+    app.wait_for_text_cursor("hello world", TIMEOUT)
         .expect("'hello world'");
 
     let cursor_count = app.cursor_pos_count();
@@ -373,7 +375,7 @@ fn test_basic_editing_and_delete() {
         app.wait_for_text("hello world", TIMEOUT).expect("restored");
 
         adb::ic_delete_surrounding_text(5, 0).expect("delete_surrounding");
-        app.wait_for_text("hello ", TIMEOUT)
+        app.wait_for_text_cursor("hello ", TIMEOUT)
             .expect("'hello ' after delete_surrounding(5, 0)");
 
         let cursor_count = app.cursor_pos_count();
@@ -510,7 +512,8 @@ fn test_tap_clears_pending_preedit_without_committing() {
     tawc_integration::helpers::test_init();
     with_wayland_text_input(|app| {
         adb::ic_commit_text("anchor").expect("commit 'anchor'");
-        app.wait_for_text("anchor", TIMEOUT).expect("'anchor'");
+        app.wait_for_text_cursor("anchor", TIMEOUT)
+            .expect("'anchor'");
         let before = app.last_text().unwrap_or_default();
 
         adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");
@@ -547,7 +550,9 @@ fn test_focus_leave_clears_pending_preedit_without_committing() {
     let mut text_app = start_wayland_debug_text_input(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
 
     adb::ic_commit_text("anchor").expect("commit 'anchor'");
-    text_app.wait_for_text("anchor", TIMEOUT).expect("'anchor'");
+    text_app
+        .wait_for_text_cursor("anchor", TIMEOUT)
+        .expect("'anchor'");
     adb::ic_set_composing_text("pending").expect("setComposingText 'pending'");
     text_app
         .wait_for_preedit("pending", TIMEOUT)
@@ -600,7 +605,7 @@ fn test_composing_region_replacement_paths() {
     tawc_integration::helpers::test_init();
     with_wayland_text_input(|app| {
         adb::ic_commit_text("hello world").expect("commit 'hello world'");
-        app.wait_for_text("hello world", TIMEOUT)
+        app.wait_for_text_cursor("hello world", TIMEOUT)
             .expect("'hello world'");
 
         let cursor_count = app.cursor_pos_count();
@@ -922,19 +927,20 @@ fn assert_android_clipboard_stays(expected: &str, duration: Duration) {
 
 fn wait_for_clipboard_timeout_without_android_replace(expected: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
+    let before = adb::clipboard_pull_timeouts_total().expect("clipboard debug state before");
     loop {
         let got = adb::clipboard_get_text().expect("get Android clipboard");
         assert_eq!(
             got, expected,
             "non-closing clipboard source should not replace Android clipboard"
         );
-        let logs = adb::logcat_dump_tawc().expect("dump tawc-native logcat");
-        if logs.contains("clipboard: timed out waiting for selection source") {
+        let current = adb::clipboard_pull_timeouts_total().expect("clipboard debug state");
+        if current > before {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "clipboard pull timeout log did not appear within {:?}",
+            "clipboard pull timeout counter did not advance within {:?}",
             timeout
         );
         thread::sleep(Duration::from_millis(100));

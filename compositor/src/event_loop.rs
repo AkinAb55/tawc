@@ -7,7 +7,7 @@
 
 use std::ffi::c_void;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use log::{error, info};
@@ -280,7 +280,7 @@ pub fn run(
     touch_channel: Channel<TouchEvent>,
     text_input_channel: Channel<TextInputEvent>,
     clipboard_channel: Channel<ClipboardEvent>,
-    state_query_channel: Channel<()>,
+    state_query_channel: Channel<mpsc::Sender<String>>,
     surface_event_channel: Channel<SurfaceEvent>,
     running: &std::sync::atomic::AtomicBool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -515,9 +515,9 @@ pub fn run(
     })?;
 
     // --- Source 5: State query channel ---
-    // Receives requests to log compositor state (from QUERY_STATE broadcast).
+    // Receives requests for a compositor-thread state snapshot.
     loop_handle.insert_source(state_query_channel, move |event, _, data: &mut TawcState| {
-        if let ChannelEvent::Msg(()) = event {
+        if let ChannelEvent::Msg(response) = event {
             let clients = data.client_count.load(std::sync::atomic::Ordering::Relaxed);
             let bound_hosts = data
                 .hosts
@@ -525,8 +525,14 @@ pub fn run(
                 .filter(|h| h.egl_surface.is_some())
                 .count();
             let (surfaces_wlegl, surfaces_shm) = data.attached_buffer_counts();
-            info!(
-                "COMPOSITOR_STATE: clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
+            let x11_surfaces_with_host = data
+                .x11_surfaces
+                .iter()
+                .filter(|surface| data.x11_surface_host(surface).is_some())
+                .count();
+            let wlegl = crate::wlegl::debug_counters();
+            let payload = format!(
+                "clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} xwayland_running={} x11_surfaces={} x11_surfaces_with_host={} wlegl_create_buffer_total={} wlegl_import_texture_total={} last_wlegl_width={} last_wlegl_height={} last_wlegl_format={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
                 clients,
                 toplevel_count(data),
                 surfaces_wlegl,
@@ -535,6 +541,14 @@ pub fn run(
                 data.last_rendered_toplevels,
                 data.hosts.len(),
                 bound_hosts,
+                data.xwm.is_some(),
+                data.x11_surfaces.len(),
+                x11_surfaces_with_host,
+                wlegl.create_buffer_total,
+                wlegl.import_texture_total,
+                wlegl.last_width,
+                wlegl.last_height,
+                wlegl.last_format,
                 data.output_scale.fractional(),
                 data.output_physical_size.0,
                 data.output_physical_size.1,
@@ -542,6 +556,11 @@ pub fn run(
                 data.output_logical_size.1,
                 data.output_advertised,
             );
+            info!(
+                "COMPOSITOR_STATE: {}",
+                payload,
+            );
+            let _ = response.send(payload);
         }
     })?;
 
@@ -707,7 +726,7 @@ pub fn run(
     loop_handle.insert_source(listener_source, |_, source, data: &mut TawcState| {
         while let Some(stream) = source.accept().map_err(std::io::Error::other)? {
             info!("New Wayland client connected");
-            let client_state = ClientState::new(data.client_count.clone());
+            let client_state = ClientState::new(data.client_count.clone(), data.client_ids.clone());
             if let Err(e) = data
                 .display_handle
                 .insert_client(stream, Arc::new(client_state))

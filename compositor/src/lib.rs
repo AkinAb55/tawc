@@ -54,8 +54,10 @@ static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 /// Cached global ref to NativeBridge class for reverse JNI callbacks.
 static NATIVE_BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
 
+type StateQueryResponse = mpsc::Sender<String>;
+
 /// Global sender for state query requests. Replaced each time the compositor restarts.
-static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Sender<()>>> = Mutex::new(None);
+static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Sender<StateQueryResponse>>> = Mutex::new(None);
 
 /// Tracks whether the compositor thread is currently running. Set true
 /// in `nativeStartCompositor`; cleared by the thread on exit. Used to
@@ -451,11 +453,26 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSendKeySt
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeQueryState(
-    _env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
-) {
-    if let Some(sender) = STATE_QUERY_SENDER.lock().unwrap().as_ref() {
-        let _ = sender.send(());
+) -> jobject {
+    let Some(sender) = STATE_QUERY_SENDER.lock().unwrap().as_ref().cloned() else {
+        return std::ptr::null_mut();
+    };
+    let (tx, rx) = mpsc::channel();
+    if sender.send(tx).is_err() {
+        return std::ptr::null_mut();
+    }
+    let payload = match rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(payload) => payload,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match env.new_string(payload) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            log::error!("nativeQueryState: new_string failed: {}", e);
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -533,6 +550,20 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnAndroid
         }
     };
     clipboard::send_android_text(text);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeClipboardDebugState(
+    env: JNIEnv,
+    _class: JClass,
+) -> jobject {
+    match env.new_string(clipboard::debug_state()) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            log::error!("nativeClipboardDebugState: new_string failed: {}", e);
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -770,7 +801,7 @@ fn run_compositor(
     text_input_channel: smithay::reexports::calloop::channel::Channel<text_input::TextInputEvent>,
     clipboard_channel: smithay::reexports::calloop::channel::Channel<clipboard::ClipboardEvent>,
     surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
-    state_query_channel: smithay::reexports::calloop::channel::Channel<()>,
+    state_query_channel: smithay::reexports::calloop::channel::Channel<StateQueryResponse>,
     initial_scale: f64,
     initial_xwayland: bool,
     initial_gtk3_broken_menus_workaround: bool,

@@ -413,7 +413,7 @@ fn test_firefox_renders_via_ahb() {
          appears wedged / not committing. before={frames_before} after={state:?}"
     );
 
-    firefox.stop().expect("Firefox process group failed to stop cleanly");
+    firefox.stop().expect("Firefox session failed to stop cleanly");
     assert_compositor_clean();
 }
 
@@ -439,6 +439,6 @@ fn test_supertuxkart_renders_via_ahb() {
     );
 
     stk.stop()
-        .expect("supertuxkart process group failed to stop cleanly");
+        .expect("supertuxkart session failed to stop cleanly");
     assert_compositor_clean();
 }

@@ -67,7 +67,7 @@ impl DebugApp {
             }
         });
 
-        // Discover PGID now that stdout is being drained (so the process won't stall)
+        // Retained call-site ordering: start draining stdout before readiness waits.
         proc.ensure_pgid();
 
         Ok(Self {
@@ -272,6 +272,20 @@ impl DebugApp {
         })
     }
 
+    /// Wait until the latest text equals `expected` and the cursor event
+    /// paired with that text change has been observed.
+    pub fn wait_for_text_cursor(
+        &self,
+        expected: &str,
+        timeout: Duration,
+    ) -> Result<u32, String> {
+        self.wait_on_lines(
+            &format!("text '{expected}' with cursor"),
+            timeout,
+            |lines| text_cursor_from_lines(lines, expected),
+        )
+    }
+
     /// Wait until `text_changed_count()` exceeds `prev_count`, or timeout.
     /// Returns the new text value.
     pub fn wait_for_text_change(
@@ -390,6 +404,28 @@ fn last_text_from_lines(lines: &[String]) -> Option<String> {
             l.strip_prefix("TEXT_CHANGED:").map(|s| s.to_string())
         }
     })
+}
+
+fn text_cursor_from_lines(lines: &[String], expected: &str) -> Option<u32> {
+    let mut latest_text = None;
+    let mut cursor_after_latest_text = None;
+    for line in lines {
+        if line == "TEXT_CHANGED" {
+            latest_text = Some("");
+            cursor_after_latest_text = None;
+        } else if let Some(text) = line.strip_prefix("TEXT_CHANGED:") {
+            latest_text = Some(text);
+            cursor_after_latest_text = None;
+        } else if let Some(cursor) = line
+            .strip_prefix("CURSOR_POS:")
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            cursor_after_latest_text = Some(cursor);
+        }
+    }
+    (latest_text == Some(expected))
+        .then_some(cursor_after_latest_text)
+        .flatten()
 }
 
 fn last_preedit_from_lines(lines: &[String]) -> Option<String> {

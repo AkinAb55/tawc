@@ -186,12 +186,14 @@ object ProcessScanner {
         maxSweeps: Int = 8,
         sweepDelayMs: Long = 250,
         log: (String) -> Unit,
-    ) {
+    ): Int {
         val pair = listOf(canonicalize(rootfsPath) to installId)
+        var killedCount = 0
 
         fun killOne(p: ProcessInfo) {
             // Skip the polite SIGTERM — uninstall is forced teardown,
             // the rootfs is about to disappear from under these procs.
+            killedCount += 1
             if (p.requiresSu) {
                 SuProcfsScanner.kill(p.pid, OsConstants.SIGKILL)
             } else {
@@ -224,7 +226,7 @@ object ProcessScanner {
             val procs = sweep()
             if (procs.isEmpty()) {
                 if (!killedAny) log("no guest processes to clean up")
-                return
+                return killedCount
             }
             killedAny = true
             for (p in procs) {
@@ -234,7 +236,7 @@ object ProcessScanner {
             }
             try { Thread.sleep(sweepDelayMs) } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
-                return
+                return killedCount
             }
         }
         val survivors = sweep()
@@ -242,6 +244,7 @@ object ProcessScanner {
             log("warning: guest processes still present after $limit sweeps")
             for (p in survivors) log("survivor pid=${p.pid} (${p.comm})")
         }
+        return killedCount
     }
 
     /**

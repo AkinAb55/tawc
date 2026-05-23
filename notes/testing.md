@@ -277,9 +277,11 @@ text before the compositor accepts it.
   every operation.
 - **Reader thread + mpsc channel:** adb stdout is a blocking stream.
   Thread drains it continuously, mpsc gives timeout-based waiting.
-- **Process-group kill in `ChrootProcess`:** Process chain
-  `adb -> su -> bash -> chroot -> bash -> app` doesn't propagate signals;
-  Firefox spawns content processes in their own PGIDs. We track the root
-  PID via a small pidfile helper, walk descendants, and signal each PGID.
+- **App-side reset owns guest cleanup:** Per-test isolation goes
+  through the broker `test-init` action. It resets in-memory settings,
+  input state, compositor clients, and runs `ProcessScanner` against the
+  target rootfs. `RootfsProcess` is only a broker-session convenience for
+  mid-test stdout/stderr and stop requests; it does not use host pidfiles,
+  `ps`, PGID reads, or host-side `kill`.
 - **`--test-threads=1`:** Tests share the phone and compositor and can't
   run in parallel.

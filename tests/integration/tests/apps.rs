@@ -90,7 +90,7 @@ fn test_firefox_launches() {
         state
     );
 
-    firefox.stop().expect("Firefox process group failed to stop cleanly");
+    firefox.stop().expect("Firefox session failed to stop cleanly");
     assert_compositor_clean();
 }
 
@@ -111,7 +111,7 @@ fn test_supertuxkart_launches() {
     );
 
     stk.stop()
-        .expect("supertuxkart process group failed to stop cleanly");
+        .expect("supertuxkart session failed to stop cleanly");
     assert_compositor_clean();
 }
 
@@ -135,7 +135,6 @@ fn test_supertuxkart_launches() {
 #[test]
 fn test_lxterminal_input_and_exit() {
     tawc_integration::helpers::test_init();
-    adb::logcat_clear().expect("Failed to clear logcat");
 
     let mut term = launch_and_wait_for_toplevel(
         BACKEND,
@@ -154,8 +153,6 @@ fn test_lxterminal_input_and_exit() {
         "lxterminal exited shortly after first frame — shell crash on startup?"
     );
     wait_for_keyboard_shown(TIMEOUT);
-    adb::wait_for_active_input_connection(TIMEOUT)
-        .expect("TawcInputConnection did not become active");
 
     // Drive the shell: "exit" via the IC's commitText, newline via
     // wl_keyboard Enter. Same path a soft-keyboard user typing into
@@ -199,7 +196,6 @@ fn test_gtk4_widget_factory_copy_paste_and_text_input() {
     let paste_text = "gtk4 widget factory paste";
     let expected = "gtk4 widget factory paste edited";
 
-    adb::logcat_clear().expect("Failed to clear logcat");
     adb::clipboard_set_text(paste_text).expect("set Android clipboard");
 
     let mut factory = launch_and_wait_for_toplevel(
@@ -215,8 +211,6 @@ fn test_gtk4_widget_factory_copy_paste_and_text_input() {
         "tap gtk4-widget-factory entry",
     );
     wait_for_keyboard_shown(TIMEOUT);
-    adb::wait_for_active_input_connection(TIMEOUT)
-        .expect("TawcInputConnection did not become active");
 
     ctrl_key(adb::KEYCODE_A);
     ctrl_key(adb::KEYCODE_V);

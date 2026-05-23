@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::adb;
 
-/// Compositor state snapshot, parsed from COMPOSITOR_STATE log line.
+/// Compositor state snapshot returned by the `query-state` broker action.
 #[derive(Debug, Clone)]
 pub struct CompositorState {
     pub clients: u32,
@@ -17,6 +17,14 @@ pub struct CompositorState {
     pub rendered_toplevels: u32,
     pub hosts: u32,
     pub bound_hosts: u32,
+    pub xwayland_running: bool,
+    pub x11_surfaces: u32,
+    pub x11_surfaces_with_host: u32,
+    pub wlegl_create_buffer_total: u64,
+    pub wlegl_import_texture_total: u64,
+    pub last_wlegl_width: u32,
+    pub last_wlegl_height: u32,
+    pub last_wlegl_format: u32,
     pub output_physical_w: i32,
     pub output_physical_h: i32,
     pub output_logical_w: i32,
@@ -24,39 +32,135 @@ pub struct CompositorState {
     pub output_advertised: bool,
 }
 
-/// Query the compositor's current state via broadcast intent.
-/// Does NOT clear logcat — counts existing COMPOSITOR_STATE lines and waits for a new one.
+/// Query the compositor's current state via the in-app broker.
 pub fn query_state(timeout: Duration) -> Result<CompositorState, String> {
-    // Count existing COMPOSITOR_STATE lines so we can detect the new one
-    let existing_logs = adb::logcat_dump_tawc()
-        .map_err(|e| format!("Failed to dump logcat: {}", e))?;
-    let existing_count = existing_logs.lines()
-        .filter(|l| l.contains("COMPOSITOR_STATE:"))
-        .count();
-
-    adb::broadcast_query_state().map_err(|e| format!("Failed to send query: {}", e))?;
-
     let deadline = Instant::now() + timeout;
     loop {
-        let logs = adb::logcat_dump_tawc()
-            .map_err(|e| format!("Failed to dump logcat: {}", e))?;
-        let state_lines: Vec<&str> = logs.lines()
-            .filter(|l| l.contains("COMPOSITOR_STATE:"))
-            .collect();
-        if state_lines.len() > existing_count {
-            // Parse the newest COMPOSITOR_STATE line
-            if let Some(state) = parse_compositor_state_line(state_lines.last().unwrap()) {
-                return Ok(state);
+        match adb::query_state() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(state) = parse_compositor_state(stdout.trim()) {
+                    return Ok(state);
+                }
+                return Err(format!("query-state returned malformed stdout: {stdout:?}"));
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if Instant::now() > deadline {
+                    return Err(format!(
+                        "query-state failed with {} stderr={stderr:?}",
+                        output.status
+                    ));
+                }
+            }
+            Err(e) => {
+                if Instant::now() > deadline {
+                    return Err(format!("query-state failed: {e}"));
+                }
             }
         }
-        if Instant::now() > deadline {
-            return Err(format!(
-                "Timeout waiting for COMPOSITOR_STATE in logcat (existing: {}, current: {})",
-                existing_count, state_lines.len()
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Query state once and return true if the app answers. Used by readiness
+/// checks that need to prove the compositor loop is dispatching.
+pub fn query_state_once() -> Result<CompositorState, String> {
+    let output = adb::query_state().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "query-state failed with {} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_compositor_state(stdout.trim())
+        .ok_or_else(|| format!("query-state returned malformed stdout: {stdout:?}"))
+}
+
+fn parse_compositor_state(line: &str) -> Option<CompositorState> {
+    let payload = if let Some(idx) = line.find("COMPOSITOR_STATE:") {
+        &line[idx + "COMPOSITOR_STATE:".len()..]
+    } else {
+        line
+    };
+    parse_compositor_state_payload(payload)
+}
+
+fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
+    let mut clients = None;
+    let mut toplevels = None;
+    let mut surfaces_wlegl = None;
+    let mut surfaces_shm = None;
+    let mut frames = None;
+    let mut rendered_toplevels = None;
+    let mut hosts = None;
+    let mut bound_hosts = None;
+    let mut xwayland_running = None;
+    let mut x11_surfaces = None;
+    let mut x11_surfaces_with_host = None;
+    let mut wlegl_create_buffer_total = None;
+    let mut wlegl_import_texture_total = None;
+    let mut last_wlegl_width = None;
+    let mut last_wlegl_height = None;
+    let mut last_wlegl_format = None;
+    let mut output_physical_w = None;
+    let mut output_physical_h = None;
+    let mut output_logical_w = None;
+    let mut output_logical_h = None;
+    let mut output_advertised = None;
+    for part in payload.split_whitespace() {
+        if let Some((key, val)) = part.split_once('=') {
+            match key {
+                "clients" => clients = Some(val.parse().ok()?),
+                "toplevels" => toplevels = Some(val.parse().ok()?),
+                "surfaces_wlegl" => surfaces_wlegl = Some(val.parse().ok()?),
+                "surfaces_shm" => surfaces_shm = Some(val.parse().ok()?),
+                "frames" => frames = Some(val.parse().ok()?),
+                "rendered_toplevels" => rendered_toplevels = Some(val.parse().ok()?),
+                "hosts" => hosts = Some(val.parse().ok()?),
+                "bound_hosts" => bound_hosts = Some(val.parse().ok()?),
+                "xwayland_running" => xwayland_running = Some(val.parse().ok()?),
+                "x11_surfaces" => x11_surfaces = Some(val.parse().ok()?),
+                "x11_surfaces_with_host" => x11_surfaces_with_host = Some(val.parse().ok()?),
+                "wlegl_create_buffer_total" => wlegl_create_buffer_total = Some(val.parse().ok()?),
+                "wlegl_import_texture_total" => wlegl_import_texture_total = Some(val.parse().ok()?),
+                "last_wlegl_width" => last_wlegl_width = Some(val.parse().ok()?),
+                "last_wlegl_height" => last_wlegl_height = Some(val.parse().ok()?),
+                "last_wlegl_format" => last_wlegl_format = Some(val.parse().ok()?),
+                "output_physical_w" => output_physical_w = Some(val.parse().ok()?),
+                "output_physical_h" => output_physical_h = Some(val.parse().ok()?),
+                "output_logical_w" => output_logical_w = Some(val.parse().ok()?),
+                "output_logical_h" => output_logical_h = Some(val.parse().ok()?),
+                "output_advertised" => output_advertised = Some(val.parse().ok()?),
+                _ => {}
+            }
+        }
+    }
+    Some(CompositorState {
+        clients: clients?,
+        toplevels: toplevels?,
+        surfaces_wlegl: surfaces_wlegl?,
+        surfaces_shm: surfaces_shm?,
+        frames: frames?,
+        rendered_toplevels: rendered_toplevels?,
+        hosts: hosts.unwrap_or_default(),
+        bound_hosts: bound_hosts.unwrap_or_default(),
+        xwayland_running: xwayland_running.unwrap_or_default(),
+        x11_surfaces: x11_surfaces.unwrap_or_default(),
+        x11_surfaces_with_host: x11_surfaces_with_host.unwrap_or_default(),
+        wlegl_create_buffer_total: wlegl_create_buffer_total.unwrap_or_default(),
+        wlegl_import_texture_total: wlegl_import_texture_total.unwrap_or_default(),
+        last_wlegl_width: last_wlegl_width.unwrap_or_default(),
+        last_wlegl_height: last_wlegl_height.unwrap_or_default(),
+        last_wlegl_format: last_wlegl_format.unwrap_or_default(),
+        output_physical_w: output_physical_w.unwrap_or_default(),
+        output_physical_h: output_physical_h.unwrap_or_default(),
+        output_logical_w: output_logical_w.unwrap_or_default(),
+        output_logical_h: output_logical_h.unwrap_or_default(),
+        output_advertised: output_advertised.unwrap_or_default(),
+    })
 }
 
 /// Wait until the compositor reports the expected number of clients and toplevels.
@@ -79,59 +183,6 @@ pub fn wait_for_state(
         }
         thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn parse_compositor_state_line(line: &str) -> Option<CompositorState> {
-    let idx = line.find("COMPOSITOR_STATE:")?;
-    let payload = &line[idx + "COMPOSITOR_STATE:".len()..];
-    let mut clients = None;
-    let mut toplevels = None;
-    let mut surfaces_wlegl = None;
-    let mut surfaces_shm = None;
-    let mut frames = None;
-    let mut rendered_toplevels = None;
-    let mut hosts = None;
-    let mut bound_hosts = None;
-    let mut output_physical_w = None;
-    let mut output_physical_h = None;
-    let mut output_logical_w = None;
-    let mut output_logical_h = None;
-    let mut output_advertised = None;
-    for part in payload.split_whitespace() {
-        if let Some((key, val)) = part.split_once('=') {
-            match key {
-                "clients" => clients = Some(val.parse().ok()?),
-                "toplevels" => toplevels = Some(val.parse().ok()?),
-                "surfaces_wlegl" => surfaces_wlegl = Some(val.parse().ok()?),
-                "surfaces_shm" => surfaces_shm = Some(val.parse().ok()?),
-                "frames" => frames = Some(val.parse().ok()?),
-                "rendered_toplevels" => rendered_toplevels = Some(val.parse().ok()?),
-                "hosts" => hosts = Some(val.parse().ok()?),
-                "bound_hosts" => bound_hosts = Some(val.parse().ok()?),
-                "output_physical_w" => output_physical_w = Some(val.parse().ok()?),
-                "output_physical_h" => output_physical_h = Some(val.parse().ok()?),
-                "output_logical_w" => output_logical_w = Some(val.parse().ok()?),
-                "output_logical_h" => output_logical_h = Some(val.parse().ok()?),
-                "output_advertised" => output_advertised = Some(val.parse().ok()?),
-                _ => {}
-            }
-        }
-    }
-    Some(CompositorState {
-        clients: clients?,
-        toplevels: toplevels?,
-        surfaces_wlegl: surfaces_wlegl?,
-        surfaces_shm: surfaces_shm?,
-        frames: frames?,
-        rendered_toplevels: rendered_toplevels?,
-        hosts: hosts.unwrap_or_default(),
-        bound_hosts: bound_hosts.unwrap_or_default(),
-        output_physical_w: output_physical_w.unwrap_or_default(),
-        output_physical_h: output_physical_h.unwrap_or_default(),
-        output_logical_w: output_logical_w.unwrap_or_default(),
-        output_logical_h: output_logical_h.unwrap_or_default(),
-        output_advertised: output_advertised.unwrap_or_default(),
-    })
 }
 
 /// Wait until the last rendered frame shows the expected number of toplevels.

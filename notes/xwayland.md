@@ -70,9 +70,10 @@ of the box.
   going AHB → TAWC-DRI → X server → android_wlegl → compositor
   gralloc1 import → GL texture; no SHM, no GLAMOR, no magenta.
   Verification: `xwayland::test_tawc_dri_ahb_present_round_trip` asserts
-  compositor logcat shows `wlegl: create_buffer 320x240 ... fmt=1`
-  (AHB, not SHM) AND `wlegl: imported ANativeWindowBuffer as texture
-  320x240` (full GL bind). Stress verified by
+  the broker-returned compositor counters advance with
+  `last_wlegl_width=320`, `last_wlegl_height=240`, and
+  `last_wlegl_format=1` (AHB, not SHM), and that the wlegl texture-import
+  counter advances (full GL bind). Stress verified by
   `xwayland::test_tawc_dri_ahb_present_animated_loop`: a double-buffered
   60fps loop (alternating between two AHBs, repainting each frame
   with a swept gradient phase) runs 120 frames in 2.0s, the
@@ -114,11 +115,10 @@ of the box.
   Verification: `xwayland::test_eglx11_renders_via_ahb` runs a
   chroot-side EGL-on-X11 client (`tests/apps/eglx11-test/`) for 30
   frames; the test asserts `eglGetPlatformDisplay(EGL_PLATFORM_X11_KHR)`
-  succeeds, GL_VENDOR=Qualcomm, and the compositor logs both
-  `wlegl: create_buffer ... fmt=1` (AHB import via
-  TAWC-DRI, not SHM) AND
-  `wlegl: imported ANativeWindowBuffer as texture ...`
-  (full GL bind). On OnePlus 9 (Adreno 660) the client picks up the
+  succeeds, GL_VENDOR=Qualcomm, and broker-returned compositor counters
+  show a wlegl create-buffer with `fmt=1` (AHB import via TAWC-DRI, not
+  SHM) and an advanced wlegl texture-import count (full GL bind). On
+  OnePlus 9 (Adreno 660) the client picks up the
   vendor GLES driver via libhybris's TLS thunks and ships frames
   end-to-end with no CPU readback.
 - **Phase 2 step 5 — done (2026-05-01).** Real-app shakedown via
@@ -476,8 +476,8 @@ Build wired via `--enable-x11`, `EGL_PLATFORM_X11_KHR` dispatch in
 `scripts/build-libhybris.sh`. **Verification:**
 `xwayland::test_eglx11_renders_via_ahb` runs a chroot-side EGL-on-X11
 test program (`tests/apps/eglx11-test/`) for 30 frames and asserts the
-compositor logged `wlegl: create_buffer ... fmt=1` AND
-`wlegl: imported ANativeWindowBuffer as texture` for that surface
+broker-returned compositor counters show `wlegl create_buffer ... fmt=1`
+and an advanced wlegl texture-import count for that surface
 (AHB, not SHM, not magenta). On OnePlus 9 Adreno 660 the client
 picks up the vendor GLES driver through libhybris's TLS thunks.
 The `present_check_flip` instrumentation hook is still pending;

@@ -224,8 +224,6 @@ fn observe_gtk3_demo_application_menu_tap(workaround_enabled: bool) -> Gtk3MenuO
             .unwrap_or_else(|e| panic!("set gtk3 broken menus workaround: {e}")),
         "set-gtk3-broken-menus-workaround",
     );
-    adb::logcat_clear().expect("Failed to clear logcat");
-
     let (mut app, rx) = launch_gtk3_demo_application_with_wayland_debug();
     assert_broker_ok(
         adb::inject_touch_logical(GTK3_DEMO_APPLICATION_MENU_X, GTK3_DEMO_APPLICATION_MENU_Y)
