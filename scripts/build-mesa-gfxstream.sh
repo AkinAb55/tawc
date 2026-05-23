@@ -11,8 +11,9 @@
 #                              installed to install/usr/lib/gfxstream/
 #   - build-<abi>-mesa-zink/  → -Dgallium-drivers=zink -Degl=enabled
 #                              installed to install/usr/lib/mesa-zink/
-# The shared setup work (host-built sysroot, cargo virtgpu_kumquat_ffi,
-# .so stubs, pkg-config files, cross.txt) is done once per ABI.
+# The shared setup work (host-built sysroot, .so stubs, pkg-config
+# files, cross.txt) is done once per ABI. The cargo
+# virtgpu_kumquat_ffi build only runs when gfxstream-vk is enabled.
 #
 # Bridge architecture:
 #   chroot: vulkan app -> libvulkan.so.1 -> libvulkan_gfxstream.so (this)
@@ -53,6 +54,8 @@
 #   scripts/build-mesa-gfxstream.sh                 # default --abi=aarch64
 #   scripts/build-mesa-gfxstream.sh --abi=x86_64
 #   scripts/build-mesa-gfxstream.sh --abi=both
+#   scripts/build-mesa-gfxstream.sh --no-gfxstream   # build only Mesa-Zink
+#   scripts/build-mesa-gfxstream.sh --no-zink        # build only gfxstream-vk
 #   scripts/build-mesa-gfxstream.sh --clean
 
 set -euo pipefail
@@ -67,10 +70,12 @@ PATCH_DIR="$REPO_DIR/deps/mesa-patches/mesa"
 
 CLEAN=0
 ABIS=""
+WITH_GFXSTREAM=1
 WITH_ZINK=1
 for arg in "$@"; do
     case "$arg" in
         --clean) CLEAN=1 ;;
+        --no-gfxstream) WITH_GFXSTREAM=0 ;;
         --no-zink) WITH_ZINK=0 ;;
         --abi=aarch64) ABIS="aarch64" ;;
         --abi=x86_64)  ABIS="x86_64" ;;
@@ -79,8 +84,16 @@ for arg in "$@"; do
     esac
 done
 [ -n "$ABIS" ] || ABIS="aarch64"
+[ "$WITH_GFXSTREAM" = "1" ] || [ "$WITH_ZINK" = "1" ] || {
+    echo "ERROR: both gfxstream-vk and Mesa-Zink are disabled; nothing to build" >&2
+    exit 1
+}
 
-for tool in meson ninja pkg-config cargo rustc wayland-scanner; do
+tools=(meson ninja pkg-config wayland-scanner)
+if [ "$WITH_GFXSTREAM" = "1" ]; then
+    tools+=(cargo rustc)
+fi
+for tool in "${tools[@]}"; do
     command -v "$tool" >/dev/null || {
         echo "ERROR: '$tool' not on PATH. See notes/building.md." >&2
         exit 1
@@ -134,11 +147,13 @@ build_one() {
         echo "ERROR: $CC_BIN not on PATH (install $abi cross-toolchain — see notes/building.md)" >&2
         return 1
     }
-    rustup target list --installed 2>/dev/null | grep -q "^${RUST_TARGET}\$" || {
-        echo "ERROR: rustup target ${RUST_TARGET} missing." >&2
-        echo "       Install with: rustup target add ${RUST_TARGET}" >&2
-        return 1
-    }
+    if [ "$WITH_GFXSTREAM" = "1" ]; then
+        rustup target list --installed 2>/dev/null | grep -q "^${RUST_TARGET}\$" || {
+            echo "ERROR: rustup target ${RUST_TARGET} missing." >&2
+            echo "       Install with: rustup target add ${RUST_TARGET}" >&2
+            return 1
+        }
+    fi
 
     local OUT_DIR="$REPO_DIR/build/mesa-$abi"
     local PREFIX="$OUT_DIR/install"
@@ -161,25 +176,29 @@ build_one() {
 
     mkdir -p "$OUT_DIR" "$PREFIX" "$PC_DIR" "$STUB_DIR" "$CARGO_DIR"
 
-    # ── Cargo build of virtgpu_kumquat_ffi ──
-    # This sidesteps the meson Rust-subproject mess; we hand the resulting
-    # static lib + Mesa's existing virtgpu_kumquat_ffi.h to meson via
-    # pkg-config and the patched `-Dvirtgpu_kumquat_external_ffi=true`.
-    mkdir -p "$CARGO_DIR/.cargo"
-    cat >"$CARGO_DIR/.cargo/config.toml" <<EOF
+    local KUMQUAT_FFI_A=""
+    local KUMQUAT_FFI_INC=""
+    if [ "$WITH_GFXSTREAM" = "1" ]; then
+        # ── Cargo build of virtgpu_kumquat_ffi ──
+        # This sidesteps the meson Rust-subproject mess; we hand the resulting
+        # static lib + Mesa's existing virtgpu_kumquat_ffi.h to meson via
+        # pkg-config and the patched `-Dvirtgpu_kumquat_external_ffi=true`.
+        mkdir -p "$CARGO_DIR/.cargo"
+        cat >"$CARGO_DIR/.cargo/config.toml" <<EOF
 [target.${RUST_TARGET}]
 linker = "$CC_BIN"
 EOF
-    echo "==> [$abi] cargo build virtgpu_kumquat_ffi (target=${RUST_TARGET}, release)"
-    ( cd "$MESA_DIR" && \
-      CARGO_TARGET_DIR="$CARGO_DIR/target" \
-      CARGO_HOME="$CARGO_DIR" \
-      cargo build -p virtgpu_kumquat_ffi --target="$RUST_TARGET" --release )
+        echo "==> [$abi] cargo build virtgpu_kumquat_ffi (target=${RUST_TARGET}, release)"
+        ( cd "$MESA_DIR" && \
+          CARGO_TARGET_DIR="$CARGO_DIR/target" \
+          CARGO_HOME="$CARGO_DIR" \
+          cargo build -p virtgpu_kumquat_ffi --target="$RUST_TARGET" --release )
 
-    local KUMQUAT_FFI_A="$CARGO_DIR/target/${RUST_TARGET}/release/libvirtgpu_kumquat_ffi.a"
-    local KUMQUAT_FFI_INC="$MESA_DIR/src/virtio/virtgpu_kumquat_ffi/include"
-    [ -f "$KUMQUAT_FFI_A" ] || { echo "ERROR: cargo did not produce $KUMQUAT_FFI_A" >&2; return 1; }
-    [ -f "$KUMQUAT_FFI_INC/virtgpu_kumquat_ffi.h" ] || { echo "ERROR: header missing at $KUMQUAT_FFI_INC" >&2; return 1; }
+        KUMQUAT_FFI_A="$CARGO_DIR/target/${RUST_TARGET}/release/libvirtgpu_kumquat_ffi.a"
+        KUMQUAT_FFI_INC="$MESA_DIR/src/virtio/virtgpu_kumquat_ffi/include"
+        [ -f "$KUMQUAT_FFI_A" ] || { echo "ERROR: cargo did not produce $KUMQUAT_FFI_A" >&2; return 1; }
+        [ -f "$KUMQUAT_FFI_INC/virtgpu_kumquat_ffi.h" ] || { echo "ERROR: header missing at $KUMQUAT_FFI_INC" >&2; return 1; }
+    fi
 
     # ── Stub .so files for runtime deps ──
     # Same trick as build-libhybris.sh: the chroot supplies the real
@@ -253,14 +272,16 @@ EOF
     write_pc libudev "-I$SYSROOT/usr/include" "-L$STUB_DIR -ludev" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libudev)"
     write_pc libffi "-I$SYSROOT/usr/include" "-L$STUB_DIR -lffi" "$(PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig" pkg-config --modversion libffi)"
 
-    # virtgpu_kumquat_ffi: static lib from cargo + header from Mesa source.
-    # Static archive built by cargo pulls in libstd's stubs for libgcc_s,
-    # pthread, dl, util, m, c, rt — those are fine because libvulkan_gfxstream.so
-    # already DT_NEEDED's libstdc++ / libm / libc and the chroot has them.
-    write_pc virtgpu_kumquat_ffi \
-        "-I$KUMQUAT_FFI_INC" \
-        "$KUMQUAT_FFI_A -lpthread -ldl -lutil -lrt -lm" \
-        "0.1.76"
+    if [ "$WITH_GFXSTREAM" = "1" ]; then
+        # virtgpu_kumquat_ffi: static lib from cargo + header from Mesa source.
+        # Static archive built by cargo pulls in libstd's stubs for libgcc_s,
+        # pthread, dl, util, m, c, rt — those are fine because libvulkan_gfxstream.so
+        # already DT_NEEDED's libstdc++ / libm / libc and the chroot has them.
+        write_pc virtgpu_kumquat_ffi \
+            "-I$KUMQUAT_FFI_INC" \
+            "$KUMQUAT_FFI_A -lpthread -ldl -lutil -lrt -lm" \
+            "0.1.76"
+    fi
 
     cat >"$PC_DIR/wayland-scanner.pc" <<EOF
 wayland_scanner=$HOST_WAYLAND_SCANNER
@@ -303,64 +324,67 @@ cpu = '$MESON_CPU'
 endian = 'little'
 EOF
 
-    # ── Configure + build: gfxstream-vk ──
-    # `-Dvirtgpu_kumquat=true -Dvirtgpu_kumquat_external_ffi=true` enables
-    # kumquat without pulling Mesa's Rust subprojects into the meson graph.
-    # Required by patch deps/mesa-patches/mesa/02-meson-external-kumquat-ffi.patch.
-    local BUILD_DIR_GFXSTREAM="$MESA_DIR/build-$abi-gfxstream"
-    if [ -f "$BUILD_DIR_GFXSTREAM/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_GFXSTREAM/build.ninja"; then
-        echo "==> [$abi] old host-header Mesa builddir detected; reconfiguring"
-        rm -rf "$BUILD_DIR_GFXSTREAM"
-    fi
-    if [ -d "$BUILD_DIR_GFXSTREAM" ] && [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
-        echo "==> [$abi] incomplete Mesa gfxstream builddir detected; reconfiguring"
-        rm -rf "$BUILD_DIR_GFXSTREAM"
-    fi
-    if [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
-        PKG_CONFIG_LIBDIR="$PC_DIR" meson setup "$BUILD_DIR_GFXSTREAM" "$MESA_DIR" \
-            --cross-file "$OUT_DIR/cross.txt" \
-            -Dvulkan-drivers=gfxstream \
-            -Dgallium-drivers= \
-            -Dgles1=disabled -Dgles2=disabled -Dopengl=false -Degl=disabled \
-            -Dglx=disabled -Dvideo-codecs= \
-            -Dvirtgpu_kumquat=true \
-            -Dvirtgpu_kumquat_external_ffi=true \
-            -Dplatforms=wayland \
-            -Dlmsensors=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
-            -Dshared-glapi=disabled -Dllvm=disabled -Dxmlconfig=disabled \
-            -Ddisplay-info=disabled \
-            --buildtype release -Ddefault_library=shared \
-            --prefix /usr --libdir lib/gfxstream
-    fi
-    ninja -C "$BUILD_DIR_GFXSTREAM"
+    if [ "$WITH_GFXSTREAM" = "1" ]; then
+        # ── Configure + build: gfxstream-vk ──
+        # `-Dvirtgpu_kumquat=true -Dvirtgpu_kumquat_external_ffi=true` enables
+        # kumquat without pulling Mesa's Rust subprojects into the meson graph.
+        # Required by patch deps/mesa-patches/mesa/02-meson-external-kumquat-ffi.patch.
+        local BUILD_DIR_GFXSTREAM="$MESA_DIR/build-$abi-gfxstream"
+        if [ -f "$BUILD_DIR_GFXSTREAM/build.ninja" ] && grep -q -- "-idirafter.*usr/include" "$BUILD_DIR_GFXSTREAM/build.ninja"; then
+            echo "==> [$abi] old host-header Mesa builddir detected; reconfiguring"
+            rm -rf "$BUILD_DIR_GFXSTREAM"
+        fi
+        if [ -d "$BUILD_DIR_GFXSTREAM" ] && [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
+            echo "==> [$abi] incomplete Mesa gfxstream builddir detected; reconfiguring"
+            rm -rf "$BUILD_DIR_GFXSTREAM"
+        fi
+        if [ ! -f "$BUILD_DIR_GFXSTREAM/build.ninja" ]; then
+            PKG_CONFIG_LIBDIR="$PC_DIR" meson setup "$BUILD_DIR_GFXSTREAM" "$MESA_DIR" \
+                --cross-file "$OUT_DIR/cross.txt" \
+                -Dvulkan-drivers=gfxstream \
+                -Dgallium-drivers= \
+                -Dgles1=disabled -Dgles2=disabled -Dopengl=false -Degl=disabled \
+                -Dglx=disabled -Dvideo-codecs= \
+                -Dvirtgpu_kumquat=true \
+                -Dvirtgpu_kumquat_external_ffi=true \
+                -Dplatforms=wayland \
+                -Dlmsensors=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
+                -Dshared-glapi=disabled -Dllvm=disabled -Dxmlconfig=disabled \
+                -Ddisplay-info=disabled \
+                --buildtype release -Ddefault_library=shared \
+                --prefix /usr --libdir lib/gfxstream
+        fi
+        ninja -C "$BUILD_DIR_GFXSTREAM"
 
-    # ── Stage gfxstream-vk outputs ──
-    # Mesa names the ICD JSON `gfxstream_vk_icd.<cpu>.json` based on
-    # host_machine.cpu in the cross file — so `aarch64` → `.aarch64.json`,
-    # `x86_64` → `.x86_64.json`. Stage with the same name; the Gradle
-    # packMesaGfxstream task picks it back up by glob.
-    # `--prefix=/usr --libdir=lib/gfxstream` → Mesa bakes the ICD JSON's
-    # `library_path` as `/usr/lib/gfxstream/libvulkan_gfxstream.so`,
-    # which is where [BridgeInstallProvider] copies it into the rootfs.
-    # We co-locate the JSON in the same dir (the runtime picks it up via
-    # an explicit `VK_ICD_FILENAMES=…`, not via /usr/share scan, so the
-    # FHS-y `/usr/share/vulkan/icd.d/` location buys us nothing here).
-    mkdir -p "$PREFIX/usr/lib/gfxstream"
-    cp "$BUILD_DIR_GFXSTREAM/src/gfxstream/guest/vulkan/libvulkan_gfxstream.so" \
-       "$PREFIX/usr/lib/gfxstream/"
-    cp "$BUILD_DIR_GFXSTREAM/src/gfxstream/guest/vulkan/gfxstream_vk_icd.${MESON_CPU}.json" \
-       "$PREFIX/usr/lib/gfxstream/"
+        # ── Stage gfxstream-vk outputs ──
+        # Mesa names the ICD JSON `gfxstream_vk_icd.<cpu>.json` based on
+        # host_machine.cpu in the cross file — so `aarch64` → `.aarch64.json`,
+        # `x86_64` → `.x86_64.json`. Stage with the same name; the Gradle
+        # packMesaGfxstream task picks it back up by glob.
+        # `--prefix=/usr --libdir=lib/gfxstream` → Mesa bakes the ICD JSON's
+        # `library_path` as `/usr/lib/gfxstream/libvulkan_gfxstream.so`,
+        # which is where [BridgeInstallProvider] copies it into the rootfs.
+        # We co-locate the JSON in the same dir (the runtime picks it up via
+        # an explicit `VK_ICD_FILENAMES=…`, not via /usr/share scan, so the
+        # FHS-y `/usr/share/vulkan/icd.d/` location buys us nothing here).
+        mkdir -p "$PREFIX/usr/lib/gfxstream"
+        cp "$BUILD_DIR_GFXSTREAM/src/gfxstream/guest/vulkan/libvulkan_gfxstream.so" \
+           "$PREFIX/usr/lib/gfxstream/"
+        cp "$BUILD_DIR_GFXSTREAM/src/gfxstream/guest/vulkan/gfxstream_vk_icd.${MESON_CPU}.json" \
+           "$PREFIX/usr/lib/gfxstream/"
 
-    echo "==> [$abi] built libvulkan_gfxstream.so:"
-    ls -la "$PREFIX/usr/lib/gfxstream/libvulkan_gfxstream.so"
-    echo "==> [$abi] gfxstream ICD JSON:"
-    cat "$PREFIX/usr/lib/gfxstream/gfxstream_vk_icd.${MESON_CPU}.json"
+        echo "==> [$abi] built libvulkan_gfxstream.so:"
+        ls -la "$PREFIX/usr/lib/gfxstream/libvulkan_gfxstream.so"
+        echo "==> [$abi] gfxstream ICD JSON:"
+        cat "$PREFIX/usr/lib/gfxstream/gfxstream_vk_icd.${MESON_CPU}.json"
+    else
+        echo "==> [$abi] Mesa gfxstream-vk skipped (--no-gfxstream)"
+        rm -rf "$PREFIX/usr/lib/gfxstream"
+    fi
 
     # ── Configure + build: Mesa-Zink (LIBHYBRIS_ZINK backend) ──
     # Gated by --no-zink so APK builds that disable the libhybris-zink
-    # backend (via `-PtawcGraphics=libhybris,gfxstream,cpu`) skip this
-    # configure entirely — it's the bulk of the Mesa cross-build. The
-    # gfxstream-vk pieces above still build either way.
+    # backend skip this configure entirely.
     if [ "$WITH_ZINK" = "0" ]; then
         echo "==> [$abi] Mesa-Zink skipped (--no-zink)"
         # Sweep any stale outputs from a previous WITH_ZINK=1 build so

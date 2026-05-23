@@ -65,6 +65,7 @@ use smithay::xwayland::{X11Surface, X11Wm, XWaylandActivation, XWaylandClientDat
 use crate::host::{ActivityId, OutputHost};
 use crate::launcher;
 use crate::protocol::android_wlegl::server::android_wlegl::AndroidWlegl;
+#[cfg(feature = "gfxstream")]
 use crate::protocol::tawc_gfxstream::server::tawc_gfxstream::TawcGfxstream;
 use crate::scale::OutputScale;
 use crate::text_input::TextInputState;
@@ -300,11 +301,9 @@ impl TawcState {
 
         dh.create_global::<Self, AndroidWlegl, ()>(2, ());
         dh.create_global::<Self, ZwpTextInputManagerV3, ()>(1, ());
-        // gfxstream-bridge custom Vulkan WSI: bind unconditionally
-        // (libhybris-backend clients ignore it; gfxstream-backend
-        // clients use it instead of `zwp_linux_dmabuf_v1`). See
-        // `crate::gfxstream_present` and notes/gfxstream-bridge.md
-        // "WSI plan: custom Vulkan WSI".
+        // gfxstream-bridge custom Vulkan WSI. Disabled builds do not
+        // advertise the protocol or link the gfxstream backend.
+        #[cfg(feature = "gfxstream")]
         dh.create_global::<Self, TawcGfxstream, ()>(1, ());
 
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);

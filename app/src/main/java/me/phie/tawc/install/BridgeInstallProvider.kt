@@ -9,20 +9,16 @@ import java.io.File
  *  - `libvulkan_gfxstream.so` at [GUEST_LIB_PATH]
  *  - the Vulkan ICD JSON at [GUEST_ICD_PATH]
  *
- * Both ride in the APK as raw assets under `assets/mesa-gfxstream/`,
+ * When the gfxstream backend is enabled, both ride in the APK as raw
+ * assets under `assets/mesa-gfxstream/`,
  * built by Gradle's `packMesaGfxstream` and extracted to
  * `<filesDir>/mesa-gfxstream/` by
  * [CompositorService.ensureMesaGfxstreamExtracted]. From there
  * [TawcInstaller] copies them into each rootfs at install time.
  *
- * Always installed when the asset is shipped (both arm64-v8a and
- * x86_64 ride in the APK as per-ABI subdirs under
- * `assets/mesa-gfxstream/<abi>/`; the runtime picks the matching one
- * via [CompositorService.ensureMesaGfxstreamExtracted]), regardless of
- * which [me.phie.tawc.GraphicsBackend] is selected — the pref controls
- * which env [RootfsEnv] sets, not which files exist on disk. Two
- * unused files cost nothing; making the manifest depend on a runtime
- * pref would invalidate the cached install on every toggle.
+ * Installed when the backend and asset are shipped, regardless of the
+ * current runtime graphics preference — the pref controls which env
+ * [RootfsEnv] sets, not which files exist on disk.
  *
  * Returns an empty list if for some reason no asset shipped for this
  * device's ABI (e.g. a custom `-PtawcAbis` build that dropped it).
@@ -43,6 +39,7 @@ internal object BridgeInstallProvider : TawcInstallProvider {
     const val GUEST_ICD_PATH = "/usr/lib/gfxstream/${CompositorService.MESA_GFXSTREAM_ICD_ASSET}"
 
     override fun entries(context: Context): List<TawcInstall> {
+        if (!EnabledGraphicsBackends.gfxstream) return emptyList()
         if (!CompositorService.ensureMesaGfxstreamExtracted(context)) return emptyList()
         val srcDir = File(context.filesDir, "mesa-gfxstream")
         return listOf(

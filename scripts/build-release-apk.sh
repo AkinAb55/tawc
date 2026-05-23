@@ -9,6 +9,8 @@
 #
 # Flags:
 #   --no-build   reuse the existing app-release-unsigned.apk
+#   --graphics=list
+#              override production graphics backend set
 #
 # Output: app/build/outputs/apk/release/app-release.apk
 set -euo pipefail
@@ -22,9 +24,11 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 KEYSTORE_PATH="${KEYSTORE_PATH:-$HOME/Android/keystore.jks}"
 
 DO_BUILD=1
+GRAPHICS="${TAWC_RELEASE_GRAPHICS:-libhybris,libhybris-zink,cpu}"
 for arg in "$@"; do
     case "$arg" in
         --no-build) DO_BUILD=0 ;;
+        --graphics=*) GRAPHICS="${arg#--graphics=}" ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | sed 's/^# \?//;$d'
             exit 0
@@ -88,8 +92,8 @@ ALIGNED="$ROOT_DIR/app/build/outputs/apk/release/app-release-aligned.apk"
 SIGNED="$ROOT_DIR/app/build/outputs/apk/release/app-release.apk"
 
 if [ "$DO_BUILD" -eq 1 ]; then
-    echo "=== Building release APK ==="
-    ( cd "$ROOT_DIR" && ./gradlew assembleRelease --quiet )
+    echo "=== Building release APK (graphics=$GRAPHICS) ==="
+    ( cd "$ROOT_DIR" && ./gradlew "-PtawcGraphics=$GRAPHICS" assembleRelease --quiet )
 fi
 
 [ -f "$UNSIGNED" ] || { echo "ERROR: $UNSIGNED not found (drop --no-build to build it)" >&2; exit 1; }

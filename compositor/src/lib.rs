@@ -14,10 +14,13 @@ use smithay::backend::egl::EGLContext;
 use smithay::backend::renderer::gles::GlesRenderer;
 use wayland_server::Display;
 
+#[cfg(feature = "gfxstream")]
 mod ahb_export;
 mod app_paths;
+#[cfg(feature = "gfxstream")]
 mod bridge;
 mod egl_android;
+#[cfg(feature = "gfxstream")]
 mod gfxstream_present;
 mod gtk3_menus_workaround;
 mod gl_import;
@@ -138,7 +141,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
         return;
     }
 
-    info!("nativeStartCompositor: spawning compositor + kumquat threads");
+    info!("nativeStartCompositor: spawning compositor thread");
     RUNNING.store(true, Ordering::SeqCst);
 
     // gfxstream-bridge kumquat listener runs as a sibling thread of
@@ -153,8 +156,16 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     // the protocol still wants an fd but the chroot doesn't read it).
     // Sequencing as (install hook, then spawn thread) makes the race
     // impossible.
-    ahb_export::install_hook();
-    bridge::spawn();
+    #[cfg(feature = "gfxstream")]
+    {
+        info!("nativeStartCompositor: spawning kumquat thread");
+        ahb_export::install_hook();
+        bridge::spawn();
+    }
+    #[cfg(not(feature = "gfxstream"))]
+    {
+        info!("nativeStartCompositor: gfxstream bridge disabled at build time");
+    }
 
     // Create the channels here, BEFORE the compositor thread starts,
     // so JNI calls (especially `nativeRegisterActivitySurface`) can

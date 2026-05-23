@@ -16,22 +16,19 @@
 //! pidfile, no lifecycle plumbing. See
 //! `notes/gfxstream-bridge.md` "Why kumquat must run as untrusted_app".
 //!
-//! Built for both Android target arches. `libgfxstream_backend.so` is
-//! cross-built per-ABI (`scripts/build-gfxstream-backend.sh --abi=both`)
-//! and staged into `app/src/main/jniLibs/<abi>/`. The kumquat_virtio
-//! dep itself is `target_os = "android"`-gated (compositor/Cargo.toml)
-//! so host-side test builds (target_os = "linux") still compile.
+//! Built only when the compositor crate's `gfxstream` feature is
+//! enabled for an Android target. Disabled builds do not depend on
+//! `kumquat_virtio` or `libgfxstream_backend.so`.
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(all(target_os = "android", feature = "gfxstream")))]
 pub fn spawn() {
-    // Host-side test builds — no kumquat dep available.
-    log::info!("kumquat: skipping spawn — not an Android target build");
+    log::info!("kumquat: skipping spawn — gfxstream bridge not built");
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "gfxstream"))]
 pub use android::spawn;
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", feature = "gfxstream"))]
 mod android {
     use kumquat_virtio::kumquat::KumquatBuilder;
     use log::{error, info};

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the debug APK.
 #
-# Usage: scripts/build-app.sh [--abi=auto|arm64-v8a|x86_64|both] [--xwayland|--no-xwayland] [--quiet]
+# Usage: scripts/build-app.sh [--abi=auto|arm64-v8a|x86_64|both] [--graphics=list|--no-gfxstream|--no-mesa] [--xwayland|--no-xwayland] [--quiet]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +12,7 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 
 ABI=auto
 XWAYLAND=true
+GRAPHICS=""
 QUIET=0
 for arg in "$@"; do
     case "$arg" in
@@ -19,6 +20,9 @@ for arg in "$@"; do
         --abi=arm64-v8a|--abi=arm64|--abi=aarch64) ABI=arm64-v8a ;;
         --abi=x86_64) ABI=x86_64 ;;
         --abi=both) ABI=both ;;
+        --graphics=*) GRAPHICS="${arg#--graphics=}" ;;
+        --no-gfxstream) GRAPHICS="libhybris,libhybris-zink,cpu" ;;
+        --no-mesa) GRAPHICS="libhybris,cpu" ;;
         --xwayland) XWAYLAND=true ;;
         --no-xwayland) XWAYLAND=false ;;
         --quiet) QUIET=1 ;;
@@ -65,10 +69,14 @@ else
     TAWC_ABIS="$ABI"
 fi
 
-GRADLE_ARGS=("-PtawcAbis=$TAWC_ABIS" "-PtawcXwayland=$XWAYLAND" assembleDebug)
+GRADLE_ARGS=("-PtawcAbis=$TAWC_ABIS" "-PtawcXwayland=$XWAYLAND")
+if [ -n "$GRAPHICS" ]; then
+    GRADLE_ARGS+=("-PtawcGraphics=$GRAPHICS")
+fi
+GRADLE_ARGS+=(assembleDebug)
 if [ "$QUIET" -eq 1 ]; then
     GRADLE_ARGS+=(--quiet)
 fi
 
-echo "=== Building APK ($TAWC_ABIS, xwayland=$XWAYLAND) ==="
+echo "=== Building APK ($TAWC_ABIS, xwayland=$XWAYLAND, graphics=${GRAPHICS:-default}) ==="
 ( cd "$ROOT_DIR" && ./gradlew "${GRADLE_ARGS[@]}" )

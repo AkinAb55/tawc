@@ -286,7 +286,9 @@ Output: `build/mesa-<arch>/install/usr/lib/gfxstream/libvulkan_gfxstream.so`
 Bundled into the APK by Gradle's `packMesaGfxstream<Abi>` and laid into
 every rootfs by `BridgeInstallProvider`. The same script also builds
 the optional Mesa-Zink tarball consumed by `libhybris-zink` unless
-Gradle passes `--no-zink` via `-PtawcGraphics=...`.
+Gradle passes `--no-zink` via `-PtawcGraphics=...`. Passing
+`--no-gfxstream` builds only Mesa-Zink; passing both `--no-gfxstream`
+and `--no-zink` is rejected because there is no Mesa output to build.
 Mesa's `wayland-protocols` XML comes from the pinned
 `deps/xwayland-src/wayland-protocols` checkout, not the host sysroot.
 That keeps Mesa's generated protocol inputs in sync with the Mesa
@@ -383,14 +385,27 @@ Builds `arm64-v8a` by default, or `x86_64` when `ANDROID_SERIAL` or
 `--abi=x86_64`, or `--abi=both` to override.
 
 Invokes the Rust compositor build, copies its output into
-`jniLibs/<abi>/`; applies Smithay/rutabaga setup; cross-builds proot
-(when enabled) and tawcroot; builds the gfxstream host backend for each
-enabled ABI; builds/packs Mesa gfxstream-vk and optional Mesa-Zink
-assets; builds/packs libhybris for arm64; builds/packs Xwayland for
-arm64 unless `--no-xwayland` is passed; then produces
+`jniLibs/<abi>/`; applies Smithay setup and, when gfxstream is enabled,
+rutabaga setup; cross-builds proot (when enabled) and tawcroot; builds
+the gfxstream host backend for each enabled ABI only when the gfxstream
+backend is enabled; builds/packs Mesa gfxstream-vk and/or Mesa-Zink
+assets when their backends are enabled; builds/packs libhybris for
+arm64; builds/packs Xwayland for arm64 unless `--no-xwayland` is passed;
+then produces
 `app/build/outputs/apk/debug/app-debug.apk`.
 Everything the supported install/runtime paths need ships inside this
 APK.
+
+Graphics backend builds are controlled by Gradle's
+`-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`, or by the
+wrapper flags `--no-gfxstream` and `--no-mesa`. Disabling gfxstream
+also disables the compositor crate's kumquat/gfxstream Cargo feature
+and drops `libgfxstream_backend.so`; disabling both gfxstream and
+libhybris-zink skips `scripts/build-mesa-gfxstream.sh` entirely.
+`scripts/build-release-apk.sh` defaults to
+`libhybris,libhybris-zink,cpu` so production APKs do not ship
+gfxstream/kumquat unless `--graphics=...` or `TAWC_RELEASE_GRAPHICS`
+opts it back in.
 
 ## Install and launch
 

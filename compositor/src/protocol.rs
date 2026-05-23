@@ -1,7 +1,7 @@
 //! Server bindings for tawc-internal Wayland protocols:
 //!   * `android_wlegl` — used by libhybris's Wayland EGL platform to
 //!     ship gralloc buffer handles.
-//!   * `tawc_gfxstream` — gfxstream-bridge custom Vulkan WSI (chroot
+//!   * `tawc_gfxstream` — optional gfxstream-bridge custom Vulkan WSI (chroot
 //!     hands the compositor a colorbuffer_id; compositor looks up the
 //!     backing AHardwareBuffer in its in-process gfxstream FrameBuffer).
 
@@ -20,6 +20,7 @@ pub mod android_wlegl {
     }
 }
 
+#[cfg(feature = "gfxstream")]
 pub mod tawc_gfxstream {
     pub mod server {
         use wayland_server;

@@ -82,6 +82,7 @@ impl SurfaceKind {
         match self {
             SurfaceKind::Shm => [1.0, 0.0, 1.0], // magenta — software fallback path
             SurfaceKind::Wlegl(BufferOrigin::Hybris) => [0.5, 1.0, 0.0], // lime — libhybris/AHB
+            #[cfg(feature = "gfxstream")]
             SurfaceKind::Wlegl(BufferOrigin::Gfxstream) => [0.0, 1.0, 1.0], // cyan — gfxstream/AHB
         }
     }

@@ -23,14 +23,14 @@ run {
     }
 }
 
-// Per-build enabled graphics backends. Default: all four. Override with
-// `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`. The
-// libhybris-zink backend is the only one whose build artefacts are
-// gated on this flag — disabling it skips the Mesa-Zink cross-build
-// (saves ~3-5 min on a cold `assembleDebug`) and drops the ~22 MB
-// `assets/mesa-zink/<abi>/mesa-zink.tar` from the APK. The other three
-// backends always build in (their cost is negligible); the flag just
-// controls whether they appear in the in-app Settings picker. See
+// Per-build enabled graphics backends. Default: all four unless the
+// caller passes a production set (scripts/build-release-apk.sh does).
+// Override with
+// `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`.
+// Disabling gfxstream removes the Rust kumquat/gfxstream feature,
+// skips libgfxstream_backend.so, and drops the Mesa gfxstream-vk
+// assets. Disabling both gfxstream and libhybris-zink skips the Mesa
+// cross-build entirely. See
 // `me.phie.tawc.install.EnabledGraphicsBackends`.
 val explicitTawcGraphics: Set<String>? = (project.findProperty("tawcGraphics") as String?)
     ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
@@ -45,6 +45,8 @@ run {
     }
 }
 val libhybrisZinkEnabled: Boolean = "libhybris-zink" in enabledGraphics
+val gfxstreamEnabled: Boolean = "gfxstream" in enabledGraphics
+val mesaBuildNeeded: Boolean = gfxstreamEnabled || libhybrisZinkEnabled
 
 fun booleanProjectProperty(name: String, default: Boolean): Boolean {
     val raw = project.findProperty(name) as String? ?: return default
@@ -84,6 +86,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        ndk {
+            abiFilters.addAll(tawcAbis)
+        }
     }
 
     buildTypes {
@@ -155,6 +160,12 @@ android {
                     "**/libxshmfence.so",
                 )
             }
+            if (!gfxstreamEnabled) {
+                variant.packaging.jniLibs.excludes.addAll(
+                    "**/libgfxstream_backend.so",
+                    "**/libc++_shared.so",
+                )
+            }
         }
     }
 
@@ -202,6 +213,16 @@ android {
     if (!xwaylandPackaged) {
         androidResources {
             ignoreAssetsPatterns.add("xwayland")
+        }
+    }
+    if (!gfxstreamEnabled) {
+        androidResources {
+            ignoreAssetsPatterns.add("mesa-gfxstream")
+        }
+    }
+    if (!libhybrisZinkEnabled) {
+        androidResources {
+            ignoreAssetsPatterns.add("mesa-zink")
         }
     }
 }
@@ -307,16 +328,25 @@ tawcAbis.forEach { abi ->
     }
 
     val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
-        dependsOn(buildLibxkbcommonTask, setupSmithayTask, setupRutabagaTask)
+        dependsOn(buildLibxkbcommonTask, setupSmithayTask)
+        if (gfxstreamEnabled) {
+            dependsOn(setupRutabagaTask)
+        }
         workingDir = file("${rootProject.projectDir}/compositor")
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine(
+        val cargoArgs = mutableListOf(
             "cargo", "ndk",
             "--target", abi,
             "--platform", "29",
             "--",
-            "build", "--release"
+            "build", "--release",
         )
+        if (gfxstreamEnabled) {
+            cargoArgs += listOf("--features", "gfxstream")
+        } else {
+            cargoArgs += "--no-default-features"
+        }
+        commandLine(cargoArgs)
         inputs.files(
             "${rootProject.projectDir}/compositor/Cargo.toml",
             "${rootProject.projectDir}/compositor/Cargo.lock",
@@ -330,9 +360,12 @@ tawcAbis.forEach { abi ->
         inputs.files(fileTree("$tawcRoot/deps/smithay") {
             exclude(".git/**", "target/**")
         })
-        inputs.files(fileTree("$tawcRoot/deps/rutabaga_gfx") {
-            exclude(".git/**", "build/**", "target/**")
-        })
+        inputs.property("gfxstreamEnabled", gfxstreamEnabled)
+        if (gfxstreamEnabled) {
+            inputs.files(fileTree("$tawcRoot/deps/rutabaga_gfx") {
+                exclude(".git/**", "build/**", "target/**")
+            })
+        }
         outputs.file("${rootProject.projectDir}/compositor/target/$triple/release/libcompositor.so")
     }
 
@@ -406,12 +439,10 @@ tawcAbis.forEach { abi ->
 
 // Cross-build the gfxstream host renderer (libgfxstream_backend.so) for
 // every enabled Android ABI and stage it under jniLibs/ alongside
-// libcompositor.so. Both arm64-v8a and x86_64 are supported — the bridge
-// is the only working GPU path on the x86_64 emulator (libhybris doesn't
-// load there; see notes/emulator.md).
+// libcompositor.so when the gfxstream backend is enabled.
 //
-// libcompositor.so links against `gfxstream_backend` via the
-// `kumquat_virtio` dep (compositor/Cargo.toml, target_os=android-gated),
+// When enabled, libcompositor.so links against `gfxstream_backend` via
+// the `kumquat_virtio` dep (compositor/Cargo.toml `gfxstream` feature),
 // which expects to find the .so at the path in `GFXSTREAM_PATH_RELEASE`.
 // The kumquat server itself runs as a thread of the compositor process —
 // no separate daemon, no broker plumbing. See notes/gfxstream-bridge.md.
@@ -425,27 +456,36 @@ tawcAbis.forEach { abi ->
     val libcppLib = "$bridgeJniLibsDir/libc++_shared.so"
     val gfxstreamOutDir = "$tawcRoot/build/gfxstream-android-$scriptAbi"
 
-    val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend$capAbi") {
-        workingDir = tawcRoot
-        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
-        inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
-        inputs.dir("$tawcRoot/deps/gfxstream-patches")
-        // Pin bumps in deps/deps.list (gfxstream) must invalidate.
-        inputs.file("$tawcRoot/deps/deps.list")
-        inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        outputs.files(gfxstreamLib, libcppLib)
-    }
+    if (gfxstreamEnabled) {
+        val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend$capAbi") {
+            workingDir = tawcRoot
+            environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+            commandLine("scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
+            inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
+            inputs.dir("$tawcRoot/deps/gfxstream-patches")
+            // Pin bumps in deps/deps.list (gfxstream) must invalidate.
+            inputs.file("$tawcRoot/deps/deps.list")
+            inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            outputs.files(gfxstreamLib, libcppLib)
+        }
 
-    // The cargo build needs the .so present *and* its location in
-    // `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the right
-    // `-L` / `-l` flags. We extend the existing `buildRustLibrary<Abi>`
-    // task (registered above in the per-ABI loop) instead of
-    // duplicating the cross-build wrapper.
-    tasks.named<Exec>("buildRustLibrary$capAbi") {
-        dependsOn(buildGfxstreamBackendTask)
-        environment("GFXSTREAM_PATH_RELEASE", gfxstreamOutDir)
-        inputs.file("$gfxstreamOutDir/libgfxstream_backend.so")
+        // The cargo build needs the .so present *and* its location in
+        // `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the right
+        // `-L` / `-l` flags. We extend the existing `buildRustLibrary<Abi>`
+        // task (registered above in the per-ABI loop) instead of
+        // duplicating the cross-build wrapper.
+        tasks.named<Exec>("buildRustLibrary$capAbi") {
+            dependsOn(buildGfxstreamBackendTask)
+            environment("GFXSTREAM_PATH_RELEASE", gfxstreamOutDir)
+            inputs.file("$gfxstreamOutDir/libgfxstream_backend.so")
+        }
+    } else {
+        val deleteGfxstreamBackendTask = tasks.register<Delete>("deleteGfxstreamBackend$capAbi") {
+            delete(gfxstreamLib, libcppLib)
+        }
+        tasks.named("preBuild") {
+            dependsOn(deleteGfxstreamBackendTask)
+        }
     }
 }
 
@@ -522,16 +562,10 @@ if ("arm64-v8a" in tawcAbis) {
     }
 } // end libhybris (arm64-v8a in tawcAbis)
 
-// Cross-build Mesa's chroot-side gfxstream Vulkan ICD
-// (libvulkan_gfxstream.so + the matching JSON manifest) for every
-// enabled Android ABI, and ship both as APK assets keyed by ABI under
-// `assets/mesa-gfxstream/<abi>/`. Extracted at runtime by
-// CompositorService.ensureMesaGfxstreamExtracted into the app's
-// filesDir; [BridgeInstallProvider] copies them into each rootfs at
-// install time under /usr/lib/gfxstream/ (a tawc-owned namespace,
-// matching /usr/lib/hybris/). Selected at runtime via the
-// GraphicsBackend pref (RootfsEnv pins VK_ICD_FILENAMES at the
-// install path).
+// Cross-build Mesa's chroot-side graphics bits when a Mesa-backed
+// backend is enabled:
+//   - gfxstream-vk assets for GraphicsBackend.GFXSTREAM
+//   - Mesa-Zink tarball for GraphicsBackend.LIBHYBRIS_ZINK
 //
 // The Mesa source emits the ICD JSON with an arch-suffixed name
 // (`gfxstream_vk_icd.aarch64.json` / `gfxstream_vk_icd.x86_64.json`).
@@ -556,39 +590,49 @@ tawcAbis.forEach { abi ->
     val mesaZinkTar = "$mesaInstallRoot/mesa-zink-$mesonCpu.tar"
     val mesaZinkAssetDir = "src/main/assets/mesa-zink/$abi"
 
-    val buildMesaGfxstreamTask = tasks.register<Exec>("buildMesaGfxstream$capAbi") {
-        workingDir = tawcRoot
-        // `--no-zink` flag skips the Mesa-Zink (libEGL_mesa + Gallium-Zink)
-        // configure when libhybris-zink isn't in tawcGraphics — saves the
-        // bulk of the Mesa cross-build. gfxstream-vk still builds either way.
-        val args = mutableListOf("bash", "scripts/build-mesa-gfxstream.sh", "--abi=$scriptAbi")
-        if (!libhybrisZinkEnabled) args += "--no-zink"
-        commandLine(args)
-        // Same incremental-input contract as buildLibhybris:
-        //   - the build script
-        //   - the patches dir (a patch edit must rebuild)
-        //   - dep manifest + helper (a Mesa pin bump must rebuild)
-        inputs.file("$tawcRoot/scripts/build-mesa-gfxstream.sh")
-        inputs.file("$tawcRoot/scripts/build-host-sysroot.sh")
-        inputs.dir("$tawcRoot/deps/mesa-patches")
-        inputs.file("$tawcRoot/deps/deps.list")
-        inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        inputs.property("libhybrisZinkEnabled", libhybrisZinkEnabled)
-        val out = mutableListOf<Any>(mesaGfxstreamLib, mesaGfxstreamIcd)
-        if (libhybrisZinkEnabled) out += mesaZinkTar
-        outputs.files(out)
+    val buildMesaGfxstreamTask = if (mesaBuildNeeded) {
+        tasks.register<Exec>("buildMesaGfxstream$capAbi") {
+            workingDir = tawcRoot
+            val args = mutableListOf("bash", "scripts/build-mesa-gfxstream.sh", "--abi=$scriptAbi")
+            if (!gfxstreamEnabled) args += "--no-gfxstream"
+            if (!libhybrisZinkEnabled) args += "--no-zink"
+            commandLine(args)
+            // Same incremental-input contract as buildLibhybris:
+            //   - the build script
+            //   - the patches dir (a patch edit must rebuild)
+            //   - dep manifest + helper (a Mesa pin bump must rebuild)
+            inputs.file("$tawcRoot/scripts/build-mesa-gfxstream.sh")
+            inputs.file("$tawcRoot/scripts/build-host-sysroot.sh")
+            inputs.dir("$tawcRoot/deps/mesa-patches")
+            inputs.file("$tawcRoot/deps/deps.list")
+            inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            inputs.property("gfxstreamEnabled", gfxstreamEnabled)
+            inputs.property("libhybrisZinkEnabled", libhybrisZinkEnabled)
+            val out = mutableListOf<Any>()
+            if (gfxstreamEnabled) out.addAll(listOf(mesaGfxstreamLib, mesaGfxstreamIcd))
+            if (libhybrisZinkEnabled) out.add(mesaZinkTar)
+            outputs.files(out)
+        }
+    } else {
+        null
     }
 
-    val packMesaGfxstreamTask = tasks.register<Copy>("packMesaGfxstream$capAbi") {
-        dependsOn(buildMesaGfxstreamTask)
-        // Two raw assets — no symlinks, so no tar wrapper needed (unlike
-        // libhybris). Rename the arch-suffixed ICD JSON to a single
-        // generic name so the runtime extractor opens the same file on
-        // both ABIs.
-        into("${project.projectDir}/$mesaGfxstreamAssetDir")
-        from(mesaGfxstreamLib)
-        from(mesaGfxstreamIcd) {
-            rename { "gfxstream_vk_icd.json" }
+    val packMesaGfxstreamTask = if (gfxstreamEnabled) {
+        tasks.register<Copy>("packMesaGfxstream$capAbi") {
+            dependsOn(buildMesaGfxstreamTask!!)
+            // Two raw assets — no symlinks, so no tar wrapper needed (unlike
+            // libhybris). Rename the arch-suffixed ICD JSON to a single
+            // generic name so the runtime extractor opens the same file on
+            // both ABIs.
+            into("${project.projectDir}/$mesaGfxstreamAssetDir")
+            from(mesaGfxstreamLib)
+            from(mesaGfxstreamIcd) {
+                rename { "gfxstream_vk_icd.json" }
+            }
+        }
+    } else {
+        tasks.register<Delete>("packMesaGfxstream$capAbi") {
+            delete("${project.projectDir}/$mesaGfxstreamAssetDir")
         }
     }
 
@@ -597,7 +641,7 @@ tawcAbis.forEach { abi ->
     // enabled build so the APK doesn't smuggle 22 MB of dead weight.
     val packMesaZinkTask = if (libhybrisZinkEnabled) {
         tasks.register<Copy>("packMesaZink$capAbi") {
-            dependsOn(buildMesaGfxstreamTask)
+            dependsOn(buildMesaGfxstreamTask!!)
             // Tarball with symlinks (libEGL_mesa.so → libEGL_mesa.so.0 → …).
             // Same shape as the libhybris asset; runtime extractor mirrors.
             into("${project.projectDir}/$mesaZinkAssetDir")

@@ -9,12 +9,12 @@ import me.phie.tawc.GraphicsBackend
  * `app/build.gradle.kts` (override with
  * `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`).
  *
- * Default: all four enabled. Disabling `libhybris-zink` is the only
- * toggle that changes the build (skips the Mesa-Zink cross-compile +
- * drops the ~22 MB `assets/mesa-zink/<abi>/mesa-zink.tar` asset); the
- * other three always compile in and this gate only controls whether
- * they appear in the in-app Settings picker. Pattern mirrors
- * [EnabledMethods].
+ * Default: all four enabled unless the build wrapper passes a leaner
+ * production set. Disabling `gfxstream` removes the kumquat/gfxstream
+ * Rust feature, skips
+ * `libgfxstream_backend.so`, and drops the Mesa gfxstream-vk assets.
+ * Disabling both `gfxstream` and `libhybris-zink` skips the Mesa build
+ * entirely. Pattern mirrors [EnabledMethods].
  *
  * Settings UI calls [enabled] to filter the picker.
  * [me.phie.tawc.install.MesaZinkInstallProvider] short-circuits to

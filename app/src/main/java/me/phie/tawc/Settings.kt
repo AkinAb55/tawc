@@ -197,8 +197,9 @@ enum class GraphicsBackend(val key: String, val displayName: String) {
      * Forward GL/Vulkan command streams to an in-compositor-process
      * gfxstream renderer over a kumquat AF_UNIX socket. No vendor
      * blob inside the chroot — slightly slower per-call, but much
-     * more robust to vendor / Android-version drift. The kumquat
-     * server runs as a thread of the compositor app (always on);
+     * more robust to vendor / Android-version drift. When this APK
+     * ships the backend, the kumquat server runs as a thread of the
+     * compositor app;
      * the chroot-side `libvulkan_gfxstream.so` + ICD JSON ride in
      * the APK and are laid into each rootfs by
      * [me.phie.tawc.install.BridgeInstallProvider] at install time.
@@ -226,14 +227,26 @@ enum class GraphicsBackend(val key: String, val displayName: String) {
          * (notes/emulator.md "libhybris on x86_64"), so libhybris would
          * just no-op and every GPU client would fall back to SHM. The
          * gfxstream bridge is the only working GPU path there — make
-         * it the default so a fresh install Just Works on the AVD.
+         * it the default when this APK ships it. If gfxstream is
+         * disabled at build time, x86_64 falls back to CPU when present.
          * Everywhere else (aarch64 physical), libhybris stays the
          * default — proven, lower latency, no IPC.
          */
-        val DEFAULT: GraphicsBackend = when (Build.SUPPORTED_ABIS.firstOrNull()) {
-            "x86_64" -> GFXSTREAM
-            else -> LIBHYBRIS
-        }
+        val DEFAULT: GraphicsBackend
+            get() {
+                val preferred = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                    "x86_64" -> GFXSTREAM
+                    else -> LIBHYBRIS
+                }
+                if (me.phie.tawc.install.EnabledGraphicsBackends.isEnabled(preferred)) {
+                    return preferred
+                }
+                if (Build.SUPPORTED_ABIS.firstOrNull() == "x86_64" &&
+                    me.phie.tawc.install.EnabledGraphicsBackends.isEnabled(CPU)) {
+                    return CPU
+                }
+                return me.phie.tawc.install.EnabledGraphicsBackends.enabled.first()
+            }
 
         fun fromKeyOrDefault(key: String?): GraphicsBackend {
             val match = entries.firstOrNull { it.key == key } ?: return DEFAULT

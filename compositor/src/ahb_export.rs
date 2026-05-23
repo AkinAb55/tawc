@@ -127,15 +127,15 @@ fn ahb_export_callback(ahb_os_handle: i64) -> Result<i32, ()> {
 /// accepting connections — first AHB allocation can land immediately,
 /// no race window.
 pub fn install_hook() {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "gfxstream"))]
     {
         match kumquat_virtio::rutabaga_gfx::set_ahb_export_callback(ahb_export_callback) {
             Ok(()) => info!("ahb_export: hook installed"),
             Err(()) => warn!("ahb_export: hook already installed (idempotent)"),
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", feature = "gfxstream")))]
     {
-        info!("ahb_export: hook skipped (not an android build)");
+        info!("ahb_export: hook skipped (gfxstream bridge not built)");
     }
 }

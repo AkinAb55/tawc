@@ -95,6 +95,7 @@ pub enum BufferOrigin {
     Hybris,
     /// `tawc_gfxstream` — gfxstream-bridge custom Vulkan WSI (chroot
     /// client renders with mesa+gfxstream into a kumquat-allocated AHB).
+    #[cfg(feature = "gfxstream")]
     Gfxstream,
 }
 
@@ -136,6 +137,7 @@ impl WleglBufferData {
     /// Not used by the android_wlegl path, which has its own
     /// gralloc1-import construction via `tawc_wlegl_import` and tags
     /// the resulting buffer with [`BufferOrigin::Hybris`] inline.
+    #[cfg(feature = "gfxstream")]
     pub fn from_ahb(
         ahb: *mut ndk_sys::AHardwareBuffer,
         width: i32,

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build, install, and optionally launch the debug APK.
 #
-# Usage: scripts/app-build-install.sh [--no-build] [--no-launch] [--force-install] [--xwayland|--no-xwayland]
+# Usage: scripts/app-build-install.sh [--no-build] [--no-launch] [--force-install] [--graphics=list|--no-gfxstream|--no-mesa] [--xwayland|--no-xwayland]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +19,7 @@ for arg in "$@"; do
         --no-build)  DO_BUILD=0 ;;
         --no-launch) DO_LAUNCH=0 ;;
         --force-install) FORCE_INSTALL=1 ;;
-        --xwayland|--no-xwayland) BUILD_ARGS+=("$arg") ;;
+        --graphics=*|--no-gfxstream|--no-mesa|--xwayland|--no-xwayland) BUILD_ARGS+=("$arg") ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | sed 's/^# \?//;$d'
             exit 0
