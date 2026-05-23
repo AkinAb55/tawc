@@ -60,17 +60,23 @@ Some context that trips up first-time readers:
   `GFXSTREAM_FATAL("udmabuf failed to initialize")` if that fails.
   On Android the device exists on 6.6+ kernels (Pixel 10 Pro Fold and
   newer) but SELinux denies `untrusted_app` access to
-  `udmabuf_device`, so the open fails and the FATAL crashes the
-  whole tawc process at startup — before any client connects, and
-  regardless of which graphics backend the user picked, because
-  `bridge::spawn()` runs unconditionally. We don't use the udmabuf
-  path (our AHB-export hook handles host-visible memory), so
+  `udmabuf_device`, so the open fails and the FATAL would crash the
+  whole tawc process when gfxstream initializes. We don't use the
+  udmabuf path (our AHB-export hook handles host-visible memory), so
   `bridge.rs` pins `VulkanAllocateHostVisibleAsUdmabuf:disabled` in
   the renderer-features string passed through
   `STREAM_RENDERER_PARAM_RENDERER_FEATURES`. Watch for similar
   pattern in future gfxstream bumps — any new feature that
   auto-enables on a kernel/device-presence check and FATALs on
-  init-fail will reproduce the same class of bug.
+  init-fail can reproduce the same class of bug.
+- **Kumquat binds early, gfxstream initializes on first connect.**
+  `bridge::spawn()` still starts a thread and binds
+  `kumquat-gpu-0` unconditionally when gfxstream is compiled in, so
+  clients can connect without a broker handshake. The patched
+  `KumquatBuilder::build()` does not construct `KumquatGpu`; the
+  renderer is built only after the first accepted client. Non-gfxstream
+  backends therefore pay no gfxstream init cost and avoid renderer
+  startup crashes.
 
 ## The idea in one paragraph
 

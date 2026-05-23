@@ -36,12 +36,12 @@ mod android {
     use kumquat_virtio::kumquat::KumquatBuilder;
     use log::{error, info};
 
-    /// Spawn the kumquat server on a dedicated thread. The thread blocks
-    /// in `Kumquat::run()`'s `wait_ctx.wait()` until a client connects,
-    /// then dispatches commands to the gfxstream renderer
-    /// (`libgfxstream_backend.so`).
+    /// Spawn the kumquat listener on a dedicated thread. The thread
+    /// blocks in `Kumquat::run()`'s `wait_ctx.wait()` until a client
+    /// connects; the patched rutabaga fork initializes the gfxstream
+    /// renderer only after that first accept.
     ///
-    /// Errors at build time are logged and swallowed: the compositor
+    /// Listener setup errors are logged and swallowed: the compositor
     /// keeps running so the libhybris path stays usable. A missing
     /// kumquat just means clients launched with the gfxstream backend
     /// will see `connect()` fail with ENOENT and surface that to the user.
@@ -60,8 +60,8 @@ mod android {
                 return;
             }
         }
-        // KumquatBuilder::build() already removes a stale socket file
-        // before binding, so we don't need to.
+        // KumquatBuilder::build() removes a stale socket file before
+        // binding, but no longer initializes the gfxstream renderer.
 
         // Force-disable udmabuf backing — auto-enables on kernel >= 6.6 and
         // FATALs when SELinux denies the open on Android. See
@@ -84,10 +84,10 @@ mod android {
             if let Err(e) = kumquat.run() {
                 // The fork already drops per-client errors inside
                 // Kumquat::run (rutabaga-patches/02-keep-server-alive-on-
-                // client-error). Anything reaching here is the wait_ctx
-                // itself failing, which is unrecoverable — log and exit
-                // the thread.
-                error!("kumquat: wait_ctx failed: {:?}; thread exiting", e);
+                // client-error). Anything reaching here is listener,
+                // wait_ctx, or first-connect renderer init failure; log
+                // and exit the thread while keeping the app alive.
+                error!("kumquat: server failed: {:?}; thread exiting", e);
                 return;
             }
         }

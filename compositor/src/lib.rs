@@ -141,9 +141,9 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     info!("nativeStartCompositor: spawning compositor + kumquat threads");
     RUNNING.store(true, Ordering::SeqCst);
 
-    // gfxstream-bridge kumquat server runs as a sibling thread of the
-    // calloop event loop. Always-on, no broker handshake — clients
-    // connect lazily when a chroot process loads gfxstream-vk. See
+    // gfxstream-bridge kumquat listener runs as a sibling thread of
+    // the calloop event loop. The patched rutabaga fork initializes
+    // gfxstream itself only after the first client connects. See
     // notes/gfxstream-bridge.md.
     //
     // The AHB export hook must be installed BEFORE the kumquat
