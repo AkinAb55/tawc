@@ -398,8 +398,9 @@ tawc-exec [--foreground-app] --in-rootfs ID [--graphics KEY] [--op-title TITLE] 
 
 `--foreground-app` starts `MainActivity` even when the app process is
 already running. Install/uninstall actions need it because they start
-`InstallationService` as a foreground service; ordinary broker probes
-should leave it off.
+`InstallationService` as a foreground service. `RUNINSIDE` does this
+implicitly in the host helper because the app may need to start the
+lazy compositor foreground service before entering the rootfs.
 
 `--op-title TITLE` opts into the in-app log-screen mirror — the broker
 posts an Operation, opens `LogScreenActivity`, and streams stdout /

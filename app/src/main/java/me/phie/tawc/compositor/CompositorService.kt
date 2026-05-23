@@ -417,6 +417,12 @@ class CompositorService : Service() {
         private const val CHANNEL_ID = "tawc_compositor"
         private const val ACTION_EXIT = "me.phie.tawc.compositor.EXIT"
 
+        fun ensureRunning(context: Context) {
+            context.applicationContext.startForegroundService(
+                Intent(context.applicationContext, CompositorService::class.java)
+            )
+        }
+
         /** Lock for [ensureLibhybrisExtracted] — see method KDoc. */
         private val LIBHYBRIS_EXTRACT_LOCK = Any()
         /** Lock for [ensureXwaylandExtracted] — see method KDoc. */

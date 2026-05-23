@@ -103,11 +103,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             return
         }
 
-        // Start and bind the CompositorService. The Service owns the
+        // Ensure and bind the CompositorService. The Service owns the
         // compositor thread (and runs xkb-data extraction) and survives
         // this Activity's lifetime.
         val serviceIntent = Intent(this, CompositorService::class.java)
-        startForegroundService(serviceIntent)
+        CompositorService.ensureRunning(this)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
         surfaceView = TawcSurfaceView(this)

@@ -97,6 +97,7 @@
     <string name="operation_title_run_command">%1$s: %2$s</string>
     <string name="operation_status_running">Running&#8230;</string>
     <string name="operation_status_done">Done</string>
+    <string name="operation_status_cancelled">Cancelled</string>
     <string name="operation_status_exited_with_code">Exited with code %1$d</string>
     <string name="operation_status_unknown_install_method">Unknown install method \'%1$s\'</string>
     <string name="operation_status_failed_to_start">Failed to start: %1$s: %2$s</string>

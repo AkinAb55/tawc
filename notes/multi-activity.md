@@ -31,13 +31,13 @@ closes that window.
 
 ## Bootstrap: there is no "primary" CompositorActivity
 
-`MainActivity` is the launcher entry. Its `onCreate` calls
-`startForegroundService(CompositorService)` and then renders a tiny
-status page — that's it. The compositor thread + Wayland socket live
-in `CompositorService` for the duration of the app process; from that
-point on, every `CompositorActivity` instance corresponds 1:1 to a
-real Wayland toplevel (spawned by the policy via reverse-JNI, killed
-by `finishActivity` when the toplevel dies). The recents view shows
+`MainActivity` is the launcher entry. It does not start the compositor
+on open; user-launched rootfs commands go through `UserRootfsSession`,
+which starts `CompositorService` lazily before spawning the Linux
+process. Once a Wayland client maps a toplevel, every
+`CompositorActivity` instance corresponds 1:1 to a real Wayland
+toplevel (spawned by the policy via reverse-JNI, killed by
+`finishActivity` when the toplevel dies). The recents view shows
 `MainActivity` (the launcher card) plus one card per window. There is
 no separate "compositor" / "primary" task to confuse the user.
 
@@ -417,11 +417,8 @@ per-host counters surfaced in `nativeQueryState`.
 
 `MainActivity` becomes a thin launcher:
 
-- `onCreate`: `startForegroundService(CompositorService)`,
-  `bindService(...)`. Once bound, displays a "compositor running" status
-  plus a button to launch a chroot session (or just `finish()` itself if
-  we want the launcher to be invisible — open question, default to a
-  visible page for now since it's also where we'll put settings).
+- `onCreate`: render installed rootfs cards and app-level tools.
+  Compositor startup is deferred until a user launches a rootfs command.
 - Stays the only Activity in `category.LAUNCHER` so the recents view
   doesn't get a confusing "tawc home" entry.
 - It does NOT host a SurfaceView; the bootstrap path goes:

@@ -27,6 +27,13 @@ internal object MethodRunHelper {
         graphics: GraphicsBackend? = null,
     ): MethodResult {
         val proc = method.startInside(rootfs, command, graphics)
+        return collectProcess(proc, onLine)
+    }
+
+    fun collectProcess(
+        proc: Process,
+        onLine: ((String) -> Unit)?,
+    ): MethodResult {
         // We don't redirectErrorStream up at startInside (the broker
         // path needs them split into separate frames), so collect both
         // here and merge into one ordered-by-arrival line stream.

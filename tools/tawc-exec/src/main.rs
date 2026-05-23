@@ -272,7 +272,9 @@ fn run(invocation: Invocation) -> io::Result<i32> {
     // which is hard to distinguish from "broker disconnected normally".
     // Cheaper to ask up front.
     let was_running = app_running(serial.as_deref());
-    if invocation.foreground_app || !was_running {
+    let foreground_app =
+        invocation.foreground_app || matches!(invocation.parsed, Parsed::RunInside { .. });
+    if foreground_app || !was_running {
         if was_running {
             eprintln!("tawc-exec: bringing MainActivity foreground...");
         } else {

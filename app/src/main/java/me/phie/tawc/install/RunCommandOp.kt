@@ -13,7 +13,9 @@ import me.phie.tawc.ops.OperationsRegistry
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
@@ -43,13 +45,32 @@ internal object RunCommandOp {
         val app = context.applicationContext
         val opId = "run-cmd:${installation.id}:${seq.incrementAndGet()}"
         val sink = MutableSharedFlow<String>(replay = 200, extraBufferCapacity = 1024)
-        val procRef = arrayOfNulls<Process>(1)
+        val procRef = AtomicReference<Process?>()
+        val cancelled = AtomicBoolean(false)
+        val terminal = AtomicBoolean(false)
+        val opRef = AtomicReference<MutableOperation?>()
+        fun finish(stage: OperationStage, message: String) {
+            val currentOp = opRef.get() ?: return
+            if (terminal.compareAndSet(false, true)) {
+                terminate(currentOp, opId, sink, stage, message)
+            }
+        }
         val op = MutableOperation(
             id = opId,
             title = app.getString(R.string.operation_title_run_command, installation.id, command),
             log = sink,
-            cancelHandler = { procRef[0]?.destroyForcibly() },
+            cancelHandler = {
+                if (cancelled.compareAndSet(false, true)) {
+                    val proc = procRef.get()
+                    if (proc != null) {
+                        proc.destroyForcibly()
+                    } else {
+                        finish(OperationStage.FAILED, app.getString(R.string.operation_status_cancelled))
+                    }
+                }
+            },
         )
+        opRef.set(op)
         OperationsRegistry.register(op)
         op.publish(OperationProgress(OperationStage.RUNNING, app.getString(R.string.operation_status_running)))
         sink.tryEmit("$ $command")
@@ -66,56 +87,68 @@ internal object RunCommandOp {
             Log.w(TAG, "open log screen: ${t.message}")
         }
 
-        val method = InstallationMethod.forKey(app, installation.method)
-        if (method == null) {
-            terminate(
-                op,
-                opId,
-                sink,
-                OperationStage.FAILED,
-                app.getString(R.string.operation_status_unknown_install_method, installation.method),
-            )
-            return
-        }
         val rootfs = InstallationStore(app).rootfsDir(installation.id).absolutePath
 
-        val proc: Process = try {
-            method.startInside(rootfs, command)
-        } catch (t: Throwable) {
-            terminate(
-                op,
-                opId,
-                sink,
-                OperationStage.FAILED,
-                app.getString(
-                    R.string.operation_status_failed_to_start,
-                    t.javaClass.simpleName,
-                    t.message ?: app.getString(R.string.operation_status_no_detail),
-                ),
-            )
-            return
-        }
-        procRef[0] = proc
-        // Close stdin immediately so commands that read from it (e.g.
-        // `cat` with no args) get EOF instead of blocking forever.
-        try { proc.outputStream.close() } catch (_: Throwable) {}
+        thread(name = "tawc-runcmd-starter", isDaemon = true) {
+            if (cancelled.get()) return@thread
 
-        thread(name = "tawc-runcmd-stdout", isDaemon = true) {
-            relayLines(proc.inputStream, sink)
-        }
-        thread(name = "tawc-runcmd-stderr", isDaemon = true) {
-            relayLines(proc.errorStream, sink)
-        }
-        thread(name = "tawc-runcmd-waiter", isDaemon = true) {
-            val exit = try { proc.waitFor() } catch (_: InterruptedException) { -1 }
-            // Java's wstatus int can't reliably distinguish "exited 137"
-            // from "killed by SIGKILL"; we just report what we got.
-            val (stage, msg) = if (exit == 0) {
-                OperationStage.DONE to app.getString(R.string.operation_status_done)
-            } else {
-                OperationStage.FAILED to app.getString(R.string.operation_status_exited_with_code, exit)
+            val method = InstallationMethod.forKey(app, installation.method)
+            if (method == null) {
+                if (cancelled.get()) return@thread
+                finish(
+                    OperationStage.FAILED,
+                    app.getString(R.string.operation_status_unknown_install_method, installation.method),
+                )
+                return@thread
             }
-            terminate(op, opId, sink, stage, msg)
+
+            val proc: Process = try {
+                UserRootfsSession.startInside(app, method, rootfs, command)
+            } catch (t: Throwable) {
+                val msg = if (cancelled.get()) {
+                    app.getString(R.string.operation_status_cancelled)
+                } else {
+                    app.getString(
+                        R.string.operation_status_failed_to_start,
+                        t.javaClass.simpleName,
+                        t.message ?: app.getString(R.string.operation_status_no_detail),
+                    )
+                }
+                finish(OperationStage.FAILED, msg)
+                return@thread
+            }
+            procRef.set(proc)
+            if (cancelled.get()) {
+                try {
+                    proc.destroyForcibly()
+                    proc.waitFor()
+                } catch (_: Throwable) {}
+                finish(OperationStage.FAILED, app.getString(R.string.operation_status_cancelled))
+                return@thread
+            }
+            // Close stdin immediately so commands that read from it (e.g.
+            // `cat` with no args) get EOF instead of blocking forever.
+            try { proc.outputStream.close() } catch (_: Throwable) {}
+
+            thread(name = "tawc-runcmd-stdout", isDaemon = true) {
+                relayLines(proc.inputStream, sink)
+            }
+            thread(name = "tawc-runcmd-stderr", isDaemon = true) {
+                relayLines(proc.errorStream, sink)
+            }
+            thread(name = "tawc-runcmd-waiter", isDaemon = true) {
+                val exit = try { proc.waitFor() } catch (_: InterruptedException) { -1 }
+                // Java's wstatus int can't reliably distinguish "exited 137"
+                // from "killed by SIGKILL"; we just report what we got.
+                val (stage, msg) = if (cancelled.get()) {
+                    OperationStage.FAILED to app.getString(R.string.operation_status_cancelled)
+                } else if (exit == 0) {
+                    OperationStage.DONE to app.getString(R.string.operation_status_done)
+                } else {
+                    OperationStage.FAILED to app.getString(R.string.operation_status_exited_with_code, exit)
+                }
+                finish(stage, msg)
+            }
         }
     }
 

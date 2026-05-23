@@ -12,7 +12,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
-import me.phie.tawc.compositor.CompositorService
 import me.phie.tawc.install.DistroInfoActivity
 import me.phie.tawc.install.InstallActivity
 import me.phie.tawc.install.Installation
@@ -26,13 +25,11 @@ import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
 /**
- * Home screen for the tawc app. Starts the [CompositorService] (which
- * spawns the Rust compositor thread + Wayland socket), then renders a
- * card for each currently-installed Linux environment with two actions:
- * Info (opens [DistroInfoActivity]) and Run (opens [LauncherActivity]
- * to pick an app). The home screen deliberately doesn't compute rootfs
- * size — `du -sk` over a multi-GB tree costs seconds via su, and DistroInfo
- * is the place that needs it.
+ * Home screen for the tawc app. Renders a card for each currently-installed
+ * Linux environment with two actions: Info (opens [DistroInfoActivity]) and
+ * Run (opens [LauncherActivity] to pick an app). The compositor starts lazily
+ * when a user launches a rootfs command, so a broken graphics backend doesn't
+ * keep the home screen or Settings from opening.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -45,10 +42,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Compositor is foreground/sticky and outlives this Activity; the
-        // launcher tap is the natural place to ensure it's running.
-        startForegroundService(Intent(this, CompositorService::class.java))
 
         val scaffold = buildHomeScreen(getString(R.string.app_name))
 

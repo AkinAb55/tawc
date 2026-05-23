@@ -308,13 +308,13 @@ fi
 # running rather than starting it themselves, so the suite gets a single
 # clean compositor lifetime instead of N partial ones. Force-stop first
 # so a previous app process/compositor is gone before the new one starts.
-# The Service is `exported="false"`, so we launch MainActivity — its
-# onCreate calls startForegroundService.
+# MainActivity intentionally does not start the compositor; RUNINSIDE is
+# the shared user/rootfs launch path that starts it lazily.
 echo "=== Starting compositor ==="
 adb shell "am force-stop me.phie.tawc"
 sleep 0.3
 adb logcat -c >/dev/null 2>&1 || true
-adb shell "am start -n me.phie.tawc/.MainActivity" >/dev/null
+"$TAWC_EXEC" --in-rootfs "$INSTALL_ID" -- true >/dev/null
 
 # Wait until the tawc process is alive, the wayland socket exists, AND
 # the calloop event loop is dispatching. The compositor binds the

@@ -30,6 +30,7 @@ import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationMethod
 import me.phie.tawc.install.InstallationStore
+import me.phie.tawc.install.UserRootfsSession
 import me.phie.tawc.ui.tawcCard
 import me.phie.tawc.ui.verticalLp
 import kotlin.math.max
@@ -47,13 +48,10 @@ import kotlin.math.min
  * "Future UX").
  *
  * Launches are fire-and-forget on the process-scoped [LAUNCH_SCOPE]
- * (Dispatchers.IO). `InstallationMethod.runInside` blocks until the
- * launched program exits, so the coroutine pins one IO thread for
- * the program's lifetime — which is fine, since the program needs
- * the JVM alive anyway (Wayland socket lives in CompositorService,
- * proot/tawcroot tracee tree gets torn down on JVM death). Closing
- * this Activity does NOT kill the program: the scope outlives the
- * Activity via JVM lifetime.
+ * (Dispatchers.IO). [UserRootfsSession] starts the compositor lazily,
+ * then blocks until the launched program exits, so the coroutine pins
+ * one IO thread for the program's lifetime. Closing this Activity does
+ * NOT kill the program: the scope outlives the Activity via JVM lifetime.
  */
 class LauncherActivity : AppCompatActivity() {
 
@@ -317,9 +315,9 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     /**
-     * Fire-and-forget launch via [InstallationMethod.runInside]. We
-     * finish the Activity right away; [LAUNCH_SCOPE] is process-scoped
-     * so the coroutine keeps running.
+     * Fire-and-forget launch via [UserRootfsSession]. We finish the
+     * Activity right away; [LAUNCH_SCOPE] is process-scoped so the
+     * coroutine keeps running.
      *
      * Stdio is redirected to /dev/null so a chatty program can't fill
      * the pipe back to the JVM (which we never read).
@@ -337,8 +335,9 @@ class LauncherActivity : AppCompatActivity() {
         val method = InstallationMethod.forKey(this, inst.method) ?: return
         val rootfs = store.rootfsDir(inst.id).absolutePath
         val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
+        val app = applicationContext
         LAUNCH_SCOPE.launch {
-            runCatching { method.runInside(rootfs, cmd) }
+            runCatching { UserRootfsSession.runInside(app, method, rootfs, cmd) }
                 .onFailure { android.util.Log.w(TAG, "launch ${entry.id}: $it") }
         }
         finish()

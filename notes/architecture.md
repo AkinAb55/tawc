@@ -51,15 +51,15 @@ The compositor (`compositor/src/`) is split into:
 
 Kotlin side (`app/src/main/java/me/phie/tawc/`):
 
-- **MainActivity.kt** -- Home screen (only Activity in `category.LAUNCHER`). Starts
-  `CompositorService` so the Wayland socket is up, then renders one card per installed
-  distro (each with Info + Run buttons) plus "Task manager" / "Install new distro"
-  buttons. `CompositorActivity` is spawned indirectly: a Wayland app mapping a window
-  triggers the native `spawnActivity` reverse-JNI.
+- **MainActivity.kt** -- Home screen (only Activity in `category.LAUNCHER`). Renders
+  one card per installed distro (each with Info + Run buttons) plus "Task manager" /
+  "Install new distro" buttons. It does not start the compositor; user-launched
+  rootfs commands go through `UserRootfsSession`, which starts `CompositorService`
+  lazily before spawning the Linux process.
 - **launcher/LauncherActivity.kt** -- Per-distro app picker. Reads the rootfs's
   `.desktop` files via [`NativeBridge.nativeLauncherScan`][launcher.rs] (Rust does the
   scan + parsing), shows a type-to-filter list with each entry's icon, fires
-  `InstallationMethod.runInside` on a process-wide `LAUNCH_SCOPE` so the
+  `UserRootfsSession.runInside` on a process-wide `LAUNCH_SCOPE` so the
   launcher Activity can finish without killing the launched program. `Enter`
   launches the top filtered match.
 - **launcher/IconLoader.kt** -- Async PNG icon decoder for launcher rows.
