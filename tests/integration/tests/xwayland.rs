@@ -26,6 +26,45 @@ const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+fn xwayland_pids() -> Vec<u32> {
+    let output = adb::shell("pidof Xwayland").expect("pidof Xwayland");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn wait_for_xwayland_running(expected: bool, timeout: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pids = xwayland_pids();
+        if pids.is_empty() != expected {
+            return pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Xwayland running={} did not become {expected}; pids={pids:?}",
+            !pids.is_empty()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_xwayland_restarted(old_pids: &[u32], timeout: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pids = xwayland_pids();
+        if !pids.is_empty() && pids.iter().all(|pid| !old_pids.contains(pid)) {
+            return pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Xwayland did not restart; old_pids={old_pids:?} current_pids={pids:?}",
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn shell_quote_single(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -45,6 +84,52 @@ fn wait_for_android_clipboard(expected: &str, timeout: Duration) {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn test_xwayland_setting_starts_and_stops_process_live() {
+    tawc_integration::helpers::test_init();
+    require_compositor();
+
+    assert_broker_ok(adb::set_xwayland(true).expect("enable xwayland"), "set-xwayland");
+    assert!(adb::get_xwayland().expect("get xwayland"));
+    let initial_pids = wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+
+    assert_broker_ok(adb::set_xwayland(false).expect("disable xwayland"), "set-xwayland");
+    assert!(!adb::get_xwayland().expect("get xwayland disabled"));
+
+    assert_broker_ok(adb::set_xwayland(true).expect("re-enable xwayland"), "set-xwayland");
+    assert!(adb::get_xwayland().expect("get xwayland re-enabled"));
+    wait_for_xwayland_restarted(&initial_pids, XWAYLAND_LAUNCH_TIMEOUT);
+
+    let mut app = RootfsProcess::spawn_with(SHM_BACKEND, "DISPLAY=:0 xclock -update 1")
+        .expect("spawn xclock after re-enabling Xwayland");
+    app.ensure_pgid();
+    let deadline = Instant::now() + XWAYLAND_LAUNCH_TIMEOUT;
+    while Instant::now() < deadline {
+        if !app.is_running() {
+            app.stop().ok();
+            panic!("xclock exited before rendering after Xwayland re-enable");
+        }
+        if has_shm_surface() {
+            assert_broker_ok(
+                adb::set_xwayland(false).expect("disable xwayland with active X11 client"),
+                "set-xwayland",
+            );
+            wait_for_xwayland_running(false, XWAYLAND_LAUNCH_TIMEOUT);
+            app.stop().ok();
+            assert_broker_ok(
+                adb::set_xwayland(true).expect("restore xwayland after active-client stop"),
+                "set-xwayland",
+            );
+            wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+            assert_compositor_clean();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    app.stop().ok();
+    panic!("xclock did not render after Xwayland re-enable");
 }
 
 #[test]

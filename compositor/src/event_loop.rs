@@ -22,7 +22,7 @@ use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::{
@@ -546,12 +546,13 @@ pub fn run(
     })?;
 
     // --- Source 6: Surface lifecycle events from Activities ---
-    loop_handle.insert_source(surface_event_channel, |event, _, data: &mut TawcState| {
+    let loop_handle_for_surface_events = loop_handle.clone();
+    loop_handle.insert_source(surface_event_channel, move |event, _, data: &mut TawcState| {
         let evt = match event {
             ChannelEvent::Msg(e) => e,
             ChannelEvent::Closed => return,
         };
-        handle_surface_event(data, evt);
+        handle_surface_event(&loop_handle_for_surface_events, data, evt);
         if let Err(e) = data.display_handle.flush_clients() {
             error!("flush_clients error after surface event: {}", e);
         }
@@ -570,7 +571,10 @@ pub fn run(
     // the end of each tick so frame callbacks reach clients on idle ticks
     // (the fd-source dispatcher only flushes on incoming requests).
     let frame_timer = Timer::from_duration(Duration::from_millis(16));
-    loop_handle.insert_source(frame_timer, |_, _, data: &mut TawcState| {
+    let loop_handle_for_frame_timer = loop_handle.clone();
+    loop_handle.insert_source(frame_timer, move |_, _, data: &mut TawcState| {
+        crate::xwayland::service_pending(&loop_handle_for_frame_timer, data);
+
         // New toplevels or dead toplevels need a repaint and focus update.
         // Consume the flag here so cleanup (step 4) can set it again for the
         // next frame. Both render and focus update use the local variable.
@@ -684,7 +688,8 @@ pub fn run(
 
     // Spawn Xwayland (best-effort: failure logs and continues — the
     // Wayland-only subset of the compositor still works without it).
-    crate::xwayland::start_xwayland(&loop_handle, &state);
+    let initial_xwayland = state.xwayland_enabled;
+    crate::xwayland::set_enabled(&loop_handle, &mut state, initial_xwayland);
 
     // Bind the Wayland socket as the last setup step. From here on, any
     // new connection lands in a backlog the dispatch loop drains within
@@ -763,7 +768,11 @@ fn toplevel_count(data: &TawcState) -> usize {
 // Surface event handling (per-Activity SurfaceView lifecycle)
 // ---------------------------------------------------------------------------
 
-fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
+fn handle_surface_event(
+    loop_handle: &LoopHandle<'static, TawcState>,
+    data: &mut TawcState,
+    evt: SurfaceEvent,
+) {
     match evt {
         SurfaceEvent::Register { activity_id, native_window, width, height } => {
             let nw = native_window as *mut c_void;
@@ -863,6 +872,9 @@ fn handle_surface_event(data: &mut TawcState, evt: SurfaceEvent) {
         }
         SurfaceEvent::OutputScaleChanged { scale } => {
             apply_output_scale(data, OutputScale::new(scale));
+        }
+        SurfaceEvent::XwaylandChanged { enabled } => {
+            crate::xwayland::set_enabled(loop_handle, data, enabled);
         }
         SurfaceEvent::Gtk3BrokenMenusWorkaroundChanged { enabled } => {
             crate::gtk3_menus_workaround::set_enabled(data, enabled);

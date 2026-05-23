@@ -430,6 +430,7 @@ internal object InputActions {
                 Settings.enterTestMode()
                 NativeBridge.nativeSetTintBuffersByType(Settings.tintBuffersByType)
                 NativeBridge.nativeSetOutputScale(Settings.outputScale)
+                NativeBridge.nativeSetXwaylandEnabled(Settings.xwayland)
                 NativeBridge.nativeSetGtk3BrokenMenusWorkaround(Settings.gtk3BrokenMenusWorkaround)
                 clearRecordingImeOutput()
                 NativeBridge.activeInputConnection = null

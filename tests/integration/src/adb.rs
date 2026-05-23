@@ -512,6 +512,31 @@ pub fn get_output_scale() -> io::Result<f32> {
         .map_err(|e| io::Error::other(format!("parse output scale: {e}; stdout={stdout:?}")))
 }
 
+/// Dynamically start/stop Xwayland through the same broker action used by Settings.
+pub fn set_xwayland(enabled: bool) -> io::Result<Output> {
+    let enabled = if enabled { "true" } else { "false" };
+    broker_action("set-xwayland", &[("enabled", enabled)])
+}
+
+/// Read the current Xwayland setting.
+pub fn get_xwayland() -> io::Result<bool> {
+    let output = broker_action("get-xwayland", &[])?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "get-xwayland failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(io::Error::other(format!(
+            "parse xwayland setting: stdout={other:?}"
+        ))),
+    }
+}
+
 /// Dynamically toggle the contained GTK3 broken menus workaround through
 /// the same broker action used by Settings.
 pub fn set_gtk3_broken_menus_workaround(enabled: bool) -> io::Result<Output> {

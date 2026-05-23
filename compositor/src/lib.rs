@@ -94,6 +94,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     mut env: JNIEnv,
     _class: JClass,
     output_scale: f32,
+    xwayland: jboolean,
     gtk3_broken_menus_workaround: jboolean,
 ) {
     android_logger::init_once(
@@ -172,6 +173,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     *STATE_QUERY_SENDER.lock().unwrap() = Some(state_query_sender);
 
     let initial_scale = sanitize_output_scale(output_scale as f64).unwrap_or(DEFAULT_OUTPUT_SCALE);
+    let initial_xwayland = xwayland != 0;
     let initial_gtk3_broken_menus_workaround = gtk3_broken_menus_workaround != 0;
     std::thread::spawn(move || {
         if let Err(e) = run_compositor(
@@ -181,6 +183,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
             surface_event_channel,
             state_query_channel,
             initial_scale,
+            initial_xwayland,
             initial_gtk3_broken_menus_workaround,
         ) {
             log::error!("Compositor failed: {}", e);
@@ -469,6 +472,17 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetOutput
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetXwaylandEnabled(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    host::send_surface_event(SurfaceEvent::XwaylandChanged {
+        enabled: enabled != 0,
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSetGtk3BrokenMenusWorkaround(
     _env: JNIEnv,
     _class: JClass,
@@ -727,6 +741,7 @@ fn run_compositor(
     surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
     state_query_channel: smithay::reexports::calloop::channel::Channel<()>,
     initial_scale: f64,
+    initial_xwayland: bool,
     initial_gtk3_broken_menus_workaround: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- EGL context (no surface yet — first Activity provides one) ---
@@ -781,6 +796,7 @@ fn run_compositor(
         scale,
         (0, 0),
         (0, 0),
+        initial_xwayland,
         initial_gtk3_broken_menus_workaround,
         render_state,
         output,

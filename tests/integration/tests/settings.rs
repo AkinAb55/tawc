@@ -318,7 +318,9 @@ fn test_test_init_resets_settings_and_closes_existing_clients() {
             .expect("set gtk3 broken menus workaround"),
         "set-gtk3-broken-menus-workaround",
     );
+    assert_broker_ok(adb::set_xwayland(false).expect("set xwayland"), "set-xwayland");
     assert_eq!(adb::get_output_scale().expect("get output scale"), 3.25);
+    assert!(!adb::get_xwayland().expect("get xwayland"));
     assert!(
         !adb::get_gtk3_broken_menus_workaround()
             .expect("get gtk3 broken menus workaround")
@@ -329,6 +331,7 @@ fn test_test_init_resets_settings_and_closes_existing_clients() {
     drop(leaked);
 
     assert_eq!(adb::get_output_scale().expect("get reset output scale"), 2.0);
+    assert!(adb::get_xwayland().expect("get reset xwayland"));
     assert!(
         adb::get_gtk3_broken_menus_workaround()
             .expect("get reset gtk3 broken menus workaround")

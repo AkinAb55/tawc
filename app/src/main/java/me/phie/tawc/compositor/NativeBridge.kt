@@ -122,6 +122,7 @@ object NativeBridge {
      *  The first real output size comes from [nativeRegisterActivitySurface]. */
     external fun nativeStartCompositor(
         outputScale: Float,
+        xwayland: Boolean,
         gtk3BrokenMenusWorkaround: Boolean,
     )
 
@@ -219,6 +220,9 @@ object NativeBridge {
     /** Update the compositor output scale live. The compositor propagates
      *  this through wl_output, fractional-scale, and xdg configure events. */
     external fun nativeSetOutputScale(scale: Float)
+
+    /** Start/stop the compositor-owned Xwayland server live. */
+    external fun nativeSetXwaylandEnabled(enabled: Boolean)
 
     /** Toggle the contained GTK3 broken menubar workaround. */
     external fun nativeSetGtk3BrokenMenusWorkaround(enabled: Boolean)

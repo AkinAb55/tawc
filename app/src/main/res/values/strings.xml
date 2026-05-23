@@ -38,6 +38,7 @@
     <string name="settings_debug_rendering">Debug rendering</string>
     <string name="settings_compatibility">Compatibility</string>
     <string name="settings_tint_buffers_by_type">Tint buffers based on type</string>
+    <string name="settings_xwayland">Xwayland</string>
     <string name="settings_gtk3_broken_menus_workaround">GTK3 broken menus workaround</string>
     <string name="settings_gtk3_broken_menus_workaround_detail">Spoof a pointer briefly entering each window, allows GTK3 menus to work correctly</string>
     <string name="settings_display_scale">Display scale: %1$s</string>

@@ -20,6 +20,8 @@ import me.phie.tawc.compositor.NativeBridge
  * | `get-graphics-backend` | — | prints current backend key on stdout |
  * | `set-output-scale` | `value` ∈ 0.5..4.0, snapped to 0.25 | save current setting and push live compositor scale |
  * | `get-output-scale` | — | prints current output scale |
+ * | `set-xwayland` | `enabled` ∈ true|false | save current setting and start/stop Xwayland |
+ * | `get-xwayland` | — | prints true/false |
  * | `set-gtk3-broken-menus-workaround` | `enabled` ∈ true|false | save current setting and push live workaround toggle |
  * | `get-gtk3-broken-menus-workaround` | — | prints true/false |
  */
@@ -32,6 +34,8 @@ internal object SettingsActions {
         ActionRegistry.register("get-graphics-backend", GetGraphicsBackendAction)
         ActionRegistry.register("set-output-scale", SetOutputScaleAction)
         ActionRegistry.register("get-output-scale", GetOutputScaleAction)
+        ActionRegistry.register("set-xwayland", SetXwaylandAction)
+        ActionRegistry.register("get-xwayland", GetXwaylandAction)
         ActionRegistry.register("set-gtk3-broken-menus-workaround", SetGtk3BrokenMenusWorkaroundAction)
         ActionRegistry.register("get-gtk3-broken-menus-workaround", GetGtk3BrokenMenusWorkaroundAction)
     }
@@ -76,6 +80,27 @@ internal object SettingsActions {
     private object GetOutputScaleAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             ctx.out(String.format(java.util.Locale.US, "%.2f", Settings.outputScale))
+            return 0
+        }
+    }
+
+    private object SetXwaylandAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val raw = args["enabled"] ?: args["value"]
+                ?: return ctx.fail("set-xwayland: --arg enabled=true|false required")
+            val enabled = raw.toBooleanStrictOrNull()
+                ?: return ctx.fail("set-xwayland: invalid boolean '$raw'")
+            Settings.xwayland = enabled
+            NativeBridge.nativeSetXwaylandEnabled(enabled)
+            Log.i(TAG, "set-xwayland: $enabled")
+            ctx.out(enabled.toString())
+            return 0
+        }
+    }
+
+    private object GetXwaylandAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            ctx.out(Settings.xwayland.toString())
             return 0
         }
     }

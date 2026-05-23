@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info, warn};
 
+use smithay::reexports::calloop::RegistrationToken;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::backend::renderer::{buffer_type, BufferType};
 use smithay::delegate_dispatch2;
@@ -194,6 +195,11 @@ pub struct TawcState {
     /// lets X11 clients associate their X11 windows with backing
     /// wl_surfaces. `xwm` is None until Xwayland reports Ready.
     pub xwayland_shell_state: XWaylandShellState,
+    pub xwayland_enabled: bool,
+    pub xwayland_source: Option<RegistrationToken>,
+    pub xwayland_source_dead: bool,
+    pub xwayland_start_pending: bool,
+    pub xwayland_start_after: Option<std::time::Instant>,
     pub xwm: Option<X11Wm>,
     /// X11 surfaces known to the window-manager side. Once an X11 surface
     /// gets a backing wl_surface it is mirrored into `desktop` as a Smithay
@@ -229,6 +235,7 @@ impl TawcState {
         output_scale: OutputScale,
         output_logical_size: (i32, i32),
         output_physical_size: (i32, i32),
+        xwayland_enabled: bool,
         gtk3_broken_menus_workaround_enabled: bool,
         render: crate::render::RenderState,
         output: smithay::output::Output,
@@ -336,6 +343,11 @@ impl TawcState {
             // gets its own Android task / recents card.
             single_activity_mode: false,
             xwayland_shell_state,
+            xwayland_enabled,
+            xwayland_source: None,
+            xwayland_source_dead: false,
+            xwayland_start_pending: false,
+            xwayland_start_after: None,
             xwm: None,
             x11_surfaces: Vec::new(),
             xdisplay: None,

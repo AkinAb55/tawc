@@ -30,8 +30,10 @@
 //! `/tmp/.X11-unix/X<N>` for the `:N` form of `$DISPLAY`.
 
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::{
@@ -50,6 +52,15 @@ use smithay::wayland::selection::SelectionTarget;
 
 use crate::compositor::TawcState;
 use crate::host::ActivityId;
+
+const RESTART_GRACE: Duration = Duration::from_millis(500);
+const START_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+enum StartResult {
+    Started(RegistrationToken),
+    RetryLater,
+    Unavailable,
+}
 
 fn configure_x11_toplevel_for_host(
     state: &TawcState,
@@ -82,19 +93,92 @@ pub fn configure_x11_toplevels_for_hosts(state: &TawcState) -> bool {
     configured
 }
 
+pub fn set_enabled(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+    enabled: bool,
+) {
+    if state.xwayland_enabled == enabled
+        && ((enabled && state.xwayland_source.is_some() && !state.xwayland_source_dead)
+            || (!enabled && state.xwayland_source.is_none() && state.xwm.is_none()))
+    {
+        return;
+    }
+
+    state.xwayland_enabled = enabled;
+    if enabled {
+        state.xwayland_start_pending = true;
+        service_pending(handle, state);
+    } else {
+        state.xwayland_start_pending = false;
+        state.xwayland_start_after = None;
+        stop_xwayland(handle, state);
+    }
+}
+
+pub fn service_pending(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+) {
+    let now = Instant::now();
+    if state.xwayland_source_dead {
+        if let Some(token) = state.xwayland_source.take() {
+            handle.remove(token);
+        }
+        state.xwayland_source_dead = false;
+        cleanup_xwayland_runtime_state(state);
+        if state.xwayland_enabled {
+            state.xwayland_start_pending = true;
+            state.xwayland_start_after = Some(now + START_RETRY_DELAY);
+        }
+    }
+
+    if !state.xwayland_enabled || !state.xwayland_start_pending {
+        return;
+    }
+    if state.xwayland_source.is_some() {
+        state.xwayland_start_pending = false;
+        state.xwayland_start_after = None;
+        return;
+    }
+    if state.xwm.is_some() {
+        state.xwayland_start_after = Some(now + START_RETRY_DELAY);
+        return;
+    }
+    if state.xwayland_start_after.is_some_and(|when| now < when) {
+        return;
+    }
+
+    match start_xwayland(handle, state) {
+        StartResult::Started(token) => {
+            state.xwayland_source = Some(token);
+            state.xwayland_start_pending = false;
+            state.xwayland_start_after = None;
+        }
+        StartResult::RetryLater => {
+            state.xwayland_start_pending = true;
+            state.xwayland_start_after = Some(now + START_RETRY_DELAY);
+        }
+        StartResult::Unavailable => {
+            state.xwayland_start_pending = false;
+            state.xwayland_start_after = None;
+        }
+    }
+}
+
 /// Spawn Xwayland and insert it as a calloop event source. On the
 /// `Ready` event the X11 window manager is constructed and stashed on
 /// the state.
-pub fn start_xwayland(
-    handle: &smithay::reexports::calloop::LoopHandle<'static, TawcState>,
+fn start_xwayland(
+    handle: &LoopHandle<'static, TawcState>,
     state: &TawcState,
-) {
+) -> StartResult {
     if matches!(
         std::env::var("TAWC_XWAYLAND_ENABLED").as_deref(),
         Ok("0") | Ok("false") | Ok("FALSE")
     ) {
         info!("xwayland: disabled or unavailable; not spawning");
-        return;
+        return StartResult::Unavailable;
     }
 
     let paths = crate::app_paths::get();
@@ -110,20 +194,14 @@ pub fn start_xwayland(
     if let Err(e) = std::fs::create_dir_all(format!("{}/.X11-unix", xwl_runtime_dir)) {
         warn!("xwayland: mkdir {}: {}", xwl_runtime_dir, e);
     }
-    // Best-effort cleanup of stale lockfiles from a previous compositor
-    // run. Smithay's lock-grab logic recovers from a stale PID lock too,
-    // but that path is slower.
-    for n in 0..3 {
-        let _ = std::fs::remove_file(format!("{}/.X{}-lock", xwl_runtime_dir, n));
-        let _ = std::fs::remove_file(format!("{}/.X11-unix/X{}", xwl_runtime_dir, n));
-    }
-
     // Tell our patched smithay where to put X11 sockets.
     std::env::set_var("TAWC_XWL_RUNTIME_DIR", xwl_runtime_dir);
     // PATH is consumed by `Command::new("Xwayland")` lookup.
+    let xwl_bin = format!("{}/bin", xwl_install_dir);
     let path_with_xwl = match std::env::var("PATH") {
-        Ok(p) => format!("{}/bin:{}", xwl_install_dir, p),
-        Err(_) => format!("{}/bin", xwl_install_dir),
+        Ok(p) if p.split(':').any(|entry| entry == xwl_bin) => p,
+        Ok(p) => format!("{}:{}", xwl_bin, p),
+        Err(_) => xwl_bin,
     };
     std::env::set_var("PATH", &path_with_xwl);
 
@@ -172,11 +250,11 @@ pub fn start_xwayland(
     let old_cwd = std::env::current_dir().ok();
     if let Err(e) = std::env::set_current_dir(&paths.data_dir) {
         error!("xwayland: chdir {} failed: {}", paths.data_dir, e);
-        return;
+        return StartResult::RetryLater;
     }
     let spawn_result = XWayland::spawn(
         &dh,
-        None,
+        Some(0),
         envs,
         true, // open_abstract_socket — Linux only, costs nothing on Android
         stdout,
@@ -190,7 +268,7 @@ pub fn start_xwayland(
         Ok(pair) => pair,
         Err(e) => {
             error!("xwayland: failed to spawn Xwayland: {}", e);
-            return;
+            return StartResult::RetryLater;
         }
     };
 
@@ -214,16 +292,117 @@ pub fn start_xwayland(
                 }
                 Err(e) => {
                     error!("xwayland: X11Wm::start_wm failed: {}", e);
+                    data.xwayland_source_dead = true;
                 }
             }
         }
         XWaylandEvent::Error => {
             error!("xwayland: Xwayland crashed during startup");
+            data.xwayland_source_dead = true;
         }
     });
-    if let Err(e) = result {
-        error!("xwayland: insert_source failed: {}", e);
+    match result {
+        Ok(token) => StartResult::Started(token),
+        Err(e) => {
+            error!("xwayland: insert_source failed: {}", e);
+            StartResult::RetryLater
+        }
     }
+}
+
+fn stop_xwayland(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+) {
+    let Some(token) = state.xwayland_source.take() else {
+        state.xwm = None;
+        state.xdisplay = None;
+        return;
+    };
+
+    info!("xwayland: stopping Xwayland");
+    handle.remove(token);
+    kill_xwayland_processes();
+    state.xwayland_start_after = Some(Instant::now() + RESTART_GRACE);
+    cleanup_xwayland_runtime_state(state);
+}
+
+fn cleanup_xwayland_runtime_state(state: &mut TawcState) {
+    state.xdisplay = None;
+
+    let clear_x11_clipboard = current_data_device_selection_userdata(&state.seat)
+        .as_deref()
+        .is_some_and(|user_data| {
+            matches!(
+                user_data,
+                crate::clipboard::SelectionUserData::X11(SelectionTarget::Clipboard)
+            )
+        });
+    if clear_x11_clipboard {
+        clear_data_device_selection(&state.display_handle, &state.seat);
+    }
+
+    let hosts: Vec<ActivityId> = state
+        .x11_surfaces
+        .iter()
+        .filter_map(|surface| state.x11_surface_host(surface))
+        .collect();
+    let surfaces = std::mem::take(&mut state.x11_surfaces);
+    for surface in surfaces {
+        if let Some(wl) = surface.wl_surface() {
+            state.desktop.remove_surface(&wl);
+        }
+    }
+    state.toplevels_changed = true;
+    state.sync_desktop_hosts();
+    for host in hosts {
+        state.finish_host_if_unused(&host);
+    }
+}
+
+fn kill_xwayland_processes() {
+    let uid = unsafe { libc::getuid() };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<libc::pid_t>() else {
+            continue;
+        };
+        let comm_path = format!("/proc/{pid}/comm");
+        let Ok(comm) = std::fs::read_to_string(comm_path) else {
+            continue;
+        };
+        if comm.trim() != "Xwayland" {
+            continue;
+        }
+        if proc_uid(pid) != Some(uid) {
+            continue;
+        }
+        let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+        if rc == 0 {
+            info!("xwayland: killed Xwayland pid {}", pid);
+        } else {
+            warn!(
+                "xwayland: failed to kill Xwayland pid {}: {}",
+                pid,
+                std::io::Error::last_os_error(),
+            );
+        }
+    }
+}
+
+fn proc_uid(pid: libc::pid_t) -> Option<libc::uid_t> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid_line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    uid_line
+        .split_whitespace()
+        .nth(1)?
+        .parse::<libc::uid_t>()
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +434,21 @@ impl XwmHandler for TawcState {
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {
         // Window object created on the X side — wait for map_request
         // before committing to any host placement.
+    }
+
+    fn disconnected(&mut self, xwm: XwmId) {
+        if self.xwm.as_ref().is_some_and(|active| active.id() == xwm) {
+            info!("xwayland: X11Wm disconnected");
+            self.xwm = None;
+            if self.xwayland_source.is_some() {
+                self.xwayland_source_dead = true;
+            }
+            if self.xwayland_enabled {
+                self.xwayland_start_pending = true;
+                self.xwayland_start_after = Some(Instant::now() + START_RETRY_DELAY);
+            }
+            cleanup_xwayland_runtime_state(self);
+        }
     }
 
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}

@@ -47,7 +47,7 @@ class SettingsActivity : AppCompatActivity() {
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
         scaffold.content.addView(
-            buildSectionCard(getString(R.string.settings_compatibility), buildGtk3BrokenMenusWorkaroundCheckbox()),
+            buildSectionCard(getString(R.string.settings_compatibility), buildCompatibilitySettings()),
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
         scaffold.content.addView(
@@ -116,6 +116,33 @@ class SettingsActivity : AppCompatActivity() {
                 NativeBridge.nativeSetTintBuffersByType(checked)
             }
         }
+    }
+
+    private fun buildCompatibilitySettings(): android.view.View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(buildXwaylandCheckbox(), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(buildGtk3BrokenMenusWorkaroundCheckbox(), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+    }
+
+    private fun buildXwaylandCheckbox(): android.view.View {
+        val cardPad = (12 * resources.displayMetrics.density).toInt()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val checkbox = CheckBox(this).apply {
+            text = getString(R.string.settings_xwayland)
+            textSize = 15f
+            isChecked = Settings.xwayland
+            setPadding(0, cardPad / 2, 0, cardPad / 2)
+            setOnCheckedChangeListener { _, checked ->
+                Settings.xwayland = checked
+                NativeBridge.nativeSetXwaylandEnabled(checked)
+            }
+        }
+        column.addView(checkbox, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        return column
     }
 
     private fun buildGtk3BrokenMenusWorkaroundCheckbox(): android.view.View {

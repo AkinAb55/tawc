@@ -23,6 +23,7 @@ object Settings {
     private const val KEY_GRAPHICS_BACKEND = "graphics_backend"
     private const val KEY_TINT_BUFFERS_BY_TYPE = "tint_buffers_by_type"
     private const val KEY_OUTPUT_SCALE = "output_scale"
+    private const val KEY_XWAYLAND = "xwayland"
     private const val KEY_GTK3_BROKEN_MENUS_WORKAROUND = "gtk3_broken_menus_workaround"
 
     const val MIN_OUTPUT_SCALE = 0.5f
@@ -34,6 +35,7 @@ object Settings {
         var graphicsBackend: GraphicsBackend
         var tintBuffersByType: Boolean
         var outputScale: Float
+        var xwayland: Boolean
         var gtk3BrokenMenusWorkaround: Boolean
     }
 
@@ -59,6 +61,12 @@ object Settings {
                 prefs.edit { putFloat(KEY_OUTPUT_SCALE, snapOutputScale(value)) }
             }
 
+        override var xwayland: Boolean
+            get() = prefs.getBoolean(KEY_XWAYLAND, true)
+            set(value) {
+                prefs.edit { putBoolean(KEY_XWAYLAND, value) }
+            }
+
         override var gtk3BrokenMenusWorkaround: Boolean
             get() = prefs.getBoolean(KEY_GTK3_BROKEN_MENUS_WORKAROUND, true)
             set(value) {
@@ -71,6 +79,7 @@ object Settings {
         @Volatile override var tintBuffersByType: Boolean = true
         @Volatile override var outputScale: Float = DEFAULT_OUTPUT_SCALE
             set(value) { field = snapOutputScale(value) }
+        @Volatile override var xwayland: Boolean = true
         @Volatile override var gtk3BrokenMenusWorkaround: Boolean = true
     }
 
@@ -120,6 +129,15 @@ object Settings {
     var outputScale: Float
         get() = requireStore().outputScale
         set(value) { requireStore().outputScale = snapOutputScale(value) }
+
+    /**
+     * Enable the compositor-owned Xwayland server for X11 applications.
+     * Toggled live: disabling drops the current Xwayland process and
+     * enabling starts a fresh one without restarting the compositor.
+     */
+    var xwayland: Boolean
+        get() = requireStore().xwayland
+        set(value) { requireStore().xwayland = value }
 
     /**
      * Workaround for GTK3 native Wayland menubars on touch-only seats. When
