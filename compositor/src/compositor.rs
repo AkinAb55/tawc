@@ -60,7 +60,7 @@ use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorati
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
-use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
+use smithay::xwayland::{X11Surface, X11Wm, XWaylandActivation, XWaylandClientData};
 
 use crate::host::{ActivityId, OutputHost};
 use crate::launcher;
@@ -197,6 +197,8 @@ pub struct TawcState {
     pub xwayland_shell_state: XWaylandShellState,
     pub xwayland_enabled: bool,
     pub xwayland_source: Option<RegistrationToken>,
+    pub xwayland_activation: Option<XWaylandActivation>,
+    pub xwayland_activation_source: Option<RegistrationToken>,
     pub xwayland_source_dead: bool,
     pub xwayland_start_pending: bool,
     pub xwayland_start_after: Option<std::time::Instant>,
@@ -345,6 +347,8 @@ impl TawcState {
             xwayland_shell_state,
             xwayland_enabled,
             xwayland_source: None,
+            xwayland_activation: None,
+            xwayland_activation_source: None,
             xwayland_source_dead: false,
             xwayland_start_pending: false,
             xwayland_start_after: None,
@@ -712,6 +716,11 @@ impl TawcState {
             .into_iter()
             .next()
             .map(|t| t.wl_surface().clone())
+    }
+
+    pub fn first_toplevel_for_host(&self, host_id: &ActivityId) -> Option<WlSurface> {
+        self.first_wayland_toplevel_for_host(host_id)
+            .or_else(|| self.desktop.first_surface_for_host(host_id))
     }
 }
 

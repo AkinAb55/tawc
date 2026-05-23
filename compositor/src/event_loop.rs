@@ -658,7 +658,7 @@ pub fn run(
         if toplevels_changed {
             let new_focus = data
                 .desktop_visible_host_id()
-                .and_then(|host| data.first_wayland_toplevel_for_host(&host));
+                .and_then(|host| data.first_toplevel_for_host(&host));
             data.set_input_focus(new_focus.as_ref());
         }
 
@@ -861,7 +861,7 @@ fn handle_surface_event(
             if has_focus {
                 data.desktop.set_foreground_host(Some(activity_id.clone()));
                 data.sync_advertised_output_to_host_if_visible(&activity_id);
-                let target = data.first_wayland_toplevel_for_host(&activity_id);
+                let target = data.first_toplevel_for_host(&activity_id);
                 data.set_input_focus(target.as_ref());
                 data.needs_render = true;
             } else if data.desktop.foreground_host() == Some(&activity_id) {

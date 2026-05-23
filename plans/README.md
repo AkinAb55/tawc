@@ -10,7 +10,6 @@ design, build, and operational notes in [`../notes/`](../notes/).
 - [gfxstream-bridge-remaining-work.md](gfxstream-bridge-remaining-work.md) - remaining GL/GLES and x86_64 AVD work for the gfxstream bridge backend.
 - [lazy-init-compositor.md](lazy-init-compositor.md) - defer compositor GPU/Wayland initialization until the first client connects.
 - [lazy-init-kumquat.md](lazy-init-kumquat.md) - defer gfxstream/kumquat GPU initialization until the first gfxstream client connects.
-- [lazy-start-xwayland.md](lazy-start-xwayland.md) - start Xwayland only when an X11 client connects.
 - [smithay-desktop-refactor.md](smithay-desktop-refactor.md) - speculative plan for adopting more Smithay desktop/window abstractions.
 - [task-icons-window-switcher.md](task-icons-window-switcher.md) - launch hints and Kotlin open-window registry for a future in-app switcher.
 - [tawcroot-future-work.md](tawcroot-future-work.md) - deferred tawcroot syscall, `/proc`, and performance work.

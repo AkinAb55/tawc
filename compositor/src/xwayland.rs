@@ -31,9 +31,11 @@
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use std::os::fd::AsRawFd;
 
 use log::{error, info, warn};
-use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
+use smithay::reexports::calloop::generic::{FdWrapper, Generic};
+use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction, RegistrationToken};
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::{
@@ -98,20 +100,13 @@ pub fn set_enabled(
     state: &mut TawcState,
     enabled: bool,
 ) {
-    if state.xwayland_enabled == enabled
-        && ((enabled && state.xwayland_source.is_some() && !state.xwayland_source_dead)
-            || (!enabled && state.xwayland_source.is_none() && state.xwm.is_none()))
-    {
-        return;
-    }
-
     state.xwayland_enabled = enabled;
     if enabled {
-        state.xwayland_start_pending = true;
         service_pending(handle, state);
     } else {
         state.xwayland_start_pending = false;
         state.xwayland_start_after = None;
+        stop_activation_socket(handle, state);
         stop_xwayland(handle, state);
     }
 }
@@ -128,12 +123,11 @@ pub fn service_pending(
         state.xwayland_source_dead = false;
         cleanup_xwayland_runtime_state(state);
         if state.xwayland_enabled {
-            state.xwayland_start_pending = true;
             state.xwayland_start_after = Some(now + START_RETRY_DELAY);
         }
     }
 
-    if !state.xwayland_enabled || !state.xwayland_start_pending {
+    if !state.xwayland_enabled {
         return;
     }
     if state.xwayland_source.is_some() {
@@ -143,6 +137,15 @@ pub fn service_pending(
     }
     if state.xwm.is_some() {
         state.xwayland_start_after = Some(now + START_RETRY_DELAY);
+        return;
+    }
+
+    if !state.xwayland_start_pending {
+        if state.xwayland_activation.is_none()
+            && !state.xwayland_start_after.is_some_and(|when| now < when)
+        {
+            start_activation_socket(handle, state);
+        }
         return;
     }
     if state.xwayland_start_after.is_some_and(|when| now < when) {
@@ -156,7 +159,7 @@ pub fn service_pending(
             state.xwayland_start_after = None;
         }
         StartResult::RetryLater => {
-            state.xwayland_start_pending = true;
+            state.xwayland_start_pending = false;
             state.xwayland_start_after = Some(now + START_RETRY_DELAY);
         }
         StartResult::Unavailable => {
@@ -166,37 +169,23 @@ pub fn service_pending(
     }
 }
 
-/// Spawn Xwayland and insert it as a calloop event source. On the
-/// `Ready` event the X11 window manager is constructed and stashed on
-/// the state.
-fn start_xwayland(
-    handle: &LoopHandle<'static, TawcState>,
-    state: &TawcState,
-) -> StartResult {
+fn prepare_xwayland_environment() -> Option<(String, String)> {
     if matches!(
         std::env::var("TAWC_XWAYLAND_ENABLED").as_deref(),
         Ok("0") | Ok("false") | Ok("FALSE")
     ) {
-        info!("xwayland: disabled or unavailable; not spawning");
-        return StartResult::Unavailable;
+        info!("xwayland: disabled or unavailable");
+        return None;
     }
 
     let paths = crate::app_paths::get();
-    let xwl_runtime_dir = &paths.xwayland_runtime_dir;
-    let xwl_install_dir = &paths.xwayland_dir;
-
-    let handle_for_wm = handle.clone();
-    // Make sure <appData>/share/xtmp/.X11-unix/ exists. Patched
-    // smithay drops the listening socket here; bionic-built libxcb /
-    // xtrans look up :0 here too (from the compositor side — rootfs
-    // side gets it at /tmp/.X11-unix via each method's asymmetric bind,
-    // see notes/installation.md "/usr/share/tawc").
+    let xwl_runtime_dir = paths.xwayland_runtime_dir.clone();
+    let xwl_install_dir = paths.xwayland_dir.clone();
     if let Err(e) = std::fs::create_dir_all(format!("{}/.X11-unix", xwl_runtime_dir)) {
         warn!("xwayland: mkdir {}: {}", xwl_runtime_dir, e);
     }
-    // Tell our patched smithay where to put X11 sockets.
-    std::env::set_var("TAWC_XWL_RUNTIME_DIR", xwl_runtime_dir);
-    // PATH is consumed by `Command::new("Xwayland")` lookup.
+    std::env::set_var("TAWC_XWL_RUNTIME_DIR", &xwl_runtime_dir);
+
     let xwl_bin = format!("{}/bin", xwl_install_dir);
     let path_with_xwl = match std::env::var("PATH") {
         Ok(p) if p.split(':').any(|entry| entry == xwl_bin) => p,
@@ -204,6 +193,89 @@ fn start_xwayland(
         Err(_) => xwl_bin,
     };
     std::env::set_var("PATH", &path_with_xwl);
+
+    Some((xwl_runtime_dir, xwl_install_dir))
+}
+
+fn start_activation_socket(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+) {
+    if state.xwayland_activation.is_some() || state.xwayland_activation_source.is_some() {
+        return;
+    }
+    if prepare_xwayland_environment().is_none() {
+        state.xwayland_start_pending = false;
+        state.xwayland_start_after = None;
+        return;
+    }
+
+    let activation = match XWayland::prepare_lazy(Some(0), false) {
+        Ok(activation) => activation,
+        Err(e) => {
+            warn!("xwayland: failed to prepare activation socket: {}", e);
+            state.xwayland_start_after = Some(Instant::now() + START_RETRY_DELAY);
+            return;
+        }
+    };
+    let display_number = activation.display_number();
+    let fd = activation.poll_fd().as_raw_fd();
+    state.xwayland_activation = Some(activation);
+
+    let source = Generic::new(
+        unsafe { FdWrapper::new(fd) },
+        Interest::READ,
+        Mode::Level,
+    );
+    match handle.insert_source(source, move |_, _, data: &mut TawcState| {
+        info!("xwayland: X11 client connected; starting Xwayland");
+        data.xwayland_activation_source = None;
+        data.xwayland_start_pending = true;
+        data.xwayland_start_after = None;
+        Ok(PostAction::Remove)
+    }) {
+        Ok(token) => {
+            state.xwayland_activation_source = Some(token);
+            info!("xwayland: activation socket ready, DISPLAY=:{}", display_number);
+        }
+        Err(e) => {
+            error!("xwayland: failed to insert activation socket source: {}", e);
+            state.xwayland_activation = None;
+            state.xwayland_start_after = Some(Instant::now() + START_RETRY_DELAY);
+        }
+    }
+}
+
+fn stop_activation_socket(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+) {
+    if let Some(token) = state.xwayland_activation_source.take() {
+        handle.remove(token);
+    }
+    state.xwayland_activation = None;
+}
+
+/// Spawn Xwayland and insert it as a calloop event source. On the
+/// `Ready` event the X11 window manager is constructed and stashed on
+/// the state.
+fn start_xwayland(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+) -> StartResult {
+    let paths = crate::app_paths::get();
+    let Some((xwl_runtime_dir, xwl_install_dir)) = prepare_xwayland_environment() else {
+        return StartResult::Unavailable;
+    };
+    let Some(activation) = state.xwayland_activation.take() else {
+        warn!("xwayland: start requested without an activation socket");
+        return StartResult::RetryLater;
+    };
+    if let Some(token) = state.xwayland_activation_source.take() {
+        handle.remove(token);
+    }
+
+    let handle_for_wm = handle.clone();
 
     let dh = state.display_handle.clone();
     // Xwayland is a pure bionic process. libhybris/lib is intentionally
@@ -252,11 +324,10 @@ fn start_xwayland(
         error!("xwayland: chdir {} failed: {}", paths.data_dir, e);
         return StartResult::RetryLater;
     }
-    let spawn_result = XWayland::spawn(
+    let spawn_result = XWayland::spawn_with_activation(
         &dh,
-        Some(0),
+        activation,
         envs,
-        true, // open_abstract_socket — Linux only, costs nothing on Android
         stdout,
         stderr,
         |_| (),
@@ -285,7 +356,23 @@ fn start_xwayland(
                 x11_socket,
                 xwayland_client_for_handler.clone(),
             ) {
-                Ok(wm) => {
+                Ok(mut wm) => {
+                    let android_clipboard_active = current_data_device_selection_userdata(&data.seat)
+                        .as_deref()
+                        .is_some_and(|user_data| {
+                            matches!(user_data, crate::clipboard::SelectionUserData::AndroidText(_))
+                        });
+                    if android_clipboard_active {
+                        if let Err(e) = wm.new_selection(
+                            SelectionTarget::Clipboard,
+                            Some(crate::clipboard::text_mime_types()),
+                        ) {
+                            warn!(
+                                "clipboard: failed to notify XWayland of existing Android selection: {:?}",
+                                e
+                            );
+                        }
+                    }
                     data.xwm = Some(wm);
                     data.xdisplay = Some(display_number);
                     info!("xwayland: X11Wm attached, DISPLAY=:{}", display_number);
@@ -444,7 +531,7 @@ impl XwmHandler for TawcState {
                 self.xwayland_source_dead = true;
             }
             if self.xwayland_enabled {
-                self.xwayland_start_pending = true;
+                self.xwayland_start_pending = false;
                 self.xwayland_start_after = Some(Instant::now() + START_RETRY_DELAY);
             }
             cleanup_xwayland_runtime_state(self);

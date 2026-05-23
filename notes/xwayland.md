@@ -673,10 +673,13 @@ that Kotlin exports before `nativeStartCompositor`. No `su`, no
 
 ## Compositor-side wiring (done; on-disk in this branch)
 
-- `compositor/src/xwayland.rs` — spawns Xwayland on event-loop start,
-  wires `X11Wm` on `XWaylandEvent::Ready`, implements `XwmHandler` +
-  `XWaylandShellHandler` directly on `TawcState` (which is the calloop
-  data type — no wrapper struct).
+- `compositor/src/xwayland.rs` — prepares the `:0` X11 listening socket
+  when Xwayland is enabled, then socket-activates the Xwayland process
+  when the first X11 client connects. Xwayland gets `-terminate 5`, so
+  it exits after its last real X11 client has been gone for five seconds;
+  tawc then recreates the activation socket. The same module wires
+  `X11Wm` on `XWaylandEvent::Ready` and implements `XwmHandler` +
+  `XWaylandShellHandler` directly on `TawcState` (the calloop data type).
 - `xwayland` feature added to the smithay dep in
   `compositor/Cargo.toml`.
 - `[patch.crates-io] smithay = { path = "../deps/smithay" }` pulls
@@ -757,9 +760,9 @@ On first `CompositorService.onCreate` after install / app upgrade,
 `<filesDir>/xwayland/share/` and creates the
 `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks pointing at
 the real binaries in `nativeLibraryDir`. The compositor's
-`xwayland::start_xwayland` then sets cwd, `PATH`, `XDG_RUNTIME_DIR`,
-and `LD_LIBRARY_PATH` so the smithay `Command::new("Xwayland")`
-lookup picks up our copy.
+Xwayland path sets cwd, `PATH`, `XDG_RUNTIME_DIR`, and
+`LD_LIBRARY_PATH` before spawning so the smithay
+`Command::new("Xwayland")` lookup picks up our copy.
 
 The same packaging path now works for `arm64-v8a` and `x86_64`. On
 x86_64 the libhybris-backed AHB/EGL-on-X11 path is still unavailable,

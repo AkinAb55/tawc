@@ -197,6 +197,15 @@ impl DesktopRegistry {
         self.surface_to_host.values().any(|h| h == host_id)
     }
 
+    pub fn first_surface_for_host(&self, host_id: &ActivityId) -> Option<WlSurface> {
+        self.surface_to_host
+            .iter()
+            .find_map(|(surface, assigned)| {
+                (assigned == host_id && self.windows.contains_key(surface))
+                    .then(|| surface.clone())
+            })
+    }
+
     pub fn host_for_surface(&self, surface: &WlSurface) -> Option<ActivityId> {
         self.windows.iter().find_map(|(root, window)| {
             let host = self.surface_to_host.get(root)?;

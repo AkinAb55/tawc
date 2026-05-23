@@ -1,5 +1,5 @@
 //! Xwayland tests. Anything that exercises the bionic-built Xwayland the
-//! compositor spawns at startup — pure-X11 clients, the TAWC-DRI
+//! compositor socket-activates for X11 clients — pure-X11 clients, the TAWC-DRI
 //! AHB-shipping pipe, and EGL-on-X11 via the libhybris X11 platform
 //! plugin. Buffer-type assertions inside these tests stay here (rather
 //! than moving to `cpu_graphics::` / `libhybris::` / `gfxstream::`) because
@@ -25,6 +25,7 @@ const SHM_BACKEND: GraphicsBackend = GraphicsBackend::Cpu;
 const BACKEND: GraphicsBackend = GraphicsBackend::Libhybris;
 
 const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
+const XWAYLAND_IDLE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn xwayland_pids() -> Vec<u32> {
     let output = adb::shell("pidof Xwayland").expect("pidof Xwayland");
@@ -65,6 +66,43 @@ fn wait_for_xwayland_restarted(old_pids: &[u32], timeout: Duration) -> Vec<u32> 
     }
 }
 
+fn x11_socket_exists() -> bool {
+    adb::rootfs_run_with(SHM_BACKEND, "test -S /tmp/.X11-unix/X0")
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_x11_socket(expected: bool, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let exists = x11_socket_exists();
+        if exists == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "X11 socket exists={exists} did not become {expected}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn inject_touch_logical_when_focused(x: f32, y: f32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let last_error = match adb::inject_touch_logical(x, y) {
+            Ok(_) => return,
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "touch injection never found a focused host; last error={}",
+            last_error
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn shell_quote_single(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -91,20 +129,44 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
     tawc_integration::helpers::test_init();
     require_compositor();
 
+    assert_broker_ok(adb::set_xwayland(false).expect("disable xwayland"), "set-xwayland");
+    wait_for_xwayland_running(false, XWAYLAND_LAUNCH_TIMEOUT);
+
     assert_broker_ok(adb::set_xwayland(true).expect("enable xwayland"), "set-xwayland");
     assert!(adb::get_xwayland().expect("get xwayland"));
+    wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        xwayland_pids().is_empty(),
+        "enabling Xwayland should expose the X11 socket without starting the process"
+    );
+
+    let mut first = RootfsProcess::spawn_with(SHM_BACKEND, "DISPLAY=:0 xclock -update 1")
+        .expect("spawn first lazy-start xclock");
+    first.ensure_pgid();
     let initial_pids = wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+    first.stop().expect("first xclock failed to stop cleanly");
+    wait_for_xwayland_running(false, XWAYLAND_IDLE_STOP_TIMEOUT);
+    wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
 
     assert_broker_ok(adb::set_xwayland(false).expect("disable xwayland"), "set-xwayland");
     assert!(!adb::get_xwayland().expect("get xwayland disabled"));
+    wait_for_xwayland_running(false, XWAYLAND_LAUNCH_TIMEOUT);
+    wait_for_x11_socket(false, XWAYLAND_LAUNCH_TIMEOUT);
 
     assert_broker_ok(adb::set_xwayland(true).expect("re-enable xwayland"), "set-xwayland");
     assert!(adb::get_xwayland().expect("get xwayland re-enabled"));
-    wait_for_xwayland_restarted(&initial_pids, XWAYLAND_LAUNCH_TIMEOUT);
+    wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        xwayland_pids().is_empty(),
+        "re-enabling Xwayland should wait for the first X11 client"
+    );
 
     let mut app = RootfsProcess::spawn_with(SHM_BACKEND, "DISPLAY=:0 xclock -update 1")
         .expect("spawn xclock after re-enabling Xwayland");
     app.ensure_pgid();
+    wait_for_xwayland_restarted(&initial_pids, XWAYLAND_LAUNCH_TIMEOUT);
     let deadline = Instant::now() + XWAYLAND_LAUNCH_TIMEOUT;
     while Instant::now() < deadline {
         if !app.is_running() {
@@ -122,7 +184,11 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
                 adb::set_xwayland(true).expect("restore xwayland after active-client stop"),
                 "set-xwayland",
             );
-            wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+            wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
+            assert!(
+                xwayland_pids().is_empty(),
+                "restoring Xwayland after a forced stop should only recreate the socket"
+            );
             assert_compositor_clean();
             return;
         }
@@ -145,10 +211,7 @@ fn test_android_clipboard_text_to_x11() {
         .expect("start x11-debug-app paste");
     app.wait_ready()
         .expect("x11-debug-app paste did not map its X11 window");
-    assert_broker_ok(
-        adb::inject_touch_logical(40.0, 40.0).expect("tap x11-debug-app"),
-        "tap x11-debug-app",
-    );
+    inject_touch_logical_when_focused(40.0, 40.0, Duration::from_secs(2));
     app.wait_for_tag_value("CLIPBOARD_PASTE", android_text, XWAYLAND_LAUNCH_TIMEOUT)
         .expect("X11 client did not receive Android clipboard text");
 
