@@ -4,8 +4,10 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
 import android.text.format.Formatter
+import android.view.KeyEvent
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -180,10 +182,9 @@ class DistroInfoActivity : AppCompatActivity() {
             // Gboard ignores TYPE_TEXT_FLAG_NO_SUGGESTIONS on a plain CLASS_TEXT
             // field and still autocorrects.
             inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
-                InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            setSingleLine(false)
-            maxLines = 6
+                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_GO
             typeface = Typeface.MONOSPACE
             textSize = 14f
         }
@@ -207,6 +208,17 @@ class DistroInfoActivity : AppCompatActivity() {
             btn.setTextColor(
                 MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
             )
+        }
+        input.setOnEditorActionListener { _, actionId, event ->
+            val isEnter = actionId == EditorInfo.IME_ACTION_GO ||
+                actionId == EditorInfo.IME_ACTION_DONE ||
+                (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+            if (isEnter) {
+                dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.performClick()
+                true
+            } else {
+                false
+            }
         }
         input.requestFocus()
     }
