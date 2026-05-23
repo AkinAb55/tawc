@@ -1,5 +1,6 @@
 package me.phie.tawc.compositor
 
+import android.os.Bundle
 import android.text.Editable
 import android.text.Selection
 import android.view.KeyEvent
@@ -9,6 +10,7 @@ import android.view.inputmethod.CompletionInfo
 import android.view.inputmethod.CorrectionInfo
 import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.TextAttribute
 import android.util.Log
 
@@ -22,8 +24,11 @@ import android.util.Log
  * `getTextBeforeCursor`/`getExtractedText`. We keep it in sync with
  * the Wayland client's actual text via two channels:
  *
- * 1. **Outbound:** every IME method calls `super` first to update the
- *    Editable, then JNI to forward to the compositor.
+ * 1. **Outbound:** representable edit methods validate the request,
+ *    update the Editable through `BaseInputConnection`, then forward the
+ *    matching operation to the compositor. Unsupported or
+ *    non-representable mutations return `false` before touching the
+ *    Editable.
  * 2. **Inbound:** when the Wayland client commits a `set_surrounding_text`,
  *    the compositor calls reverse-JNI [updateFromCompositor], which
  *    overwrites the Editable with the truth (handles autocomplete,
@@ -149,6 +154,20 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
 
     internal fun targetsView(view: View): Boolean = targetView === view
 
+    override fun beginBatchEdit(): Boolean {
+        Log.d(TAG, "InputConnection.beginBatchEdit")
+        return super.beginBatchEdit()
+    }
+
+    override fun endBatchEdit(): Boolean {
+        Log.d(TAG, "InputConnection.endBatchEdit")
+        return super.endBatchEdit()
+    }
+
+    override fun clearMetaKeyStates(states: Int): Boolean {
+        return false
+    }
+
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
         val str = text?.toString() ?: return false
         // OpenBoard's per-Enter handler — after the user types <word><space>
@@ -194,6 +213,12 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         return true
     }
 
+    override fun commitText(
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean = commitText(text, newCursorPosition)
+
     override fun commitCompletion(text: CompletionInfo?): Boolean {
         val str = text?.text?.toString() ?: return false
         Log.d(TAG, "InputConnection.commitCompletion: \"$str\"")
@@ -207,7 +232,17 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         val newText = info.newText?.toString() ?: return false
         Log.d(TAG, "InputConnection.commitCorrection: $offset \"$oldText\" -> \"$newText\"")
         if (offset < 0) return false
+        val ed = editable ?: return false
+        if (offset + oldText.length > ed.length) return false
+        if (ed.subSequence(offset, offset + oldText.length).toString() != oldText) {
+            Log.d(TAG, "InputConnection.commitCorrection: old text mismatch")
+            return false
+        }
         return replaceText(offset, offset + oldText.length, newText, 1, null)
+    }
+
+    override fun commitContent(inputContentInfo: InputContentInfo, flags: Int, opts: Bundle?): Boolean {
+        return false
     }
 
     override fun replaceText(
@@ -219,12 +254,13 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
     ): Boolean {
         val str = text.toString()
         val ed = editable ?: return false
-        val replaceStart = start.coerceIn(0, ed.length)
-        val replaceEnd = end.coerceIn(0, ed.length)
-        if (replaceStart > replaceEnd) return false
+        if (start < 0 || end < 0 || start > end || start > ed.length || end > ed.length) {
+            Log.d(TAG, "InputConnection.replaceText: \"$str\" $start..$end out of bounds len=${ed.length}")
+            return false
+        }
 
         val cursor = wireCursor.coerceIn(0, ed.length)
-        if (cursor < replaceStart || cursor > replaceEnd) {
+        if (cursor < start || cursor > end) {
             Log.d(
                 TAG,
                 "InputConnection.replaceText: \"$str\" $start..$end not representable at cursor=$cursor",
@@ -232,8 +268,8 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
             return false
         }
 
-        val before = cursor - replaceStart
-        val after = replaceEnd - cursor
+        val before = cursor - start
+        val after = end - cursor
         Log.d(TAG, "InputConnection.replaceText: \"$str\" $start..$end cursorPos=$newCursorPosition delete=$before/$after")
         val ok = super.replaceText(start, end, text, newCursorPosition, textAttribute)
         if (!ok) return false
@@ -260,6 +296,12 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         return true
     }
 
+    override fun setComposingText(
+        text: CharSequence,
+        newCursorPosition: Int,
+        textAttribute: TextAttribute?,
+    ): Boolean = setComposingText(text, newCursorPosition)
+
     override fun setComposingRegion(start: Int, end: Int): Boolean {
         Log.d(TAG, "InputConnection.setComposingRegion: $start..$end")
         super.setComposingRegion(start, end)
@@ -269,6 +311,9 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         composingRegionIsPreedit = false
         return true
     }
+
+    override fun setComposingRegion(start: Int, end: Int, textAttribute: TextAttribute?): Boolean =
+        setComposingRegion(start, end)
 
     override fun finishComposingText(): Boolean {
         Log.d(TAG, "InputConnection.finishComposingText")
@@ -377,6 +422,7 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+        if (beforeLength < 0 || afterLength < 0) return false
         Log.d(TAG, "InputConnection.deleteSurroundingText: before=$beforeLength after=$afterLength")
         // Snapshot key counts BEFORE super collapses the deleted span.
         val keys = unitsToKeyPlan(beforeLength, afterLength)
@@ -388,9 +434,10 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
     }
 
     override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+        if (beforeLength < 0 || afterLength < 0) return false
         // Convert code points to UTF-16 code units using our wire cursor, then
         // delegate.
-        val ed = editable ?: return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+        val ed = editable ?: return false
         val cursor = wireCursor.coerceIn(0, ed.length)
         val before16 = utf16FromCodePoints(ed, cursor, -beforeLength)
         val after16 = utf16FromCodePoints(ed, cursor, afterLength)
@@ -404,6 +451,18 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
         return true
     }
 
+    override fun performContextMenuAction(id: Int): Boolean {
+        return false
+    }
+
+    override fun performPrivateCommand(action: String?, data: Bundle?): Boolean {
+        return false
+    }
+
+    override fun performSpellCheck(): Boolean {
+        return false
+    }
+
     override fun sendKeyEvent(event: KeyEvent): Boolean {
         // Only handle key-down events to avoid double-processing
         if (event.action != KeyEvent.ACTION_DOWN) return true
@@ -415,6 +474,29 @@ class TawcInputConnection(private val targetView: View) : BaseInputConnection(ta
             NativeBridge.nativeSendKeyEvent(event.keyCode)
         }
         return true
+    }
+
+    override fun setImeConsumesInput(imeConsumesInput: Boolean): Boolean {
+        return false
+    }
+
+    override fun setSelection(start: Int, end: Int): Boolean {
+        val ed = editable ?: return false
+        if (start < 0 || end < 0 || start > ed.length || end > ed.length) return false
+        Log.d(TAG, "InputConnection.setSelection: $start..$end")
+        return super.setSelection(start, end)
+    }
+
+    override fun reportFullscreenMode(enabled: Boolean): Boolean {
+        return false
+    }
+
+    override fun requestCursorUpdates(cursorUpdateMode: Int): Boolean {
+        return false
+    }
+
+    override fun requestCursorUpdates(cursorUpdateMode: Int, cursorUpdateFilter: Int): Boolean {
+        return false
     }
 
     override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText? {

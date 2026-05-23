@@ -8,11 +8,9 @@
 //! `NativeBridge.native*` directly** and no broker action that does so
 //! either. Tests act as a keyboard (sending IME methods to the IC) or as
 //! a wayland client (assertions go through `wayland-debug-app`'s observed
-//! events). The IC's full state machine — `computeReplaceDeltas`, the
-//! Editable mirror, the `composingRegionIsPreedit` short-circuit,
-//! `wireCursor`, `unitsToKeyPlan` — runs in every test the same way it runs in
-//! production. See `notes/text-input.md` ("Test infrastructure note") for
-//! the rationale.
+//! events). Tests assert the two public ends — Android contract results and
+//! client-visible Wayland behavior — not private tawc state. See
+//! `notes/text-input.md` ("Test infrastructure note") for the rationale.
 //!
 //! Tap / cursor events either come from the OS-level [`input_tap`] helper or
 //! from [`inject_touch_logical`], which dispatches a MotionEvent through the
@@ -273,11 +271,8 @@ pub fn wait_for_active_input_connection(timeout: Duration) -> Result<(), String>
 // ---- IC drivers ----------------------------------------------------------
 //
 // These mirror the [android.view.inputmethod.InputConnection] surface that
-// the system IMM dispatches Gboard events through. The IC's full state
-// machine runs on every call — Editable mirror update, composing-region
-// delta computation, the `composingRegionIsPreedit` short-circuit, key
-// translation in `unitsToKeyPlan`, etc. The wire output is what real
-// Gboard would produce given the same sequence of method calls.
+// the system IMM dispatches Gboard events through. The wire output is what
+// real Gboard would produce given the same sequence of method calls.
 
 /// Call `TawcInputConnection.commitText(text, 1)` on the active IC.
 /// Equivalent of Gboard's `commitText` — autocorrect commit, finished
@@ -378,6 +373,30 @@ pub fn ic_delete_surrounding_text(before: u32, after: u32) -> io::Result<Output>
     broker_action(
         "ic-delete-surrounding-text",
         &[("before", &b), ("after", &a)],
+    )
+}
+
+/// Call `TawcInputConnection.deleteSurroundingTextInCodePoints(before, after)`
+/// on the active IC. Same Android boundary as [ic_delete_surrounding_text],
+/// but the counts are Unicode code points instead of UTF-16 code units.
+pub fn ic_delete_surrounding_text_codepoints(before: u32, after: u32) -> io::Result<Output> {
+    let b = before.to_string();
+    let a = after.to_string();
+    broker_action(
+        "ic-delete-surrounding-text-codepoints",
+        &[("before", &b), ("after", &a)],
+    )
+}
+
+/// Try `TawcInputConnection.replaceText(...)` and return the raw broker
+/// result so tests can assert Android-contract rejection without treating
+/// the expected `false` as a harness failure.
+pub fn ic_replace_text_raw(start: u32, end: u32, text: &str) -> io::Result<Output> {
+    let s = start.to_string();
+    let e = end.to_string();
+    broker_action_raw(
+        "ic-replace-text",
+        &[("start", &s), ("end", &e), ("text", text)],
     )
 }
 

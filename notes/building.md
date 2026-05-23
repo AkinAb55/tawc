@@ -119,6 +119,19 @@ package archives that have already rolled off the mirror.
 
 ## Environment variables
 
+Gradle needs an Android SDK location. Set one of:
+
+- repo-local `local.properties` with `sdk.dir=/path/to/Android/Sdk`
+- `ANDROID_HOME=/path/to/Android/Sdk`
+- `ANDROID_SDK_ROOT=/path/to/Android/Sdk`
+
+`local.properties` is gitignored because the path is host-specific. On this
+dev machine it is:
+
+```properties
+sdk.dir=/home/ai/Android/Sdk
+```
+
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 export ANDROID_HOME=$HOME/Android/Sdk

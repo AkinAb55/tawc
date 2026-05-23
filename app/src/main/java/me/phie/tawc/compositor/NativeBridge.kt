@@ -393,11 +393,11 @@ object NativeBridge {
     }
 
     /**
-     * Called from native after a Wayland client commits a `set_surrounding_text`
-     * with the canonical text and selection. Replaces the active
-     * TawcInputConnection's Editable contents and selection so Gboard's
-     * queries (`getTextBeforeCursor`, `getExtractedText`, etc.) match the
-     * editor's actual state.
+     * Called from native after the focused Wayland client commits a
+     * `set_surrounding_text` with the canonical text and selection. Replaces
+     * the TawcInputConnection attached to [activityId], if that Activity still
+     * owns the active IC, so Gboard's queries (`getTextBeforeCursor`,
+     * `getExtractedText`, etc.) match the editor's actual state.
      *
      * Without this, Gboard's text model drifts whenever the Wayland client
      * changes text outside the IME path (cursor moves on touch, autocomplete,
@@ -407,11 +407,12 @@ object NativeBridge {
      * `selStart`/`selEnd` are UTF-16 code unit offsets within `text`.
      */
     @JvmStatic
-    fun onUpdateEditableText(text: String, selStart: Int, selEnd: Int) {
-        Log.d(TAG, "onUpdateEditableText (from compositor): \"$text\" sel=$selStart..$selEnd")
+    fun onUpdateEditableText(activityId: String, text: String, selStart: Int, selEnd: Int) {
+        Log.d(TAG, "onUpdateEditableText (from compositor): $activityId \"$text\" sel=$selStart..$selEnd")
         mainHandler.post {
-            val ic = activeInputConnection ?: return@post
-            ic.updateFromCompositor(text, selStart, selEnd)
+            serviceRef?.get()
+                ?.getActivity(activityId)
+                ?.updateEditableTextFromCompositor(text, selStart, selEnd)
         }
     }
 

@@ -201,6 +201,13 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         return ic.takeIf { it.targetsView(surfaceView) }
     }
 
+    internal fun updateEditableTextFromCompositor(text: String, selStart: Int, selEnd: Int) {
+        val ic = NativeBridge.activeInputConnection ?: return
+        if (ic.targetsView(surfaceView)) {
+            ic.updateFromCompositor(text, selStart, selEnd)
+        }
+    }
+
     fun setFullscreenFromCompositor(fullscreen: Boolean) {
         if (!initialized) {
             compositorFullscreen = fullscreen

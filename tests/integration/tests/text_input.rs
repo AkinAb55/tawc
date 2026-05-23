@@ -9,10 +9,8 @@
 //! - **As a keyboard**: every input call goes through
 //!   [`TawcInputConnection`] via `adb::ic_*` helpers — the same Kotlin
 //!   surface the system IMM dispatches Gboard / OpenBoard / AOSP-latin
-//!   events through. The IC's full state machine (Editable mirror,
-//!   `computeReplaceDeltas`, `composingRegionIsPreedit` short-circuit,
-//!   `wireCursor`, `unitsToKeyPlan`, `lastSyncedCursor` divergence guard) runs on
-//!   every test exactly the same way it runs in production.
+//!   events through. Tests assert Android contract results and
+//!   client-visible Wayland behavior, not tawc private state.
 //! - **As an app**: assertions go through `wayland-debug-app`'s observed
 //!   `TAWC_DEBUG:…` events (`TEXT_CHANGED`, `PREEDIT`, `CURSOR_POS`,
 //!   `KEY`, `COMMIT`, `DELETE_SURROUNDING`). That's what a real wayland
@@ -456,6 +454,18 @@ fn test_direct_replacement_apis() {
         adb::ic_commit_text("abc").expect("commit 'abc'");
         app.wait_for_text("abc", TIMEOUT).expect("'abc'");
 
+        let rejected = adb::ic_replace_text_raw(0, 1, "X").expect("replace outside cursor");
+        assert!(
+            !rejected.status.success(),
+            "replaceText outside the wire cursor should return false"
+        );
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            app.last_text().as_deref(),
+            Some("abc"),
+            "rejected replaceText must not change the client-visible buffer"
+        );
+
         adb::ic_replace_text(0, 3, "ABC").expect("replace current word with completion");
         app.wait_for_text("ABC", TIMEOUT)
             .expect("replaceText should replace the current word");
@@ -649,6 +659,25 @@ fn test_composing_region_replacement_paths() {
             "commitText over region did not replace marked text: {:?}",
             text
         );
+    });
+}
+
+#[test]
+fn test_delete_surrounding_text_in_codepoints() {
+    tawc_integration::helpers::test_init();
+    with_wayland_text_input(|app| {
+        adb::ic_commit_text("a😀bc").expect("commit emoji text");
+        app.wait_for_text("a😀bc", TIMEOUT).expect("initial emoji text");
+
+        adb::ic_delete_surrounding_text_codepoints(3, 0)
+            .expect("deleteSurroundingTextInCodePoints suffix");
+        app.wait_for_text("a", TIMEOUT)
+            .expect("codepoint delete should remove emoji+suffix with three keys");
+
+        adb::ic_delete_surrounding_text_codepoints(1, 0)
+            .expect("delete remaining char");
+        app.wait_for_text("", TIMEOUT)
+            .expect("codepoint delete should clear remaining text");
     });
 }
 

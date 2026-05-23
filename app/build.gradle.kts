@@ -253,6 +253,17 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
 }
 
+val checkInputConnectionAudit = tasks.register<Exec>("checkInputConnectionAudit") {
+    workingDir = rootProject.projectDir
+    commandLine("scripts/check-inputconnection-audit.sh")
+    inputs.file("$rootDir/app/build.gradle.kts")
+    inputs.file("$rootDir/scripts/check-inputconnection-audit.sh")
+}
+
+tasks.named("check") {
+    dependsOn(checkInputConnectionAudit)
+}
+
 val rustTripleFor = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
     "x86_64" to "x86_64-linux-android",

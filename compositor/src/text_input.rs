@@ -33,6 +33,7 @@ use wayland_protocols::wp::text_input::zv3::server::{
 };
 
 use crate::compositor::TawcState;
+use crate::host::ActivityId;
 
 // ---------------------------------------------------------------------------
 // Android → Compositor text input events (via calloop channel)
@@ -107,8 +108,8 @@ fn hide_keyboard() {
 /// pokes `InputMethodManager.updateSelection`, so this single call
 /// covers both jobs — the IME sees the new text via Editable queries
 /// and the new selection via IMM in one round-trip.
-fn update_editable_text(text: &str, sel_start: i32, sel_end: i32) {
-    crate::update_editable_text(text, sel_start, sel_end);
+fn update_editable_text(activity_id: &str, text: &str, sel_start: i32, sel_end: i32) {
+    crate::update_editable_text(activity_id, text, sel_start, sel_end);
 }
 
 /// Push a new `EditorInfo.inputType` (and a small set of `imeOptions`
@@ -272,11 +273,15 @@ impl TextInputState {
     }
 
     /// Process a commit from the client. Atomically applies all pending state.
-    pub fn commit(&mut self, id: &ObjectId) {
+    pub fn commit(&mut self, id: &ObjectId, focused_activity_id: Option<&ActivityId>) {
         // Look up the resource up-front so we can emit events outside the
         // mutable borrow on `instance_state` below. Cloning a resource is
         // cheap (refcounted handle).
         let ti = self.instances.iter().find(|t| t.id() == *id).cloned();
+        let is_focused_instance = ti
+            .as_ref()
+            .zip(self.focused_surface.as_ref())
+            .is_some_and(|(ti, surface)| ti.id().same_client_as(&surface.id()));
 
         let state = match self.instance_state.get_mut(id) {
             Some(s) => s,
@@ -357,7 +362,7 @@ impl TextInputState {
         let commit_count = state.commit_count;
 
         // End of borrow on `state`; do JNI calls outside the &mut.
-        if enabled_now {
+        if enabled_now && is_focused_instance {
             if let Some((text, sel_start, sel_end)) = sync_to_android {
                 // Mirror the Wayland client's text into the Android Editable
                 // so Gboard's queries match the editor's truth, and (inside
@@ -365,7 +370,11 @@ impl TextInputState {
                 // composing region and refreshes its cached selection. One
                 // round-trip handles both for every cause — `cause=other`
                 // just means the IME also needs to drop its prediction model.
-                update_editable_text(&text, sel_start, sel_end);
+                if let Some(activity_id) = focused_activity_id {
+                    update_editable_text(activity_id, &text, sel_start, sel_end);
+                } else {
+                    debug!("text_input: focused surface has no activity host; skipping Android Editable sync");
+                }
             }
         }
 
@@ -897,7 +906,12 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for TawcState {
             }
             zwp_text_input_v3::Request::SetCursorRectangle { .. } => {}
             zwp_text_input_v3::Request::Commit => {
-                state.text_input_state.commit(&id);
+                let focused_activity_id = state
+                    .text_input_state
+                    .focused_surface
+                    .as_ref()
+                    .and_then(|surface| state.desktop.host_for_surface(surface));
+                state.text_input_state.commit(&id, focused_activity_id.as_ref());
             }
             zwp_text_input_v3::Request::Destroy => {
                 state.text_input_state.remove_instance(&id);

@@ -26,10 +26,9 @@ import me.phie.tawc.compositor.TawcInputConnection
  * events through. There is intentionally **no broker action that calls
  * `NativeBridge.native*` directly**. The test path = the production
  * path: a "keyboard" sends commits / preedits / key events into the IC,
- * the IC mirrors the Editable, computes deltas, applies the
- * `composingRegionIsPreedit` short-circuit when it should, and forwards
- * to native. The wayland client (wayland-debug-app) is the other endpoint
- * — tests assert on what *it* sees on the wire.
+ * and the wayland client (wayland-debug-app) is the other endpoint.
+ * Tests assert Android contract results and what the client sees on the
+ * wire, not tawc private state.
  *
  * Why this matters: an earlier version of this file exposed bypass
  * actions (`inject-text`, `set-composing`, `key-event`, …) that called
@@ -39,9 +38,8 @@ import me.phie.tawc.compositor.TawcInputConnection
  * the IME is no longer in the loop, and the
  * justification disappears — the bypass became dead weight that hid
  * IC regressions behind a wayland-side fallback (text-input-v3 done
- * ordering produces the right *observable* even when IC's
- * `computeReplaceDeltas`, Editable mirror, or short-circuit are buggy,
- * because the protocol's preedit-replacement does the work). Driving
+ * ordering can produce the right *observable* even when the Android
+ * entrypoint did not translate the IME request correctly). Driving
  * everything through IC closes that hole.
  *
  * Anything that needs to read compositor state without driving input
@@ -65,6 +63,7 @@ import me.phie.tawc.compositor.TawcInputConnection
  * | `ic-finish-composing` | — | `IC.finishComposingText()` |
  * | `ic-set-selection` | `start`, `end` | `IC.setSelection(start, end)` |
  * | `ic-delete-surrounding-text` | `before`, `after` | `IC.deleteSurroundingText(before, after)` |
+ * | `ic-delete-surrounding-text-codepoints` | `before`, `after` | `IC.deleteSurroundingTextInCodePoints(before, after)` |
  * | `ic-send-key-event` | `keycode` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))` |
  * | `ic-send-modified-key-event` | `keycode`, `ctrl`, `alt`, `shift` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))` |
  * | `ic-finish-hidden-composing` | — | `RecordingImeOutput` stale hidden IC `finishComposingText()` |
@@ -97,6 +96,7 @@ internal object InputActions {
         ActionRegistry.register("ic-finish-composing", IcFinishComposingAction)
         ActionRegistry.register("ic-set-selection", IcSetSelectionAction)
         ActionRegistry.register("ic-delete-surrounding-text", IcDeleteSurroundingTextAction)
+        ActionRegistry.register("ic-delete-surrounding-text-codepoints", IcDeleteSurroundingTextInCodePointsAction)
         ActionRegistry.register("ic-send-key-event", IcSendKeyEventAction)
         ActionRegistry.register("ic-send-modified-key-event", IcSendModifiedKeyEventAction)
         ActionRegistry.register("ic-finish-hidden-composing", IcFinishHiddenComposingAction)
@@ -300,6 +300,17 @@ internal object InputActions {
             return withActiveInputConnection(ctx, "ic-delete-surrounding-text") { ic ->
                 Log.d(TAG, "InputAction ic-delete-surrounding-text $before/$after")
                 ic.deleteSurroundingText(before, after)
+            }
+        }
+    }
+
+    private object IcDeleteSurroundingTextInCodePointsAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val before = argInt(args, "before", 0)!!
+            val after = argInt(args, "after", 0)!!
+            return withActiveInputConnection(ctx, "ic-delete-surrounding-text-codepoints") { ic ->
+                Log.d(TAG, "InputAction ic-delete-surrounding-text-codepoints $before/$after")
+                ic.deleteSurroundingTextInCodePoints(before, after)
             }
         }
     }

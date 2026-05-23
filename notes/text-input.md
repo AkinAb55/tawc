@@ -66,17 +66,53 @@ Open trade-off: the combined path still vulnerable to the same crash as standalo
 
 ## Android Side: InputConnection
 
-### Key methods
+### Android 36 InputConnection audit
 
-| InputConnection method | Action | Wayland equivalent |
+Audited against `compileSdk = 36`. `scripts/check-inputconnection-audit.sh`
+compares the SDK's `javap android.view.inputmethod.InputConnection`
+surface against a pinned method list; update this table and the script
+together when the SDK changes.
+
+| InputConnection method | Class | tawc decision |
 |---|---|---|
-| `commitText(text, pos)` | Insert finalized text | (atomic delete for setComposingRegion replace) `delete_surrounding_text(before, after)` + `commit_string(text)` + `done` |
-| `setComposingText(text, pos)` | Set composing text | (atomic delete) `delete_surrounding_text(before, after)` + `preedit_string(text, len, len)` + `done` |
-| `finishComposingText()` | Finalize composing text | If a preedit is tracked: `commit_string(tracked_preedit)` + `preedit_string(None)` + `done`; otherwise no-op |
-| `deleteSurroundingText(before, after)` | Delete around cursor (char counts) | Backspace×before + Forward-Delete×after on `wl_keyboard` (see "Why standalone deletion is a key event") |
-| `sendKeyEvent(event)` | Hardware key event | `wl_keyboard` press+release via `keymap::android_to_evdev` |
-| `getTextBeforeCursor(n)` | IME queries editor text | Served from BaseInputConnection's Editable |
-| `getTextAfterCursor(n)` | IME queries editor text | Served from BaseInputConnection's Editable |
+| `beginBatchEdit()` | batch | Explicitly accepted. Keeps BaseInputConnection batch state; each tawc edit still emits its own Wayland `done` today. |
+| `endBatchEdit()` | batch | Explicitly accepted. See `beginBatchEdit()`. |
+| `clearMetaKeyStates(states)` | non-text action | Rejected (`false`). No tawc meta-key mirror exists behind the IC. |
+| `closeConnection()` | lifecycle | Clears the active IC if this instance owns it, then delegates to base. |
+| `commitCompletion(info)` | text mutation | If `info.text` exists, delegates to `commitText(text, 1)`. Null text returns `false`. |
+| `commitContent(info, flags, opts)` | rich content | Rejected (`false`). No text-input-v3 equivalent. |
+| `commitCorrection(info)` | text mutation | Requires valid offset, old text, and mirror old-text match; delegates to `replaceText`. |
+| `commitText(text, pos)` | text mutation | Emits optional atomic delete for marked committed regions, then `commit_string(text)` + `done`. Null text returns `false`. |
+| `commitText(text, pos, attr)` | text mutation | Delegates to `commitText(text, pos)`; tawc ignores styling attributes. |
+| `deleteSurroundingText(before, after)` | text mutation | Negative counts return `false`; otherwise updates base Editable and emits Backspace/Delete `wl_keyboard` events. |
+| `deleteSurroundingTextInCodePoints(before, after)` | text mutation | Negative counts or missing Editable return `false`; converts code point counts to UTF-16 counts around the wire cursor, then uses `deleteSurroundingText`. |
+| `finishComposingText()` | text mutation | Delegates to base, emits `nativeFinishComposingText`; compositor commits tracked preedit or no-ops if none. |
+| `setComposingRegion(start, end)` | local annotation | Delegates to base. Marks committed mirror text so the next commit/preedit can emit an atomic delete if representable. |
+| `setComposingRegion(start, end, attr)` | local annotation | Delegates to `setComposingRegion(start, end)`; tawc ignores styling attributes. |
+| `setComposingText(text, pos)` | text mutation | Delegates to base, then emits optional atomic delete plus `preedit_string(text)` + `done`. Null text is treated as empty preedit. |
+| `setComposingText(text, pos, attr)` | text mutation | Delegates to `setComposingText(text, pos)`; tawc ignores styling attributes. |
+| `replaceText(start, end, text, pos, attr)` | text mutation | Requires an in-bounds range containing the wire cursor; emits atomic delete plus `commit_string(text)`. Non-representable ranges return `false` before base mutation. |
+| `setSelection(start, end)` | local cursor | Explicitly accepted only for the Android-side mirror. text-input-v3 cannot move the client cursor; later replacements are guarded so stale mirror cursor movement cannot slice arbitrary client bytes. |
+| `performEditorAction(action)` | non-text action | Emits Enter as a `wl_keyboard` key. |
+| `sendKeyEvent(event)` | non-text action | Key-down events become `wl_keyboard` key events; key-up events return `true` and are ignored to avoid double processing. |
+| `performContextMenuAction(id)` | editor command | Rejected (`false`). Cut/copy/paste/select-all would otherwise be mirror-only or incomplete. |
+| `performPrivateCommand(action, data)` | private command | Rejected (`false`). No tawc command namespace. |
+| `performSpellCheck()` | IME command | Rejected (`false`). Spellcheck is an IME/editor service, not representable in text-input-v3. |
+| `reportFullscreenMode(enabled)` | status | Rejected (`false`). tawc uses `IME_FLAG_NO_FULLSCREEN` and has no extracted fullscreen editor. |
+| `requestCursorUpdates(mode)` | cursor monitoring | Rejected (`false`). Cursor geometry is not currently reported back through Android's cursor-update API. |
+| `requestCursorUpdates(mode, filter)` | cursor monitoring | Rejected (`false`). See `requestCursorUpdates(mode)`. |
+| `requestTextBoundsInfo(bounds, executor, consumer)` | query/cursor geometry | Default unsupported behavior; no tawc text bounds provider. |
+| `setImeConsumesInput(consumes)` | status | Rejected (`false`). tawc does not track this Android-side hint. |
+| `performHandwritingGesture(gesture, executor, consumer)` | handwriting | Default unsupported behavior. No text-input-v3 equivalent. |
+| `previewHandwritingGesture(gesture, cancellation)` | handwriting | Default unsupported behavior. No text-input-v3 equivalent. |
+| `getTextBeforeCursor(n, flags)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getTextAfterCursor(n, flags)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getSelectedText(flags)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getSurroundingText(before, after, flags)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getExtractedText(request, flags)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getCursorCapsMode(reqModes)` | query | Served by BaseInputConnection's Editable mirror. |
+| `getHandler()` | threading | Inherited base behavior. |
+| `takeSnapshot()` | query | Default snapshot behavior; tawc has no custom snapshot provider. |
 
 ### sendKeyEvent mapping
 
@@ -95,14 +131,14 @@ Every Android `KeyEvent` we recognise becomes a real `wl_keyboard` press+release
 
 We keep the Editable in sync via two channels:
 
-1. **Outbound (Android → Wayland):** every overridden IME method calls `super` first to update the Editable, then JNI to forward to the compositor. This ensures the Editable predicts what the Wayland client will have right after our event takes effect.
+1. **Outbound (Android → Wayland):** representable edit methods validate the request, update the Editable through `BaseInputConnection`, then forward the matching operation to the compositor. Unsupported or non-representable mutations return `false` before touching the Editable. This keeps the Editable's prediction tied to an operation the Wayland client should also see.
 
-2. **Inbound (Wayland → Android):** when a client commits a `set_surrounding_text`, the compositor calls reverse-JNI `onUpdateEditableText(text, selStart, selEnd)`. That replaces the active `TawcInputConnection`'s Editable contents and selection so the IME sees the editor's truth, not just our predictions. This catches:
+2. **Inbound (Wayland → Android):** when the focused client commits a `set_surrounding_text`, the compositor derives the focused surface's `activityId` and calls reverse-JNI `onUpdateEditableText(activityId, text, selStart, selEnd)`. Kotlin looks up that Activity and replaces its active `TawcInputConnection` Editable only if the IC still targets the Activity's `SurfaceView`. This catches:
    - Cursor moves caused by user touch / arrow keys (`change_cause=other`)
    - Editor-side text changes (autocomplete in Firefox URL bar, paste, undo, mid-stream insertions)
    - Drift between what we sent and what the client actually applied
 
-Without (2), the IME's text model silently desyncs after the first non-IME cursor move and every later operation lands at the wrong position. The single `TawcInputConnection` is cached on `NativeBridge.activeInputConnection` so reverse-JNI updates always hit the live IME session (and broadcast tests share state across multi-step flows).
+Without (2), the IME's text model silently desyncs after the first non-IME cursor move and every later operation lands at the wrong position. The activity id on the reverse-JNI call prevents a stale surrounding-text update from an old/background client from mutating the current foreground IC.
 
 With `fullEditor=true`, `mFallbackMode=false`, so `sendCurrentText()` is a no-op — calling `super` does NOT cause duplicate input via key events.
 
@@ -140,7 +176,7 @@ State is properly double-buffered: pending fields are stored when requests arriv
 Android Gboard (IME)
      ↓
 InputConnection callbacks (TawcInputConnection.kt)
-  - Calls super (updates BaseInputConnection Editable)
+  - Validates each mutation, then calls super when the operation is representable
   - deleteSurroundingText: unitsToKeyPlan → emitKeys → nativeSendKeyEvent
     (and STOP — no nativeDeleteSurroundingText, see "Why standalone deletion is a key event")
   - commitText/setComposingText with computeReplaceDeltas() != 0:
@@ -167,7 +203,7 @@ Client sends back: set_surrounding_text + set_text_change_cause + commit
      ↓
 Compositor processes commit:
   - Stores surrounding text (double-buffered)
-  - Pushes Editable + IMM update via updateFromCompositor (single round-trip)
+  - Pushes activity-scoped Editable + IMM update via updateFromCompositor (single round-trip)
   - If change_cause=other AND we had a tracked preedit: emit preedit_string(None) + done
   - Updates keyboard visibility
 ```
@@ -178,7 +214,7 @@ Compositor processes commit:
 |---|---|
 | Any instance enabled (via sync_keyboard_visibility) | `InputMethodManager.showSoftInput()` |
 | No instances enabled | `InputMethodManager.hideSoftInputFromWindow()` |
-| Client commits a `set_surrounding_text` (any cause) | `TawcInputConnection.updateFromCompositor(text, selStart, selEnd)` — replaces Editable contents and selection AND pokes `IMM.updateSelection` so the IME drops any composing region |
+| Focused client commits a `set_surrounding_text` (any cause) | `onUpdateEditableText(activityId, text, selStart, selEnd)` → matching Activity's `TawcInputConnection.updateFromCompositor(...)` — replaces Editable contents and selection AND pokes `IMM.updateSelection` so the IME drops any composing region |
 | Resolved EditorInfo for the focused instance changes | `onContentTypeChanged(inputType, imeFlags)` → `restartInput`, so the next `onCreateInputConnection` carries the new fields |
 
 ### Input Focus
@@ -277,8 +313,9 @@ Hints add flags on TEXT-class fields: `auto_capitalization` → `FLAG_CAP_SENTEN
 
 **The rule: tests interact with the system as a keyboard or as an app, never inside the compositor.**
 
-- **As a keyboard**: every normal test driver call goes through the focused activity's active `TawcInputConnection` via the broker `ic-*` actions (`ic-commit-text`, `ic-replace-text`, `ic-set-composing-text`, `ic-set-composing-region`, `ic-finish-composing`, `ic-set-selection`, `ic-delete-surrounding-text`, `ic-send-key-event`) — the same Kotlin entry points the system IMM dispatches Gboard / OpenBoard / AOSP-latin events through. The IC's full state machine runs on every test step: Editable mirror, `computeReplaceDeltas`, `composingRegionIsPreedit` short-circuit, `wireCursor` tracking, `unitsToKeyPlan` key-translation, `lastSyncedCursor` divergence guard. Broker actions fail loudly if there is no matching active IC or if the IC method returns `false`.
-- **As an app**: assertions go through `wayland-debug-app`'s observed `TAWC_DEBUG:…` events — `TEXT_CHANGED`, `PREEDIT`, `CURSOR_POS`, `KEY`, `COMMIT`, `DELETE_SURROUNDING`. That's what a real wayland client running under our compositor sees.
+- **As a keyboard**: every normal test driver call goes through the focused activity's active `TawcInputConnection` via the broker `ic-*` actions (`ic-commit-text`, `ic-replace-text`, `ic-set-composing-text`, `ic-set-composing-region`, `ic-finish-composing`, `ic-set-selection`, `ic-delete-surrounding-text`, `ic-delete-surrounding-text-codepoints`, `ic-send-key-event`) — the same Kotlin entry points the system IMM dispatches Gboard / OpenBoard / AOSP-latin events through. Broker actions fail loudly if there is no matching active IC or if the IC method returns `false`, except for tests that intentionally assert a public Android-contract rejection.
+- **As an app**: assertions go through `wayland-debug-app`'s observed `TAWC_DEBUG:…` events — `TEXT_CHANGED`, `PREEDIT`, `CURSOR_POS`, `KEY`, `COMMIT`, `DELETE_SURROUNDING`, `DONE`. That's what a real wayland client running under our compositor sees.
+- Tests must not assert private Rust or Kotlin state such as the Editable contents, composing spans, `wireCursor`, `lastSyncedCursor`, or text-input structs. Mirror drift should be exposed by follow-up IC actions whose client-visible result would land wrong if Android's editor model had diverged.
 
 There is intentionally **no test infra that pokes `NativeBridge.native*` directly**. Earlier versions had a "bypass" channel that did — broadcasts, then later broker actions like `inject-text` — but it was pulled. The reason: `nativeCommitText` / `nativeSetComposingText` / `nativeFinishComposingText` / `nativeSendKeyEvent` are JNI primitives the IC calls into the Rust compositor with after running its state machine. Calling them directly skips the IC entirely. Wayland-side text-input-v3 done-ordering produces the right *observable* (preedit replaces on the next preedit/commit) regardless of what the IC computed, so a buggy IC can produce correct-looking GTK output and a bypass test smiles. Driving every scenario through IC closes that hole — wayland-side assertions become a real integration check rather than a redundant proof of text-input-v3.
 

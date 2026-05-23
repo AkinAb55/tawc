@@ -316,6 +316,7 @@ before any client connection arrives.
 | `ic-finish-composing` | InputActions | `TawcInputConnection.finishComposingText()`. |
 | `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`. |
 | `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
+| `ic-delete-surrounding-text-codepoints` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingTextInCodePoints(before, after)`. |
 | `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
 | `ic-send-modified-key-event` (`keycode`, `ctrl`, `alt`, `shift`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))`. |
 | `ic-finish-hidden-composing` | InputActions | Test-only stale-callback hook: calls `finishComposingText()` on the hidden test IC retained by `RecordingImeOutput` after keyboard hide. Normal `ic-*` actions still require the current focused IC. |

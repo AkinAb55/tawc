@@ -168,7 +168,7 @@ scripts/tawc-exec.sh --action ic-finish-composing
 scripts/tawc-exec.sh --action ic-send-key-event --arg keycode=67  # Backspace
 ```
 
-Every call goes through the same Kotlin entry points the system IMM uses to dispatch Gboard / OpenBoard / AOSP-latin events, so the IC's full state machine (Editable mirror, `computeReplaceDeltas`, the `composingRegionIsPreedit` short-circuit) runs on every test step.
+Every call goes through the same Kotlin entry points the system IMM uses to dispatch Gboard / OpenBoard / AOSP-latin events. Tests assert Android contract results and `wayland-debug-app` observations, not private tawc Rust/Kotlin state.
 
 Broker actions connect to an already-running `LocalServerSocket` and complete in <10ms each, vs. 100–300ms per `am broadcast` JVM cold start (the broadcast channel was retired entirely). More reliable than `adb shell input text` (which gets intercepted by the IME).
 
