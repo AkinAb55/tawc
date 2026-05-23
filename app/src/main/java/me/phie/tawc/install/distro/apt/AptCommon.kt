@@ -28,7 +28,12 @@ internal object AptCommon {
         "/var/cache/apt/archives",
     )
 
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("dbus-x11", "lxterminal")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf(
+        "dbus-x11",
+        "libwayland-client0",
+        "libwayland-server0",
+        "lxterminal",
+    )
 
     fun configure(
         method: InstallationMethod,
