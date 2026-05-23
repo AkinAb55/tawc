@@ -1003,9 +1003,8 @@ fn reconfigure_all_toplevels(state: &mut TawcState) {
         else {
             continue;
         };
-        if let Some((w, h)) = state.configure_toplevel_for_host(toplevel, host_id) {
+        if state.configure_toplevel_for_host(toplevel, host_id).is_some() {
             toplevel.send_pending_configure();
-            crate::gtk3_menus_workaround::prime_toplevel(state, toplevel.wl_surface(), w, h);
         }
     }
 

@@ -129,14 +129,14 @@ so it is easy to remove later:
   explanatory text.
 - `NativeBridge.nativeSetGtk3BrokenMenusWorkaround()`: live toggle.
 - `SurfaceEvent::Gtk3BrokenMenusWorkaroundChanged`: compositor-thread event.
-- `TawcState::gtk3_broken_menus_workaround_enabled`: compositor state flag.
-- `compositor/src/gtk3_menus_workaround.rs`: isolated Rust helper.
-- `XdgShellHandler::new_toplevel`: calls `prime_toplevel()` for each new
-  toplevel.
+- `TawcState::gtk3_broken_menus_workaround`: isolated state owned by
+  `compositor/src/gtk3_menus_workaround.rs`.
+- `gtk3_menus_workaround::after_commit`: primes each new toplevel once after
+  its first buffer commit.
 
-When enabled at compositor startup, `TawcState::new()` calls
-`seat.add_pointer()`. When the setting changes live, the helper calls
-`seat.add_pointer()` or `seat.remove_pointer()` and updates the state flag.
+When enabled at compositor startup, `gtk3_menus_workaround::init_seat()` adds
+the pointer. When the setting changes live, the helper calls
+`seat.add_pointer()` or `seat.remove_pointer()` and updates its state.
 
 The pointer capability is a seat-level Wayland capability, so it is visible to
 all clients while the workaround is enabled. There is no Wayland mechanism in
@@ -148,6 +148,11 @@ Existing clients may not bind a newly-added pointer immediately enough to be
 helped for already-created windows. The supported behavior is that after the
 setting is enabled, newly-created toplevels are primed.
 
+Priming intentionally waits until the first buffer commit instead of running
+during the initial xdg configure. Some clients create cursor resources only
+after that configure round-trip; sending `wl_pointer.enter` during configure
+can drive their cursor path before setup is complete.
+
 ## Removal Map
 
 If GTK3 or tawc's decoration policy changes enough that this workaround is no
@@ -156,10 +161,8 @@ longer needed, remove:
 - the Settings key/property and Settings screen checkbox;
 - the Kotlin `NativeBridge` declaration and JNI function;
 - the `SurfaceEvent` variant and event-loop handler branch;
-- `TawcState::gtk3_broken_menus_workaround_enabled` and initial
-  `seat.add_pointer()` branch;
+- `TawcState::gtk3_broken_menus_workaround`;
 - `compositor/src/gtk3_menus_workaround.rs`;
-- the `prime_toplevel()` call in `XdgShellHandler::new_toplevel`;
+- the small lifecycle calls to `gtk3_menus_workaround::*`;
 - the broker get/set actions and their docs;
 - this note.
-

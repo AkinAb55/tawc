@@ -6,38 +6,103 @@
 //! primes GTK3's pointer-crossing state and avoids the bad cold path.
 //!
 //! This module is intentionally isolated compatibility glue. If the workaround
-//! is removed, delete this module, its Settings/JNI toggle, and the single
-//! new-toplevel call site.
+//! is removed, delete this module plus its small Settings/JNI and compositor
+//! lifecycle hooks.
+
+use std::collections::HashSet;
 
 use log::info;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::input::{Seat, SeatHandler};
 use smithay::input::pointer::MotionEvent as PointerMotionEvent;
+use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
 use crate::compositor::TawcState;
 
+pub(crate) fn init_seat<D: SeatHandler + 'static>(seat: &mut Seat<D>, enabled: bool) {
+    if enabled {
+        seat.add_pointer();
+    }
+}
+
+pub(crate) struct State {
+    pub(crate) enabled: bool,
+    primed: HashSet<ObjectId>,
+}
+
+impl State {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            primed: HashSet::new(),
+        }
+    }
+}
+
 pub(crate) fn set_enabled(data: &mut TawcState, enabled: bool) {
-    if data.gtk3_broken_menus_workaround_enabled == enabled {
+    if data.gtk3_broken_menus_workaround.enabled == enabled {
         return;
     }
 
-    data.gtk3_broken_menus_workaround_enabled = enabled;
+    data.gtk3_broken_menus_workaround.enabled = enabled;
     if enabled {
         data.seat.add_pointer();
     } else {
         data.seat.remove_pointer();
+        data.gtk3_broken_menus_workaround.primed.clear();
     }
     info!("GTK3 broken menus workaround changed: {}", enabled);
 }
 
-pub(crate) fn prime_toplevel(
-    data: &mut TawcState,
-    surface: &WlSurface,
-    width: i32,
-    height: i32,
-) {
-    if !data.gtk3_broken_menus_workaround_enabled {
+pub(crate) fn after_commit(data: &mut TawcState, committed: &WlSurface) {
+    if !data.gtk3_broken_menus_workaround.enabled {
+        return;
+    }
+
+    let committed_toplevel = data
+        .xdg_shell_state
+        .toplevel_surfaces()
+        .iter()
+        .find(|toplevel| toplevel.wl_surface() == committed)
+        .cloned();
+    let Some(toplevel) = committed_toplevel else {
+        return;
+    };
+
+    let surface = toplevel.wl_surface();
+    let id = surface.id();
+    if data.gtk3_broken_menus_workaround.primed.contains(&id) {
+        return;
+    }
+    let has_buffer = with_renderer_surface_state(surface, |renderer_state| {
+        renderer_state.buffer().is_some()
+    })
+    .unwrap_or(false);
+    if !has_buffer {
+        return;
+    }
+    let Some(host_id) = data.desktop.assigned_host(surface).cloned() else {
+        return;
+    };
+    let Some((w, h)) = data.host_logical_size(&host_id) else {
+        return;
+    };
+
+    prime_toplevel(data, surface, w, h);
+    data.gtk3_broken_menus_workaround.primed.insert(id);
+}
+
+pub(crate) fn toplevel_destroyed(data: &mut TawcState, surface: &WlSurface) {
+    data.gtk3_broken_menus_workaround
+        .primed
+        .remove(&surface.id());
+}
+
+fn prime_toplevel(data: &mut TawcState, surface: &WlSurface, width: i32, height: i32) {
+    if !data.gtk3_broken_menus_workaround.enabled {
         return;
     }
     let Some(pointer) = data.seat.get_pointer() else {

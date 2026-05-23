@@ -133,7 +133,7 @@ pub struct TawcState {
     /// and briefly enters/leaves each new toplevel so GTK3 initializes its
     /// cold pointer-crossing state before touchscreen menubar taps. See
     /// notes/gtk3-broken-menus-workaround.md.
-    pub gtk3_broken_menus_workaround_enabled: bool,
+    pub gtk3_broken_menus_workaround: crate::gtk3_menus_workaround::State,
 
     /// Output scale factor (physical pixels per logical pixel). Canonical source
     /// of truth — lib.rs sets this at startup and render.rs reads it back.
@@ -296,12 +296,7 @@ impl TawcState {
         seat.add_keyboard(XkbConfig::default(), 200, 25)
             .expect("Failed to add keyboard to seat");
         seat.add_touch();
-        // GTK3 broken menus workaround: when enabled, expose a pointer so
-        // the isolated workaround helper can briefly enter/leave each new
-        // toplevel and prime GTK3's crossing state.
-        if gtk3_broken_menus_workaround_enabled {
-            seat.add_pointer();
-        }
+        crate::gtk3_menus_workaround::init_seat(&mut seat, gtk3_broken_menus_workaround_enabled);
 
         dh.create_global::<Self, AndroidWlegl, ()>(2, ());
         dh.create_global::<Self, ZwpTextInputManagerV3, ()>(1, ());
@@ -329,7 +324,9 @@ impl TawcState {
             desktop: crate::desktop::DesktopRegistry::new(),
             popup_manager: PopupManager::default(),
             active_popup_grab: None,
-            gtk3_broken_menus_workaround_enabled,
+            gtk3_broken_menus_workaround: crate::gtk3_menus_workaround::State::new(
+                gtk3_broken_menus_workaround_enabled,
+            ),
             output_scale,
             output_logical_size,
             output_physical_size,
@@ -816,6 +813,8 @@ impl CompositorHandler for TawcState {
         self.desktop.commit_surface(surface);
         self.sync_desktop_hosts();
         self.buffer_commit_pending = true;
+
+        crate::gtk3_menus_workaround::after_commit(self, surface);
     }
 }
 
@@ -837,9 +836,8 @@ impl XdgShellHandler for TawcState {
             );
         });
         set_toplevel_fullscreen_state(&surface, self.host_fullscreen(&assignment.host), None);
-        if let Some((w, h)) = self.configure_toplevel_for_host(&surface, &assignment.host) {
+        if self.configure_toplevel_for_host(&surface, &assignment.host).is_some() {
             surface.send_configure();
-            crate::gtk3_menus_workaround::prime_toplevel(self, surface.wl_surface(), w, h);
         } else {
             info!(
                 "Deferring initial configure for {:?} until host {} registers",
@@ -972,6 +970,7 @@ impl XdgShellHandler for TawcState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        crate::gtk3_menus_workaround::toplevel_destroyed(self, surface.wl_surface());
         let host = self.desktop.remove_wayland_toplevel(surface.wl_surface());
         self.sync_desktop_hosts();
         self.toplevels_changed = true;
