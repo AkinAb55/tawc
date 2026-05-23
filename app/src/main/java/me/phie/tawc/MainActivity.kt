@@ -155,7 +155,6 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
             isFocusable = false
             isClickable = true
-            backgroundTintList = ColorStateList.valueOf(getColor(R.color.tawc_accent))
             setTextColor(getColor(R.color.tawc_on_tonal))
             setOnClickListener {
                 val i = Intent(this@MainActivity, LauncherActivity::class.java)
