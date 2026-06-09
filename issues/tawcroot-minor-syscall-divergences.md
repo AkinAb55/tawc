@@ -8,11 +8,6 @@ re-discovered.
 
 Remaining:
 
-- **Reserved-fd "behaves as EBADF" contract is partial** (fdtab.h):
-  `openat(1000, "etc/shadow", …)` with a reserved dirfd passes the
-  dirfd through; `fstatat(1000, "", AT_EMPTY_PATH)`/`statx` stat the
-  reserved fd. (`close`/`dup`/`fcntl`/`readlinkat-empty`/`fchdir`/
-  `fstat`/`fchown` now check `tawcroot_fd_is_reserved`.)
 - **execveat(AT_SYMLINK_NOFOLLOW)** → ENOSYS placeholder (documented
   in syscalls_exec.c; fine until something uses it).
 - **Signal-shadow staleness across fork**: a forked child inherits
@@ -33,6 +28,12 @@ Remaining:
 
 ## Fixed (2026-06)
 
+- Reserved-fd "behaves as EBADF" contract: a reserved dirfd with a
+  relative path now EBADFs in the shared translate front door
+  (translate_local), covering every *at handler at once; the
+  fstatat/statx AT_EMPTY_PATH operate-on-dirfd shapes check too.
+  Absolute paths still pass (kernel ignores dirfd there). Smoke:
+  rootfs_smoke.c::test_reserved_dirfd_ebadf.
 - chown family: fchownat now does a translate + fstatat existence
   probe before faking 0 (missing path → ENOENT); fchown validates the
   fd (bad fd → EBADF, reserved fd → EBADF).

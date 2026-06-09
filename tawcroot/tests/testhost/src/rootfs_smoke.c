@@ -882,6 +882,36 @@ static int test_fstat_fake_root_decoration(void)
 	return fails;
 }
 
+/* Reserved fds must answer EBADF when used as a dirfd anchor: for
+ * fd-relative path resolution (openat/fstatat with a relative path)
+ * and for AT_EMPTY_PATH operate-on-dirfd shapes. Without this a guest
+ * could use our rootfs/bind O_PATH fds to probe or escape the view.
+ * Absolute paths are NOT checked — the kernel ignores dirfd there. */
+static int test_reserved_dirfd_ebadf(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_openat, tawcroot_rootfs_fd, "etc/probe",
+		    O_RDONLY, 0, 0, 0, rv);
+	fails += tawc_io_step("openat(reserved dirfd, rel) -> EBADF",
+			      rv == TAWC_EBADF);
+	tawc_io_kv_dec("    rv", rv);
+	struct stat st;
+	INLINE_SYS6(TAWC_SYS_fstatat, tawcroot_rootfs_fd, "etc/probe",
+		    &st, 0, 0, 0, rv);
+	fails += tawc_io_step("fstatat(reserved dirfd, rel) -> EBADF",
+			      rv == TAWC_EBADF);
+	INLINE_SYS6(TAWC_SYS_fstatat, tawcroot_rootfs_fd, "",
+		    &st, AT_EMPTY_PATH, 0, 0, rv);
+	fails += tawc_io_step("fstatat(reserved fd, AT_EMPTY_PATH) -> EBADF",
+			      rv == TAWC_EBADF);
+	/* Absolute path: dirfd ignored, must still resolve. */
+	INLINE_SYS6(TAWC_SYS_fstatat, tawcroot_rootfs_fd, "/etc/probe",
+		    &st, 0, 0, 0, rv);
+	fails += tawc_io_step("fstatat(reserved dirfd, abs) -> 0", rv == 0);
+	return fails;
+}
+
 /* openat2 / fchmodat2 must trap to ENOSYS — untrapped they'd resolve
  * guest paths against the HOST view (BPF default is RET_ALLOW). Every
  * caller has a pre-5.6 / pre-6.6 fallback path. */
@@ -4311,6 +4341,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_dirfd_relative_symlink_escape_clamped();
 	fails += test_open_creat_follows_symlink_leaf_clamped();
 	fails += test_fstat_fake_root_decoration();
+	fails += test_reserved_dirfd_ebadf();
 	fails += test_openat2_fchmodat2_enosys();
 	fails += test_inotify_add_watch_translates();
 	fails += test_fchdir_dispatch();

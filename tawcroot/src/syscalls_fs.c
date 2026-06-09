@@ -297,6 +297,7 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 		long empty = guest_path_is_empty(gpath);
 		if (empty < 0) return empty;
 		if (empty) {
+			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
 					   (long)&local, flags, 0, 0);
 			return finish_stat(rv, &local, out);
@@ -404,6 +405,12 @@ static long translate_local(struct tawcroot_path_scratch *scratch, int slot,
 
 	if (dirfd != AT_FDCWD) {
 		if (path_buf[0] != '/') {
+			/* Reserved fds must behave as EBADF (fdtab.h
+			 * contract) — without this, a guest could use our
+			 * rootfs/bind O_PATH fds as resolution anchors.
+			 * Absolute paths fall through: the kernel ignores
+			 * dirfd entirely for those, even invalid ones. */
+			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
 			/* Lift EVERY non-empty fd-relative path to guest-
 			 * absolute via the dirfd's /proc/self/fd link, then
 			 * run the full translator so the `..` clamp AND the
@@ -950,6 +957,7 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 		long empty = guest_path_is_empty(path);
 		if (empty < 0) return empty;
 		if (empty) {
+			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
 			long rv = TAWC_RAW(TAWC_SYS_statx, dirfd, (long)"", flags,
 					   mask, (long)&local, 0);
 			return finish_statx(rv, &local, out);
