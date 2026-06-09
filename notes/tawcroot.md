@@ -1707,51 +1707,75 @@ tawcroot/                            # everything tawcroot-specific lives here
 │                       #   testhost via adb (device)
 ├── Makefile            # incremental host build (production + testhost + cleat tests)
 ├── include/                            # production headers — no test scaffolding
-│   ├── tawcroot.h      # exec-state struct, magic constant
+│   ├── tawcroot.h      # entry-point contract (tawcroot_main)
 │   ├── arch.h          # syscall_args struct, includes arch/<arch>.h
 │   ├── arch/{aarch64,x86_64}.h  # arch_read_args / arch_write_return
+│   ├── chroot.h        # chroot(2) emulation registration
+│   ├── dirent_filter.h # getdents64 reserved-fd dirent compaction — pure
 │   ├── dispatch.h      # syscall→handler table API
+│   ├── errno_neg.h     # negated-errno constants (TAWC_EINVAL == -22)
 │   ├── exec_handler.h  # execve handler entry (memfd build + execveat)
 │   ├── exec_state.h    # serialized re-exec state struct + (de)serialize
-│   ├── fdtab.h         # reserved-fd allocator + memo cache
+│   ├── fdtab.h         # reserved high-fd table + close/dup protection
 │   ├── filter.h        # seccomp filter install API
+│   ├── filter_build.h  # pure cBPF program builder
 │   ├── handler.h       # SIGSYS handler install + observation
-│   ├── io.h            # libc-free print helpers
+│   ├── identity.h      # fake-root uid/gid registration
+│   ├── io.h            # libc-free print helpers + tawc_str_* builders
 │   ├── loader_elf.h    # phdr parsing, image bounds, interp pointer
 │   ├── loader_exec.h   # --exec-child entry + shebang resolution
 │   ├── loader_jump.h   # asm-only stack-pivot + final jump to ld.so/_start
 │   ├── loader_map.h    # mmap/mprotect of PT_LOADs, AT_PHDR computation
 │   ├── loader_stack.h  # synthesize argv/envp/auxv on a fresh stack
-│   ├── path.h          # translator, modes, bind table
-│   ├── path_oracle.h   # readlink/openat oracle interface used by resolver
+│   ├── path.h          # translator, modes, bind table, open_in_view
+│   ├── path_oracle.h   # readlink oracle interface used by resolver
+│   ├── path_orchestrate.h # fold→bind→memo→resolve→bind ctx + memo struct
 │   ├── path_resolve.h  # symlink walker — operates against an oracle
+│   ├── path_scratch.h  # handler-safe PATH_MAX scratch-buffer pool
+│   ├── proc_rewrite.h  # /proc/self/maps reverse-translation — pure
+│   ├── proc_shadow.h   # /proc shadow-fd synthesis + /proc/self classify
 │   ├── raw_sys.h       # tawc_<syscall> wrappers
+│   ├── shm.h           # /dev/shm emulation (memfd-backed name table)
+│   ├── signal_shadow.h # guest SIGSYS sigaction/sigmask virtualization
+│   ├── supervisor.h    # shared per-process bootstrap (prod + --exec-child)
+│   ├── syscalls_{control,exec,fs,socket}.h # handler registration entries
 │   ├── sysnr.h         # per-arch syscall numbers
+│   ├── tawc_string.h   # memcpy/memset/... freestanding-vs-hosted switch
+│   ├── tawc_uapi.h     # kernel ABI constants (O_*, AT_*, struct stat, ...)
 │   └── usercopy.h      # process_vm_readv-based guarded copy
 ├── src/                                # production sources — no test scaffolding
-│   ├── main.c          # production entry: --exec-child / prod-rootfs init
+│   ├── main.c          # production entry: CLI parse, --exec-child dispatch
+│   ├── chroot.c        # chroot(2) emulation — root-view swap on guest call
+│   ├── dirent_filter.c # getdents64 compaction — pure
 │   ├── dispatch.c      # syscall→handler table storage
-│   ├── filter.c        # build + install BPF program
+│   ├── exec_handler.c  # execve guest-side entry (build memfd state + execveat)
+│   ├── exec_state.c    # exec-state (de)serialization — pure
+│   ├── filter.c        # install BPF program (seccomp + stub address)
+│   ├── filter_build.c  # build BPF program — pure
 │   ├── handler.c       # sigsys_handler dispatch, ucontext glue
 │   ├── identity.c      # fake-root uid/gid handlers
-│   ├── io.c            # io.h impl (libc-free print helpers via tawc_write)
-│   ├── strings.c       # pure libc-free str/mem helpers — also linked into the
-│   │                   #   cleat test runner under hosted glibc for unit tests
-│   │                   #   (tawcroot/tests/unit/test_strings.c)
-│   ├── path.c          # translate(), reverse-translate, bind table, memo
+│   ├── io.c            # io.h print impl (via tawc_write)
+│   ├── strings.c       # pure libc-free str/mem helpers + bounded builders —
+│   │                   #   also linked into the cleat test runner under hosted
+│   │                   #   glibc (tawcroot/tests/unit/test_strings.c)
+│   ├── path.c          # translate(), reverse-translate, bind table, memo,
+│   │                   #   open_in_view
 │   ├── path_fold.c     # absolute-path folder (`.`/`..`/empty/`//`) — pure
 │   ├── path_orchestrate.c # fold→bind→memo→resolve→bind staging, binds_reanchor — pure
 │   ├── path_resolve.c  # symlink walker — pure, oracle-driven
-│   ├── chroot.c        # chroot(2) emulation — root-view swap on guest call
-│   ├── exec_handler.c  # execve guest-side entry (build memfd state + execveat)
-│   ├── exec_state.c    # exec-state (de)serialization
+│   ├── path_scratch.c  # scratch-buffer pool (CAS acquire/release)
+│   ├── proc_rewrite.c  # /proc/self/maps line rewriter — pure
+│   ├── proc_shadow.c   # /proc shadow memfds (maps/overflow/pci) + classify
+│   ├── shm.c           # /dev/shm emulation
+│   ├── signal_shadow.c # SIGSYS sigaction/sigmask shadow state
+│   ├── supervisor.c    # shared bootstrap: rootfs fd, binds, handler, masks
 │   ├── loader_elf.c    # ELF phdr parsing
 │   ├── loader_map.c    # PT_LOAD mmap/mprotect, AT_PHDR computation
 │   ├── loader_stack.c  # synthesize argv/envp/auxv on a fresh stack
-│   ├── loader_exec.c   # --exec-child main: load guest + jump
-│   ├── loader_io_prod.c # production-side oracle (raw syscalls)
+│   ├── loader_exec.c   # --exec-child main: load guest + jump, shebang chain
+│   ├── loader_io_prod.c # production loader I/O vtable (raw syscalls)
 │   ├── syscalls_{fs,fd,control,exec,socket}.c # per-syscall handlers
-│   ├── usercopy.c      # process_vm_readv probe + tawc_copy_string_from_guest
+│   ├── usercopy.c      # process_vm_readv probe + guarded guest copies
 │   └── arch/{aarch64,x86_64}_{stub,loader_jump}.S  # _start, raw syscall stub,
 │                                                   # sigreturn trampoline, loader jump
 └── tests/                              # everything that isn't shipped in production

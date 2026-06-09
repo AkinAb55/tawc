@@ -88,16 +88,10 @@ int tawcroot_shm_is_dir(const char *path)
 	return 0;
 }
 
-static int name_eq(const char *a, const char *b)
-{
-	while (*a && *a == *b) { a++; b++; }
-	return *a == 0 && *b == 0;
-}
-
 static struct tawcroot_shm_entry *find_entry_locked(const char *name)
 {
 	for (size_t i = 0; i < TAWCROOT_SHM_MAX; i++) {
-		if (g_shm[i].in_use && name_eq(g_shm[i].name, name))
+		if (g_shm[i].in_use && tawc_streq(g_shm[i].name, name))
 			return &g_shm[i];
 	}
 	return 0;
