@@ -139,52 +139,34 @@ static long render_proc_fd_path(char *dst, size_t cap, int fd,
 	return (long)i;
 }
 
-/* Common bind/connect translator. `nr` is the syscall to issue
- * (TAWC_SYS_bind or TAWC_SYS_connect); the ABI is identical. */
-static long do_translate_unix_addr(int nr, const tawcroot_syscall_args *args)
+/* Build a translated sockaddr_un from a guest one. Reads `addrlen`
+ * bytes of guest sockaddr at `guest_addr`, and if it's a pathname
+ * AF_UNIX address, rewrites the path inside the rootfs view into
+ * `un_out`, setting `*out_len` to the new addrlen. Returns:
+ *   1  — translated (use un_out / *out_len)
+ *   0  — pass through unchanged (non-UNIX, abstract, nameless)
+ *  <0  — -errno
+ * Shared by bind/connect and sendto/sendmsg. */
+static long translate_unix_sockaddr(const void *guest_addr, long addrlen,
+				    struct tawc_sockaddr_un *un_out,
+				    long *out_len)
 {
-	int sockfd = (int)args->a;
-	const void *guest_addr = (const void *)(uintptr_t)args->b;
-	long  addrlen = (long)args->c;
-
-	/* Defensive: if no addr or impossibly small, pass through. */
-	if (!guest_addr || addrlen < (long)sizeof(uint16_t)) {
-		return TAWC_RAW(nr, args->a, args->b, args->c, 0, 0, 0);
-	}
-
-	/* Cap addrlen at our local sockaddr_un size. The kernel does the
-	 * same — anything past 110B is ignored. */
-	if (addrlen > (long)sizeof(struct tawc_sockaddr_un)) {
+	if (!guest_addr || addrlen < (long)sizeof(uint16_t)) return 0;
+	if (addrlen > (long)sizeof(struct tawc_sockaddr_un))
 		addrlen = sizeof(struct tawc_sockaddr_un);
-	}
 
 	struct tawc_sockaddr_un un_in;
 	long e = tawc_copy_from_guest(&un_in, (size_t)addrlen, guest_addr);
 	if (e < 0) return TAWC_EFAULT;
 
-	/* Non-AF_UNIX: untouched. */
-	if (un_in.sun_family != AF_UNIX_FAMILY) {
-		return TAWC_RAW(nr, args->a, args->b, args->c, 0, 0, 0);
-	}
+	if (un_in.sun_family != AF_UNIX_FAMILY) return 0;
 
-	/* Determine the path-bytes length the guest provided. */
 	long path_bytes = addrlen - (long)sizeof(uint16_t);
-	if (path_bytes <= 0) {
-		/* Nameless / autobind. Pass through. */
-		return TAWC_RAW(nr, args->a, args->b, args->c, 0, 0, 0);
-	}
+	if (path_bytes <= 0) return 0;            /* nameless / autobind */
+	if (un_in.sun_path[0] == '\0') return 0;  /* abstract socket */
 
-	/* Abstract socket: sun_path[0] == 0. No filesystem translation. */
-	if (un_in.sun_path[0] == '\0') {
-		return TAWC_RAW(nr, args->a, args->b, args->c, 0, 0, 0);
-	}
-
-	/* Bind takes a NUL-terminated or addrlen-bounded path. The kernel
-	 * uses min(strnlen, path_bytes). We mirror that to extract the
-	 * guest's intended path string. */
-	if (path_bytes > (long)sizeof un_in.sun_path) {
+	if (path_bytes > (long)sizeof un_in.sun_path)
 		path_bytes = sizeof un_in.sun_path;
-	}
 	char guest_path[109];
 	long pl = 0;
 	while (pl < path_bytes && un_in.sun_path[pl] != '\0') {
@@ -193,41 +175,81 @@ static long do_translate_unix_addr(int nr, const tawcroot_syscall_args *args)
 	}
 	guest_path[pl] = '\0';
 
-	/* Translate. PARENT_CREATE for bind() (the leaf is a socket node
-	 * the kernel will create). connect() should be FOLLOW (the socket
-	 * already exists), but PARENT_CREATE folds + clamps the same
-	 * way and the kernel does the existence check itself; using
-	 * PARENT_CREATE for both is fine and saves a code path here. */
 	char suffix[1024];
-	tawcroot_path_result r = tawcroot_path_translate(guest_path,
-	                                                 suffix, sizeof suffix,
-	                                                 TAWCROOT_PATH_PARENT_CREATE);
+	tawcroot_path_result r = tawcroot_path_translate(
+		guest_path, suffix, sizeof suffix,
+		TAWCROOT_PATH_PARENT_CREATE);
 	if (r.err) return r.err;
 
-	/* Re-pack a sockaddr_un. Prefer the host-absolute path when we know
-	 * it (rootfs and binds we set up): some Android app-sandbox
-	 * kernels return ENOENT for AF_UNIX bind/connect via
-	 * `/proc/self/fd/N/...` even though the same path works for stat
-	 * and open. Fall back to /proc/self/fd/N/... only if we don't have
-	 * a stored host path for this base_fd. */
-	struct tawc_sockaddr_un un_out;
-	un_out.sun_family = AF_UNIX_FAMILY;
+	un_out->sun_family = AF_UNIX_FAMILY;
 	const char *host_prefix = host_path_for_base_fd(r.base_fd);
 	long n;
 	if (host_prefix) {
-		n = render_host_path(un_out.sun_path, sizeof un_out.sun_path,
-		                     host_prefix, suffix);
+		n = render_host_path(un_out->sun_path, sizeof un_out->sun_path,
+				     host_prefix, suffix);
 	} else {
-		n = render_proc_fd_path(un_out.sun_path, sizeof un_out.sun_path,
-		                        r.base_fd, suffix);
+		n = render_proc_fd_path(un_out->sun_path, sizeof un_out->sun_path,
+					r.base_fd, suffix);
 	}
 	if (n < 0) return n;
+	*out_len = (long)sizeof(uint16_t) + n + 1;
+	return 1;
+}
 
-	/* New addrlen: family bytes + path bytes + 1 (NUL). The kernel
-	 * accepts a NUL-inclusive length for filesystem sockets. */
-	long new_addrlen = (long)sizeof(uint16_t) + n + 1;
-	return TAWC_RAW(nr, (long)sockfd, (long)&un_out,
-	                new_addrlen, 0, 0, 0);
+/* Common bind/connect translator. `nr` is the syscall to issue
+ * (TAWC_SYS_bind or TAWC_SYS_connect); the ABI is identical. */
+static long do_translate_unix_addr(int nr, const tawcroot_syscall_args *args)
+{
+	struct tawc_sockaddr_un un_out;
+	long new_addrlen;
+	long t = translate_unix_sockaddr(
+		(const void *)(uintptr_t)args->b, (long)args->c,
+		&un_out, &new_addrlen);
+	if (t < 0) return t;
+	if (t == 0)
+		return TAWC_RAW(nr, args->a, args->b, args->c, 0, 0, 0);
+	return TAWC_RAW(nr, args->a, (long)&un_out, new_addrlen, 0, 0, 0);
+}
+
+/* Reverse-translate a HOST sockaddr_un the kernel wrote into an out
+ * param back into the guest view, in place. `kern_addr` holds the
+ * kernel's sockaddr and `*kern_lenp` its addrlen; on a successful
+ * rewrite the guest-view sockaddr replaces it and *kern_lenp updates.
+ * A non-pathname / outside-view address is left untouched. The kernel
+ * truncates sun_path to fit the guest buffer; we match by truncating
+ * the guest path to 108 bytes. */
+static void reverse_translate_unix_sockaddr(struct tawc_sockaddr_un *kern_addr,
+					    long *kern_lenp)
+{
+	long klen = *kern_lenp;
+	if (klen < (long)sizeof(uint16_t)) return;
+	if (kern_addr->sun_family != AF_UNIX_FAMILY) return;
+	long path_bytes = klen - (long)sizeof(uint16_t);
+	if (path_bytes <= 0) return;
+	if (kern_addr->sun_path[0] == '\0') return;  /* abstract */
+
+	if (path_bytes > (long)sizeof kern_addr->sun_path)
+		path_bytes = sizeof kern_addr->sun_path;
+	char host[109];
+	long hl = 0;
+	while (hl < path_bytes && kern_addr->sun_path[hl] != '\0') {
+		host[hl] = kern_addr->sun_path[hl];
+		hl++;
+	}
+	host[hl] = '\0';
+
+	char guest[109];
+	long gn = tawcroot_host_path_to_guest_abs(host, (size_t)hl,
+						  guest, sizeof guest);
+	if (gn < 0) return;  /* outside the view — leave host path as-is */
+
+	if (gn > (long)sizeof kern_addr->sun_path)
+		gn = sizeof kern_addr->sun_path;  /* kernel-style truncation */
+	for (long i = 0; i < gn; i++) kern_addr->sun_path[i] = guest[i];
+	if (gn < (long)sizeof kern_addr->sun_path)
+		kern_addr->sun_path[gn] = '\0';
+	*kern_lenp = (long)sizeof(uint16_t) + gn +
+		(gn < (long)sizeof kern_addr->sun_path ? 1 : 0);
 }
 
 static long handle_bind(const tawcroot_syscall_args *args, ucontext_t *uc)
@@ -242,6 +264,144 @@ static long handle_connect(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return do_translate_unix_addr(TAWC_SYS_connect, args);
 }
 
+/* sendto(fd, buf, len, flags, dest_addr, addrlen): a connectionless
+ * AF_UNIX client (glibc syslog(3) to /dev/log, sd_notify to
+ * NOTIFY_SOCKET, some DNS helpers) carries the destination path in
+ * dest_addr. Untranslated it went to the host fs and the message
+ * vanished. Translate dest_addr exactly like connect; everything else
+ * (buf/len/flags) passes through. NULL dest_addr → ordinary send. */
+static long handle_sendto(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const void *dest = (const void *)(uintptr_t)args->e;
+	long addrlen = (long)args->f;
+	if (!dest || addrlen <= 0) {
+		return TAWC_RAW(TAWC_SYS_sendto, args->a, args->b, args->c,
+				args->d, args->e, args->f);
+	}
+	struct tawc_sockaddr_un un_out;
+	long new_addrlen;
+	long t = translate_unix_sockaddr(dest, addrlen, &un_out, &new_addrlen);
+	if (t < 0) return t;
+	if (t == 0) {
+		return TAWC_RAW(TAWC_SYS_sendto, args->a, args->b, args->c,
+				args->d, args->e, args->f);
+	}
+	return TAWC_RAW(TAWC_SYS_sendto, args->a, args->b, args->c,
+			args->d, (long)&un_out, new_addrlen);
+}
+
+/* Local mirror of struct msghdr (64-bit ABI; matches the kernel's
+ * user_msghdr layout). We only touch msg_name / msg_namelen; the iov /
+ * control fields are forwarded as the guest gave them. */
+struct tawc_msghdr {
+	uint64_t msg_name;        /* void*  */
+	uint32_t msg_namelen;     /* socklen_t */
+	uint32_t _pad;
+	uint64_t msg_iov;         /* struct iovec* */
+	uint64_t msg_iovlen;
+	uint64_t msg_control;
+	uint64_t msg_controllen;
+	int32_t  msg_flags;
+	uint32_t _pad2;
+};
+
+/* sendmsg(fd, msghdr*, flags): the destination sockaddr lives in
+ * msg_name. Copy the msghdr, translate msg_name into a stack-local
+ * sockaddr, repoint, and re-issue. Same connectionless-client failure
+ * mode as sendto. */
+static long handle_sendmsg(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	const void *gmsg = (const void *)(uintptr_t)args->b;
+	if (!gmsg) {
+		return TAWC_RAW(TAWC_SYS_sendmsg, args->a, args->b, args->c,
+				0, 0, 0);
+	}
+	struct tawc_msghdr mh;
+	long e = tawc_copy_from_guest(&mh, sizeof mh, gmsg);
+	if (e < 0) return TAWC_EFAULT;
+	if (mh.msg_name == 0 || mh.msg_namelen == 0) {
+		return TAWC_RAW(TAWC_SYS_sendmsg, args->a, args->b, args->c,
+				0, 0, 0);
+	}
+	struct tawc_sockaddr_un un_out;
+	long new_addrlen;
+	long t = translate_unix_sockaddr(
+		(const void *)(uintptr_t)mh.msg_name, (long)mh.msg_namelen,
+		&un_out, &new_addrlen);
+	if (t < 0) return t;
+	if (t == 0) {
+		return TAWC_RAW(TAWC_SYS_sendmsg, args->a, args->b, args->c,
+				0, 0, 0);
+	}
+	/* Repoint a COPY of the msghdr at our translated sockaddr; the
+	 * guest's msghdr stays untouched. */
+	mh.msg_name = (uint64_t)(uintptr_t)&un_out;
+	mh.msg_namelen = (uint32_t)new_addrlen;
+	return TAWC_RAW(TAWC_SYS_sendmsg, args->a, (long)&mh, args->c,
+			0, 0, 0);
+}
+
+/* Shared tail for getsockname / getpeername / accept4: after the kernel
+ * fills (addr, addrlen) with a HOST sockaddr_un, reverse-translate the
+ * sun_path back into the guest view so a server re-publishing its bound
+ * path advertises a guest-visible path (and we don't leak the host
+ * prefix). `nr` is the syscall to issue; for accept4 the return value
+ * is the new fd (passed through). guest_addr/guest_lenp are out params;
+ * either may be NULL (caller doesn't want the address). */
+static long getname_with_reverse(int nr, long a, long guest_addr_l,
+				 long guest_lenp_l, long d)
+{
+	void *guest_addr = (void *)(uintptr_t)guest_addr_l;
+	void *guest_lenp = (void *)(uintptr_t)guest_lenp_l;
+	if (!guest_addr || !guest_lenp) {
+		/* No address requested (or accept4 with NULL addr): forward. */
+		return TAWC_RAW(nr, a, guest_addr_l, guest_lenp_l, d, 0, 0);
+	}
+	uint32_t guest_cap;
+	long e = tawc_copy_from_guest(&guest_cap, sizeof guest_cap, guest_lenp);
+	if (e < 0) return TAWC_EFAULT;
+
+	struct tawc_sockaddr_un kbuf;
+	uint32_t klen = sizeof kbuf;
+	long rv = TAWC_RAW(nr, a, (long)&kbuf, (long)&klen, d, 0, 0);
+	if (rv < 0) return rv;
+
+	long kern_len = (long)klen;
+	reverse_translate_unix_sockaddr(&kbuf, &kern_len);
+
+	/* Copy back up to the guest's buffer cap (kernel truncates); write
+	 * the FULL translated length to *addrlen regardless (kernel
+	 * semantics — the guest learns the real size even when truncated). */
+	uint32_t copy = (uint32_t)kern_len;
+	if (copy > guest_cap) copy = guest_cap;
+	if (copy > 0) {
+		long ce = tawc_copy_to_guest(guest_addr, &kbuf, copy);
+		if (ce < 0) return TAWC_EFAULT;
+	}
+	uint32_t report = (uint32_t)kern_len;
+	long le = tawc_copy_to_guest(guest_lenp, &report, sizeof report);
+	if (le < 0) return TAWC_EFAULT;
+	return rv;
+}
+
+static long handle_getsockname(const tawcroot_syscall_args *args,
+			       ucontext_t *uc)
+{
+	(void)uc;
+	return getname_with_reverse(TAWC_SYS_getsockname, args->a,
+				    args->b, args->c, 0);
+}
+
+static long handle_getpeername(const tawcroot_syscall_args *args,
+			       ucontext_t *uc)
+{
+	(void)uc;
+	return getname_with_reverse(TAWC_SYS_getpeername, args->a,
+				    args->b, args->c, 0);
+}
+
 /* `accept` is RET_TRAP'd by Android's untrusted_app seccomp filter (the
  * app sandbox allows `accept4` but not the legacy `accept`). Glibc inside
  * a tawcroot-hosted chroot still calls the legacy `accept` for code that
@@ -251,16 +411,37 @@ static long handle_connect(const tawcroot_syscall_args *args, ucontext_t *uc)
  * Convert accept(fd, addr, addrlen) -> accept4(fd, addr, addrlen, 0):
  * the fourth flags arg defaults to 0 which has identical semantics to
  * accept. The accept4 syscall is allowed by Android's filter, so issuing
- * it from our stub IP gets through. */
+ * it from our stub IP gets through.
+ *
+ * The peer address out-param is reverse-translated like getpeername:
+ * an AF_UNIX peer that bound a filesystem path would otherwise hand the
+ * accepting server the HOST sun_path. */
 static long handle_accept(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	return TAWC_RAW(TAWC_SYS_accept4, args->a, args->b, args->c, 0, 0, 0);
+	return getname_with_reverse(TAWC_SYS_accept4, args->a,
+				    args->b, args->c, 0);
+}
+
+/* accept4 carries flags in arg d; route through the same reverse-
+ * translating path. Trapping it (not just legacy accept) is what makes
+ * the peer-address reverse translation actually fire for modern
+ * SOCK_CLOEXEC callers. */
+static long handle_accept4(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	return getname_with_reverse(TAWC_SYS_accept4, args->a,
+				    args->b, args->c, args->d);
 }
 
 void tawcroot_socket_register(void)
 {
-	tawcroot_dispatch_install(TAWC_SYS_bind,    handle_bind);
-	tawcroot_dispatch_install(TAWC_SYS_connect, handle_connect);
-	tawcroot_dispatch_install(TAWC_SYS_accept,  handle_accept);
+	tawcroot_dispatch_install(TAWC_SYS_bind,        handle_bind);
+	tawcroot_dispatch_install(TAWC_SYS_connect,     handle_connect);
+	tawcroot_dispatch_install(TAWC_SYS_accept,      handle_accept);
+	tawcroot_dispatch_install(TAWC_SYS_accept4,     handle_accept4);
+	tawcroot_dispatch_install(TAWC_SYS_sendto,      handle_sendto);
+	tawcroot_dispatch_install(TAWC_SYS_sendmsg,     handle_sendmsg);
+	tawcroot_dispatch_install(TAWC_SYS_getsockname, handle_getsockname);
+	tawcroot_dispatch_install(TAWC_SYS_getpeername, handle_getpeername);
 }

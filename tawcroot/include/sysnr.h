@@ -107,6 +107,12 @@
 # define TAWC_SYS_connect         203
 # define TAWC_SYS_accept          202
 # define TAWC_SYS_accept4         242
+# define TAWC_SYS_getsockname    204
+# define TAWC_SYS_getpeername    205
+# define TAWC_SYS_sendto         206
+# define TAWC_SYS_recvfrom       207
+# define TAWC_SYS_sendmsg        211
+# define TAWC_SYS_recvmsg        212
 /* chroot has its own handler in src/chroot.c that swaps the rootfs
  * view bookkeeping. The other five trap to -EPERM (defense-in-depth;
  * see fake_eperm in src/syscalls_control.c). */
@@ -234,6 +240,12 @@
 # define TAWC_SYS_clone3          435
 # define TAWC_SYS_bind             49
 # define TAWC_SYS_connect          42
+# define TAWC_SYS_getsockname      51
+# define TAWC_SYS_getpeername      52
+# define TAWC_SYS_sendto           44
+# define TAWC_SYS_recvfrom         45
+# define TAWC_SYS_sendmsg          46
+# define TAWC_SYS_recvmsg          47
 /* accept→accept4, poll→ppoll, epoll_wait→epoll_pwait: Android's
  * untrusted_app filter RET_TRAPs the legacy variant on x86_64 in favour
  * of the modern one. We route the legacy through the modern from the

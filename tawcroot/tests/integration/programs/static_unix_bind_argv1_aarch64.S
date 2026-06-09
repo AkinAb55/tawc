@@ -2,10 +2,14 @@
  * header for rationale and exit-code key.
  *
  * Aarch64 syscall numbers:
- *   __NR_socket      = 198
- *   __NR_bind        = 200
- *   __NR_close       =  57
- *   __NR_exit_group  =  94
+ *   __NR_socket       = 198
+ *   __NR_bind         = 200
+ *   __NR_getsockname  = 204
+ *   __NR_close        =  57
+ *   __NR_exit_group   =  94
+ *
+ * Stack frame (sub 304): addr at sp+0, addr2 at sp+128, len2 at sp+256.
+ * argv[1] is at sp+320 (16 + 304).
  */
 
 	.text
@@ -16,25 +20,26 @@ _start:
 	cmp     x0, #2
 	b.lt    .Lfail_argc
 
-	/* Reserve 128 bytes on stack for sockaddr_un, zero it. */
-	sub     sp, sp, #128
-	mov     x9, sp
-	mov     x10, #128
+	/* Reserve 304 bytes: addr(128) + addr2(128) + len2(8) + slack.
+	 * Zero the first 256 (addr + addr2). */
+	sub     sp, sp, #304
+	mov     x9, sp                 /* &addr */
+	mov     x10, #256
 	mov     x11, #0
 .Lzero_loop:
 	subs    x10, x10, #8
 	str     x11, [x9, x10]
 	b.gt    .Lzero_loop
-	str     x11, [x9]              /* final 8 bytes (subs reached 0 above) */
+	str     x11, [x9]
 
 	/* sun_family = AF_UNIX = 1 (u16 at offset 0) */
 	mov     w11, #1
 	strh    w11, [x9]
 
-	/* argv[1] is at sp+128+16 (we just sub'd 128; argv[1] used to be at sp+16). */
-	ldr     x12, [sp, #144]        /* argv[1] */
+	/* argv[1] is at sp+320. */
+	ldr     x12, [sp, #320]
 	add     x13, x9, #2            /* &addr.sun_path[0] */
-	mov     x14, #0                /* counter */
+	mov     x14, #0
 .Lcpy:
 	cmp     x14, #107
 	b.ge    .Lpath_too_long
@@ -64,6 +69,34 @@ _start:
 	cmp     x0, #0
 	b.lt    .Lfail_bind
 
+	/* getsockname(sock_fd, &addr2, &len2). nr=204.
+	 * *len2 = 128 (buffer cap) first. addr2 = sp+128, len2 = sp+256. */
+	mov     w11, #128
+	str     w11, [sp, #256]
+	mov     x0, x19
+	add     x1, sp, #128           /* &addr2 */
+	add     x2, sp, #256           /* &len2 */
+	mov     x8, #204
+	svc     #0
+	cmp     x0, #0
+	b.lt    .Lfail_getsockname
+
+	/* Compare addr2.sun_path (sp+130) to argv[1] (sp+320). */
+	add     x13, sp, #130          /* &addr2.sun_path[0] */
+	ldr     x12, [sp, #320]        /* argv[1] */
+	mov     x14, #0
+.Lcmp:
+	ldrb    w15, [x12, x14]        /* argv[1][i] */
+	ldrb    w16, [x13, x14]        /* sun_path[i] */
+	cmp     w15, w16
+	b.ne    .Lfail_cmp
+	cbz     w15, .Lcmp_done
+	add     x14, x14, #1
+	cmp     x14, #108
+	b.ge    .Lfail_cmp
+	b       .Lcmp
+.Lcmp_done:
+
 	/* close(sock_fd) */
 	mov     x0, x19
 	mov     x8, #57
@@ -92,6 +125,18 @@ _start:
 	mov     x0, #60
 1:
 	add     x0, x0, #160
+	mov     x8, #94
+	svc     #0
+	brk     #0
+
+.Lfail_cmp:
+	mov     x0, #205
+	mov     x8, #94
+	svc     #0
+	brk     #0
+
+.Lfail_getsockname:
+	mov     x0, #206
 	mov     x8, #94
 	svc     #0
 	brk     #0
