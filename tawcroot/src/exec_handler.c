@@ -8,11 +8,17 @@
 #include "errno_neg.h"
 #include "exec_handler.h"
 #include "exec_state.h"
+#include "loader_elf.h"
 #include "path.h"
 #include "path_scratch.h"
 #include "raw_sys.h"
 #include "shm.h"
 #include "tawc_uapi.h"
+
+/* Shebang resolution depth + read buffer, matching binfmt_script /
+ * loader_exec.c. */
+#define PROBE_SHEBANG_MAX_DEPTH 4
+#define PROBE_SHEBANG_BUF       256
 
 /* Cap on serialized exec_state size we'll write into a memfd. Sized to
  * hold the full header (offset arrays for MAX_ARGS args + MAX_ENV envs)
@@ -45,6 +51,92 @@ static long probe_check_executable(int fd)
 	return 0;
 }
 
+/* Open a guest exec target against the rootfs view (when configured) or
+ * the host fs (legacy --exec-via-handler). Mirrors loader_exec.c's
+ * open_in_view but kept local to the handler so classification runs
+ * pre-commit. Returns an O_RDONLY|O_CLOEXEC fd or -errno. */
+static long probe_open_target(const char *guest_path)
+{
+	if (tawcroot_rootfs_fd < 0)
+		return tawc_openat(AT_FDCWD, guest_path,
+				   O_RDONLY | O_CLOEXEC, 0);
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *suffix = scratch->buf[0];
+	tawcroot_path_result r = tawcroot_path_translate(
+		guest_path, suffix, TAWCROOT_PATH_SCRATCH_SIZE,
+		TAWCROOT_PATH_FOLLOW);
+	if (r.err) return r.err;
+	if (suffix[0] == 0) return TAWC_EISDIR;
+	return tawc_openat(r.base_fd, suffix, O_RDONLY | O_CLOEXEC, 0);
+}
+
+/* Require the file at `fd` to parse as an ET_EXEC/ET_DYN ELF for this
+ * machine. A wrong-arch / malformed / too-short file is -ENOEXEC, which
+ * is what the kernel returns and what makes a shell fall back to `sh
+ * file`. */
+static long classify_elf(int fd)
+{
+	uint8_t ebuf[sizeof(tawc_elf64_ehdr)];
+	long n = tawc_pread64(fd, ebuf, sizeof ebuf, 0);
+	if (n != (long)sizeof ebuf) return TAWC_ENOEXEC;
+	struct tawc_loader_image img;
+	if (tawc_loader_parse_ehdr(ebuf, sizeof ebuf, &img) != 0)
+		return TAWC_ENOEXEC;  /* bad magic / class / wrong machine */
+	if (img.e_type != TAWC_ET_EXEC && img.e_type != TAWC_ET_DYN)
+		return TAWC_ENOEXEC;
+	return 0;
+}
+
+/* Classify whether the open file is something the loader can actually
+ * run, BEFORE the execveat commit point. Without this, problems the
+ * loader only discovers post-commit (a `chmod +x`'d text file, a
+ * shebang whose interpreter is missing, a wrong-arch ELF) kill the
+ * calling program with a loader exit code instead of returning a clean
+ * execve errno. Resolves the shebang chain the same way the kernel and
+ * loader_exec.c do; the final file must be a valid ELF.
+ *
+ * Note: a narrow TOCTOU window remains (the file could be replaced
+ * between this probe and the child's open), same as for the existing
+ * executable-bit probe — but that window is far narrower than the
+ * always-dies-post-commit behaviour it replaces. */
+static long classify_loadable(int fd, int depth)
+{
+	if (depth > PROBE_SHEBANG_MAX_DEPTH) return TAWC_ELOOP;
+
+	uint8_t magic[2];
+	long n = tawc_pread64(fd, magic, 2, 0);
+	if (n < 0) return n;
+	if (n < 2 || !(magic[0] == '#' && magic[1] == '!'))
+		return classify_elf(fd);
+
+	/* Shebang: read the line, extract the interpreter path, open it
+	 * through the view, require it executable, and recurse. */
+	char line[PROBE_SHEBANG_BUF];
+	long ln = tawc_pread64(fd, line, sizeof line - 1, 0);
+	if (ln < 2) return TAWC_ENOEXEC;
+	line[ln] = 0;
+	long eol = 2;
+	while (eol < ln && line[eol] != '\n') eol++;
+	/* A full buffer with no newline = interpreter line too long: the
+	 * kernel (≥5.1) returns ENOEXEC rather than truncating. */
+	if (eol == ln && ln == (long)sizeof line - 1) return TAWC_ENOEXEC;
+	line[eol] = 0;
+	long i = 2;
+	while (i < eol && (line[i] == ' ' || line[i] == '\t')) i++;
+	long lo = i;
+	while (i < eol && line[i] != ' ' && line[i] != '\t') i++;
+	if (i == lo) return TAWC_ENOEXEC;  /* "#!\n" with no interpreter */
+	line[i] = 0;
+	const char *interp = &line[lo];
+
+	long ifd = probe_open_target(interp);
+	if (ifd < 0) return ifd;  /* missing interpreter → ENOENT, etc. */
+	long ck = probe_check_executable((int)ifd);
+	if (ck == 0) ck = classify_loadable((int)ifd, depth + 1);
+	tawc_close((int)ifd);
+	return ck;
+}
+
 /* Tiny int-to-string for the fd argv slot. Returns the number of
  * bytes written (excluding NUL); 0 if it doesn't fit. */
 static size_t u_to_str(unsigned long v, char *buf, size_t cap)
@@ -75,25 +167,15 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * the probe through the translator so we open inside the view.
 	 * In legacy --exec-via-handler mode (no rootfs) the path is a
 	 * host-fs path, opened directly. */
-	if (tawcroot_rootfs_fd >= 0) {
-		TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-		char *suffix = scratch->buf[0];
-		tawcroot_path_result r = tawcroot_path_translate(
-		    path, suffix, TAWCROOT_PATH_SCRATCH_SIZE,
-		    TAWCROOT_PATH_FOLLOW);
-		if (r.err) return r.err;
-		if (suffix[0] == 0) return TAWC_EISDIR;
-		long probe = tawc_openat(r.base_fd, suffix,
-		                         O_RDONLY | O_CLOEXEC, 0);
+	{
+		long probe = probe_open_target(path);
 		if (probe < 0) return probe;
 		long ck = probe_check_executable((int)probe);
-		tawc_close((int)probe);
-		if (ck < 0) return ck;
-	} else {
-		long probe = tawc_openat(AT_FDCWD, path,
-		                         O_RDONLY | O_CLOEXEC, 0);
-		if (probe < 0) return probe;
-		long ck = probe_check_executable((int)probe);
+		/* Classify the binary (ELF / shebang chain) before the commit
+		 * so a non-ELF non-script, a missing shebang interpreter, or a
+		 * wrong-arch ELF returns a clean errno to the guest instead of
+		 * killing it with a loader exit code post-execveat. */
+		if (ck == 0) ck = classify_loadable((int)probe, 0);
 		tawc_close((int)probe);
 		if (ck < 0) return ck;
 	}

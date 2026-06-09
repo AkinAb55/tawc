@@ -21,9 +21,20 @@
  * and calls into this same code path.
  */
 
+#define _GNU_SOURCE
 #include <cleat/test.h>
 #include <cleat/subproc.h>
 #include <stc/cstr.h>
+
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifndef TAWCROOT_TEST_TMPDIR
+# define TAWCROOT_TEST_TMPDIR "/tmp"
+#endif
 
 #ifndef TAWCROOT_TESTHOST_BIN
 # error "TAWCROOT_TESTHOST_BIN must be defined"
@@ -98,4 +109,48 @@ test(exec_via_handler_non_executable_returns_50)
 	 * file on every host we run on. */
 	const char *args[] = { "--exec-via-handler", "/etc/hostname", NULL };
 	test_int_eq(run(args), 50);
+}
+
+/* Write `contents` to a fresh 0755 temp file; returns the path in a
+ * static buffer (single-threaded test, one outstanding at a time). */
+static const char *make_exec_file(const char *suffix, const char *contents)
+{
+	static char path[256];
+	snprintf(path, sizeof path, "%s/tawcroot-classify-%s",
+	         TAWCROOT_TEST_TMPDIR, suffix);
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+	if (fd < 0) return NULL;
+	size_t n = strlen(contents);
+	if (write(fd, contents, n) != (ssize_t)n) { close(fd); return NULL; }
+	close(fd);
+	return path;
+}
+
+test(exec_via_handler_non_elf_text_returns_50)
+{
+	/* A `chmod +x`'d text file with no shebang: real execve returns
+	 * -ENOEXEC (so a shell falls back to `sh file`). Pre-fix the probe
+	 * passed it through to execveat and the loader died post-commit
+	 * with exit 61. The classification probe must turn it into a clean
+	 * -ENOEXEC, reported as exit 50. */
+	const char *p = make_exec_file("text", "this is not a program\n");
+	test_true(p != NULL);
+	const char *args[] = { "--exec-via-handler", p, NULL };
+	test_int_eq(run(args), 50);
+	(void)unlink(p);
+}
+
+test(exec_via_handler_shebang_missing_interp_returns_50)
+{
+	/* A script whose interpreter doesn't exist: real execve returns
+	 * -ENOENT. Pre-fix the loader chased the shebang post-commit and
+	 * died with exit 75. The probe resolves the shebang and surfaces
+	 * the missing-interpreter errno as exit 50. */
+	const char *p = make_exec_file("badinterp",
+	                               "#!/no/such/interpreter/here\n"
+	                               "echo hi\n");
+	test_true(p != NULL);
+	const char *args[] = { "--exec-via-handler", p, NULL };
+	test_int_eq(run(args), 50);
+	(void)unlink(p);
 }
