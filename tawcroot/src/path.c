@@ -181,6 +181,40 @@ static int host_prefix_match(const char *host, size_t n,
 	return 1;
 }
 
+long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
+				     char *out, size_t out_cap)
+{
+	if (!host || !out) return TAWC_EFAULT;
+	if (out_cap < 2)   return TAWC_ENAMETOOLONG;
+
+	const struct tawcroot_bind *best_bind = 0;
+	size_t best_pl = 0;
+
+	if (host_prefix_match(host, n, tawcroot_rootfs_host_path,
+	                      tawcroot_rootfs_host_path_len))
+		best_pl = tawcroot_rootfs_host_path_len;
+
+	for (size_t bi = 0; bi < tawcroot_n_binds; bi++) {
+		const struct tawcroot_bind *b = &tawcroot_binds[bi];
+		if (!b->active || b->src_len == 0) continue;
+		if (!host_prefix_match(host, n, b->src, b->src_len))
+			continue;
+		if (b->src_len > best_pl) {
+			best_bind = b;
+			best_pl = b->src_len;
+		}
+	}
+
+	if (best_bind)
+		return write_guest_abs_suffix(out, out_cap, host,
+		                              best_pl, n,
+		                              best_bind->dst, best_bind->dst_len);
+	if (best_pl > 0)
+		return write_guest_abs_suffix(out, out_cap, host,
+		                              best_pl, n, 0, 0);
+	return TAWC_ENOENT;
+}
+
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)
 {
 	if (fd < 0 || fd == AT_FDCWD) return TAWC_EINVAL;
@@ -192,32 +226,7 @@ long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)
 		fd, host, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n < 0) return n;
 
-	const struct tawcroot_bind *best_bind = 0;
-	size_t best_pl = 0;
-
-	if (host_prefix_match(host, (size_t)n, tawcroot_rootfs_host_path,
-	                      tawcroot_rootfs_host_path_len))
-		best_pl = tawcroot_rootfs_host_path_len;
-
-	for (size_t bi = 0; bi < tawcroot_n_binds; bi++) {
-		const struct tawcroot_bind *b = &tawcroot_binds[bi];
-		if (!b->active || b->src_len == 0) continue;
-		if (!host_prefix_match(host, (size_t)n, b->src, b->src_len))
-			continue;
-		if (b->src_len > best_pl) {
-			best_bind = b;
-			best_pl = b->src_len;
-		}
-	}
-
-	if (best_bind)
-		return write_guest_abs_suffix(out, out_cap, host,
-		                              best_pl, (size_t)n,
-		                              best_bind->dst, best_bind->dst_len);
-	if (best_pl > 0)
-		return write_guest_abs_suffix(out, out_cap, host,
-		                              best_pl, (size_t)n, 0, 0);
-	return TAWC_ENOENT;
+	return tawcroot_host_path_to_guest_abs(host, (size_t)n, out, out_cap);
 }
 
 /* Well-known-symlink memoization. After fold_absolute, the orchestrator
@@ -400,9 +409,11 @@ static const struct tawcroot_path_oracle prod_oracle = {
 };
 
 /* Production cwd-to-guest-absolute resolver: read the kernel cwd via
- * raw `getcwd`, validate against the rootfs host prefix, and write
- * the in-rootfs guest-absolute view (e.g. host `/data/.../rootfs/foo`
- * → guest `/foo`). Returns -ENOENT if the cwd is outside the rootfs
+ * raw `getcwd` and reverse-translate through the shared longest-prefix
+ * walk (rootfs AND bind srcs — a `cd` into a bind dst leaves the
+ * kernel cwd at the bind src; matching only the rootfs prefix here
+ * made getcwd and every relative path fail ENOENT after such a cd).
+ * Returns the written length, or -ENOENT if the cwd is outside the
  * view (we deliberately don't leak host paths through guest errors). */
 static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
 {
@@ -423,29 +434,7 @@ static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
 	size_t cwd_len = (size_t)r;
 	while (cwd_len > 0 && cwd[cwd_len - 1] == 0) cwd_len--;
 
-	/* Match the rootfs host prefix by bytes, with a component-
-	 * boundary requirement on the next byte so a sibling whose name
-	 * happens to share the rootfs prefix (e.g. rootfs="/tmp/rfs"
-	 * vs. cwd="/tmp/rfs-evil/x") doesn't count as inside. */
-	if (cwd_len < tawcroot_rootfs_host_path_len) return TAWC_ENOENT;
-	for (size_t i = 0; i < tawcroot_rootfs_host_path_len; i++) {
-		if (cwd[i] != tawcroot_rootfs_host_path[i]) return TAWC_ENOENT;
-	}
-	if (cwd_len > tawcroot_rootfs_host_path_len &&
-	    cwd[tawcroot_rootfs_host_path_len] != '/') return TAWC_ENOENT;
-
-	/* Write the guest-absolute view: drop the host prefix, keep the
-	 * leading '/' (or synthesize one if cwd IS the rootfs root). */
-	size_t off = 0;
-	if (off + 1 >= out_cap) return TAWC_ENAMETOOLONG;
-	out[off++] = '/';
-	for (size_t i = tawcroot_rootfs_host_path_len; i < cwd_len; i++) {
-		if (cwd[i] == '/' && i == tawcroot_rootfs_host_path_len) continue;
-		if (off + 1 >= out_cap) return TAWC_ENAMETOOLONG;
-		out[off++] = cwd[i];
-	}
-	out[off] = 0;
-	return 0;
+	return tawcroot_host_path_to_guest_abs(cwd, cwd_len, out, out_cap);
 }
 
 /* ---------------------------------------------------------------- */

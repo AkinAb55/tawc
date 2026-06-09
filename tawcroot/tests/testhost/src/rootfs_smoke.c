@@ -1002,6 +1002,53 @@ static int test_relative_path_after_chdir(void)
 	return fails;
 }
 
+/* cwd inside a bind: `cd` into a bind dst leaves the kernel cwd at the
+ * bind SRC host path. getcwd and relative-path resolution must walk
+ * the bind table, not just the rootfs prefix — pre-fix, `cd /lib64 &&
+ * ls` was dead (getcwd ENOENT, every relative syscall ENOENT). */
+static int test_cwd_inside_bind(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_chdir, "/lib64", 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("chdir(\"/lib64\") (bind dst) -> 0", rv == 0);
+	tawc_io_kv_dec("    rv", rv);
+
+	char buf[256];
+	buf[0] = 0;
+	INLINE_SYS6(TAWC_SYS_getcwd, buf, sizeof buf, 0, 0, 0, 0, rv);
+	int reports_bind_dst = (rv == 7 &&
+				buf[0] == '/' && buf[1] == 'l' &&
+				buf[2] == 'i' && buf[3] == 'b' &&
+				buf[4] == '6' && buf[5] == '4' &&
+				buf[6] == 0);
+	fails += tawc_io_step("getcwd inside bind -> \"/lib64\"",
+			      reports_bind_dst);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "probe.txt", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"relative open inside bind dst -> routes through bind",
+		fd >= 0);
+	tawc_io_kv_dec("    rv", fd);
+	if (fd >= 0) {
+		char data[32];
+		long n = tawc_read((int)fd, data, sizeof data - 1);
+		int from_bind = (n >= 13 &&
+				 data[0] == 'f' && data[1] == 'r' &&
+				 data[2] == 'o' && data[3] == 'm' &&
+				 data[4] == '-');
+		fails += tawc_io_step("relative read = bind src contents",
+				      from_bind);
+		tawc_close((int)fd);
+	}
+
+	/* Restore the guest cwd to "/" for downstream tests. */
+	INLINE_SYS6(TAWC_SYS_chdir, "/", 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("chdir back to \"/\"", rv == 0);
+	return fails;
+}
+
 /* readlinkat: create a symlink in the fake rootfs and verify our
  * dispatch routes it through. */
 static int test_readlinkat_dispatch(void)
@@ -4134,6 +4181,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_fchdir_dispatch();
 	fails += test_escape_attempt_clamps();
 	fails += test_relative_path_after_chdir();
+	fails += test_cwd_inside_bind();
 	fails += test_readlinkat_dispatch();
 	fails += test_readlink_on_bind_dst_returns_einval();
 	fails += test_faccessat2_known_good();

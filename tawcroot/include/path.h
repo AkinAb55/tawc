@@ -201,6 +201,17 @@ long tawcroot_proc_fd_to_host_path(int fd, char *out, size_t out_cap);
  * with "/" and is NUL-terminated. */
 long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
 
+/* Reverse-translate a host path `host[0..n)` into a guest-absolute path
+ * by longest-prefix match against the rootfs host path and the active
+ * bind srcs. Output starts with "/" and is NUL-terminated; returns the
+ * written length, -ENOENT when the host path is outside the view,
+ * -ENAMETOOLONG on overflow. Shared by fd reverse-translation (dirfds),
+ * getcwd, and relative-path cwd resolution so all three agree on what
+ * "inside the view" means — getcwd previously matched only the rootfs
+ * prefix, so a chdir into a bind dst broke every relative path. */
+long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
+				     char *out, size_t out_cap);
+
 /* `/proc/self/exe` synthesis (phase 2e).
  *
  * After manual-load the kernel's view of /proc/self/exe is the

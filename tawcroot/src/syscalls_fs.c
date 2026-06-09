@@ -1064,15 +1064,21 @@ static long handle_chdir(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return rv;
 }
 
-/* getcwd reverse-translation. Kernel returns the host cwd; we strip
- * the rootfs prefix, prepend `/`, copy to the guest's buffer, and
- * return a length matching the kernel's getcwd contract.
+/* getcwd reverse-translation. Kernel returns the host cwd; we reverse-
+ * translate via the shared longest-prefix walk (rootfs AND bind srcs —
+ * `cd /system` into a bind leaves the kernel cwd at the bind src, and
+ * matching only the rootfs prefix made getcwd fail ENOENT after an
+ * ordinary cd), copy to the guest's buffer, and return a length
+ * matching the kernel's getcwd contract (INCLUDING the trailing NUL).
  *
- * If the kernel cwd is outside the rootfs view, return -ENOENT — proot
- * leaks the host path here, but exposing the host through a getcwd
- * answer the guest can read is exactly the kind of accidental escape
- * we close in §"Translation rules".
- */
+ * If the kernel cwd is outside the view, return -ENOENT — proot leaks
+ * the host path here, but exposing the host through a getcwd answer
+ * the guest can read is exactly the kind of accidental escape we
+ * close in §"Translation rules".
+ *
+ * The result is staged in a stack-local buffer and copied through the
+ * guarded helper — a wild guest pointer must EFAULT, not crash the
+ * SIGSYS handler (review finding B1+B6). */
 static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -1092,35 +1098,14 @@ static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 	size_t host_len = (size_t)r;
 	while (host_len > 0 && host[host_len - 1] == 0) host_len--;
 
-	if (host_len < tawcroot_rootfs_host_path_len) return TAWC_ENOENT;
-	for (size_t i = 0; i < tawcroot_rootfs_host_path_len; i++)
-		if (host[i] != tawcroot_rootfs_host_path[i]) return TAWC_ENOENT;
-	/* Component-boundary check (review finding B4): a kernel cwd at
-	 * "<rootfs>-evil/x" byte-matches the rootfs prefix but is not
-	 * inside the view. Require end-of-string or `/` after the prefix. */
-	if (host_len > tawcroot_rootfs_host_path_len &&
-	    host[tawcroot_rootfs_host_path_len] != '/') return TAWC_ENOENT;
-
-	/* Build "/<host[prefix:]>" into a stack-local buffer first, then
-	 * copy through the guarded helper. Writing directly into `out` was
-	 * the original implementation; a wild guest pointer would crash the
-	 * SIGSYS handler (review finding B1+B6). The kernel's getcwd
-	 * contract: returns length INCLUDING the trailing NUL. */
 	char *tmp = scratch->buf[1];
-	size_t off = 0;
-	if (off + 1 >= cap || off + 1 >= TAWCROOT_PATH_SCRATCH_SIZE)
-		return TAWC_ERANGE;
-	tmp[off++] = '/';
-	for (size_t i = tawcroot_rootfs_host_path_len; i < host_len; i++) {
-		if (tmp[off - 1] == '/' && host[i] == '/') continue;
-		if (off + 1 >= cap || off + 1 >= TAWCROOT_PATH_SCRATCH_SIZE)
-			return TAWC_ERANGE;
-		tmp[off++] = host[i];
-	}
-	tmp[off] = 0;
-	long ce = tawc_copy_to_guest(out, tmp, off + 1);
+	long n = tawcroot_host_path_to_guest_abs(host, host_len, tmp,
+						 TAWCROOT_PATH_SCRATCH_SIZE);
+	if (n < 0) return n;
+	if ((size_t)n + 1 > cap) return TAWC_ERANGE;
+	long ce = tawc_copy_to_guest(out, tmp, (size_t)n + 1);
 	if (ce < 0) return ce;
-	return (long)(off + 1);
+	return n + 1;
 }
 
 /* Translate-and-pass-through wrappers for the simpler path-bearing
