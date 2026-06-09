@@ -367,6 +367,27 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
  * The post-fold orchestration (bind → memo → resolver → bind) is in
  * `path_orchestrate.c`. */
 
+/* Open a guest path read-only through the current root view. Falls
+ * back to the host fs when no rootfs is configured (the legacy --exec /
+ * --exec-via-handler diagnostics run before any rootfs exists).
+ * Returns an O_RDONLY|O_CLOEXEC fd or -errno; a path that resolves to
+ * the rootfs/bind directory itself is -EISDIR (exec/read of a dir).
+ * Shared by the loader and the exec handler's pre-commit probe. */
+long tawcroot_open_in_view(const char *guest_path)
+{
+	if (tawcroot_rootfs_fd < 0)
+		return tawc_openat(AT_FDCWD, guest_path,
+				   O_RDONLY | O_CLOEXEC, 0);
+	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+	char *suffix = scratch->buf[0];
+	tawcroot_path_result r = tawcroot_path_translate(
+		guest_path, suffix, TAWCROOT_PATH_SCRATCH_SIZE,
+		TAWCROOT_PATH_FOLLOW);
+	if (r.err) return r.err;
+	if (suffix[0] == 0) return TAWC_EISDIR;
+	return tawc_openat(r.base_fd, suffix, O_RDONLY | O_CLOEXEC, 0);
+}
+
 /* ---------------------------------------------------------------- */
 /* Production oracle + cwd source for the orchestration.             */
 

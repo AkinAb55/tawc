@@ -11,7 +11,6 @@
 #include "io.h"
 #include "loader_elf.h"
 #include "path.h"
-#include "path_scratch.h"
 #include "raw_sys.h"
 #include "shm.h"
 #include "tawc_uapi.h"
@@ -52,24 +51,6 @@ static long probe_check_executable(int fd)
 	return 0;
 }
 
-/* Open a guest exec target against the rootfs view (when configured) or
- * the host fs (legacy --exec-via-handler). Mirrors loader_exec.c's
- * open_in_view but kept local to the handler so classification runs
- * pre-commit. Returns an O_RDONLY|O_CLOEXEC fd or -errno. */
-static long probe_open_target(const char *guest_path)
-{
-	if (tawcroot_rootfs_fd < 0)
-		return tawc_openat(AT_FDCWD, guest_path,
-				   O_RDONLY | O_CLOEXEC, 0);
-	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-	char *suffix = scratch->buf[0];
-	tawcroot_path_result r = tawcroot_path_translate(
-		guest_path, suffix, TAWCROOT_PATH_SCRATCH_SIZE,
-		TAWCROOT_PATH_FOLLOW);
-	if (r.err) return r.err;
-	if (suffix[0] == 0) return TAWC_EISDIR;
-	return tawc_openat(r.base_fd, suffix, O_RDONLY | O_CLOEXEC, 0);
-}
 
 /* Require the file at `fd` to parse as an ET_EXEC/ET_DYN ELF for this
  * machine. A wrong-arch / malformed / too-short file is -ENOEXEC, which
@@ -130,7 +111,7 @@ static long classify_loadable(int fd, int depth)
 	line[i] = 0;
 	const char *interp = &line[lo];
 
-	long ifd = probe_open_target(interp);
+	long ifd = tawcroot_open_in_view(interp);
 	if (ifd < 0) return ifd;  /* missing interpreter → ENOENT, etc. */
 	long ck = probe_check_executable((int)ifd);
 	if (ck == 0) ck = classify_loadable((int)ifd, depth + 1);
@@ -151,7 +132,7 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * In legacy --exec-via-handler mode (no rootfs) the path is a
 	 * host-fs path, opened directly. */
 	{
-		long probe = probe_open_target(path);
+		long probe = tawcroot_open_in_view(path);
 		if (probe < 0) return probe;
 		long ck = probe_check_executable((int)probe);
 		/* Classify the binary (ELF / shebang chain) before the commit

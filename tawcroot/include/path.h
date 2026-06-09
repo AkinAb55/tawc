@@ -212,6 +212,11 @@ long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
 long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
 				     char *out, size_t out_cap);
 
+/* Open a guest path read-only through the current root view (host-fs
+ * fallback when no rootfs is configured). Returns an O_RDONLY|O_CLOEXEC
+ * fd or -errno; -EISDIR when the path names the rootfs/bind dir itself. */
+long tawcroot_open_in_view(const char *guest_path);
+
 /* `/proc/self/exe` synthesis (phase 2e).
  *
  * After manual-load the kernel's view of /proc/self/exe is the

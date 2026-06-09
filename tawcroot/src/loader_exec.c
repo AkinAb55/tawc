@@ -67,25 +67,6 @@ void tawcroot_loader_set_host_auxv(uint64_t hwcap, uint64_t hwcap2,
 	g_host_page_size = is_pow2(page_size) ? (size_t)page_size : 4096;
 }
 
-/* Open a guest path against the rootfs view (when configured) or the
- * host filesystem (when not). The `--exec` legacy diagnostic path runs
- * before any rootfs is set up, so it falls through to AT_FDCWD/host;
- * production `-r ROOTFS -- CMD` has tawcroot_rootfs_fd set and routes
- * through tawcroot_path_translate. */
-static long open_in_view(const char *guest_path, char *suffix_buf,
-                         size_t suffix_cap)
-{
-	if (tawcroot_rootfs_fd < 0) {
-		return tawc_openat(AT_FDCWD, guest_path,
-		                   O_RDONLY | O_CLOEXEC, 0);
-	}
-	tawcroot_path_result r = tawcroot_path_translate(
-	    guest_path, suffix_buf, suffix_cap, TAWCROOT_PATH_FOLLOW);
-	if (r.err) return r.err;
-	if (suffix_buf[0] == 0) return TAWC_EISDIR; /* exec'ing the rootfs root */
-	return tawc_openat(r.base_fd, suffix_buf,
-	                   O_RDONLY | O_CLOEXEC, 0);
-}
 
 /* Stage tag for parse_image so callers can distinguish ehdr vs phdr
  * failure and exit with the correct documented loader code (61 vs 62).
@@ -246,9 +227,7 @@ static long resolve_shebangs(int initial_fd,
 		argv_out[*argc_out] = 0;
 
 		/* Open the interpreter, close the previous fd, loop. */
-		static char interp_suffix[TAWC_LDR_PATH_MAX];
-		long new_fd = open_in_view(new_argv0, interp_suffix,
-		                           sizeof interp_suffix);
+		long new_fd = tawcroot_open_in_view(new_argv0);
 		if (new_fd < 0) {
 			tawc_close(bin_fd);
 			return new_fd;
@@ -267,16 +246,8 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * captured (legacy --exec path before auxv capture runs). */
 	const size_t PAGE = g_host_page_size;
 
-	/* Buffer for the translated path suffix when rootfs mode is active.
-	 * Sized for the worst-case canonicalized suffix (PATH_MAX). Static
-	 * to avoid bloating the loader's stack frame; this function never
-	 * recurses and the buffer is unused after the openat. */
-	static char bin_suffix[TAWC_LDR_PATH_MAX];
-	static char ld_suffix[TAWC_LDR_PATH_MAX];
-
 	/* --- 1. Open + parse the guest binary. --- */
-	long bin_fd = open_in_view(args->guest_path, bin_suffix,
-	                           sizeof bin_suffix);
+	long bin_fd = tawcroot_open_in_view(args->guest_path);
 	if (bin_fd < 0) LOADER_FAIL(60);
 
 	/* --- 1.5. Resolve any #! shebang chain into ELF + adjusted argv. ---
@@ -356,8 +327,7 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 		 * file at that host path won't exist (or worse, exists with
 		 * a different ABI); route it through the same translator the
 		 * binary used. */
-		long ld_fd = open_in_view(interp_path, ld_suffix,
-		                          sizeof ld_suffix);
+		long ld_fd = tawcroot_open_in_view(interp_path);
 		if (ld_fd < 0) LOADER_FAIL(65);
 
 		struct tawc_loader_image ld_img;
