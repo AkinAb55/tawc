@@ -35,11 +35,13 @@
  *       expected to surface this back to the guest as the result of
  *       its `execve` syscall.
  *
- * The handler uses raw_sys.h for every syscall. NOTE: the exec path
- * stages argv/envp/exec_state in static buffers (here and in
- * syscalls_exec.c), so two threads exec'ing concurrently — or a
- * CLONE_VM child exec'ing while the parent execs — can interleave.
- * See issues/tawcroot-exec-static-buffers-not-thread-safe.md.
+ * The handler uses raw_sys.h for every syscall. The exec path stages
+ * argv/envp/exec_state in static buffers (here and in syscalls_exec.c);
+ * a process-global spinlock in syscalls_exec.c (exec_lock) serializes
+ * the whole collect→write→execveat sequence so two concurrent execs —
+ * or a CLONE_VM child exec'ing while the parent execs — can't
+ * interleave. The winner execveats away without unlocking (the address
+ * space is replaced); a losing/failing exec unlocks before returning.
  */
 
 #pragma once

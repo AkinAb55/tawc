@@ -240,3 +240,37 @@ test(exec_state_with_many_args_and_env)
 	test_ptr_eq(out.envp[NE], NULL);
 	free(buf);
 }
+
+/* A glob-heavy exec (`rm *` over a big dir, a linker invocation) passes
+ * hundreds-to-thousands of args. Pre-fix MAX_ARGS was 256, so each such
+ * exec E2BIG'd even though the kernel allows ~2 MB of argv. Serialize a
+ * near-cap argv + a large env and confirm it round-trips. */
+test(exec_state_near_cap_args_roundtrip)
+{
+	enum { NA = 2000, NE = 500 };
+	static const char *argv[NA + 1];
+	static const char *envp[NE + 1];
+	for (int i = 0; i < NA; i++) argv[i] = "globbed-filename-12345.txt";
+	argv[NA] = NULL;
+	for (int i = 0; i < NE; i++) envp[i] = "SOME_EXPORTED_VAR=some-value";
+	envp[NE] = NULL;
+
+	size_t need = tawcroot_exec_state_estimate_bytes("/usr/bin/rm",
+	                                                 NA, argv, envp, NULL);
+	uint8_t *buf = malloc(need);
+	test_int_eq((int)tawcroot_exec_state_write(buf, need, "/usr/bin/rm",
+	                                           NA, argv, envp, NULL),
+	            (int)need);
+
+	static const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
+	static const char *ebuf[TAWCROOT_EXEC_STATE_MAX_ENV + 1];
+	tawcroot_exec_state out;
+	test_int_eq((int)tawcroot_exec_state_read(buf, need, abuf, ebuf, &out), 0);
+	test_int_eq((int)out.argc, NA);
+	test_int_eq((int)out.envc, NE);
+	test_str_eq(out.argv[0], "globbed-filename-12345.txt");
+	test_str_eq(out.argv[NA - 1], "globbed-filename-12345.txt");
+	test_str_eq(out.envp[NE - 1], "SOME_EXPORTED_VAR=some-value");
+	test_ptr_eq(out.argv[NA], NULL);
+	free(buf);
+}

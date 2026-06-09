@@ -30,14 +30,18 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "exec_handler.h"
+#include "exec_state.h"
 #include "path.h"
 #include "raw_sys.h"
 #include "syscalls_exec.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
-#define MAX_ARGS     256
-#define MAX_ENV      256
+/* Keep the collection caps in lockstep with the exec_state
+ * serialization caps — collecting more than the writer can serialize
+ * would E2BIG after the fact. */
+#define MAX_ARGS     TAWCROOT_EXEC_STATE_MAX_ARGS
+#define MAX_ENV      TAWCROOT_EXEC_STATE_MAX_ENV
 /* Bash-launched binaries inherit an environment that easily blows past
  * a 4 KB per-string limit — `LS_COLORS` runs 5-6 KB in many configs,
  * `_=...` can reflect a long absolute path, and bash propagates a few
@@ -98,11 +102,45 @@ static long collect_array(char *const *guest_arr,
 		size_t want = avail > MAX_STR ? MAX_STR : avail;
 		long n = tawc_copy_string_from_guest(strings + off, want,
 		                                     (const char *)p);
-		if (n < 0) return n;
+		if (n < 0) {
+			/* A single oversized argv/env string is -E2BIG to the
+			 * kernel (MAX_ARG_STRLEN), not the -ENAMETOOLONG our
+			 * string copy returns for a too-long path. Reshape it
+			 * so the guest sees the errno execve(2) really gives. */
+			if (n == TAWC_ENAMETOOLONG) return TAWC_E2BIG;
+			return n;
+		}
 		ptrs[i] = strings + off;
 		off += (size_t)n + 1;  /* +1 for the NUL */
 		i++;
 	}
+}
+
+/* All the exec collection state (path_buf, argv/envp strings + ptr
+ * arrays in do_exec_path, guest_path/resolved in handle_execveat, and
+ * exec_handler.c's state_buf) is `static` — ~400 KB that doesn't fit
+ * the handler stack budget. SIGSYS handlers run concurrently on
+ * multiple guest threads (sa_mask only masks the trapping thread), and
+ * a CLONE_VM child exec'ing while a sibling execs shares this address
+ * space, so two concurrent execs could interleave writes into these
+ * buffers. Serialize the whole collect→write→execveat sequence with a
+ * spinlock: exec is terminal for the thread (the winner execveats away
+ * and never unlocks — that's fine, the address space is replaced), so
+ * blocking a concurrent exec briefly is harmless and vfork-safe. The
+ * common fork-then-exec case never contends (COW gives the child its
+ * own copy of the statics). */
+static volatile int g_exec_lock;
+
+static void exec_lock(void)
+{
+	while (__atomic_test_and_set(&g_exec_lock, __ATOMIC_ACQUIRE)) {
+		/* spin — exec is rare and terminal */
+	}
+}
+
+static void exec_unlock(void)
+{
+	__atomic_clear(&g_exec_lock, __ATOMIC_RELEASE);
 }
 
 /* Common path: parse arg0 = path pointer, arg1 = argv, arg2 = envp;
@@ -162,8 +200,13 @@ static long do_exec(const void *guest_path,
 static long handle_execve(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	return do_exec((const void *)args->a, (char *const *)args->b,
-	               (char *const *)args->c);
+	exec_lock();
+	long r = do_exec((const void *)args->a, (char *const *)args->b,
+	                 (char *const *)args->c);
+	/* Only reached on failure — on success do_exec execveats away and
+	 * never returns, leaving the lock held in the now-replaced image. */
+	exec_unlock();
+	return r;
 }
 
 static long append_relative(char *base, size_t *len, size_t cap,
@@ -186,9 +229,8 @@ static long append_relative(char *base, size_t *len, size_t cap,
 /* execveat(dirfd, path, argv, envp, flags). Handles the common fexecve(3)
  * shape: execveat(fd, "", argv, envp, AT_EMPTY_PATH), plus dirfd-relative
  * non-empty paths that can be reverse-translated into the rootfs view. */
-static long handle_execveat(const tawcroot_syscall_args *args, ucontext_t *uc)
+static long execveat_locked(const tawcroot_syscall_args *args)
 {
-	(void)uc;
 	int dirfd = (int)args->a;
 	int flags = (int)args->e;
 
@@ -224,6 +266,15 @@ static long handle_execveat(const tawcroot_syscall_args *args, ucontext_t *uc)
 
 	return do_exec_path(resolved, (char *const *)args->c,
 	                    (char *const *)args->d);
+}
+
+static long handle_execveat(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	exec_lock();
+	long r = execveat_locked(args);
+	exec_unlock();  /* only on failure — success execveats away */
+	return r;
 }
 
 void tawcroot_exec_register(void)

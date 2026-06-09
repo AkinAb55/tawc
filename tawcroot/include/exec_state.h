@@ -71,8 +71,13 @@ extern "C" {
  * exist outside the tree — both ends are the same binary — so we
  * don't maintain back-compat. */
 #define TAWCROOT_EXEC_STATE_VERSION 3
-#define TAWCROOT_EXEC_STATE_MAX_ARGS 256
-#define TAWCROOT_EXEC_STATE_MAX_ENV  256
+/* MAX_ARGS at 4096: shell glob expansions, linker invocations, and
+ * pacman hooks routinely pass hundreds-to-thousands of args; the kernel
+ * allows ~2 MB of argv strings. MAX_ENV at 1024 covers the busiest bash
+ * + profile.d environments. Each entry costs 4 bytes in the (BSS, not
+ * stack) header. */
+#define TAWCROOT_EXEC_STATE_MAX_ARGS 4096
+#define TAWCROOT_EXEC_STATE_MAX_ENV  1024
 #define TAWCROOT_EXEC_STATE_MAX_BINDS 16
 #define TAWCROOT_EXEC_STATE_MAX_SHM   64
 

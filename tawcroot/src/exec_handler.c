@@ -14,13 +14,16 @@
 #include "shm.h"
 #include "tawc_uapi.h"
 
-/* Cap on serialized exec_state size we'll write into a memfd. The
- * exec_state header is itself ~2 KB (offset arrays for 256 args + 256
- * envs), and strings can grow. NOTE: the collection layer
- * (syscalls_exec.c) accepts up to 64 KB argv + 256 KB envp, which
- * cannot fit here — oversized environments fail the exec with
- * -ENOSPC. See issues/tawcroot-exec-arg-env-limits.md. */
-#define EXEC_STATE_BUF_SIZE  (64 * 1024)
+/* Cap on serialized exec_state size we'll write into a memfd. Sized to
+ * hold the full header (offset arrays for MAX_ARGS args + MAX_ENV envs)
+ * plus everything the collection layer (syscalls_exec.c) accepts: 16 KB
+ * path + 64 KB argv + 256 KB envp, with slack. Previously this was 64 KB
+ * total, so any argv+envp over ~61 KB made the write -ENOSPC, which the
+ * guest saw as a nonsensical execve()==ENOSPC for exactly the busy
+ * environments the collection layer was sized for. BSS, not stack. */
+#define EXEC_STATE_BUF_SIZE                                            \
+	(sizeof(tawcroot_exec_state_header) +                         \
+	 (16 * 1024) + (64 * 1024) + (256 * 1024) + 8192)
 
 /* Validate an exec-probe fd the way execve(2) would validate the file:
  * directories are EISDIR, non-regular files and files with no execute
