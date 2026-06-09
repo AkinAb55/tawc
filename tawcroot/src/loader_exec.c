@@ -189,21 +189,14 @@ static long resolve_shebangs(int initial_fd,
 		 * deeper per shebang level. */
 		static char interp_storage[TAWC_SHEBANG_MAX_DEPTH][TAWC_SHEBANG_BUF];
 		static char arg_storage   [TAWC_SHEBANG_MAX_DEPTH][TAWC_SHEBANG_BUF];
-		size_t interp_len = 0;
-		while (interp[interp_len] && interp_len + 1 < sizeof interp_storage[0]) {
-			interp_storage[depth][interp_len] = interp[interp_len];
-			interp_len++;
-		}
-		interp_storage[depth][interp_len] = 0;
+		(void)tawc_str_copy(interp_storage[depth],
+		                    sizeof interp_storage[0], interp);
 		const char *new_argv0 = interp_storage[depth];
 
 		const char *new_argv1 = 0;
 		if (shebang_arg) {
-			size_t al = 0;
-			while (shebang_arg[al] && al + 1 < sizeof arg_storage[0]) {
-				arg_storage[depth][al] = shebang_arg[al]; al++;
-			}
-			arg_storage[depth][al] = 0;
+			(void)tawc_str_copy(arg_storage[depth],
+			                    sizeof arg_storage[0], shebang_arg);
 			new_argv1 = arg_storage[depth];
 		}
 
@@ -269,13 +262,8 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * argv[0], which can be anything; binfmt_script uses the actual
 	 * script path). */
 	static char path_storage[TAWC_LDR_PATH_MAX];
-	{
-		size_t k = 0;
-		while (args->guest_path[k] && k + 1 < sizeof path_storage) {
-			path_storage[k] = args->guest_path[k]; k++;
-		}
-		path_storage[k] = 0;
-	}
+	(void)tawc_str_copy(path_storage, sizeof path_storage,
+	                    args->guest_path);
 	/* argc == 0: synthesize argv[0] from the exec path so a shebang
 	 * resolve doesn't lose the script path (the kernel since 5.18
 	 * similarly forces argc ≥ 1, with ""). */

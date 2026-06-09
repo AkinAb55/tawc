@@ -31,6 +31,7 @@
 #include "errno_neg.h"
 #include "exec_handler.h"
 #include "exec_state.h"
+#include "io.h"
 #include "path.h"
 #include "raw_sys.h"
 #include "syscalls_exec.h"
@@ -209,23 +210,6 @@ static long handle_execve(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return r;
 }
 
-static long append_relative(char *base, size_t *len, size_t cap,
-                            const char *rel)
-{
-	if (*len == 0) return TAWC_EINVAL;
-	if (base[*len - 1] != '/') {
-		if (*len + 1 >= cap) return TAWC_ENAMETOOLONG;
-		base[(*len)++] = '/';
-	}
-	size_t i = 0;
-	while (rel[i]) {
-		if (*len + 1 >= cap) return TAWC_ENAMETOOLONG;
-		base[(*len)++] = rel[i++];
-	}
-	base[*len] = 0;
-	return 0;
-}
-
 /* execveat(dirfd, path, argv, envp, flags). Handles the common fexecve(3)
  * shape: execveat(fd, "", argv, envp, AT_EMPTY_PATH), plus dirfd-relative
  * non-empty paths that can be reverse-translated into the rootfs view. */
@@ -259,8 +243,13 @@ static long execveat_locked(const tawcroot_syscall_args *args)
 
 	if (guest_path[0] != 0) {
 		size_t len = (size_t)rn;
-		long ar = append_relative(resolved, &len, sizeof resolved,
-		                          guest_path);
+		long ar = 0;
+		if (len == 0) return TAWC_EINVAL;
+		if (resolved[len - 1] != '/')
+			ar = tawc_str_append(resolved, sizeof resolved,
+			                     &len, "/");
+		if (!ar) ar = tawc_str_append(resolved, sizeof resolved,
+		                              &len, guest_path);
 		if (ar < 0) return ar;
 	}
 
