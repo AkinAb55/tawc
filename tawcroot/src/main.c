@@ -50,12 +50,6 @@
 int tawcroot_testhost_main(int argc, char **argv);
 #endif
 
-static int streq(const char *a, const char *b)
-{
-	while (*a && *a == *b) { a++; b++; }
-	return *a == 0 && *b == 0;
-}
-
 /* Bind a freshly-forked top-level tawcroot to its launcher: SIGKILL
  * us when the launcher dies, exit cleanly if we're already orphaned
  * to init (catches the fork→prctl race where the launcher died
@@ -206,11 +200,6 @@ static __attribute__((noreturn)) void usage(int code)
 }
 
 #ifndef TAWCROOT_TESTHOST
-/* Linux openat flags. Pull from the kernel's per-arch header — O_DIRECTORY
- * is 0x4000 on aarch64 vs 0x10000 on x86_64 (O_DIRECT on aarch64), so
- * hand-pinned values silently break the rootfs open on the wrong arch. */
-#include <linux/fcntl.h>
-
 /* Parse "src:dst" into a NUL-terminated `src_buf` and a pointer to
  * the dst tail. Returns 0 / -EINVAL. */
 static long parse_bind_spec(const char *spec, char *src_buf, size_t cap,
@@ -233,7 +222,7 @@ static long parse_bind_spec(const char *spec, char *src_buf, size_t cap,
  * Init must complete BEFORE the loader runs because the guest will
  * issue path-bearing syscalls that need our handler installed.
  * Most of the bootstrap (rootfs view, binds, handler, signal-mask
- * reset, openat2 probe, /proc/self/exe stash) is shared with the
+ * reset, /proc/self/exe stash) is shared with the
  * --exec-child re-entry and lives in tawcroot_supervisor_init. The
  * pieces still owned by the production path are:
  *   - validating and parsing the CLI (-r, -b)
@@ -346,7 +335,7 @@ static enum tawcroot_entry classify_entry(int argc, char **argv)
 #endif
 	}
 
-	if (streq(argv[1], "--exec-child")) {
+	if (tawc_streq(argv[1], "--exec-child")) {
 		/* --exec-child has two flavors. Production has only one
 		 * (loader re-exec target, bare-integer fd); testhost adds a
 		 * smoke-child variant (--state-fd=<n> companion arg). The
@@ -363,8 +352,8 @@ static enum tawcroot_entry classify_entry(int argc, char **argv)
 	}
 
 #ifdef TAWCROOT_TESTHOST
-	if (streq(argv[1], "--exec"))             return ENTRY_EXEC;
-	if (streq(argv[1], "--exec-via-handler")) return ENTRY_EXEC_VIA_HANDLER;
+	if (tawc_streq(argv[1], "--exec"))             return ENTRY_EXEC;
+	if (tawc_streq(argv[1], "--exec-via-handler")) return ENTRY_EXEC_VIA_HANDLER;
 	return ENTRY_TESTHOST;
 #else
 	/* Anything else is taken as the start of -r/-b/-- parsing.
@@ -384,12 +373,12 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 
 	int i = 1;
 	while (i < argc) {
-		if (streq(argv[i], "--")) { cmd_start = i + 1; break; }
-		if (streq(argv[i], "-r")) {
+		if (tawc_streq(argv[i], "--")) { cmd_start = i + 1; break; }
+		if (tawc_streq(argv[i], "-r")) {
 			if (i + 1 >= argc) usage(2);
 			rootfs = argv[++i];
 			i++;
-		} else if (streq(argv[i], "-b")) {
+		} else if (tawc_streq(argv[i], "-b")) {
 			if (i + 1 >= argc) usage(2);
 			if (n_binds >= TAWCROOT_MAX_BINDS) {
 				tawc_io_str("tawcroot: too many -b binds\n");

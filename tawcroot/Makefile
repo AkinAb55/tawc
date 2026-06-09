@@ -33,21 +33,26 @@ OBJ      := $(OUT)/.obj
 
 CC       ?= cc
 
-# Host base address — same constraints as the x86_64 cross-build, pinned 256 MB
-# lower to avoid colliding with anything glibc's loader might map. See
-# notes/tawcroot.md "Why non-PIE" for the cross-build constraints.
+# Host base address — same constraints as the x86_64 cross-build's
+# 0x40000000, just pinned lower (0x10000000) to avoid colliding with
+# anything glibc's loader might map. See notes/tawcroot.md "Why non-PIE"
+# for the cross-build constraints.
 HOST_BASE := 0x10000000
 
 # --- flags ---
 
 # tawcroot production / testhost: freestanding, no libc, fixed-base non-PIE.
 # See tawcroot/build.sh's COMMON_CFLAGS for the full reasoning.
+# EXTRA_CFLAGS: optional env hook (e.g. -DTAWCROOT_TRACE=1), mirroring
+# the cross-build's hook in build.sh. NOTE: flag changes don't trigger
+# rebuilds — run `tawcroot/build.sh --abi=host --clean` (or touch the
+# sources) when toggling.
 TAWC_CFLAGS := \
     -O2 -fno-strict-aliasing -fno-stack-protector -fvisibility=hidden \
     -fno-exceptions -fno-asynchronous-unwind-tables -ffreestanding \
     -Wall -Wextra -Werror -D_GNU_SOURCE \
     -I$(SRC_T)/include \
-    -MMD -MP
+    -MMD -MP $(EXTRA_CFLAGS)
 
 TAWC_LDFLAGS := \
     -static -nostdlib -nostartfiles \
@@ -69,7 +74,7 @@ TESTHOST_EXTRA_CFLAGS := -DTAWCROOT_TESTHOST=1 -I$(SRC_TH)/include
 # stay manual because each fixture has different flags / source
 # extension; only the name list is shared.
 PROGRAMS_LIST    := $(SRC_TS)/integration/programs/programs.list
-PROGRAMS_NAMES   := $(shell awk '!/^[[:space:]]*(#|$$)/' $(PROGRAMS_LIST))
+PROGRAMS_NAMES   := $(shell awk '!/^[[:space:]]*(#|$$)/ { print $$1 }' $(PROGRAMS_LIST))
 PROGRAMS_DEFINES := $(shell awk -v out='$(OUT)' \
     '!/^[[:space:]]*(#|$$)/ { printf "-DTAWCROOT_%s_BIN=\\\"%s/programs/%s\\\" ", \
                               toupper($$1), out, $$1 }' \
@@ -174,7 +179,7 @@ TESTS_ARCH_S := $(SRC_T)/src/arch/x86_64_loader_jump.S
 
 # Cleat + STC source set, lifted from deps/cleat/meson.build (cleat_test pulls
 # cleat_dep + stc_dep). Keep in sync when bumping the pinned cleat commit
-# in tawcroot/build.
+# in deps/deps.list.
 CLEAT_C := \
     $(CLEAT)/stc/src/fmt.c \
     $(CLEAT)/stc/src/cstr_utf8.c \

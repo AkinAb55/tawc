@@ -43,7 +43,8 @@ void tawc_io_dec(long v)
 	int n = 0;
 	int neg = 0;
 	unsigned long u;
-	if (v < 0) { neg = 1; u = (unsigned long)(-v); }
+	/* Negate in unsigned space: -v is UB for LONG_MIN. */
+	if (v < 0) { neg = 1; u = -(unsigned long)v; }
 	else        { u = (unsigned long)v; }
 	if (u == 0) buf[n++] = '0';
 	while (u > 0) { buf[n++] = (char)('0' + (u % 10)); u /= 10; }

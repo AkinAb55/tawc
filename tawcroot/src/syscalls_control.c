@@ -62,9 +62,8 @@
  *     uc->uc_sigmask is per-thread for free, but we strip SIGSYS from
  *     it to keep traps coming, so the shadow has to live separately.
  * Sizing of the action buffer (TAWC_KERN_SIGACTION_SIZE) is exposed
- * via signal_shadow.h:
- *   x86_64: handler ptr (8) + flags (8) + sa_restorer (8) + mask (8) = 32
- *   aarch64: handler ptr (8) + flags (8) + mask (8)              = 24
+ * via signal_shadow.h: handler ptr (8) + flags (8) + sa_restorer (8)
+ * + mask (8) = 32 on both arches (both define SA_RESTORER).
  * (Earlier revs oversized to 64; over-read past the guest struct in
  * both directions, review finding B2.) */
 
@@ -135,20 +134,14 @@ static long handle_io_uring_deny(const tawcroot_syscall_args *args,
 }
 
 /* clone3: deny with -ENOSYS so glibc's __clone falls back to the
- * older clone(2) syscall (NR 220 aarch64 / NR 56 x86_64). Android's
- * untrusted_app filter on Android 14 (and possibly later) RET_KILLs
- * clone3 — at the highest action precedence, that overrides any of
- * our filter actions. We can't intercept the kernel's KILL, but we
- * can make the GUEST not issue clone3 in the first place: trapping
- * via our own filter and returning -ENOSYS happens BEFORE the kernel
- * sees the syscall enter the dispatcher path that runs Android's
- * filter — actually no, all filters are evaluated at syscall entry
- * and the most restrictive action wins. So this only works if Android
- * RET_TRAPs (not RET_KILLs) clone3. Empirically on Android 14 the
- * trap fires via our handler — we get [sigsys] nr=435 — meaning
- * Android's policy is RET_TRAP-or-ALLOW, not RET_KILL. Returning
- * -ENOSYS from our handler causes glibc to set its "clone3 missing"
- * flag and use clone() going forward. */
+ * older clone(2) syscall (NR 220 aarch64 / NR 56 x86_64). All stacked
+ * seccomp filters are evaluated at syscall entry and the most
+ * restrictive action wins, so this can't shield the guest from an
+ * Android RET_KILL on clone3 — it works only because Android's policy
+ * is empirically not KILL: on Android 14 our trap fires ([sigsys]
+ * nr=435), i.e. Android allows-or-traps clone3. Returning -ENOSYS
+ * causes glibc to set its "clone3 missing" flag and use clone()
+ * going forward, keeping the guest off the risky syscall entirely. */
 static long handle_clone3(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)args;

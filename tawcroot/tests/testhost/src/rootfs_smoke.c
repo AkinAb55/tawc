@@ -3784,7 +3784,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 		tawcroot_rootfs_host_path_len = i;
 	}
 
-	/* Probe process_vm_readv (against our own pid). Used by the
+	/* Probe process_vm_readv (against our own task id). Used by the
 	 * guarded guest-pointer copy helpers -- see notes/tawcroot.md
 	 * "Guest memory access". Must run before the seccomp filter goes
 	 * up because the probe issues a process_vm_readv that's only

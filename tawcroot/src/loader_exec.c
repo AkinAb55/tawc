@@ -112,11 +112,11 @@ static long parse_image(int fd, struct tawc_loader_image *img,
 /* Linux BINPRM_BUF_SIZE is currently 256 bytes. We can use the same. */
 #define TAWC_SHEBANG_BUF 256
 
-/* Resolve a #! shebang chain. Mutates `path_out` (replacing with the
- * interpreter path) and prepends one or two argv entries (the interp,
- * optionally a single shebang argument, and the script path) into
- * `argv_storage` / `argv_out`. Returns the resolved fd of the final
- * binary on success (caller takes ownership), or -errno on failure.
+/* Resolve a #! shebang chain. Prepends argv entries (the interpreter,
+ * optionally a single shebang argument; the original argv[0] becomes
+ * the script-path argument) into `argv_out` in place. Returns the
+ * resolved fd of the final binary on success (caller takes ownership),
+ * or -errno on failure (the working fd is closed).
  *
  * Each shebang line yields at most ONE argv argument after the
  * interpreter path. Linux splits on the FIRST whitespace in the
@@ -124,33 +124,40 @@ static long parse_image(int fd, struct tawc_loader_image *img,
  * as a single argument, regardless of further whitespace. We match
  * that behaviour. */
 static long resolve_shebangs(int initial_fd,
-                             char *path_buf, size_t path_cap,
-                             const char *path_suffix_storage,
                              const char **argv_out,
                              size_t argv_cap,
                              int *argc_out)
 {
 	int   bin_fd = (int)initial_fd;
 	int   depth  = 0;
-	(void)path_suffix_storage;
-	(void)path_buf; (void)path_cap;
 
 	for (;;) {
 		uint8_t hdr[2];
 		long n = tawc_pread64(bin_fd, hdr, 2, 0);
-		if (n < 0) return n;
+		if (n < 0) { tawc_close(bin_fd); return n; }
 		if (n < 2 || !(hdr[0] == '#' && hdr[1] == '!')) {
 			return bin_fd;  /* ELF or unknown — let parse_image classify */
 		}
-		if (depth >= TAWC_SHEBANG_MAX_DEPTH) return TAWC_ENOEXEC;
+		if (depth >= TAWC_SHEBANG_MAX_DEPTH) {
+			tawc_close(bin_fd);
+			return TAWC_ENOEXEC;
+		}
 
 		static char line[TAWC_SHEBANG_BUF];
 		long ln = tawc_pread64(bin_fd, line, sizeof line - 1, 0);
-		if (ln < 2) return TAWC_ENOEXEC;
+		if (ln < 2) { tawc_close(bin_fd); return TAWC_ENOEXEC; }
 		line[ln] = 0;
-		/* Find newline; trim. */
+		/* Find newline; trim. A full buffer with no newline means the
+		 * shebang line exceeds BINPRM_BUF_SIZE — the kernel (≥5.1)
+		 * returns ENOEXEC rather than truncating the interpreter path
+		 * mid-token; match that. (A short read hit EOF, which acts as
+		 * the line terminator, same as the kernel.) */
 		long eol = 2;
 		while (eol < ln && line[eol] != '\n') eol++;
+		if (eol == ln && ln == (long)sizeof line - 1) {
+			tawc_close(bin_fd);
+			return TAWC_ENOEXEC;
+		}
 		line[eol] = 0;
 		/* Skip "#!" and leading whitespace. */
 		long i = 2;
@@ -166,7 +173,10 @@ static long resolve_shebangs(int initial_fd,
 		       (line[arg_hi - 1] == ' ' || line[arg_hi - 1] == '\t'))
 			arg_hi--;
 
-		if (interp_hi == interp_lo) return TAWC_ENOEXEC;  /* "#!\n" — bad */
+		if (interp_hi == interp_lo) {           /* "#!\n" — bad */
+			tawc_close(bin_fd);
+			return TAWC_ENOEXEC;
+		}
 		line[interp_hi] = 0;
 		const char *interp = &line[interp_lo];
 
@@ -202,7 +212,12 @@ static long resolve_shebangs(int initial_fd,
 		}
 
 		int extra = shebang_arg ? 2 : 1;
-		if ((size_t)(*argc_out + extra) > argv_cap) return TAWC_E2BIG;
+		/* +1: argv_out[*argc_out] gets the NULL terminator below, so
+		 * the array needs argc + extra + 1 slots. */
+		if ((size_t)(*argc_out + extra + 1) > argv_cap) {
+			tawc_close(bin_fd);
+			return TAWC_E2BIG;
+		}
 
 		/* Shift argv[1..] right by `extra`, place [interp,(arg,)script]
 		 * at the front. New argv[0] is interp, then optional shebang
@@ -231,14 +246,6 @@ static long resolve_shebangs(int initial_fd,
 		tawc_close(bin_fd);
 		bin_fd = (int)new_fd;
 		depth++;
-
-		/* DO NOT mutate path_buf here. The caller's path_storage
-		 * is shared with argv_out[0]'s ORIGINAL value, and that
-		 * pointer is now living in argv_out[1] (our captured
-		 * script_path). Overwriting path_buf would silently change
-		 * argv[1] to the interpreter's path under us — exactly
-		 * what bit pacman-key. AT_EXECFN uses args->guest_path
-		 * directly, which is unaffected. */
 	}
 }
 
@@ -279,14 +286,21 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 		}
 		path_storage[k] = 0;
 	}
+	/* argc == 0: synthesize argv[0] from the exec path so a shebang
+	 * resolve doesn't lose the script path (the kernel since 5.18
+	 * similarly forces argc ≥ 1, with ""). */
+	eff_argc = args->argc > 0 ? args->argc : 1;
 	eff_argv[0] = path_storage;
 	for (int i = 1; i < args->argc; i++) eff_argv[i] = args->argv[i];
-	eff_argv[args->argc] = 0;
-	eff_argc = args->argc;
+	eff_argv[eff_argc] = 0;
 
-	long resolved_fd = resolve_shebangs((int)bin_fd, path_storage,
-	                                    sizeof path_storage,
-	                                    bin_suffix, eff_argv,
+	/* NOTE: path_storage must not be mutated after this point. It is
+	 * argv[0]'s original value, and after a shebang resolve that
+	 * pointer lives on as the script-path argv entry — overwriting it
+	 * would silently change the interpreter's argument under us
+	 * (exactly what bit pacman-key). AT_EXECFN uses args->guest_path
+	 * directly, which is unaffected. */
+	long resolved_fd = resolve_shebangs((int)bin_fd, eff_argv,
 	                                    sizeof eff_argv / sizeof eff_argv[0],
 	                                    &eff_argc);
 	if (resolved_fd < 0) LOADER_FAIL(75);
@@ -307,6 +321,11 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	if (tawc_loader_map(&bin_img, (int)bin_fd, 0, PAGE,
 	                    &tawcroot_loader_io_prod, &bin_pl) != 0)
 		LOADER_FAIL(68);
+	/* phdr_addr == 0 means compute_phdr_addr couldn't produce a sane
+	 * AT_PHDR (no PT_PHDR and phdrs outside the first PT_LOAD) —
+	 * refuse to load instead of handing ld.so a NULL AT_PHDR. */
+	if (bin_pl.phdr_addr == 0)
+		LOADER_FAIL(73);
 
 	/* --- 3. Optional: ld.so for dynamic guests. --- */
 	uintptr_t at_base = 0;
@@ -362,6 +381,11 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	long stack_rv = tawc_mmap((void *)0, STACK_SZ, PROT_RW, MAP_PA, -1, 0);
 	if (tawc_loader_mmap_is_err((uintptr_t)stack_rv)) LOADER_FAIL(70);
 	void *stack = (void *)stack_rv;
+	/* Guard page at the low end so stack overflow is a deterministic
+	 * SIGSEGV instead of a silent walk into whatever mapping the
+	 * kernel placed below. */
+	if (tawc_mprotect(stack, PAGE, TAWC_MM_PROT_NONE) != 0)
+		LOADER_FAIL(70);
 
 	uint8_t random16[16];
 	if (tawc_getrandom(random16, 16, 0) != 16) LOADER_FAIL(71);

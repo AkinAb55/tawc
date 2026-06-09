@@ -6,14 +6,15 @@
  * writes a return value back into the saved register frame.
  *
  * The recorded `tawcroot_handler_obs` is a single-slot snapshot — one
- * writer per TRAP, atomic-ish via plain stores guarded by a release fence.
- * The dispatch table handles production traps; the observation slot stays
- * around as a test/debug hatch.
+ * writer per TRAP, plain stores, single-threaded testhost only (see the
+ * caveat at its definition). The dispatch table handles production
+ * traps; the observation slot stays around as a test/debug hatch.
  *
  * We rely on rt_sigaction directly (not bionic's libc wrapper) because
  * we link `-nostdlib`. On x86_64 the kernel mandates SA_RESTORER and a
- * user-supplied trampoline; on aarch64 the kernel installs a VDSO
- * trampoline and `sa_restorer` is unused. The trampoline lives in
+ * user-supplied trampoline. On aarch64 the kernel falls back to a VDSO
+ * trampoline only when SA_RESTORER is unset — we DO set it, so our
+ * trampoline is what actually runs on both arches. It lives in
  * arch/<arch>_stub.S as `tawcroot_sigreturn_trampoline`.
  */
 
@@ -71,9 +72,26 @@ extern void tawcroot_sigreturn_trampoline(void);
 static volatile tawcroot_handler_obs g_obs;
 #endif
 
+#ifndef SYS_SECCOMP
+# define SYS_SECCOMP 1
+#endif
+
 static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 {
 	(void)sig;
+
+	/* Only seccomp-delivered SIGSYS carries a syscall frame. A
+	 * user-raised SIGSYS (kill/tgkill/raise — not trapped) would have
+	 * us read garbage "args" from an interrupted-code ucontext and,
+	 * worse, clobber a live register via write_return on resume. The
+	 * kernel default for SIGSYS is process death; match it loudly
+	 * (notes/tawcroot.md "SIGSYS handler": abort if not seccomp). */
+	if (info->si_code != SYS_SECCOMP) {
+		tawc_io_str("tawcroot: non-seccomp SIGSYS (si_code=");
+		tawc_io_dec(info->si_code);
+		tawc_io_str("); dying\n");
+		tawc_exit_group(128 + SIGSYS);
+	}
 
 	ucontext_t *uc = (ucontext_t *)ucontext;
 	tawcroot_syscall_args args;
@@ -103,8 +121,6 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 	g_obs.last_si_code    = sc_code;
 	g_obs.last_si_arch    = sc_arch;
 	g_obs.calls          += 1;
-#else
-	(void)info;
 #endif
 
 	/* Dispatch. Empty slots fall through to -ENOSYS — see comment in

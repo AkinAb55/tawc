@@ -40,6 +40,11 @@ long tawcroot_build_filter(struct sock_filter *prog, size_t prog_cap,
 {
 	if (!prog || prog_cap == 0) return TAWC_EINVAL;
 	if (n_traps > 1900) return TAWC_E2BIG;  /* kernel cap is 4096 */
+	/* cBPF jt/jf are u8. The close block computes jf = 4 + n_reserved
+	 * and jt = n_reserved - rj; anything past 251 would silently wrap
+	 * and mis-route. Production clamps to TAWCROOT_MAX_RESERVED_FDS
+	 * (64); this guards direct callers of the pure builder. */
+	if (n_reserved > 251) return TAWC_E2BIG;
 
 	const uint32_t stub_lo = (uint32_t)(stub_ret_addr & 0xffffffffu);
 	const uint32_t stub_hi = (uint32_t)(stub_ret_addr >> 32);
@@ -86,6 +91,11 @@ long tawcroot_build_filter(struct sock_filter *prog, size_t prog_cap,
 			}
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_RET | BPF_K, SECCOMP_RET_TRAP));
+			/* Re-load nr. Strictly unreachable today (every path
+			 * inside the block ends in a RET, and the not-close
+			 * jf above jumps past this instruction) — kept as a
+			 * defensive invariant so later JEQs still see A == nr
+			 * if the block's jump math ever changes. */
 			EMIT_OR_FAIL(TAWC_BPF_S(BPF_LD | BPF_W | BPF_ABS, 0));
 			continue;
 		}

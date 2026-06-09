@@ -29,6 +29,9 @@ typedef struct {
 long tawcroot_install_handler(void);
 
 /* Read the most-recent observation. Returns a snapshot — the caller may
- * inspect any field. Stable across handler invocations because we update
- * the slot in-place inside the handler (one writer, one reader, fenced). */
+ * inspect any field. Single-threaded testhost only (one writer, one
+ * reader, plain stores). Defined only under TAWCROOT_TESTHOST; a
+ * production caller fails at link. */
+#ifdef TAWCROOT_TESTHOST
 void tawcroot_handler_observe(tawcroot_handler_obs *out);
+#endif

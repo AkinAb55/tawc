@@ -4,12 +4,14 @@
  *   tawcroot_raw_syscall      — C-callable wrapper. Shifts SysV args into
  *                                kernel syscall registers and issues syscall.
  *   tawcroot_raw_syscall_insn — label sitting EXACTLY on the syscall
- *                                instruction. The seccomp filter allowlist
- *                                checks instruction_pointer against this
- *                                address (low and high 32 bits separately —
+ *                                instruction. Kept symbolic so tests can
+ *                                sanity-check ranges.
+ *   tawcroot_raw_syscall_ret  — label immediately AFTER the syscall. This
+ *                                is what the kernel reports as
+ *                                seccomp_data.instruction_pointer, so the
+ *                                filter's IP allowlist matches against it
+ *                                (low and high 32 bits separately —
  *                                cBPF is 32-bit, see notes/tawcroot.md).
- *   tawcroot_raw_syscall_ret  — label after the syscall, kept symbolic so
- *                                we can sanity-check ranges in tests.
  *   _start                    — kernel-direct entry. Sets up argc/argv
  *                                from the initial stack and tail-calls
  *                                tawcroot_main. No bionic init runs.

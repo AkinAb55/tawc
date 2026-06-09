@@ -43,7 +43,7 @@ tawcroot_handler_fn tawcroot_dispatch_get(int nr);
 void tawcroot_dispatch_init(void);
 
 /* Returns the trap-syscall list for the BPF filter generator. The caller
- * passes a buffer; we fill it with syscall numbers (in the same order
- * the dispatch table was built) and return the count. The list is the
- * union of "every syscall with a non-NULL dispatch slot". */
+ * passes a buffer; we fill it with syscall numbers in ascending
+ * NR order (a table scan, not install order) and return the count. The
+ * list is the union of "every syscall with a non-NULL dispatch slot". */
 size_t tawcroot_dispatch_trap_list(int *out, size_t out_cap);

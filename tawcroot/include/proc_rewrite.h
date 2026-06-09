@@ -56,8 +56,9 @@ long tawcroot_proc_reverse_translate_path(
  * (everything after the inode column) is reverse-translated when it
  * matches a rootfs/bind prefix, and emitted verbatim otherwise. Lines
  * with bracketed pseudo-paths (`[heap]`, `[stack]`, `[vdso]`, …) and
- * empty paths are passed through. Lines without a trailing `\n` are
- * treated as the final partial line and emitted as-is.
+ * empty paths are passed through. A final line without a trailing
+ * `\n` is rewritten like any other (the path field just ends at the
+ * buffer instead of at a newline).
  *
  * Returns the number of bytes written to `out`, or `-ENOSPC` if the
  * output buffer is too small. The output is NOT NUL-terminated — it's

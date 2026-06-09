@@ -11,8 +11,8 @@
 
 int tawc_usercopy_works = 0;
 
-/* The process_vm_{read,write}v helpers need the *current* thread's
- * tid to address our own VM. We can't cache it: after `fork(2)` the
+/* The process_vm_{read,write}v helpers need the *current* task id to
+ * address our own VM. We can't cache it: after `fork(2)` the
  * child inherits parent globals but lives in a different process,
  * with a fresh tid that doesn't match the parent's. Same with
  * thread creation. Recompute on every call — gettid is a cheap
@@ -20,7 +20,7 @@ int tawc_usercopy_works = 0;
  * SIGSYS handler is already on the slow path. (Discovered when
  * bash's fork+execve dance returned -EFAULT through our exec
  * handler — child's process_vm_readv was reading parent VM.) */
-static long current_tid(void)
+static long current_task_id(void)
 {
 	long t = TAWC_RAW(TAWC_SYS_gettid, 0, 0, 0, 0, 0, 0);
 	return t > 0 ? t : 0;
@@ -35,7 +35,7 @@ long tawc_usercopy_init(void)
 	char dst = 0;
 	struct iovec liov = { .iov_base = &dst, .iov_len = 1 };
 	struct iovec riov = { .iov_base = &src, .iov_len = 1 };
-	long rv = TAWC_RAW(TAWC_SYS_process_vm_readv, current_tid(),
+	long rv = TAWC_RAW(TAWC_SYS_process_vm_readv, current_task_id(),
 			   (long)&liov, 1, (long)&riov, 1, 0);
 	if (rv == 1 && dst == 'x') {
 		tawc_usercopy_works = 1;
@@ -57,7 +57,7 @@ static long readv_guest(void *dst, size_t len, const void *src)
 	if (!tawc_usercopy_works) return TAWC_EFAULT;
 	struct iovec liov = { .iov_base = dst,        .iov_len = len };
 	struct iovec riov = { .iov_base = (void *)src, .iov_len = len };
-	long rv = TAWC_RAW(TAWC_SYS_process_vm_readv, current_tid(),
+	long rv = TAWC_RAW(TAWC_SYS_process_vm_readv, current_task_id(),
 			   (long)&liov, 1, (long)&riov, 1, 0);
 	return rv;
 }
@@ -109,7 +109,7 @@ long tawc_copy_to_guest(void *guest_dst, const void *src, size_t n)
 	 * address space), a bare deref is unsafe: the guest may pass a NULL
 	 * or unmapped output pointer and the kernel's contract is to return
 	 * -EFAULT, not deliver SIGSEGV synchronously into our SIGSYS handler.
-	 * Route through process_vm_writev against our own pid — the kernel
+	 * Route through process_vm_writev against our own task id — the kernel
 	 * validates the destination and reports -EFAULT cleanly. (Reviewed
 	 * findings B1+B6.) */
 	if (!guest_dst || !src) return TAWC_EFAULT;
@@ -117,7 +117,7 @@ long tawc_copy_to_guest(void *guest_dst, const void *src, size_t n)
 	if (!tawc_usercopy_works) return TAWC_EFAULT;
 	struct iovec liov = { .iov_base = (void *)src,    .iov_len = n };
 	struct iovec riov = { .iov_base = guest_dst,      .iov_len = n };
-	long rv = TAWC_RAW(TAWC_SYS_process_vm_writev, current_tid(),
+	long rv = TAWC_RAW(TAWC_SYS_process_vm_writev, current_task_id(),
 			   (long)&liov, 1, (long)&riov, 1, 0);
 	if (rv < 0)        return TAWC_EFAULT;
 	if ((size_t)rv != n) return TAWC_EFAULT;

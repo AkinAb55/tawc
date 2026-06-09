@@ -107,8 +107,9 @@ int tawc_int_to_str(char *buf, size_t buflen, int v)
 		buf[n] = 0;
 		return n;
 	}
+	/* Negate in unsigned space: -v is UB for INT_MIN. */
 	int neg = v < 0;
-	unsigned int u = (unsigned int)(neg ? -v : v);
+	unsigned int u = neg ? -(unsigned int)v : (unsigned int)v;
 	char tmp[12];
 	int t = 0;
 	while (u && t < (int)sizeof tmp) { tmp[t++] = (char)('0' + (u % 10)); u /= 10; }

@@ -94,6 +94,7 @@ static void child_load_and_jump(const struct child_args *ca)
 
 	uint8_t pbuf[64 * 64];
 	size_t pbytes = (size_t)img.e_phnum * img.e_phentsize;
+	if (pbytes > sizeof pbuf) _exit(204);
 	if (pread(fd, pbuf, pbytes, (off_t)img.e_phoff) != (ssize_t)pbytes)
 		_exit(204);
 	if (tawc_loader_parse_phdrs(pbuf, sizeof pbuf, 4096, &img) != 0)

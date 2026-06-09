@@ -62,7 +62,10 @@ static int apply_memo(char *suf, size_t cap, tawcroot_path_mode mode,
 		}
 		size_t after_src_len = suf_len - m->src_len;
 		size_t need = m->target_len + after_src_len + 1;
-		if (need > cap) return 0;
+		/* Doesn't fit: skip this entry (same reasoning as the
+		 * sole-component skip above — a later entry may still
+		 * apply). */
+		if (need > cap) continue;
 
 		/* Shift the trailing remainder (including the terminating
 		 * NUL) into its new position. Direction of copy matters:
@@ -255,6 +258,14 @@ tawcroot_path_result tawcroot_path_translate_with_ctx(
 		r.err = TAWC_EFAULT;
 		return r;
 	}
+	/* Kernel semantics: an empty pathname fails ENOENT on every path
+	 * syscall (AT_EMPTY_PATH callers never reach the translator).
+	 * Without this check "" would take the relative branch and
+	 * translate to the cwd. */
+	if (guest_path[0] == 0) {
+		r.err = TAWC_ENOENT;
+		return r;
+	}
 	r.base_fd = ctx->rootfs_base_fd;
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -295,6 +306,12 @@ tawcroot_path_result tawcroot_path_translate_with_ctx(
 		size_t j = 0;
 		while (out_suffix[j] && i + 1 < TAWCROOT_PATH_SCRATCH_SIZE)
 			tmp[i++] = out_suffix[j++];
+		if (out_suffix[j]) {
+			/* Suffix doesn't fit the re-fold scratch — error out
+			 * rather than silently truncating to a wrong path. */
+			r.err = TAWC_ENAMETOOLONG;
+			return r;
+		}
 		tmp[i] = 0;
 		long rf = tawcroot_path_fold_absolute(tmp, out_suffix, out_cap);
 		if (rf < 0) { r.err = rf; return r; }

@@ -1,16 +1,13 @@
-/* In-process `--exec` driver: opens a guest binary, parses it,
+/* In-process exec driver: opens a guest binary, parses it,
  * (recursively for ld.so), maps everything, builds an initial stack,
  * and jumps. Never returns on success.
  *
- * This is the one-piece function the production CLI needs to actually
- * run a guest. The full phase-2.6 plan also has the SIGSYS-handler-
- * triggered re-exec dance (so the guest's `execve(2)` re-routes
- * through tawcroot) — that lands later. Today the only entry point
- * is `tawcroot --exec <path> [args...]` which calls this directly,
- * giving us host-side end-to-end coverage of the production loader
- * pipeline.
+ * Entry points: the production `-r ROOTFS -- CMD` initial exec, the
+ * SIGSYS-handler-triggered `--exec-child <fd>` re-exec (guest
+ * execve(2) re-routing), and the testhost-only `--exec <path>`
+ * diagnostic mode.
  *
- * On any failure we exit_group with a small numeric status (60..79
+ * On any failure we exit_group with a small numeric status (60..83
  * range) so callers can distinguish "loader failed" from "guest ran
  * and exited N" without conflating exit codes.
  */
@@ -60,9 +57,14 @@ struct tawc_loader_exec_args {
  *   67   ld.so isn't ET_DYN, has its own PT_INTERP, etc
  *   68   guest binary mmap failed
  *   69   ld.so mmap failed
- *   70   stack region mmap failed
+ *   70   stack region mmap / guard-page mprotect failed
  *   71   getrandom for AT_RANDOM failed
  *   72   stack synth failed
+ *   73   no usable AT_PHDR address (no PT_PHDR, phdrs outside the
+ *        first PT_LOAD)
+ *   74   too many guest args for the effective-argv array
+ *   75   shebang resolve failed (depth limit, unreadable interpreter,
+ *        malformed #! line)
  *
  * Caller-distinguishable from guest exit codes (which are typically
  * 0..127). The 60..79 range is reserved for loader-driver self-failure.
@@ -77,10 +79,9 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args);
  *
  * Failure exit codes (disjoint from `tawcroot_loader_exec`'s 60..79):
  *
- *   80   fstat on state_fd failed
+ *   80   state_fd size lookup (lseek) failed or state too small
  *   81   mmap of state_fd failed
  *   82   exec_state header invalid (magic / version / sizes)
- *   83   close(state_fd) failed (cleanup; not fatal in practice)
  */
 __attribute__((noreturn))
 void tawcroot_loader_exec_child(int state_fd, const char *platform);

@@ -170,21 +170,32 @@ long tawc_loader_map(const struct tawc_loader_image *img,
 			if (rc < 0) return rc;
 		}
 
-		/* (d) Anonymous BSS extension pages. */
+		/* (d) Anonymous BSS extension pages (covers the whole segment
+		 * for pure-BSS PT_LOADs). ET_DYN replaces pages inside our
+		 * own PROT_NONE reservation, so plain MAP_FIXED is required;
+		 * ET_EXEC has no reservation, so clobbering an existing
+		 * mapping (ours included) must fail loudly — same
+		 * MAP_FIXED_NOREPLACE discipline as the file-backed part. */
 		if (s->bss_anon_hi > s->bss_anon_lo) {
-			int flags = TAWC_MM_MAP_PRIVATE | TAWC_MM_MAP_ANON |
-			            TAWC_MM_MAP_FIXED;
 			uintptr_t alen = s->bss_anon_hi - s->bss_anon_lo;
 			uintptr_t avirt = base + s->bss_anon_lo;
-			uintptr_t rv = io->mmap(io->ctx, (void *)avirt, alen,
-			                        seg_prot, flags, -1, 0);
+			uintptr_t rv;
+			if (is_dyn) {
+				int flags = TAWC_MM_MAP_PRIVATE |
+				            TAWC_MM_MAP_ANON | TAWC_MM_MAP_FIXED;
+				rv = io->mmap(io->ctx, (void *)avirt, alen,
+				              seg_prot, flags, -1, 0);
+			} else {
+				int flags = TAWC_MM_MAP_PRIVATE |
+				            TAWC_MM_MAP_ANON |
+				            TAWC_MM_MAP_FIXED_NOREPLACE;
+				rv = mmap_fixed_noreplace_checked(
+					io, (void *)avirt, alen,
+					seg_prot, flags, -1, 0);
+			}
 			if (tawc_loader_mmap_is_err(rv))
 				return tawc_loader_mmap_errno(rv);
 		}
-
-		/* For ET_EXEC: pure-BSS segments (file_size == 0). The
-		 * MAP_FIXED_NOREPLACE anonymous mmap above already placed
-		 * them. For ET_DYN: same — replace the reservation pages. */
 	}
 
 	/* placement.base/span describe the in-memory range of the loaded
@@ -208,7 +219,6 @@ long tawc_loader_map(const struct tawc_loader_image *img,
 		out->base = (uintptr_t)img->addr_min;
 		out->span = (uintptr_t)(img->addr_max - img->addr_min);
 	}
-	(void)span;
 	out->entry      = base + (uintptr_t)img->e_entry;
 	out->phdr_addr  = compute_phdr_addr(img, base);
 	out->phnum      = img->e_phnum;

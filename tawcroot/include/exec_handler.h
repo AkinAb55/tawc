@@ -19,11 +19,13 @@
  * This file's contract is:
  *
  *   `tawcroot_exec_handler_perform(path, argc, argv, envp)`
- *     - path: rootfs-translated, absolute on the host filesystem
- *       (caller is responsible for path translation).
+ *     - path: the UNTRANSLATED guest path. perform translates it for
+ *       the probe, and the exec-child re-translates it after re-exec
+ *       (the rootfs view is rebuilt from the exec_state extras).
  *     - argv: NULL-terminated guest-supplied argv.
  *     - envp: NULL-terminated guest-supplied envp.
- *     - Validates path is openable (open + readable).
+ *     - Validates the target like execve would (openable, regular
+ *       file, some execute bit; directories are -EISDIR).
  *     - Creates non-CLOEXEC memfd, writes exec_state.
  *     - Opens /proc/self/exe.
  *     - execveat-s self with `--exec-child <fdstr>`.
@@ -33,9 +35,11 @@
  *       expected to surface this back to the guest as the result of
  *       its `execve` syscall.
  *
- * The handler is async-signal-safe: every step uses raw_sys.h and
- * touches no globals beyond the function-local stack frame and the
- * memfd it creates.
+ * The handler uses raw_sys.h for every syscall. NOTE: the exec path
+ * stages argv/envp/exec_state in static buffers (here and in
+ * syscalls_exec.c), so two threads exec'ing concurrently — or a
+ * CLONE_VM child exec'ing while the parent execs — can interleave.
+ * See issues/tawcroot-exec-static-buffers-not-thread-safe.md.
  */
 
 #pragma once
@@ -48,15 +52,17 @@ extern "C" {
 
 /* Perform the re-exec dance. See module header.
  *
- * `path` is the host-fs path the guest wanted to exec (post-rootfs-
- * translation). `argv` and `envp` are NULL-terminated arrays of
+ * `path` is the guest path the guest wanted to exec (translation
+ * happens inside). `argv` and `envp` are NULL-terminated arrays of
  * NUL-terminated strings (same shape as argv/envp passed to execve).
  *
  * Returns -errno on any pre-execveat failure:
- *   -EACCES   couldn't open path
- *   -EFAULT   memfd creation / write failed
- *   -ENOMEM   exec_state too large for any memfd we'd want to use
- *   -ENOEXEC  /proc/self/exe couldn't be opened
+ *   probe errors    raw open/translate errno (-ENOENT, -EACCES, …),
+ *                   -EISDIR for directories, -EACCES for non-regular
+ *                   or non-executable files
+ *   -ENOSPC        exec_state too large for the serialization buffer
+ *   -EFAULT        memfd creation / write / rewind failed
+ *   -ENOEXEC       /proc/self/exe couldn't be opened
  *   anything else from execveat itself (rare; usually just doesn't
  *   return)
  *

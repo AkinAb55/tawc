@@ -27,7 +27,20 @@ void rh_rmrf(const char *path)
 
 bool rh_mkdir_p(const char *path, mode_t mode)
 {
-	return mkdir(path, mode) == 0 || errno == EEXIST;
+	/* mkdir -p semantics: create missing parents too (the name always
+	 * promised this; the old one-level mkdir made callers stack
+	 * per-component calls). */
+	char buf[PATH_MAX];
+	size_t n = strlen(path);
+	if (n == 0 || n >= sizeof buf) return false;
+	memcpy(buf, path, n + 1);
+	for (char *p = buf + 1; *p; p++) {
+		if (*p != '/') continue;
+		*p = 0;
+		if (mkdir(buf, mode) != 0 && errno != EEXIST) return false;
+		*p = '/';
+	}
+	return mkdir(buf, mode) == 0 || errno == EEXIST;
 }
 
 bool rh_copy_file(const char *src, const char *dst, mode_t mode)

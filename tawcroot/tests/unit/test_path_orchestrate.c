@@ -32,7 +32,7 @@
 
 /* Sentinel base_fd value. The orchestration only inspects whether the
  * result's base_fd != ctx->rootfs_base_fd to decide "did a bind take
- * over"; the value itself is opaque. We use -100 in the rootfs slot
+ * over"; the value itself is opaque. We use 100 in the rootfs slot
  * and 200+i for bind slots so test failures show which one matched. */
 #define TEST_ROOTFS_FD 100
 
@@ -348,7 +348,7 @@ test(orch_bind_takes_priority_over_memo)
 	mk_bind(&binds[0], 200, "lib");
 	struct tawcroot_symlink_memo memos[1] = {{
 		.src = "lib", .src_len = 3,
-		.target = "usr/lib", .target_len = 7, .target_absolute = 0,
+		.target = "usr/lib", .target_len = 7,
 	}};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -375,7 +375,7 @@ test(orch_memo_then_bind_when_no_first_pass_match)
 	mk_bind(&binds[0], 200, "usr/lib");
 	struct tawcroot_symlink_memo memos[1] = {{
 		.src = "lib", .src_len = 3,
-		.target = "usr/lib", .target_len = 7, .target_absolute = 0,
+		.target = "usr/lib", .target_len = 7,
 	}};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -398,7 +398,7 @@ test(orch_memo_with_absolute_target_refolds)
 	 * the leading slash, and the final suffix is "usr/bin/x". */
 	struct tawcroot_symlink_memo memos[1] = {{
 		.src = "bin", .src_len = 3,
-		.target = "usr/bin", .target_len = 7, .target_absolute = 1,
+		.target = "usr/bin", .target_len = 7,
 	}};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -419,7 +419,7 @@ test(orch_memo_skipped_under_nofollow_when_sole_component)
 	 * link target — skip the rewrite. */
 	struct tawcroot_symlink_memo memos[1] = {{
 		.src = "lib", .src_len = 3,
-		.target = "usr/lib", .target_len = 7, .target_absolute = 0,
+		.target = "usr/lib", .target_len = 7,
 	}};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -446,7 +446,7 @@ test(orch_memo_applies_to_path_with_trailing_components_under_nofollow)
 	 * rewrite (the leaf is foo, not the symlink). */
 	struct tawcroot_symlink_memo memos[1] = {{
 		.src = "lib", .src_len = 3,
-		.target = "usr/lib", .target_len = 7, .target_absolute = 0,
+		.target = "usr/lib", .target_len = 7,
 	}};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -805,9 +805,9 @@ test(orch_memo_loop_terminates_at_eight_hops)
 	 * (cleat has no test timeout — an infinite loop hangs the run). */
 	struct tawcroot_symlink_memo memos[2] = {
 		{ .src = "a", .src_len = 1,
-		  .target = "b", .target_len = 1, .target_absolute = 0 },
+		  .target = "b", .target_len = 1 },
 		{ .src = "b", .src_len = 1,
-		  .target = "a", .target_len = 1, .target_absolute = 0 },
+		  .target = "a", .target_len = 1 },
 	};
 	struct tawcroot_path_translate_ctx ctx = {
 		.rootfs_base_fd = TEST_ROOTFS_FD,
@@ -821,4 +821,122 @@ test(orch_memo_loop_terminates_at_eight_hops)
 	/* After 8 hops alternating a↔b, the suffix is one of "a" or "b". */
 	int landed = (out[0] == 'a' || out[0] == 'b') && out[1] == 0;
 	test_int_eq(landed, 1);
+}
+
+/* ----- Empty guest path ----- */
+
+test(orch_empty_path_is_enoent)
+{
+	/* Kernel semantics: an empty pathname fails ENOENT on every path
+	 * syscall without AT_EMPTY_PATH. Regression: "" used to take the
+	 * relative branch and translate to the cwd. */
+	struct cwd_state cs = { .value = "/home/user", .ret = 0 };
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd = TEST_ROOTFS_FD,
+		.oracle = &ora_empty,
+		.cwd_to_guest_abs = mock_cwd, .cwd_ctx = &cs,
+	};
+	char out[256];
+	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
+		&ctx, "", out, sizeof out, TAWCROOT_PATH_FOLLOW);
+	test_int_eq(r.err, -2);
+}
+
+/* ----- Memo re-fold overflow ----- */
+
+test(orch_memo_refold_overflow_is_enametoolong)
+{
+	/* A memo rewrite that grows the suffix past the re-fold scratch
+	 * (4096 incl. the re-attached leading '/') must error out, not
+	 * silently truncate to a wrong path. Build "/a/<4080 x's>" and a
+	 * memo a → <32-byte prefix> so the rewritten path no longer fits. */
+	static char in[4096];
+	size_t i = 0;
+	in[i++] = '/';
+	in[i++] = 'a';
+	in[i++] = '/';
+	while (i < 4084) in[i++] = 'x';
+	in[i] = 0;
+
+	struct tawcroot_symlink_memo memos[1] = {{
+		.src = "a", .src_len = 1,
+		.target = "0123456789012345678901234567890", .target_len = 31,
+	}};
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd = TEST_ROOTFS_FD,
+		.memos = memos, .n_memos = 1,
+		.oracle = &ora_empty,
+	};
+	static char out[8192];
+	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
+		&ctx, in, out, sizeof out, TAWCROOT_PATH_FOLLOW);
+	test_int_eq(r.err, -36);
+}
+
+/* ----- Root-anchored memo target with multi-component src ----- */
+
+test(orch_memo_multicomponent_src_uses_root_anchored_target)
+{
+	/* The builder (memo_one in path.c) stores relative symlink
+	 * targets root-anchored: rootfs usr/sbin → "bin" is stored as
+	 * target "usr/bin". This pins the orchestration side of that
+	 * contract: the stored target replaces the full src prefix. */
+	struct tawcroot_symlink_memo memos[1] = {{
+		.src = "usr/sbin", .src_len = 8,
+		.target = "usr/bin", .target_len = 7,
+	}};
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd = TEST_ROOTFS_FD,
+		.memos = memos, .n_memos = 1,
+		.oracle = &ora_empty,
+	};
+	char out[256];
+	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
+		&ctx, "/usr/sbin/pacman", out, sizeof out,
+		TAWCROOT_PATH_FOLLOW);
+	test_int_eq(r.err, 0);
+	test_str_eq(out, "usr/bin/pacman");
+}
+
+test(orch_memo_dotdot_target_refolds)
+{
+	/* var/run → ../run is stored root-anchored as "var/../run"; the
+	 * re-fold collapses it to "run". */
+	struct tawcroot_symlink_memo memos[1] = {{
+		.src = "var/run", .src_len = 7,
+		.target = "var/../run", .target_len = 10,
+	}};
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd = TEST_ROOTFS_FD,
+		.memos = memos, .n_memos = 1,
+		.oracle = &ora_empty,
+	};
+	char out[256];
+	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
+		&ctx, "/var/run/dbus", out, sizeof out,
+		TAWCROOT_PATH_FOLLOW);
+	test_int_eq(r.err, 0);
+	test_str_eq(out, "run/dbus");
+}
+
+/* ----- Memo shrink regression (comment in apply_memo describes it,
+ * previously untested) ----- */
+
+test(orch_memo_shrinking_target_keeps_tail)
+{
+	struct tawcroot_symlink_memo memos[1] = {{
+		.src = "very/long/prefix", .src_len = 16,
+		.target = "p", .target_len = 1,
+	}};
+	struct tawcroot_path_translate_ctx ctx = {
+		.rootfs_base_fd = TEST_ROOTFS_FD,
+		.memos = memos, .n_memos = 1,
+		.oracle = &ora_empty,
+	};
+	char out[256];
+	tawcroot_path_result r = tawcroot_path_translate_with_ctx(
+		&ctx, "/very/long/prefix/bash", out, sizeof out,
+		TAWCROOT_PATH_FOLLOW);
+	test_int_eq(r.err, 0);
+	test_str_eq(out, "p/bash");
 }

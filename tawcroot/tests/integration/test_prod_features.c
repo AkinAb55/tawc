@@ -212,6 +212,35 @@ test(prod_execveat_empty_path_execs_fd)
 	rh_rmrf(FAKE_ROOTFS);
 }
 
+/* memo_one (path.c) must store relative well-known-symlink targets
+ * root-anchored: a relative symlink target is relative to the
+ * symlink's PARENT directory. Regression: with rootfs `usr/sbin →
+ * bin`, /usr/sbin/x used to be rewritten to bin/x (anchored at the
+ * rootfs root) instead of usr/bin/x. The rootfs here deliberately has
+ * NO top-level /bin, so the mis-anchored path can't be rescued by a
+ * second symlink hop and the exec fails. */
+test(prod_memoized_relative_symlink_anchors_at_parent)
+{
+	const char *root = TAWCROOT_TEST_TMPDIR "/tawcroot-test-rootfs-memo";
+	char p[PATH_MAX];
+
+	rh_rmrf(root);
+	snprintf(p, sizeof p, "%s/usr/bin", root);
+	test_true(rh_mkdir_p(p, 0755));
+	snprintf(p, sizeof p, "%s/usr/bin/static_exit42", root);
+	test_true(rh_copy_file(TAWCROOT_STATIC_EXIT42_BIN, p, 0755));
+	snprintf(p, sizeof p, "%s/usr/sbin", root);
+	test_int_eq(symlink("bin", p), 0);
+
+	const char *args[] = {
+		"-r", root, "--",
+		"/usr/sbin/static_exit42", NULL
+	};
+	test_int_eq(run_with(args), 42);
+
+	rh_rmrf(root);
+}
+
 /* Block SIGSYS in the orchestrator child before it execs tawcroot.
  * Tawcroot inherits the kernel signal mask across execve, and
  * supervisor_init must reset it to empty (rt_sigprocmask SIG_SETMASK 0)

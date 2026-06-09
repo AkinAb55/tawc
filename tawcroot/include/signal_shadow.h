@@ -29,11 +29,11 @@
 #include <stddef.h>
 
 /* Size of the kernel struct sigaction at sigsetsize=8 — must match
- * what handle_rt_sigaction copies between guest and shadow. */
-#if defined(__x86_64__)
+ * what handle_rt_sigaction copies between guest and shadow. Both
+ * x86_64 and aarch64 define SA_RESTORER, so the kernel layout is
+ * handler (8) + flags (8) + restorer (8) + mask (8) = 32 on both. */
+#if defined(__x86_64__) || defined(__aarch64__)
 # define TAWC_KERN_SIGACTION_SIZE 32
-#elif defined(__aarch64__)
-# define TAWC_KERN_SIGACTION_SIZE 24
 #else
 # error "unsupported arch"
 #endif

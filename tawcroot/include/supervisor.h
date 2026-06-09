@@ -1,8 +1,8 @@
 /* Per-process tawcroot supervisor bootstrap.
  *
  * Installs the rootfs view, bind table, shm map, dispatch table,
- * SIGSYS handler, signal-mask reset, openat2 probe, and the
- * /proc/self/exe stash. Used by both:
+ * SIGSYS handler, signal-mask reset, and the /proc/self/exe stash.
+ * Used by both:
  *
  *   - prod_rootfs_init (top-level `-r ROOTFS …` entry, in main.c)
  *   - tawcroot_loader_exec_child (the SIGSYS-handler-driven re-exec

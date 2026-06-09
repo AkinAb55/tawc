@@ -471,7 +471,16 @@ static long fetch_and_translate_at(int dirfd, const char *guest_path,
 			}
 			/* Relative path with explicit dirfd: kernel resolves
 			 * off the dirfd. Copy path_buf into suffix so callers
-			 * with one output buffer still work. */
+			 * with one output buffer still work.
+			 *
+			 * use_empty stays 0 even for an empty input: that flag
+			 * means "the guest path TRANSLATED to the base_fd
+			 * itself" (e.g. "/" or a bind root) and makes callers
+			 * substitute "." / AT_EMPTY_PATH. A literally-empty
+			 * guest path must instead reach the kernel verbatim so
+			 * the kernel's own empty-path semantics apply: -ENOENT
+			 * for most syscalls, the O_PATH-symlink magic for
+			 * readlinkat(fd, ""). */
 			size_t i = 0;
 			while (path_buf[i] && i + 1 < suffix_cap) {
 				suffix[i] = path_buf[i];
@@ -480,7 +489,7 @@ static long fetch_and_translate_at(int dirfd, const char *guest_path,
 			if (i + 1 >= suffix_cap) return TAWC_ENAMETOOLONG;
 			suffix[i] = '\0';
 			*base_fd_out    = dirfd;
-			*use_empty_path = (suffix[0] == '\0');
+			*use_empty_path = 0;
 			return 0;
 		}
 		/* Absolute path: dirfd is ignored by the kernel; fall
@@ -846,7 +855,9 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	const char *gpath = (const char *)(uintptr_t)args->b;
 	char       *buf   = (char *)(uintptr_t)args->c;
 	int         size  = (int)args->d;
-	if (!gpath || !buf || size <= 0) return TAWC_EFAULT;
+	/* Kernel checks bufsiz first: <= 0 is EINVAL, not EFAULT. */
+	if (size <= 0) return TAWC_EINVAL;
+	if (!gpath || !buf) return TAWC_EFAULT;
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 
 	/* Phase 2e: synthesize /proc/self/exe from the stashed guest exe
@@ -954,8 +965,18 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	int dirfd = (int)args->a;
 	const char *gpath = (const char *)(uintptr_t)args->b;
 	int mode  = (int)args->c;
-	int flags = (int)args->d;
 	if (!gpath) return TAWC_EFAULT;
+
+	/* Plain faccessat is a THREE-argument syscall — args->d is
+	 * whatever the guest left in the 4th arg register; reading it as
+	 * flags would randomly flip resolution mode. Only faccessat2
+	 * carries real flags. We can't forward those: Android RET_TRAPs
+	 * faccessat2 (recursive SIGSYS, see the "." comment below) and
+	 * plain faccessat ignores flags. -ENOSYS makes glibc/musl fall
+	 * back to their own AT_SYMLINK_NOFOLLOW / AT_EACCESS emulation
+	 * on top of syscalls we do translate. */
+	if (args->nr == TAWC_SYS_faccessat2 && (int)args->d != 0)
+		return TAWC_ENOSYS;
 
 	{
 		char shm_buf[320];
@@ -965,9 +986,7 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (kind == SHM_PEEK_DIR)  return tawcroot_shm_access_dir();
 	}
 
-	tawcroot_path_mode pmode = (flags & AT_SYMLINK_NOFOLLOW)
-		? TAWCROOT_PATH_NOFOLLOW
-		: TAWCROOT_PATH_FOLLOW;
+	tawcroot_path_mode pmode = TAWCROOT_PATH_FOLLOW;
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *path_buf = scratch->buf[0];
@@ -991,7 +1010,6 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * xbps's `xbps_pkgdb_lock`, observed as
 	 * `[pkgdb] rootdir /: No such file or directory`. */
 	const char *p = use_empty ? "." : suffix;
-	(void)flags;
 	return TAWC_RAW(TAWC_SYS_faccessat, base_fd, (long)p,
 	                mode, 0, 0, 0);
 }
@@ -1042,7 +1060,9 @@ static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	char  *out = (char *)(uintptr_t)args->a;
 	size_t cap = (size_t)args->b;
-	if (!out || cap == 0) return TAWC_EFAULT;
+	if (!out) return TAWC_EFAULT;
+	/* Kernel contract: a zero-size buffer is ERANGE, not EFAULT. */
+	if (cap == 0) return TAWC_ERANGE;
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 	char *host = scratch->buf[0];
@@ -1054,8 +1074,6 @@ static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 	size_t host_len = (size_t)r;
 	while (host_len > 0 && host[host_len - 1] == 0) host_len--;
 
-	extern char tawcroot_rootfs_host_path[4096];
-	extern size_t tawcroot_rootfs_host_path_len;
 	if (host_len < tawcroot_rootfs_host_path_len) return TAWC_ENOENT;
 	for (size_t i = 0; i < tawcroot_rootfs_host_path_len; i++)
 		if (host[i] != tawcroot_rootfs_host_path[i]) return TAWC_ENOENT;
@@ -1139,7 +1157,8 @@ static long handle_unlinkat(const tawcroot_syscall_args *args, ucontext_t *uc)
 			if (flag & AT_REMOVEDIR) return TAWC_ENOTDIR;
 			return tawcroot_shm_unlink(shm_name);
 		}
-		if (kind == SHM_PEEK_DIR) return (flag & 0x200) ? TAWC_EBUSY : TAWC_EISDIR;
+		if (kind == SHM_PEEK_DIR)
+			return (flag & AT_REMOVEDIR) ? TAWC_EBUSY : TAWC_EISDIR;
 	}
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -1342,6 +1361,7 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (rv != 0) return rv;
 	local.stx_uid = 0;
 	local.stx_gid = 0;
+	local.stx_mask |= STATX_UID | STATX_GID;
 	long ce = tawc_copy_to_guest(out, &local, sizeof local);
 	if (ce < 0) return ce;
 	return rv;
@@ -1357,7 +1377,7 @@ static long link_with_symlink_fallback(int src_fd, const char *src_suf,
 {
 	long rv = TAWC_RAW(TAWC_SYS_linkat, src_fd, (long)src_suf,
 			   dst_fd, (long)dst_suf, flags, 0);
-	if (rv == 0 || (rv != -13 /*EACCES*/ && rv != -1 /*EPERM*/)) {
+	if (rv == 0 || (rv != TAWC_EACCES && rv != TAWC_EPERM)) {
 		return rv;
 	}
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -1597,7 +1617,9 @@ static long handle_readlink(const tawcroot_syscall_args *args, ucontext_t *uc)
 	const char *path = (const char *)(uintptr_t)args->a;
 	char *buf = (char *)(uintptr_t)args->b;
 	int  size = (int)args->c;
-	if (!path || !buf || size <= 0) return TAWC_EFAULT;
+	/* Kernel checks bufsiz first: <= 0 is EINVAL, not EFAULT. */
+	if (size <= 0) return TAWC_EINVAL;
+	if (!path || !buf) return TAWC_EFAULT;
 
 	/* Mirror handle_readlinkat: synthesize /proc/self/exe from the
 	 * stashed guest exe path. Without this, x86_64 callers that go
@@ -1632,7 +1654,32 @@ static long handle_readlink(const tawcroot_syscall_args *args, ucontext_t *uc)
 	/* See handle_readlinkat for the EINVAL-vs-ENOENT rationale. */
 	if (use_empty && tawcroot_fd_is_reserved(base_fd)) return TAWC_EINVAL;
 	const char *p = use_empty ? "" : suffix;
-	return tawc_readlinkat(base_fd, p, buf, (size_t)size);
+
+	/* Mirror handle_readlinkat's second substitution surface too: a
+	 * result equal to libtawcroot.so's own host path (the
+	 * readlink("/proc/self/fd/<n>") trick) is rewritten to the guest
+	 * exe path. Read into kernel-side scratch (path_buf is dead from
+	 * here on) so we can compare before forwarding. */
+	char *readlink_scratch = path_buf;
+	int   scratch_cap = (size > TAWCROOT_PATH_SCRATCH_SIZE)
+	                    ? TAWCROOT_PATH_SCRATCH_SIZE : size;
+	long n = tawc_readlinkat(base_fd, p, readlink_scratch,
+				 (size_t)scratch_cap);
+	if (n < 0) return n;
+	if (tawcroot_guest_exe_path_len > 0 &&
+	    tawcroot_self_host_path_len > 0 &&
+	    (size_t)n == tawcroot_self_host_path_len &&
+	    memcmp(readlink_scratch, tawcroot_self_host_path,
+	           tawcroot_self_host_path_len) == 0) {
+		size_t glen = tawcroot_guest_exe_path_len;
+		if (glen > (size_t)size) glen = (size_t)size;
+		long ce = tawc_copy_to_guest(buf, tawcroot_guest_exe_path, glen);
+		if (ce < 0) return ce;
+		return (long)glen;
+	}
+	long ce = tawc_copy_to_guest(buf, readlink_scratch, (size_t)n);
+	if (ce < 0) return ce;
+	return n;
 }
 
 static long handle_chmod(const tawcroot_syscall_args *args, ucontext_t *uc)

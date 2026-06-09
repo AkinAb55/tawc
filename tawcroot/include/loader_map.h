@@ -103,10 +103,11 @@ struct tawc_loader_placement {
  * `page_size` must be a power of two ≥ 4096 and match what the parser
  * was given.
  *
- * On success `out` is populated. On failure, partial mappings may
- * remain — call `tawc_loader_unmap` with the same `img` and a partial
- * placement (with `base` and `span` from before the failure) to clean
- * up; or unmap the whole `[base, base+span)` range yourself.
+ * On success `out` is populated. On failure, `out` is NOT written and
+ * partial mappings may remain; for ET_DYN with a kernel-chosen base the
+ * caller has no way to learn the reservation address, so a failed map
+ * is only safely cleaned up by process exit. Production treats any
+ * failure as fatal (LOADER_FAIL).
  */
 long tawc_loader_map(const struct tawc_loader_image *img,
                      int fd, uintptr_t requested_base, size_t page_size,

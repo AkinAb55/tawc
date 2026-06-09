@@ -135,8 +135,7 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 	tawcroot_dispatch_init();
 
 	/* (7) Install the SIGSYS handler. After this point we can run
-	 * code that may itself trap (notably the openat2 probe under
-	 * Android's stacked filter). */
+	 * code that may itself trap under Android's stacked filter. */
 	long inst = tawcroot_install_handler();
 	if (inst != 0) tawc_exit_group(94);
 

@@ -56,6 +56,9 @@ deps_all_names() {
 _dep_lookup() {
     local want="$1" name repo commit ref dest
     while IFS=$'\t' read -r name repo commit ref dest; do
+        case "$name" in ''|'#'*) continue ;; esac
+        name="${name%$'\r'}"; repo="${repo%$'\r'}"
+        commit="${commit%$'\r'}"; ref="${ref%$'\r'}"; dest="${dest%$'\r'}"
         if [ "$name" = "$want" ]; then
             DEP_NAME="$name"
             DEP_REPO="$repo"
@@ -64,7 +67,7 @@ _dep_lookup() {
             DEP_DEST="$DEPS_REPO_DIR/$dest"
             return 0
         fi
-    done < <(_deps_emit)
+    done <"$DEPS_MANIFEST"
     echo "ERROR: dep '$want' not in $DEPS_MANIFEST" >&2
     return 1
 }

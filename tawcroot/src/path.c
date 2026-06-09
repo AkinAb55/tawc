@@ -17,12 +17,11 @@
  *   - Empty result ("/") → suffix = "", caller passes AT_EMPTY_PATH.
  *
  * No allocations, no libc, async-signal-safe. Path buffers live on the
- * caller's stack (4 KB PATH_MAX is the hard cap). The `..`-fold uses an
- * in-place stack of byte offsets into the suffix buffer — see
- * `fold_path` below. We do **not** resolve symlinks here yet; that's the
- * next commit, parameterized per syscall semantics (follow / no-follow /
- * parent-for-create / parent-for-remove — see notes/tawcroot.md
- * §"Translation rules").
+ * caller's stack (4 KB PATH_MAX is the hard cap). The `..`-fold lives
+ * in path_fold.c; symlink resolution (parameterized per syscall
+ * semantics: follow / no-follow / parent-for-create / parent-for-remove
+ * — see notes/tawcroot.md §"Translation rules") is wired up through the
+ * oracle in the translate ctx and implemented in path_resolve.c.
  */
 
 #include <stddef.h>
@@ -105,7 +104,10 @@ void tawcroot_init_self_host_path(void)
 	long n = tawc_readlinkat(AT_FDCWD, "/proc/self/exe",
 				 tawcroot_self_host_path,
 				 sizeof tawcroot_self_host_path - 1);
-	if (n < 0) {
+	/* Exact-fit means possibly truncated; a truncated path would
+	 * false-match prefixes in the /proc/self/exe substitution, so
+	 * treat it like failure (substitution just never fires). */
+	if (n < 0 || (size_t)n >= sizeof tawcroot_self_host_path - 1) {
 		tawcroot_self_host_path[0]   = 0;
 		tawcroot_self_host_path_len  = 0;
 		return;
@@ -219,12 +221,14 @@ long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap)
 }
 
 /* Well-known-symlink memoization. After fold_absolute, the orchestrator
- * checks each memoized src against the path's first segment (component
- * boundary required). If matched, the segment is replaced with the
- * target form and the fold re-runs so any `..`/`.` in the target
- * collapses. Targets may be relative ("usr/lib") or absolute
- * ("/usr/lib") — the absolute case is handled by re-fold which strips
- * a leading `/`.
+ * checks each memoized src against the path's leading components
+ * (component boundary required). If matched, the prefix is replaced
+ * with the target and the fold re-runs so any `..`/`.` in the target
+ * collapses. Stored targets are always rootfs-root-anchored: a
+ * relative symlink target is relative to the symlink's PARENT
+ * directory, so memo_one prepends the src's parent ("usr/sbin" → "bin"
+ * is stored as "usr/bin"; "var/run" → "../run" as "var/../run", which
+ * the re-fold collapses to "run").
  *
  * The hit set is the typical glibc-rootfs symlink layout. Bumps go
  * through this table, not run-time discovery — finder cost is paid
@@ -258,14 +262,32 @@ static void memo_one(const char *prefix)
 	const char *t = abs ? buf + 1 : buf;
 	while (*t == '/') t++;
 	size_t tlen = tawc_strlen(t);
-	if (tlen + 1 > sizeof m->target) {
+
+	/* Root-anchor the stored target. A relative symlink target is
+	 * relative to the symlink's parent directory, so prepend src's
+	 * parent (everything up to and including the last '/'); an
+	 * absolute target is already root-anchored once the leading '/'
+	 * is stripped. */
+	size_t off = 0;
+	if (!abs) {
+		size_t parent_len = plen;
+		while (parent_len > 0 && prefix[parent_len - 1] != '/')
+			parent_len--;
+		if (parent_len + tlen + 1 > sizeof m->target) {
+			g_n_memo--;
+			return;
+		}
+		for (size_t i = 0; i < parent_len; i++)
+			m->target[i] = prefix[i];
+		off = parent_len;
+	}
+	if (off + tlen + 1 > sizeof m->target) {
 		g_n_memo--;
 		return;
 	}
-	for (size_t i = 0; i < tlen; i++) m->target[i] = t[i];
-	m->target[tlen] = 0;
-	m->target_len = tlen;
-	m->target_absolute = abs;
+	for (size_t i = 0; i < tlen; i++) m->target[off + i] = t[i];
+	m->target[off + tlen] = 0;
+	m->target_len = off + tlen;
 }
 
 void tawcroot_path_memoize_well_known(void)
@@ -285,14 +307,29 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
 	if (tawcroot_n_binds >= TAWCROOT_MAX_BINDS) return TAWC_ENOSPC;
 	struct tawcroot_bind *b = &tawcroot_binds[tawcroot_n_binds];
 
-	/* Strip leading '/' from dst. Empty after stripping means root,
-	 * which we don't currently allow as a bind target — that's just
-	 * "the rootfs itself" and is handled by tawcroot_rootfs_fd. */
-	const char *d = dst_guest;
-	while (*d == '/') d++;
-	size_t n = 0; while (d[n]) n++;
+	/* Normalize dst through the lexical fold so it matches folded
+	 * suffixes at lookup time — a dst with a trailing '/', '//' runs,
+	 * or '.'/'..' components would otherwise be stored verbatim and
+	 * never match (route_through_binds compares against folded
+	 * suffixes). Empty after folding means root, which we don't allow
+	 * as a bind target — that's just "the rootfs itself" and is
+	 * handled by tawcroot_rootfs_fd. */
+	{
+		TAWCROOT_PATH_SCRATCH_AUTO(scratch);
+		char *abs = scratch->buf[0];
+		size_t off = 0;
+		abs[off++] = '/';
+		for (const char *d = dst_guest; *d; d++) {
+			if (off + 1 >= TAWCROOT_PATH_SCRATCH_SIZE)
+				return TAWC_ENAMETOOLONG;
+			abs[off++] = *d;
+		}
+		abs[off] = 0;
+		long fr = tawcroot_path_fold_absolute(abs, b->dst, sizeof b->dst);
+		if (fr < 0) return fr;
+	}
+	size_t n = tawc_strlen(b->dst);
 	if (n == 0) return TAWC_EINVAL;
-	if (n + 1 > sizeof b->dst) return TAWC_ENAMETOOLONG;
 
 	long fd = tawc_openat(AT_FDCWD, src_host,
 			      O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
@@ -303,9 +340,7 @@ long tawcroot_path_add_bind(const char *src_host, const char *dst_guest)
 
 	b->src_fd  = (int)resv;
 	b->active  = 1;
-	b->dst_len = n;
-	for (size_t i = 0; i < n; i++) b->dst[i] = d[i];
-	b->dst[n] = 0;
+	b->dst_len = n;   /* b->dst already holds the folded form */
 
 	/* Stash the host src path canonicalized through the kernel's view —
 	 * /proc/self/fd of the just-opened src_fd resolves any symlinks /

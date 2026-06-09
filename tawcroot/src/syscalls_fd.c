@@ -31,15 +31,16 @@ size_t tawcroot_n_reserved_fds;
 long tawcroot_fd_reserve(int fd)
 {
 	if (fd < 0) return TAWC_EBADF;
+	if (tawcroot_n_reserved_fds >= TAWCROOT_MAX_RESERVED_FDS) {
+		/* Table full: an unrecorded high fd would be invisible to
+		 * both the BPF close trap and tawcroot_fd_is_reserved —
+		 * i.e. not actually protected from the guest. Fail closed
+		 * rather than hand back a pseudo-reserved fd. */
+		return TAWC_ENOSPC;
+	}
 	long r = tawc_fcntl(fd, F_DUPFD_CLOEXEC, TAWCROOT_RESERVED_FD_BASE);
 	if (r < 0) return r;
 	tawc_close(fd);
-	if (tawcroot_n_reserved_fds >= TAWCROOT_MAX_RESERVED_FDS) {
-		/* No room in the BPF-filter array; the reservation is still
-		 * valid (the fd lives at >= base) but close-loop fast-pathing
-		 * loses precision — handler-side check still catches it. */
-		return r;
-	}
 	tawcroot_reserved_fds[tawcroot_n_reserved_fds++] = (int)r;
 	return r;
 }
@@ -47,15 +48,19 @@ long tawcroot_fd_reserve(int fd)
 static long handle_close(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
-	(void)args;
-	/* Reserved fds: lie. The BPF filter only routes close() here when
-	 * the argument matches one of our reserved slots, so by definition
-	 * we never want the kernel to actually close it — the guest sees
-	 * success, our handler keeps the fd alive for downstream path
-	 * translation. This makes our reserved fds un-killable from the
-	 * guest (close_range, dup2/3, fcntl F_DUPFD all already reject or
-	 * trim around the reserved range), which means handler-side state
-	 * for path translation can stay immutable post-init. */
+	int fd = (int)args->a;
+	/* Reserved fds: lie. The guest sees success, our handler keeps the
+	 * fd alive for downstream path translation. Together with the
+	 * range rejections in close_range / dup2/3 / fcntl F_DUPFD this
+	 * makes our reserved fds un-killable from the guest, so handler-
+	 * side state for path translation can stay immutable post-init.
+	 *
+	 * The BPF filter normally routes close() here only for fds in the
+	 * init-time reserved set, but Android's stacked filter can TRAP
+	 * syscalls we didn't ask for — don't fake success for an fd that
+	 * isn't actually ours; forward the real close. */
+	if (!tawcroot_fd_is_reserved(fd))
+		return TAWC_RAW(TAWC_SYS_close, fd, 0, 0, 0, 0, 0);
 	return 0;
 }
 
@@ -102,6 +107,7 @@ static long handle_dup2(const tawcroot_syscall_args *args, ucontext_t *uc)
 	int oldfd = (int)args->a;
 	int newfd = (int)args->b;
 	if (tawcroot_fd_is_reserved(oldfd) ||
+	    newfd >= (int)TAWCROOT_RESERVED_FD_BASE ||
 	    tawcroot_fd_is_reserved(newfd)) return TAWC_EBADF;
 	if (oldfd == newfd) {
 		long r = tawc_fcntl(oldfd, F_GETFD, 0);
@@ -117,7 +123,12 @@ static long handle_dup3(const tawcroot_syscall_args *args, ucontext_t *uc)
 	int oldfd = (int)args->a;
 	int newfd = (int)args->b;
 	int flags = (int)args->c;
+	/* Reject the WHOLE reserved range for newfd, not just currently-
+	 * reserved slots: a guest-owned fd inside the range would be
+	 * skipped by close_range's trim and indistinguishable from ours
+	 * to future reservations. */
 	if (tawcroot_fd_is_reserved(oldfd) ||
+	    newfd >= (int)TAWCROOT_RESERVED_FD_BASE ||
 	    tawcroot_fd_is_reserved(newfd)) return TAWC_EBADF;
 	return TAWC_RAW(TAWC_SYS_dup3, oldfd, newfd, flags, 0, 0, 0);
 }
@@ -130,14 +141,13 @@ static long handle_fcntl(const tawcroot_syscall_args *args, ucontext_t *uc)
 	long a3 = args->c;
 	if (tawcroot_fd_is_reserved(fd)) return TAWC_EBADF;
 
-	/* F_DUPFD/F_DUPFD_CLOEXEC: cap the requested minimum at base-1 so
-	 * the kernel never lands the dup in our reserved range. The guest
-	 * either gets a low fd or -EMFILE, both of which match what would
-	 * happen on a process running near rlimit. */
+	/* F_DUPFD/F_DUPFD_CLOEXEC: a dup landing in the reserved range
+	 * would hand the guest one of our slots. Refuse with EINVAL —
+	 * the same error the kernel gives when the requested minimum
+	 * exceeds RLIMIT_NOFILE — rather than silently trimming, which
+	 * would violate the "result >= arg" F_DUPFD contract. */
 	if (op == F_DUPFD || op == F_DUPFD_CLOEXEC) {
-		if (a3 >= TAWCROOT_RESERVED_FD_BASE) {
-			a3 = TAWCROOT_RESERVED_FD_BASE - 1;
-		}
+		if (a3 >= TAWCROOT_RESERVED_FD_BASE) return TAWC_EINVAL;
 	}
 	return TAWC_RAW(TAWC_SYS_fcntl, fd, op, a3, 0, 0, 0);
 }

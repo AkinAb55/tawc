@@ -6,7 +6,8 @@
  * handler to no allocations / no stdio. Use these freely from main /
  * --exec-child / rootfs init code; do not call them from handlers.
  *
- * Output goes to stdout (fd 1). No newline auto-append.
+ * Output goes to stderr (fd 2) — see io.c's banner for why. No newline
+ * auto-append.
  */
 
 #pragma once

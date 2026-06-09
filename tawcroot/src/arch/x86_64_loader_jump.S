@@ -5,7 +5,8 @@
  *   rsi = entry  (target instruction address — ld.so or static _start)
  *
  * Sequence:
- *   1. Save `entry` somewhere callee-safe (rax — caller-clobbered, fine).
+ *   1. Stash `entry` in rax (nothing is called before the jump, so
+ *      a caller-clobbered register is safe).
  *   2. Load new SP. From this point we cannot touch the old stack.
  *   3. Zero rdx (rtld_fini = NULL).
  *   4. Zero rbp (frame-pointer chain ends here).

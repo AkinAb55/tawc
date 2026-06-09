@@ -57,9 +57,10 @@ esac
 # --- static fixtures (raw syscalls, freestanding) ---
 #
 # Source files are arch-specific .S because the syscall numbers and
-# instruction set differ. Aarch64 versions are added alongside the
-# original x86_64 ones; if a fixture lacks an aarch64 .S we skip it
-# (the test runner reports skipped).
+# instruction set differ. If a fixture lacks a .S for the target arch
+# we skip it here — but note test.sh hard-fails before pushing when any
+# programs.list entry is missing, so a skipped fixture must be written
+# (or delisted) before device tests run.
 build_static() {
     local name="$1"
     local src="$PROG_DIR/${name}_${STATIC_ASM_SUFFIX}.S"

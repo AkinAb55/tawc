@@ -254,13 +254,15 @@ test(filter_close_with_reserved_fd_traps)
 
 test(filter_close_block_does_not_eat_following_traps)
 {
-	/* Regression: the close block must reload nr at its tail so the
-	 * following trap_nr's JEQ compares against nr, not args[0]. If
-	 * the reload was missing, the close fd value would leak into the
-	 * next comparison and (mis)match a trap_nr coincidentally equal
-	 * to a reserved fd. Drive that exact collision: reserved fd 200
-	 * + a follow-up trap_nr 200 — the close-block ALLOW for fd 7
-	 * must not cause nr 200 to fall through to ALLOW. */
+	/* The not-close jf skip must land AFTER the close block's tail
+	 * `LD nr` (so A holds nr again), making the following trap_nr's
+	 * JEQ compare against nr, not args[0]. If the skip landed inside
+	 * the block (post-`LD args[0]`), the close fd value would leak
+	 * into the next comparison and (mis)match a trap_nr
+	 * coincidentally equal to a reserved fd. Drive that exact
+	 * collision: reserved fd 200 + a follow-up trap_nr 200 — the
+	 * close-block ALLOW for fd 7 must not cause nr 200 to fall
+	 * through to ALLOW. */
 	int traps[] = { TAWC_SYS_close, 200 };
 	int reserved[] = { 200 };
 	struct test_seccomp_data d = {
@@ -364,4 +366,20 @@ test(filter_capacity_overflow_is_e2big)
 	long rv = tawcroot_build_filter(prog, 1, traps, 1,
 					STUB_ADDR, NULL, 0, TEST_AUDIT_ARCH);
 	test_int_eq(rv, -7);
+}
+
+test(filter_reserved_set_too_large_is_e2big)
+{
+	/* cBPF jt/jf are u8: the close block's jf = 4 + n_reserved wraps
+	 * past 251 entries and would silently mis-route. The builder must
+	 * reject rather than emit a wrapped program. */
+	int traps[] = { TAWC_SYS_close };
+	static int reserved[252];
+	for (int i = 0; i < 252; i++) reserved[i] = 1000 + i;
+	struct sock_filter prog[2048];
+	long rv = tawcroot_build_filter(prog,
+	                                sizeof prog / sizeof prog[0],
+	                                traps, 1, STUB_ADDR,
+	                                reserved, 252, TEST_AUDIT_ARCH);
+	test_int_eq(rv, -7 /* E2BIG */);
 }

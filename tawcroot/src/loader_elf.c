@@ -103,6 +103,13 @@ void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
 	uint64_t fhi      = align_up  (end_file, page_size);
 	uint64_t mhi      = align_up  (end_mem,  page_size);
 
+	/* Pure-BSS segment (no file bytes at all): map the whole [lo, mhi)
+	 * anonymously. Without this, an unaligned p_vaddr would compute
+	 * file_size == page_size and map junk file bytes where the kernel
+	 * maps zeros. */
+	if (p_filesz == 0)
+		fhi = lo;
+
 	uint64_t off_lo   = align_down(p_offset, page_size);
 	/* p_offset must have the same in-page offset as p_vaddr (the
 	 * parser validated this). So `p_offset - off_lo == p_vaddr - lo`,
@@ -170,6 +177,15 @@ long tawc_loader_parse_phdrs(const void *phdr_buf, size_t phdr_buf_len,
 				return TAWC_EINVAL;
 			if (ph->p_memsz == 0)
 				continue; /* empty PT_LOAD: ignore (linkers occasionally emit) */
+			/* Reject geometry whose page-aligned end would wrap
+			 * u64: a wrapped vaddr_memhi poisons the sorted-overlap
+			 * check and makes addr_max < addr_min downstream (span
+			 * underflow in the mapper / unmap). */
+			if (ph->p_vaddr > (uint64_t)-1 - ph->p_memsz)
+				return TAWC_EINVAL;
+			if (ph->p_vaddr + ph->p_memsz >
+			    (uint64_t)-1 - (page_size - 1))
+				return TAWC_EINVAL;
 			if (!is_pow2(ph->p_align) || ph->p_align < page_size)
 				return TAWC_EINVAL;
 			if ((ph->p_offset & (page_size - 1)) !=

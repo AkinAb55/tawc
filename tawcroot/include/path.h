@@ -33,13 +33,12 @@ extern int tawcroot_rootfs_fd;
  *              itself" (use AT_EMPTY_PATH).
  * The translator writes `suffix` into the caller-provided buffer.
  *
- * Today there are exactly two outcomes:
+ * Outcomes:
  *   - Path inside rootfs view  → base_fd = rootfs_fd, suffix = path[1..]
- *   - Path is "/" (the rootfs)  → base_fd = rootfs_fd, suffix = ""
- *   - Otherwise: -ENOENT (we deliberately don't escape outside the view).
- *
- * Bind-mount support and `..`/symlink clamping land in subsequent
- * commits inside this file; the API stays stable.
+ *   - Path is "/" (the rootfs) → base_fd = rootfs_fd, suffix = ""
+ *   - Path under a bind dst    → base_fd = bind src_fd, suffix relative
+ *                                to the bind src
+ *   - Otherwise: -errno (we deliberately don't escape outside the view).
  */
 typedef struct {
 	int   base_fd;
@@ -48,9 +47,9 @@ typedef struct {
 
 /* Resolution mode — see notes/tawcroot.md §"Translation rules" for the
  * full semantics. The mode parameterizes how the FINAL component of a
- * path is treated; parent components are always followed. Only the
- * symlink walker (forthcoming) varies behavior across modes; the
- * current string-level fold treats all modes alike except for the
+ * path is treated; parent components are always followed. The symlink
+ * walker (path_resolve.c) varies leaf handling across modes; the
+ * string-level fold treats all modes alike except for the
  * well-known-symlink memoizer, which avoids rewriting a path whose
  * SOLE component is a memoized symlink under NOFOLLOW/PARENT_*.
  *
@@ -135,11 +134,13 @@ struct tawcroot_bind {
 extern struct tawcroot_bind tawcroot_binds[TAWCROOT_MAX_BINDS];
 extern size_t               tawcroot_n_binds;
 
-/* Add a bind. `dst` may have a leading '/'; we strip it. Returns 0 on
- * success, -errno on failure (no slot left, src open failed, dst too
- * long). Must be called BEFORE the seccomp filter is installed; the
- * call opens the src dir via raw `openat`. The new bind is added with
- * `active = 1`. */
+/* Add a bind. `dst` is normalized through the lexical fold (leading
+ * '/' optional; trailing '/', '//' runs, and '.'/'..' components are
+ * collapsed) so it matches folded suffixes at lookup time. Returns 0
+ * on success, -errno on failure (no slot left, src open failed, dst
+ * too long or empty after folding). Must be called BEFORE the seccomp
+ * filter is installed; the call opens the src dir via raw `openat`.
+ * The new bind is added with `active = 1`. */
 long tawcroot_path_add_bind(const char *src_host, const char *dst_guest);
 
 /* Re-anchor every bind in `binds[0..n_binds]` for a chroot to

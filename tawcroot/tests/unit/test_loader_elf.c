@@ -555,3 +555,43 @@ test(real_exe_parses_and_has_loads)
 		test_int_eq((int)(img.loads[i].file_offset & 4095), 0);
 	}
 }
+
+test(phdrs_vaddr_plus_memsz_overflow_rejected)
+{
+	/* p_vaddr + p_memsz wrapping u64 used to produce vaddr_memhi <
+	 * vaddr_lo, poisoning the sorted-overlap check and underflowing
+	 * the mapper's span (addr_max - addr_min). Must be EINVAL. */
+	tawc_elf64_phdr ph[1];
+	mk_load(&ph[0], 0xfffffffffffff000ull, 0x1000, 0x2000,
+	        0x1000, 0x4);
+	struct tawc_loader_image img;
+	mk_img_phnum(&img, 1);
+	test_int_eq(tawc_loader_parse_phdrs(ph, sizeof ph, 4096, &img), -22);
+}
+
+test(phdrs_aligned_end_overflow_rejected)
+{
+	/* End within a page of UINT64_MAX: align_up itself wraps to 0. */
+	tawc_elf64_phdr ph[1];
+	mk_load(&ph[0], 0xffffffffffffe000ull, 0x1000, 0x1f00,
+	        0x1000, 0x4);
+	struct tawc_loader_image img;
+	mk_img_phnum(&img, 1);
+	test_int_eq(tawc_loader_parse_phdrs(ph, sizeof ph, 4096, &img), -22);
+}
+
+test(seg_layout_pure_bss_unaligned_vaddr_maps_no_file_bytes)
+{
+	/* A pure-BSS PT_LOAD (p_filesz == 0) with an unaligned p_vaddr
+	 * used to compute file_size == page_size, making the mapper map
+	 * junk file bytes where the kernel maps zeros. The whole segment
+	 * must be anonymous. */
+	struct tawc_loader_seg seg;
+	tawc_loader_seg_layout(0x404100, 0, 0x2000, 0x4100, 0x4 | 0x2,
+	                       4096, &seg);
+	test_int_eq((int)seg.file_size, 0);
+	test_int_eq((int)(seg.bss_anon_lo), 0x404000);
+	test_int_eq((int)(seg.bss_anon_hi), 0x407000);
+	/* No partial-page memset slice either (nothing file-backed). */
+	test_true(seg.bss_partial_hi <= seg.bss_partial_lo);
+}

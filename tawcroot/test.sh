@@ -9,8 +9,8 @@
 #   - tawcroot/tests/integration/  full-supervisor tests (fork production tawcroot)
 #   - tawcroot/tests/diff/         (future) differential tests vs proot
 #
-# All four are registered through cleat and share one filter syntax,
-# one exit code, one report. Positional args are full-match regexes
+# The existing three are registered through cleat and share one filter
+# syntax, one exit code, one report. Positional args are full-match regexes
 # against `module`, `name`, or `module::name` (e.g.
 # `handler/test_foundation_smoke`, `rootfs_syscalls_smoke`, `.*smoke.*`).
 # Multiple args are
@@ -139,11 +139,17 @@ PROGRAMS_LIST="$TAWCROOT_DIR/tests/integration/programs/programs.list"
 MISSING_FIXTURES=()
 while IFS= read -r name; do
     [[ -z "$name" || "$name" =~ ^[[:space:]]*# ]] && continue
-    name="$(echo "$name" | tr -d '[:space:]')"
+    name="$(echo "$name" | awk '{print $1}')"
     if [ ! -f "$LOCAL_FIXTURES_DIR/$name" ]; then
         MISSING_FIXTURES+=("$name")
     fi
 done < "$PROGRAMS_LIST"
+# `wrap` (handler/test_androidfilter's host-bionic helper) is built by
+# build-fixtures.sh but lives outside programs.list — give it the same
+# fail-loudly treatment instead of an unrelated-looking runtime error.
+if [ ! -f "$LOCAL_FIXTURES_DIR/wrap" ]; then
+    MISSING_FIXTURES+=("wrap")
+fi
 if [ "${#MISSING_FIXTURES[@]}" -gt 0 ]; then
     {
         echo "ERROR: ${#MISSING_FIXTURES[@]} fixture(s) missing from $LOCAL_FIXTURES_DIR/:"
@@ -183,7 +189,7 @@ TMPLOG=$(mktemp)
 trap 'rm -f "$TMPLOG"' EXIT
 adb shell "cd $TAWC_SCRATCH && $TESTS$PT_QUOTED; echo __exit=\$?" \
     | tee "$TMPLOG"
-got=$(grep -oE '__exit=[0-9]+' "$TMPLOG" | tail -1 | cut -d= -f2)
+got=$(grep -oE '__exit=[0-9]+' "$TMPLOG" | tail -1 | cut -d= -f2 || true)
 if [ "${got:-}" != "0" ]; then
     echo "FAIL: cleat orchestrator exit code = ${got:-<missing>}" >&2
     exit 1

@@ -74,13 +74,14 @@ long tawcroot_shm_statx_name(const char *name, struct statx *out,
 long tawcroot_shm_access_dir(void);
 long tawcroot_shm_access_name(const char *name);
 
-/* exec_state ferry. The writer snapshots all live entries in one
- * lock acquisition (avoids index-shift races against concurrent
- * shm operations on other threads); the reader re-registers them
- * after the new tawcroot incarnation re-establishes its rootfs
- * view. Fds carry across execveat because they are non-CLOEXEC. */
-size_t tawcroot_shm_export_all(const char **names_out, int *fds_out,
-			       size_t cap);
+/* exec_state ferry. The writer snapshots all live entries — name
+ * BYTES included — in one lock acquisition, so concurrent shm ops on
+ * other threads can neither shift indices nor mutate a name between
+ * export and serialization. The reader re-registers them after the
+ * new tawcroot incarnation re-establishes its rootfs view. Fds carry
+ * across execveat because they are non-CLOEXEC. */
+size_t tawcroot_shm_export_all(char (*names_out)[TAWCROOT_SHM_NAME_MAX + 1],
+			       int *fds_out, size_t cap);
 long   tawcroot_shm_register(const char *name, int fd);
 
 /* Reset the table to empty. Called from --exec-child before

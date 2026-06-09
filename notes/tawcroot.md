@@ -467,7 +467,7 @@ the SIGSYS handler.
 All guest-pointer access therefore goes through tiny `copy_from_guest`,
 `copy_string_from_guest`, and `copy_to_guest` helpers. They are
 handler-safe and libc-free. Prefer raw `process_vm_readv` /
-`process_vm_writev` against our own pid: the kernel validates the
+`process_vm_writev` against our own task id: the kernel validates the
 guest address and returns `-EFAULT` without delivering SIGSEGV to
 tawcroot. The helpers build small stack-local `iovec`s and issue the
 syscalls through `tawcroot_raw_syscall()`. If a target kernel lacks
@@ -1702,8 +1702,8 @@ adds an `exec.c`).
 tawcroot/                            # everything tawcroot-specific lives here
 ├── README.md           # short: "see notes/tawcroot.md"
 ├── build               # cross-ABI NDK build (also stages into APK jniLibs)
-├── build-fixtures      # NDK build for guest fixtures (loader smoke)
-├── test                # runs the cleat orchestrator (host) or pushes
+├── build-fixtures.sh   # NDK build for guest fixtures (loader smoke)
+├── test.sh             # runs the cleat orchestrator (host) or pushes
 │                       #   testhost via adb (device)
 ├── Makefile            # incremental host build (production + testhost + cleat tests)
 ├── include/                            # production headers — no test scaffolding
@@ -2988,8 +2988,9 @@ here so we don't ship MVP and discover them at runtime.
      vDSO base — the vDSO mapping persists across mmap of new
      segments, safe to inherit; without it, `clock_gettime` falls
      back to real syscalls, measurable perf regression). The initial
-     stack lives on a freshly `mmap`'d region (~128 KB +
-     `PROT_NONE` guard page), not on our existing stack.
+     stack lives on a freshly `mmap`'d region (8 MiB, matching the
+     kernel's default RLIMIT_STACK, + `PROT_NONE` guard page at the
+     low end), not on our existing stack.
      **`SP` must be 16-byte aligned on entry** — hardware
      requirement on aarch64 (unaligned SP faults), ABI
      requirement on x86_64 (SSE assumes it).

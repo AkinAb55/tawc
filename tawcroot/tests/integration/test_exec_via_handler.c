@@ -82,3 +82,22 @@ test(exec_via_handler_nonexistent_returns_50)
 	};
 	test_int_eq(run(args), 50);
 }
+
+test(exec_via_handler_directory_returns_50)
+{
+	/* execve of a directory must fail cleanly at the probe (EISDIR)
+	 * — NOT execveat into the loader, which would destroy the calling
+	 * process and exit with a loader code. Regression: the probe's
+	 * O_RDONLY open succeeds on directories. */
+	const char *args[] = { "--exec-via-handler", "/etc", NULL };
+	test_int_eq(run(args), 50);
+}
+
+test(exec_via_handler_non_executable_returns_50)
+{
+	/* Same for a mode-644 regular file: real execve gives EACCES and
+	 * the caller survives. /etc/hostname is a stable non-executable
+	 * file on every host we run on. */
+	const char *args[] = { "--exec-via-handler", "/etc/hostname", NULL };
+	test_int_eq(run(args), 50);
+}

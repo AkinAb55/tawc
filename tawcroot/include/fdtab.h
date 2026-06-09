@@ -43,8 +43,12 @@ extern size_t tawcroot_n_reserved_fds;
  * that turned out to be a major performance pothole: pacman/gpgme's
  * fork-and-close-all-fds dance hammers `close(fd)` for fd in
  * [3, RLIMIT_NOFILE) — typically ~1M iterations on Android — and we
- * trapped each one in [1000, 1M). The BPF filter mirrors this exact
- * predicate so most close-loop iterations skip the handler entirely. */
+ * trapped each one in [1000, 1M). The BPF filter bakes in the set as
+ * of filter install, so most close-loop iterations skip the handler
+ * entirely. CAVEAT: fds reserved AFTER install (shm_open, chroot) are
+ * matched by this runtime predicate but NOT by the BPF close trap —
+ * a guest close() of those reaches the kernel unmediated. See
+ * issues/tawcroot-close-fastpath-misses-runtime-reserved-fds.md. */
 static inline int tawcroot_fd_is_reserved(int fd)
 {
 	if (fd < TAWCROOT_RESERVED_FD_BASE) return 0;
@@ -56,9 +60,13 @@ static inline int tawcroot_fd_is_reserved(int fd)
 
 /* Move `fd` to the next free slot at or above TAWCROOT_RESERVED_FD_BASE
  * via `fcntl(F_DUPFD_CLOEXEC, base)` and close the original. Returns
- * the new fd on success, -errno on failure. Call BEFORE the seccomp
- * filter goes up (close/fcntl would otherwise trap into a not-yet-
- * registered handler). */
+ * the new fd on success, -errno on failure. -ENOSPC when the table is
+ * full — failing closed, because an unrecorded high fd would be
+ * invisible to both the BPF close trap and tawcroot_fd_is_reserved
+ * (i.e. not actually protected); the original fd is left open in that
+ * case. Call BEFORE the seccomp filter goes up (close/fcntl would
+ * otherwise trap into a not-yet-registered handler); post-init callers
+ * (chroot) go through the raw stub, which the filter allowlists. */
 long tawcroot_fd_reserve(int fd);
 
 /* Register the close/dup/fcntl handler set in the dispatch table.

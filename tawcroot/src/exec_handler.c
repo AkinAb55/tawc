@@ -16,13 +16,34 @@
 
 /* Cap on serialized exec_state size we'll write into a memfd. The
  * exec_state header is itself ~2 KB (offset arrays for 256 args + 256
- * envs), and strings can grow. 64 KB is comfortably more than any
- * sane invocation. */
+ * envs), and strings can grow. NOTE: the collection layer
+ * (syscalls_exec.c) accepts up to 64 KB argv + 256 KB envp, which
+ * cannot fit here — oversized environments fail the exec with
+ * -ENOSPC. See issues/tawcroot-exec-arg-env-limits.md. */
 #define EXEC_STATE_BUF_SIZE  (64 * 1024)
 
+/* Validate an exec-probe fd the way execve(2) would validate the file:
+ * directories are EISDIR, non-regular files and files with no execute
+ * bit at all are EACCES. The O_RDONLY open alone passes for mode-644
+ * files and directories, and by the time the loader discovers the
+ * problem (post-execveat) the calling program is already gone — `bash
+ * -c /etc` must get a clean error, not a destroyed shell. */
+static long probe_check_executable(int fd)
+{
+	struct statx stx;
+	long sr = TAWC_RAW(TAWC_SYS_statx, fd, (long)"",
+	                   AT_EMPTY_PATH, STATX_TYPE | STATX_MODE,
+	                   (long)&stx, 0);
+	if (sr < 0) return sr;
+	if (S_ISDIR(stx.stx_mode)) return TAWC_EISDIR;
+	if (!S_ISREG(stx.stx_mode)) return TAWC_EACCES;
+	if ((stx.stx_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)
+		return TAWC_EACCES;
+	return 0;
+}
+
 /* Tiny int-to-string for the fd argv slot. Returns the number of
- * bytes written (excluding NUL). 32-byte buffer is more than enough
- * for a 64-bit unsigned. */
+ * bytes written (excluding NUL); 0 if it doesn't fit. */
 static size_t u_to_str(unsigned long v, char *buf, size_t cap)
 {
 	if (cap < 2) return 0;
@@ -62,12 +83,16 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		long probe = tawc_openat(r.base_fd, suffix,
 		                         O_RDONLY | O_CLOEXEC, 0);
 		if (probe < 0) return probe;
+		long ck = probe_check_executable((int)probe);
 		tawc_close((int)probe);
+		if (ck < 0) return ck;
 	} else {
 		long probe = tawc_openat(AT_FDCWD, path,
 		                         O_RDONLY | O_CLOEXEC, 0);
 		if (probe < 0) return probe;
+		long ck = probe_check_executable((int)probe);
 		tawc_close((int)probe);
+		if (ck < 0) return ck;
 	}
 
 	/* (2) Create a non-CLOEXEC memfd. !CLOEXEC is required so the fd
@@ -84,6 +109,11 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 	 * route to host paths (no rootfs_fd). */
 	const char *bind_src_arr[TAWCROOT_EXEC_STATE_MAX_BINDS];
 	const char *bind_dst_arr[TAWCROOT_EXEC_STATE_MAX_BINDS];
+	/* Static: 16 KB of name copies would blow the handler stack
+	 * budget. Exec already stages through static buffers (see the
+	 * thread-safety note in exec_handler.h). */
+	static char shm_name_buf[TAWCROOT_EXEC_STATE_MAX_SHM]
+	                        [TAWCROOT_SHM_NAME_MAX + 1];
 	const char *shm_name_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
 	int         shm_fd_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
 	tawcroot_exec_state_extras extras = { 0 };
@@ -146,8 +176,10 @@ long tawcroot_exec_handler_perform(const char *path, int argc,
 		 * concurrent shm ops on other threads can't shift indices
 		 * mid-export. */
 		size_t shm_n = tawcroot_shm_export_all(
-			shm_name_arr, shm_fd_arr,
+			shm_name_buf, shm_fd_arr,
 			TAWCROOT_EXEC_STATE_MAX_SHM);
+		for (size_t i = 0; i < shm_n; i++)
+			shm_name_arr[i] = shm_name_buf[i];
 		extras.n_shm    = (uint32_t)shm_n;
 		extras.shm_name = shm_name_arr;
 		extras.shm_fd   = shm_fd_arr;

@@ -67,11 +67,21 @@ long tawcroot_dirent_filter_compact(void *buf, long n,
 	while (in < n) {
 		unsigned short reclen;
 		__builtin_memcpy(&reclen, p + in + DIRENT64_RECLEN_OFF, 2);
-		if (reclen == 0 || in + (long)reclen > n) {
-			/* Malformed; bail without filtering further. */
-			return n;
-		}
+		/* A record needs at least the fixed header plus a NUL name
+		 * byte; anything smaller (zero included) is malformed and
+		 * would put `name` outside the record. */
+		if (reclen < DIRENT64_NAME_OFF + 1 || in + (long)reclen > n)
+			goto malformed;
 		const char *name = (const char *)(p + in + DIRENT64_NAME_OFF);
+		/* The buffer is guest memory — another guest thread can race
+		 * the kernel's writes. Require the name's NUL inside the
+		 * record so the digit scan below can't walk out of bounds. */
+		int has_nul = 0;
+		for (long k = DIRENT64_NAME_OFF; k < (long)reclen; k++) {
+			if (p[in + k] == 0) { has_nul = 1; break; }
+		}
+		if (!has_nul)
+			goto malformed;
 		if (!tawcroot_dirent_filter_dname_is_reserved(
 		        name, reserved_fds, n_reserved)) {
 			if (out != in)
@@ -81,4 +91,12 @@ long tawcroot_dirent_filter_compact(void *buf, long n,
 		in += reclen;
 	}
 	return out;
+
+malformed:
+	/* If nothing was dropped yet the buffer is byte-identical to the
+	 * kernel's output — hand it back unfiltered. Once entries have
+	 * been compacted away, [out, in) is stale bytes mid-record, so
+	 * returning the original length would hand the guest a corrupted
+	 * stream; drop the malformed tail instead. */
+	return out == in ? n : out;
 }

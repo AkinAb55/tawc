@@ -316,6 +316,9 @@ run_backend_round() {
             exit 1
         }
     elif [[ "$backend" = "chroot" && "$status" = "77" ]]; then
+        # The SKIP explanation went into $tmp.err (run_backend's stderr
+        # is captured); surface it so the user sees why nothing ran.
+        cat "$tmp.err" >&2
         return 77
     else
         echo "ERROR: backend failed: $backend round $round" >&2

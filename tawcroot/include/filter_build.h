@@ -19,8 +19,11 @@
 #include <linux/filter.h>
 
 /* Build the trap-or-allow cBPF program into `prog` (capacity
- * `prog_cap` instructions). Returns program length on success or
- * -E2BIG when `prog_cap` is too small for the requested trap set.
+ * `prog_cap` instructions). Returns program length on success;
+ * -E2BIG when `prog_cap` is too small for the requested trap set,
+ * when `n_traps` exceeds the kernel program budget, or when
+ * `n_reserved` > 251 (the close block's u8 jump offsets can't encode
+ * more); -EINVAL for a NULL / zero-capacity program buffer.
  *
  * Inputs:
  *   trap_nrs       — syscall numbers to TRAP. Order is preserved.

@@ -317,3 +317,52 @@ test(compact_malformed_reclen_overshoots_bails)
 	int reserved[] = {1000};
 	test_int_eq(tawcroot_dirent_filter_compact(buf, 32, reserved, 1), 32);
 }
+
+test(compact_malformed_reclen_too_small_bails)
+{
+	/* reclen in (0, header+1): the name pointer would land outside
+	 * the record (and possibly the buffer). Must bail, not read. */
+	unsigned char buf[64];
+	memset(buf, 0, sizeof buf);
+	uint16_t tiny = 8;
+	memcpy(buf + 16, &tiny, 2);
+	int reserved[] = {1000};
+	test_int_eq(tawcroot_dirent_filter_compact(buf, 32, reserved, 1), 32);
+}
+
+test(compact_name_without_nul_bails)
+{
+	/* A record whose d_name has no NUL before reclen ends would let
+	 * the digit scan run past the record (the buffer is guest memory,
+	 * so the kernel's NUL guarantee can be raced away). */
+	unsigned char buf[64];
+	long n = emit_dirent(buf, 0, "12345");
+	memset(buf + DIRENT64_NAME_OFF, '9', (size_t)n - DIRENT64_NAME_OFF);
+	int reserved[] = {1000};
+	test_int_eq(tawcroot_dirent_filter_compact(buf, n, reserved, 1), n);
+}
+
+test(compact_malformed_after_drop_returns_compacted_prefix)
+{
+	/* Once entries have been dropped, [out, in) holds stale bytes; a
+	 * malformed tail must not make the filter hand back the original
+	 * length over a half-compacted buffer. It returns the compacted
+	 * prefix and drops the malformed tail. */
+	unsigned char buf[256];
+	long n = 0;
+	n = emit_dirent(buf, n, "1000"); /* dropped */
+	n = emit_dirent(buf, n, "5");    /* kept, memmoved left */
+	long good_end = n;
+	uint16_t zero = 0;               /* malformed third record */
+	memset(buf + n, 0, 24);
+	memcpy(buf + n + 16, &zero, 2);
+	n += 24;
+
+	int reserved[] = {1000};
+	long out_n = tawcroot_dirent_filter_compact(buf, n, reserved, 1);
+	test_int_eq(out_n, good_end - 24); /* just the "5" record */
+
+	char names[64];
+	collect_names(buf, out_n, names);
+	test_str_eq(names, "5");
+}

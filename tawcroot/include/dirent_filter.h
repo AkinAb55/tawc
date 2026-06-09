@@ -25,9 +25,11 @@ int tawcroot_dirent_filter_dname_is_reserved(const char *name,
 
 /* Compact a linux_dirent64 buffer in place, dropping entries whose
  * d_name parses to a reserved fd. Returns the new byte length
- * (0 <= rv <= n). The buffer is NOT bounds-checked beyond reclen
- * sanity; on a malformed dirent (zero or runaway reclen) the function
- * bails and returns the original length unchanged.
+ * (0 <= rv <= n). The buffer is guest memory, so records are sanity-
+ * checked (reclen bounds, name NUL inside the record). On a malformed
+ * dirent the function bails: if nothing was dropped yet the buffer is
+ * untouched and the original length is returned; otherwise the
+ * compacted prefix length is returned and the malformed tail dropped.
  *
  * Layout of linux_dirent64:
  *   u64  d_ino    (offset 0)

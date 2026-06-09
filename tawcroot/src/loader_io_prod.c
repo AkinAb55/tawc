@@ -1,9 +1,8 @@
 /* Production-side `tawc_loader_io` impl: forwards to raw syscalls.
  *
  * Mirror of tawcroot/tests/unit/test_loader_map.c's libc-forwarding impl, but
- * built into the freestanding production binary. Runs in the
- * `--exec-child` mode (forthcoming) and any other path that loads
- * a guest in-process.
+ * built into the freestanding production binary. Runs in `--exec-child`
+ * mode and any other path that loads a guest in-process.
  *
  * Lives in PROD_C only — `raw_sys.h` is freestanding and would clash
  * with glibc's syscall wrappers under hosted-glibc tests. The mapper

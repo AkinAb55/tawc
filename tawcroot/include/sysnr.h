@@ -218,7 +218,7 @@
 # define TAWC_SYS_chroot          161
 # define TAWC_SYS_pivot_root      155
 # define TAWC_SYS_mount           165
-# define TAWC_SYS_umount2         166   /* x86_64 NR 22 (old umount) is unused; glibc routes through umount2 */
+# define TAWC_SYS_umount2         166   /* x86_64 has no legacy umount; glibc routes through umount2 */
 # define TAWC_SYS_unshare         272
 # define TAWC_SYS_setns           308
 #else

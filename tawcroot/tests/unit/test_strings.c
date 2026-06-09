@@ -111,6 +111,9 @@ test(tawc_int_to_str_basics)
 
 	n = tawc_int_to_str(buf, sizeof buf, -2147483647);
 	test_str_eq(buf, "-2147483647");
+
+	n = tawc_int_to_str(buf, sizeof buf, INT32_MIN); /* negation must not overflow */
+	test_str_eq(buf, "-2147483648");
 }
 
 test(tawc_int_to_str_buffer_too_small)

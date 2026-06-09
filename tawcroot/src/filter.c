@@ -4,7 +4,7 @@
  * filter we install here is intentionally minimal:
  *
  *   1. arch != TAWCROOT_AUDIT_ARCH      → KILL_PROCESS  (defense in depth)
- *   2. instruction_pointer == &stub_insn → ALLOW         (our raw syscall)
+ *   2. instruction_pointer == &stub_ret  → ALLOW         (our raw syscall)
  *   3. syscall_nr == trap_syscall_nr    → TRAP          (smoke-test target)
  *   4. default                          → ALLOW
  *
@@ -21,8 +21,8 @@
  *     offset 16 args[0]             (u64)
  *     ...
  *
- * The `ip_lo`/`ip_hi` design-note comment in notes/tawcroot.md is off by 8
- * (claims IP is at 16); the kernel struct above is the source of truth.
+ * The kernel struct above is the source of truth for the offsets
+ * (notes/tawcroot.md's cBPF sketch agrees).
  */
 
 #include <stddef.h>

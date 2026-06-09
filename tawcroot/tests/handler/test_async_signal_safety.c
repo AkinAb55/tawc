@@ -205,6 +205,14 @@ test(handler_c_pinned_import_list)
 		/* Sigreturn trampoline (asm). ASS — it just loads ucontext and
 		 * returns to the kernel via rt_sigreturn. */
 		"tawcroot_sigreturn_trampoline",
+		/* Fatal-path diagnostics for non-seccomp SIGSYS (io.c). ASS —
+		 * stack buffers + the raw write syscall, no state. Only runs
+		 * on the way to exit_group. */
+		"tawc_io_str",
+		"tawc_io_dec",
+		/* exit_group for the non-seccomp SIGSYS abort (raw_sys.h
+		 * static inline on most builds; listed for -O0/odd builds). */
+		"tawc_exit_group",
 	};
 
 	char path[512];

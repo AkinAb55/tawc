@@ -117,9 +117,14 @@ static long dup_to_reserved_inheritable(int fd)
 static void add_to_reserved_list(int fd)
 {
 	if (tawcroot_n_reserved_fds >= TAWCROOT_MAX_RESERVED_FDS) {
-		/* No BPF fast-path slot left; runtime-list check still
-		 * protects close, only the close-loop perf optimization
-		 * loses precision. */
+		/* Table full: the fd stays usable internally but is NOT
+		 * protected — neither the BPF close trap (baked at install)
+		 * nor tawcroot_fd_is_reserved will recognise it, so a guest
+		 * close() reaches the kernel. Unreachable in practice (64
+		 * slots vs ≤ 33 users). Note that even WITH a slot, fds
+		 * reserved after filter install are missed by the BPF close
+		 * fast path — see issues/tawcroot-close-fastpath-misses-
+		 * runtime-reserved-fds.md. */
 		return;
 	}
 	tawcroot_reserved_fds[tawcroot_n_reserved_fds++] = fd;
@@ -331,15 +336,24 @@ long tawcroot_shm_access_name(const char *name)
 
 /* ---------- exec_state ferry ---------- */
 
-size_t tawcroot_shm_export_all(const char **names_out, int *fds_out,
-			       size_t cap)
+size_t tawcroot_shm_export_all(char (*names_out)[TAWCROOT_SHM_NAME_MAX + 1],
+			       int *fds_out, size_t cap)
 {
 	size_t n = 0;
 	shm_lock();
 	for (size_t i = 0; i < TAWCROOT_SHM_MAX && n < cap; i++) {
 		if (!g_shm[i].in_use) continue;
-		names_out[n] = g_shm[i].name;
-		fds_out[n]   = g_shm[i].fd;
+		/* COPY the name bytes while the lock is held. Returning
+		 * pointers into the live table let a concurrent shm_unlink
+		 * (name[0] = 0) or slot reuse garble the name between
+		 * export and serialization. */
+		size_t k = 0;
+		while (g_shm[i].name[k]) {
+			names_out[n][k] = g_shm[i].name[k];
+			k++;
+		}
+		names_out[n][k] = 0;
+		fds_out[n] = g_shm[i].fd;
 		n++;
 	}
 	shm_unlock();

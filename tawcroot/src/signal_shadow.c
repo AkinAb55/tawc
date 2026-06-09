@@ -101,8 +101,10 @@ static struct slot g_slots[N_SLOTS];
 
 static unsigned slot_hash(int tid)
 {
-	/* Linear probe from a hash, so we don't pile up at modulo
-	 * collisions on small tid sets. Knuth multiplicative hash.
+	/* Multiplicative hash + linear probe. With N_SLOTS a power of
+	 * two the low bits are a bijection of tid's low bits, so the
+	 * collision structure equals plain tid % N_SLOTS — the multiply
+	 * just decorrelates probe sequences for stride-y tid patterns.
 	 * Robustness, not security — tids aren't adversarial. */
 	uint32_t u = (uint32_t)tid;
 	u *= 2654435761u;

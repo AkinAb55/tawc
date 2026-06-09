@@ -18,10 +18,10 @@
 # # Two-binary split
 #
 # `tawcroot`           -- production. No test scaffolding, no test argv
-#                         branches, no smoke driver. Currently exits with
-#                         "production CLI not yet implemented" because
-#                         phases 0/1 are still in progress. Shipped in
-#                         the APK as `libtawcroot.so`.
+#                         branches, no smoke driver. Implements the full
+#                         CLI: `tawcroot -r ROOTFS [-b SRC:DST]... -- CMD`
+#                         plus the `--exec-child <fd>` re-exec entry.
+#                         Shipped in the APK as `libtawcroot.so`.
 # `tawcroot-testhost`  -- same source set + `tawcroot/tests/testhost/src/*.c`,
 #                         compiled with `-DTAWCROOT_TESTHOST`. Drives the
 #                         in-binary smoke flows (trap-contract +

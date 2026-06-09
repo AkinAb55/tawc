@@ -15,7 +15,7 @@
  *     processes pass <100; the cap is generous and matches
  *     exec_state's serialization limit.
  *
- *   - String length is bounded by `MAX_STR` per entry (4 KB). Linux
+ *   - String length is bounded by `MAX_STR` per entry (16 KB). Linux
  *     itself caps argv strings at MAX_ARG_STRLEN (32 pages) so most
  *     normal usage fits comfortably.
  *
@@ -61,19 +61,23 @@
  *   strings_cap:  total bytes available in `strings`
  *
  * Returns the entry count (excluding NULL terminator) on success, or
- * -errno on failure (-E2BIG if too many entries, -ENOMEM if strings
- * too small, -EFAULT for bad guest pointers). */
+ * -errno on failure (-E2BIG if too many entries or the packed buffer
+ * is exhausted, -ENAMETOOLONG if one string exceeds its slot, -EFAULT
+ * for bad guest pointers). A NULL guest array is treated as an empty
+ * list, matching the kernel (Linux permits execve(path, NULL, NULL)). */
 static long collect_array(char *const *guest_arr,
                           char *strings, size_t strings_cap,
                           const char **ptrs, int cap)
 {
-	if (!guest_arr) return TAWC_EFAULT;
+	if (!guest_arr) {
+		/* Kernel-compatible: a NULL argv/envp is an empty list. */
+		ptrs[0] = (const char *)0;
+		return 0;
+	}
 
 	size_t off = 0;
 	int i = 0;
 	for (;;) {
-		if (i >= cap) return TAWC_E2BIG;
-
 		/* Copy the pointer at guest_arr[i] into local p. */
 		uintptr_t p = 0;
 		long rc = tawc_copy_from_guest(&p, sizeof p,
@@ -83,6 +87,10 @@ static long collect_array(char *const *guest_arr,
 			ptrs[i] = (const char *)0;
 			return i;
 		}
+		/* `ptrs` holds cap+1 slots: exactly `cap` entries plus the
+		 * NULL terminator fit; only a non-NULL entry at index cap
+		 * overflows. */
+		if (i >= cap) return TAWC_E2BIG;
 
 		/* Copy the string at p. */
 		size_t avail = strings_cap > off ? strings_cap - off : 0;

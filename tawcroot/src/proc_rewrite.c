@@ -102,9 +102,13 @@ long tawcroot_proc_reverse_translate_path(
  *
  * Format: addr-range perms offset dev inode <whitespace>path
  * Path may be empty, a real path starting with '/', a `[bracketed]`
- * marker, or `(deleted)` etc. seq_path's mangle_path escapes spaces
- * inside the path as '\040', so once we've crossed the inode/whitespace
- * boundary, everything until '\n' is the path field.
+ * marker, or `(deleted)` etc. The kernel's show_map_vma escapes only
+ * '\n' inside the path (as '\012'); spaces appear literally — the
+ * '\040' space-escaping is /proc/mounts, not maps. Spaces in the
+ * SUFFIX survive our rewrite because the tail is re-attached verbatim,
+ * but a rootfs/bind-src prefix containing " (" would confuse the
+ * downstream tag-split heuristic. Once we've crossed the
+ * inode/whitespace boundary, everything until '\n' is the path field.
  *
  * Returns the byte offset within `line[0..len)` of the first byte of
  * the path field, or `len` if no path is present (line is shorter

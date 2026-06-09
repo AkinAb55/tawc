@@ -30,15 +30,16 @@
  *
  * The match condition is "src is a path-prefix of suf, with a
  * component boundary" — see `apply_memo` in path_orchestrate.c. The
- * target replaces src in-place; if `target_absolute` is set the
- * caller is expected to re-fold (the orchestration loop handles
- * that). */
+ * target replaces src in-place and must be rootfs-root-anchored (no
+ * leading '/'): the builder anchors relative symlink targets at the
+ * symlink's parent directory before storing them. The target may
+ * contain '.'/'..' components; the orchestration loop re-folds after
+ * every rewrite. */
 struct tawcroot_symlink_memo {
 	char   src[32];
 	size_t src_len;
 	char   target[256];
 	size_t target_len;
-	int    target_absolute;
 };
 
 /* Context for `tawcroot_path_translate_with_ctx`. Production fills

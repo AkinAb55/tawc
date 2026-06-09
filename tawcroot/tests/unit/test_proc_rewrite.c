@@ -340,7 +340,7 @@ test(maps_rewrites_each_line_independently)
 		"e000-f000 r-xp 00000000 00:00 2 /system/lib/libdl.so\n");
 }
 
-test(maps_partial_trailing_line_emitted_as_is)
+test(maps_partial_trailing_line_still_rewritten)
 {
 	tawcroot_proc_rewrite_ctx ctx = {
 		.rootfs_host_path     = "/data/rootfs",

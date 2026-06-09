@@ -269,7 +269,7 @@ long tawc_loader_parse_phdrs(const void *phdr_buf, size_t phdr_buf_len,
  *     here)
  *   - (p_offset & (page_size-1)) == (p_vaddr & (page_size-1))
  *
- * `seg->prot` is computed from `p_flags` (PF_R/W/X bits 0/1/2).
+ * `seg->prot` is computed from `p_flags` (PF_X/W/R bits 0/1/2).
  */
 void tawc_loader_seg_layout(uint64_t p_vaddr, uint64_t p_filesz,
                             uint64_t p_memsz, uint64_t p_offset,
