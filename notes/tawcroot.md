@@ -789,6 +789,36 @@ frame. Either knob is defensible, but "non-recursive by default"
 is the safer one given our handler state is immutable-or-snapshot
 only and the handler has no genuine reason to re-enter itself.
 
+### Handler coding conventions
+
+Refactored conventions every fs-handler follows (June 2026 cleanup):
+
+- **Single guest fetch.** A handler copies the guest path string at
+  most once (`fetch_guest_path` into the scratch pool), classifies
+  intercepts (`classify_shm`, `tawcroot_proc_shadow_open`,
+  `tawcroot_is_proc_self_exe`) against that local copy, and then
+  translates the *same bytes* via `translate_local`. Never re-read a
+  guest pointer after classifying it — a racing guest thread could
+  swap the string between the peek and the translate (double-fetch).
+  Handlers without intercepts use `translate_at`, which is fetch +
+  `translate_local` in one call.
+- **`struct fs_path`** is the unit of translation output: `{fd,
+  is_root, path}` — pass `fd`/`path` straight to the `*at` syscall;
+  `is_root` means the path resolved to the base directory itself and
+  each syscall picks its own semantics ("." for most, AT_EMPTY_PATH,
+  or a direct errno).
+- **Legacy x86_64 syscalls are `via_at` shims** — rebuild the register
+  frame and re-enter the modern *at handler (nr is preserved for
+  nr-sensitive handlers). Don't write bespoke legacy bodies.
+- **Bounded string building** goes through `tawc_str_append` /
+  `tawc_str_append_dec` / `tawc_str_copy` / `tawc_proc_fd_path`
+  (strings.c, unit-tested) — no hand-rolled bounded copy loops.
+- **Trapped-and-denied syscalls** register `tawcroot_deny_enosys` /
+  `tawcroot_deny_eperm` (dispatch.c) with the rationale comment at the
+  registration site.
+- **/proc shadow synthesis** lives in `proc_shadow.c`; adding a shadow
+  file means one synthesizer + one line in `tawcroot_proc_shadow_open`.
+
 ## Path translation
 
 The core of the value-add. For each syscall that takes a path, we:
