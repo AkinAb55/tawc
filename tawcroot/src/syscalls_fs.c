@@ -713,50 +713,80 @@ static int is_proc_bus_pci_devices(const char *path)
  * reverse-translate each path field via the rootfs/bind tables, and
  * write the result into a memfd that we hand back to the guest.
  *
- * Sized for typical desktop workloads: 1 MB read buffer covers Firefox's
- * ~5–10K mappings comfortably; output may be slightly larger or smaller
- * depending on whether reverse-translation lengthens or shortens paths,
- * so the output buffer matches the read buffer's ceiling. Pathological
- * maps (>1 MB) are truncated — same behavior as a guest with a small
- * read buffer would see, just at our boundary instead of theirs.
+ * Both buffers GROW as needed rather than capping at a fixed size: a
+ * Firefox-scale process (>10k mappings) overflows a 1 MiB cap, and the
+ * old code truncated the read mid-line (the rewriter then processed a
+ * cut-off partial line) and ENOSPC'd when reverse-translation made the
+ * output longer than the input. We start at 1 MiB (covers most
+ * processes in one allocation, minimising self-perturbation of the
+ * maps we're reading) and double on demand.
  *
  * All allocations are anonymous mmaps (not on the SIGSYS handler's tiny
  * stack) and freed before return. memfd_create needs no privileges and
  * works on every kernel we target (≥ 3.17). */
 #define MAPS_BUF_SIZE  ((size_t)1 << 20)
+/* Hard ceiling so a runaway never exhausts address space; 256 MiB is
+ * orders of magnitude past any real /proc/self/maps. */
+#define MAPS_BUF_MAX   ((size_t)256 << 20)
+
+static long maps_mmap(size_t cap)
+{
+	long r = tawc_mmap(0, cap, 3 /*PROT_READ|PROT_WRITE*/,
+			   0x22 /*MAP_PRIVATE|MAP_ANONYMOUS*/, -1, 0);
+	if (r < 0 && r > -4096) return r;
+	if (r == 0) return TAWC_ENOMEM;
+	return r;
+}
+
+/* Read the whole of an already-open fd into a growable anonymous
+ * mapping. On success sets the region and cap out-params to the mapping
+ * and returns the byte length; on failure unmaps and returns -errno. */
+static long read_all_growable(int fd, long *region, size_t *cap)
+{
+	size_t c = MAPS_BUF_SIZE;
+	long reg = maps_mmap(c);
+	if (reg < 0) return reg;
+	char *buf = (char *)(uintptr_t)reg;
+	size_t len = 0;
+	for (;;) {
+		if (len == c) {
+			if (c >= MAPS_BUF_MAX) break;  /* ceiling: stop reading */
+			size_t nc = c * 2;
+			long nreg = maps_mmap(nc);
+			if (nreg < 0) {
+				(void)tawc_munmap((void *)(uintptr_t)reg, c);
+				return nreg;
+			}
+			char *nbuf = (char *)(uintptr_t)nreg;
+			for (size_t k = 0; k < len; k++) nbuf[k] = buf[k];
+			(void)tawc_munmap((void *)(uintptr_t)reg, c);
+			reg = nreg; buf = nbuf; c = nc;
+		}
+		long n = tawc_read(fd, buf + len, c - len);
+		if (n == 0) break;
+		if (n < 0) {
+			(void)tawc_munmap((void *)(uintptr_t)reg, c);
+			return n;
+		}
+		len += (size_t)n;
+	}
+	*region = reg;
+	*cap = c;
+	return (long)len;
+}
 
 static long open_proc_maps_shadow(void)
 {
-	long region = tawc_mmap(0, 2 * MAPS_BUF_SIZE,
-				3 /*PROT_READ|PROT_WRITE*/,
-				0x22 /*MAP_PRIVATE|MAP_ANONYMOUS*/,
-				-1, 0);
-	if (region < 0 && region > -4096) return region;
-	if (region == 0) return TAWC_ENOMEM; /* defensive */
-	char *in_buf  = (char *)(uintptr_t)region;
-	char *out_buf = in_buf + MAPS_BUF_SIZE;
-
 	long src = tawc_openat(AT_FDCWD, "/proc/self/maps",
 			       0 /*O_RDONLY*/ | 0x80000 /*O_CLOEXEC*/, 0);
-	if (src < 0) {
-		(void)tawc_munmap((void *)(uintptr_t)region, 2 * MAPS_BUF_SIZE);
-		return src;
-	}
+	if (src < 0) return src;
 
-	size_t in_len = 0;
-	while (in_len < MAPS_BUF_SIZE) {
-		long n = tawc_read((int)src, in_buf + in_len,
-				   MAPS_BUF_SIZE - in_len);
-		if (n == 0) break;
-		if (n < 0) {
-			tawc_close((int)src);
-			(void)tawc_munmap((void *)(uintptr_t)region,
-					  2 * MAPS_BUF_SIZE);
-			return n;
-		}
-		in_len += (size_t)n;
-	}
+	long in_region;
+	size_t in_cap;
+	long in_len = read_all_growable((int)src, &in_region, &in_cap);
 	tawc_close((int)src);
+	if (in_len < 0) return in_len;
+	char *in_buf = (char *)(uintptr_t)in_region;
 
 	tawcroot_proc_rewrite_ctx ctx = {
 		.rootfs_host_path     = tawcroot_rootfs_host_path,
@@ -764,16 +794,41 @@ static long open_proc_maps_shadow(void)
 		.binds                = tawcroot_binds,
 		.n_binds              = tawcroot_n_binds,
 	};
-	long out_len = tawcroot_proc_maps_rewrite(&ctx, in_buf, in_len,
-						  out_buf, MAPS_BUF_SIZE);
+
+	/* Output: reverse-translation can lengthen lines (a bind dst
+	 * longer than its src), so size above the input by half again plus
+	 * a megabyte and grow-retry on ENOSPC. */
+	size_t out_cap = (size_t)in_len + (size_t)in_len / 2 + MAPS_BUF_SIZE;
+	long out_region = maps_mmap(out_cap);
+	if (out_region < 0) {
+		(void)tawc_munmap((void *)(uintptr_t)in_region, in_cap);
+		return out_region;
+	}
+	long out_len;
+	for (;;) {
+		out_len = tawcroot_proc_maps_rewrite(
+			&ctx, in_buf, (size_t)in_len,
+			(char *)(uintptr_t)out_region, out_cap);
+		if (out_len != TAWC_ENOSPC) break;
+		if (out_cap >= MAPS_BUF_MAX) break;  /* ceiling */
+		(void)tawc_munmap((void *)(uintptr_t)out_region, out_cap);
+		out_cap *= 2;
+		out_region = maps_mmap(out_cap);
+		if (out_region < 0) {
+			(void)tawc_munmap((void *)(uintptr_t)in_region, in_cap);
+			return out_region;
+		}
+	}
+	(void)tawc_munmap((void *)(uintptr_t)in_region, in_cap);
 	if (out_len < 0) {
-		(void)tawc_munmap((void *)(uintptr_t)region, 2 * MAPS_BUF_SIZE);
+		(void)tawc_munmap((void *)(uintptr_t)out_region, out_cap);
 		return out_len;
 	}
+	char *out_buf = (char *)(uintptr_t)out_region;
 
 	long memfd = tawc_memfd_create("tawcroot-maps", 1U /*MFD_CLOEXEC*/);
 	if (memfd < 0) {
-		(void)tawc_munmap((void *)(uintptr_t)region, 2 * MAPS_BUF_SIZE);
+		(void)tawc_munmap((void *)(uintptr_t)out_region, out_cap);
 		return memfd;
 	}
 
@@ -783,14 +838,13 @@ static long open_proc_maps_shadow(void)
 				    (size_t)out_len - written);
 		if (w < 0) {
 			tawc_close((int)memfd);
-			(void)tawc_munmap((void *)(uintptr_t)region,
-					  2 * MAPS_BUF_SIZE);
+			(void)tawc_munmap((void *)(uintptr_t)out_region, out_cap);
 			return w;
 		}
 		written += (size_t)w;
 	}
 
-	(void)tawc_munmap((void *)(uintptr_t)region, 2 * MAPS_BUF_SIZE);
+	(void)tawc_munmap((void *)(uintptr_t)out_region, out_cap);
 
 	long sk = tawc_lseek((int)memfd, 0, 0 /*SEEK_SET*/);
 	if (sk < 0) {
