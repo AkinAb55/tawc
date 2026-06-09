@@ -257,6 +257,17 @@ static void decorate_stat(struct stat *st)
 	st->st_gid = 0;
 }
 
+/* Shared tail for the stat-shaped handlers: on kernel success,
+ * decorate the kernel-filled `local` as root-owned and copy it to the
+ * guest's out-pointer. Returns `rv` or the copy's -EFAULT. */
+static long finish_stat(long rv, struct stat *local, struct stat *guest_out)
+{
+	if (rv != 0) return rv;
+	decorate_stat(local);
+	long ce = tawc_copy_to_guest(guest_out, local, sizeof *local);
+	return ce < 0 ? ce : 0;
+}
+
 static long handle_newfstatat(const tawcroot_syscall_args *args,
 			      ucontext_t *uc)
 {
@@ -288,11 +299,7 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 		if (empty) {
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
 					   (long)&local, flags, 0, 0);
-			if (rv != 0) return rv;
-			decorate_stat(&local);
-			long ce = tawc_copy_to_guest(out, &local, sizeof local);
-			if (ce < 0) return ce;
-			return rv;
+			return finish_stat(rv, &local, out);
 		}
 	}
 
@@ -333,11 +340,7 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)resolved,
 			   (long)&local, rv_flags, 0, 0);
-	if (rv != 0) return rv;
-	decorate_stat(&local);
-	long ce = tawc_copy_to_guest(out, &local, sizeof local);
-	if (ce < 0) return ce;
-	return rv;
+	return finish_stat(rv, &local, out);
 }
 
 /* Fetch a guest-pointer path string into a stack-local buffer through
@@ -705,18 +708,8 @@ static long handle_getcwd(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (cap == 0) return TAWC_ERANGE;
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-	char *host = scratch->buf[0];
-	long r = TAWC_RAW(TAWC_SYS_getcwd, (long)host,
-			  TAWCROOT_PATH_SCRATCH_SIZE,
-			  0, 0, 0, 0);
-	if (r < 0) return r;
-
-	size_t host_len = (size_t)r;
-	while (host_len > 0 && host[host_len - 1] == 0) host_len--;
-
 	char *tmp = scratch->buf[1];
-	long n = tawcroot_host_path_to_guest_abs(host, host_len, tmp,
-						 TAWCROOT_PATH_SCRATCH_SIZE);
+	long n = tawcroot_cwd_to_guest_abs(tmp, TAWCROOT_PATH_SCRATCH_SIZE);
 	if (n < 0) return n;
 	if ((size_t)n + 1 > cap) return TAWC_ERANGE;
 	long ce = tawc_copy_to_guest(out, tmp, (size_t)n + 1);
@@ -924,6 +917,19 @@ static long handle_symlinkat(const tawcroot_syscall_args *args,
 #ifndef STATX_GID
 # define STATX_GID 0x00000100U
 #endif
+/* statx flavour of finish_stat: zero uid/gid AND set the mask bits so
+ * the guest sees the fields as populated (review C11). */
+static long finish_statx(long rv, struct statx *local,
+			 struct statx *guest_out)
+{
+	if (rv != 0) return rv;
+	local->stx_uid = 0;
+	local->stx_gid = 0;
+	local->stx_mask |= STATX_UID | STATX_GID;
+	long ce = tawc_copy_to_guest(guest_out, local, sizeof *local);
+	return ce < 0 ? ce : 0;
+}
+
 static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -946,13 +952,7 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (empty) {
 			long rv = TAWC_RAW(TAWC_SYS_statx, dirfd, (long)"", flags,
 					   mask, (long)&local, 0);
-			if (rv != 0) return rv;
-			local.stx_uid = 0;
-			local.stx_gid = 0;
-			local.stx_mask |= STATX_UID | STATX_GID;
-			long ce = tawc_copy_to_guest(out, &local, sizeof local);
-			if (ce < 0) return ce;
-			return rv;
+			return finish_statx(rv, &local, out);
 		}
 	}
 
@@ -994,13 +994,7 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 
 	long rv = TAWC_RAW(TAWC_SYS_statx, t.fd, (long)resolved,
 			   rv_flags, mask, (long)&local, 0);
-	if (rv != 0) return rv;
-	local.stx_uid = 0;
-	local.stx_gid = 0;
-	local.stx_mask |= STATX_UID | STATX_GID;
-	long ce = tawc_copy_to_guest(out, &local, sizeof local);
-	if (ce < 0) return ce;
-	return rv;
+	return finish_statx(rv, &local, out);
 }
 
 /* fstat with fake-root decoration. Without this, fstat(fd) reports the
@@ -1016,11 +1010,7 @@ static long handle_fstat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (!out) return TAWC_EFAULT;
 	struct stat local;
 	long rv = TAWC_RAW(TAWC_SYS_fstat, fd, (long)&local, 0, 0, 0, 0);
-	if (rv != 0) return rv;
-	decorate_stat(&local);
-	long ce = tawc_copy_to_guest(out, &local, sizeof local);
-	if (ce < 0) return ce;
-	return rv;
+	return finish_stat(rv, &local, out);
 }
 
 /* inotify_add_watch(fd, path, mask): translate the path, then route the

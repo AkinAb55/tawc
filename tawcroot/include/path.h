@@ -212,6 +212,11 @@ long tawcroot_fd_to_guest_abs(int fd, char *out, size_t out_cap);
 long tawcroot_host_path_to_guest_abs(const char *host, size_t n,
 				     char *out, size_t out_cap);
 
+/* Reverse-translate the kernel cwd into a guest-absolute path.
+ * Returns the written length, -ENOENT when the cwd is outside the
+ * view. Shared by the getcwd handler and relative-path translation. */
+long tawcroot_cwd_to_guest_abs(char *out, size_t out_cap);
+
 /* Open a guest path read-only through the current root view (host-fs
  * fallback when no rootfs is configured). Returns an O_RDONLY|O_CLOEXEC
  * fd or -errno; -EISDIR when the path names the rootfs/bind dir itself. */

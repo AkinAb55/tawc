@@ -411,16 +411,17 @@ static const struct tawcroot_path_oracle prod_oracle = {
 	.readlink = prod_readlink,
 };
 
-/* Production cwd-to-guest-absolute resolver: read the kernel cwd via
- * raw `getcwd` and reverse-translate through the shared longest-prefix
+/* Kernel-cwd-to-guest-absolute resolver: read the kernel cwd via raw
+ * `getcwd` and reverse-translate through the shared longest-prefix
  * walk (rootfs AND bind srcs — a `cd` into a bind dst leaves the
  * kernel cwd at the bind src; matching only the rootfs prefix here
  * made getcwd and every relative path fail ENOENT after such a cd).
  * Returns the written length, or -ENOENT if the cwd is outside the
- * view (we deliberately don't leak host paths through guest errors). */
-static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
+ * view (we deliberately don't leak host paths through guest errors).
+ * Public — the getcwd handler reverse-translates through the same
+ * function so the two can't drift. */
+long tawcroot_cwd_to_guest_abs(char *out, size_t out_cap)
 {
-	(void)ctx;
 	if (tawcroot_rootfs_host_path_len == 0) return TAWC_ENOENT;
 
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
@@ -438,6 +439,12 @@ static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
 	while (cwd_len > 0 && cwd[cwd_len - 1] == 0) cwd_len--;
 
 	return tawcroot_host_path_to_guest_abs(cwd, cwd_len, out, out_cap);
+}
+
+static long prod_cwd_to_guest_abs(void *ctx, char *out, size_t out_cap)
+{
+	(void)ctx;
+	return tawcroot_cwd_to_guest_abs(out, out_cap);
 }
 
 /* ---------------------------------------------------------------- */
