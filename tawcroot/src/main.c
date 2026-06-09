@@ -141,13 +141,14 @@ static void capture_host_auxv(int argc, char **argv)
 	while (*envp) envp++;
 	uint64_t *aux = (uint64_t *)(envp + 1);
 
-	uint64_t hwcap = 0, hwcap2 = 0, clktck = 0, flags = 0;
+	uint64_t hwcap = 0, hwcap2 = 0, clktck = 0, flags = 0, pagesz = 0;
 	uintptr_t sysinfo_ehdr = 0;
 
 	for (size_t i = 0; aux[i] != 0 /* AT_NULL */; i += 2) {
 		uint64_t t = aux[i];
 		uint64_t v = aux[i + 1];
 		switch (t) {
+			case 6:  pagesz       = v; break;            /* AT_PAGESZ */
 			case 8:  flags        = v; break;            /* AT_FLAGS */
 			case 16: hwcap        = v; break;            /* AT_HWCAP */
 			case 17: clktck       = v; break;            /* AT_CLKTCK */
@@ -157,7 +158,7 @@ static void capture_host_auxv(int argc, char **argv)
 		}
 	}
 	tawcroot_loader_set_host_auxv(hwcap, hwcap2, sysinfo_ehdr,
-	                              clktck, flags);
+	                              clktck, flags, pagesz);
 }
 
 /* Tiny ASCII-decimal parser for `--exec-child <fd>`. Returns the

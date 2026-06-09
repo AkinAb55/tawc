@@ -45,16 +45,26 @@ static uint64_t  g_host_at_hwcap2        = 0;
 static uintptr_t g_host_at_sysinfo_ehdr  = 0;
 static uint64_t  g_host_at_clktck        = 0;
 static uint64_t  g_host_at_flags         = 0;
+static size_t    g_host_page_size        = 4096;
+
+/* True iff `v` is a non-zero power of two. */
+static int is_pow2(uint64_t v)
+{
+	return v != 0 && (v & (v - 1)) == 0;
+}
 
 void tawcroot_loader_set_host_auxv(uint64_t hwcap, uint64_t hwcap2,
                                    uintptr_t sysinfo_ehdr,
-                                   uint64_t clktck, uint64_t flags)
+                                   uint64_t clktck, uint64_t flags,
+                                   uint64_t page_size)
 {
 	g_host_at_hwcap        = hwcap;
 	g_host_at_hwcap2       = hwcap2;
 	g_host_at_sysinfo_ehdr = sysinfo_ehdr;
 	g_host_at_clktck       = clktck;
 	g_host_at_flags        = flags;
+	/* Fall back to 4 KiB for a missing / nonsensical AT_PAGESZ. */
+	g_host_page_size = is_pow2(page_size) ? (size_t)page_size : 4096;
 }
 
 /* Open a guest path against the rootfs view (when configured) or the
@@ -251,7 +261,11 @@ static long resolve_shebangs(int initial_fd,
 
 void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 {
-	const size_t PAGE = 4096;
+	/* Kernel page size (AT_PAGESZ), captured at startup. Drives ELF
+	 * segment layout, mmap alignment, the stack guard page, and the
+	 * synthesized AT_PAGESZ. Defaults to 4096 when AT_PAGESZ wasn't
+	 * captured (legacy --exec path before auxv capture runs). */
+	const size_t PAGE = g_host_page_size;
 
 	/* Buffer for the translated path suffix when rootfs mode is active.
 	 * Sized for the worst-case canonicalized suffix (PATH_MAX). Static

@@ -201,6 +201,42 @@ test(placement_et_exec_covers_only_loaded_range)
 	test_int_eq((int)pl.entry, 0x401234);
 }
 
+/* Same shape at a 16 KiB page size: 16 K-page kernels (Android 15+)
+ * reject 4 K-aligned file-backed mmaps, so the loader must thread the
+ * kernel's AT_PAGESZ through parse_phdrs + map. Pure geometry against
+ * the recording mock io — no 16 K kernel required. The segments are
+ * 16 K-aligned (p_align 0x4000) and the placement spans whole 16 K
+ * pages. */
+test(placement_et_exec_16k_page)
+{
+	enum { P16 = 0x4000 };
+	tawc_elf64_phdr ph[2];
+	memset(ph, 0, sizeof ph);
+	ph[0].p_type = TAWC_PT_LOAD; ph[0].p_flags = 0x4 | 0x1;
+	ph[0].p_offset = P16;     ph[0].p_vaddr = 0x404000; ph[0].p_paddr = 0x404000;
+	ph[0].p_filesz = P16;     ph[0].p_memsz = P16;      ph[0].p_align = P16;
+	ph[1].p_type = TAWC_PT_LOAD; ph[1].p_flags = 0x4 | 0x2;
+	ph[1].p_offset = 2 * P16; ph[1].p_vaddr = 0x408000; ph[1].p_paddr = 0x408000;
+	ph[1].p_filesz = P16;     ph[1].p_memsz = P16;      ph[1].p_align = P16;
+
+	struct tawc_loader_image img;
+	memset(&img, 0, sizeof img);
+	img.e_type      = TAWC_ET_EXEC;
+	img.e_machine   = TAWC_EM_X86_64;
+	img.e_phentsize = sizeof(tawc_elf64_phdr);
+	img.e_phnum     = 2;
+	img.e_entry     = 0x404010;
+	test_int_eq(tawc_loader_parse_phdrs(ph, sizeof ph, P16, &img), 0);
+	test_int_eq((int)img.addr_min, 0x404000);
+	test_int_eq((int)img.addr_max, 0x40c000);
+
+	struct tawc_loader_placement pl;
+	test_int_eq(tawc_loader_map(&img, /*fd*/-1, 0, P16, &mock_io, &pl), 0);
+	test_int_eq((int)pl.base, 0x404000);
+	test_int_eq((int)pl.span, 0x8000);   /* addr_max - addr_min */
+	test_int_eq((int)pl.entry, 0x404010);
+}
+
 test(map_real_self_exe_dyn)
 {
 	struct tawc_loader_image img;

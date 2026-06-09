@@ -28,10 +28,18 @@ extern const struct tawc_loader_io tawcroot_loader_io_prod;
  * guest stack. Call once per tawcroot incarnation (production main and
  * --exec-child both, since the kernel rebuilds auxv on each execve).
  * Caller must walk past argv and envp to find the auxv array; missing
- * entries should be passed as 0 and will be omitted from the synth. */
+ * entries should be passed as 0 and will be omitted from the synth.
+ *
+ * `page_size` is the kernel's AT_PAGESZ. It drives ELF segment parsing,
+ * mmap alignment, the stack guard page, and the synthesized AT_PAGESZ —
+ * a 16 KiB-page kernel (Android 15+, Pixel emulator images) rejects
+ * 4 KiB-aligned file-backed mmaps and lies to the guest's ld.so/malloc
+ * if we hardcode 4096. Passed as 0 (or a non-power-of-two) falls back
+ * to 4096. */
 void tawcroot_loader_set_host_auxv(uint64_t hwcap, uint64_t hwcap2,
                                    uintptr_t sysinfo_ehdr,
-                                   uint64_t clktck, uint64_t flags);
+                                   uint64_t clktck, uint64_t flags,
+                                   uint64_t page_size);
 
 /* Arguments to forward to the guest as argv/envp. Passed directly to
  * the stack synthesizer.  `argv[argc]` must be NULL; `envp` must be
