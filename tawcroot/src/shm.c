@@ -26,7 +26,12 @@
 #include "raw_sys.h"
 #include "shm.h"
 #include "sysnr.h"
+#include "tawc_string.h"
 #include "tawc_uapi.h"
+
+#ifndef O_ACCMODE
+# define O_ACCMODE 00000003
+#endif
 
 _Static_assert(__atomic_always_lock_free(sizeof(int), 0),
 	       "int atomics must be lock-free for AS-safety");
@@ -62,6 +67,11 @@ const char *tawcroot_shm_match(const char *path)
 	for (const char *p = name; *p; p++) {
 		if (*p == '/') return 0;
 	}
+	/* "." and ".." are the directory itself / its parent, not shm
+	 * names — tawcroot_shm_match must not claim them or "/dev/shm/."
+	 * ENOENTs instead of resolving to the dir. */
+	if (name[0] == '.' && name[1] == 0) return 0;
+	if (name[0] == '.' && name[1] == '.' && name[2] == 0) return 0;
 	return name;
 }
 
@@ -114,6 +124,36 @@ static long dup_to_reserved_inheritable(int fd)
 	return r;
 }
 
+/* Hand the guest a fresh open file description on the segment by
+ * re-opening the internal memfd through /proc/self/fd/<internal> with
+ * the guest's requested access mode. A plain F_DUPFD shares ONE file
+ * description, so (a) an O_RDONLY opener got a writable fd and (b) all
+ * guest fds for a name shared a read/write/lseek offset. The re-open
+ * gives a distinct description with the right access mode and its own
+ * offset — matching real /dev/shm. Falls back to F_DUPFD (degraded but
+ * functional: shared offset, access mode = internal's) if /proc isn't
+ * available. Returns the new guest fd or -errno. */
+static long reopen_for_guest(int internal_fd, int flags)
+{
+	char path[32];
+	const char *prefix = "/proc/self/fd/";
+	size_t i = 0;
+	while (prefix[i]) { path[i] = prefix[i]; i++; }
+	int wrote = tawc_int_to_str(path + i, sizeof path - i, internal_fd);
+	if (wrote > 0) {
+		i += (size_t)wrote;
+		path[i] = 0;
+		int oflags = (flags & O_ACCMODE);
+		if (flags & O_CLOEXEC) oflags |= O_CLOEXEC;
+		long fd = tawc_openat(AT_FDCWD, path, oflags, 0);
+		if (fd >= 0) return fd;
+	}
+	/* Fallback: dup shares the file description but keeps the segment
+	 * usable when /proc/self/fd is unreachable. */
+	return tawc_fcntl(internal_fd,
+			  (flags & O_CLOEXEC) ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
+}
+
 static void add_to_reserved_list(int fd)
 {
 	if (tawcroot_n_reserved_fds >= TAWCROOT_MAX_RESERVED_FDS) {
@@ -141,7 +181,6 @@ long tawcroot_shm_open(const char *name, int flags, int mode)
 	int has_create = (flags & O_CREAT)   != 0;
 	int has_excl   = (flags & O_EXCL)    != 0;
 	int has_trunc  = (flags & O_TRUNC)   != 0;
-	int has_cloex  = (flags & O_CLOEXEC) != 0;
 
 	long guest_fd = -1;
 
@@ -152,12 +191,11 @@ long tawcroot_shm_open(const char *name, int flags, int mode)
 			shm_unlock();
 			return TAWC_EEXIST;
 		}
-		/* Dup a guest-facing fd from the internal fd UNDER THE LOCK
-		 * so a concurrent unlink+create-different-name can't recycle
-		 * the kernel slot underneath us between dup and ftruncate. */
-		guest_fd = tawc_fcntl(e->fd,
-				      has_cloex ? F_DUPFD_CLOEXEC : F_DUPFD,
-				      0);
+		/* Re-open a guest-facing fd from the internal fd UNDER THE
+		 * LOCK so a concurrent unlink+create-different-name can't
+		 * recycle the kernel slot underneath us. Re-open (not dup)
+		 * gives the guest its own file description + access mode. */
+		guest_fd = reopen_for_guest(e->fd, flags);
 		shm_unlock();
 		if (guest_fd < 0) return guest_fd;
 	} else {
@@ -187,9 +225,7 @@ long tawcroot_shm_open(const char *name, int flags, int mode)
 			return internal;
 		}
 		add_to_reserved_list((int)internal);
-		guest_fd = tawc_fcntl((int)internal,
-				      has_cloex ? F_DUPFD_CLOEXEC : F_DUPFD,
-				      0);
+		guest_fd = reopen_for_guest((int)internal, flags);
 		if (guest_fd < 0) {
 			tawc_close((int)internal);
 			shm_unlock();
@@ -275,8 +311,11 @@ void tawcroot_shm_statx_dir(struct statx *out, unsigned int mask)
 	out->stx_nlink = 2;
 	out->stx_uid = 0;
 	out->stx_gid = 0;
+	/* No STATX_SIZE: stx_size is 0 and a directory has no meaningful
+	 * size — advertising the bit while leaving the field 0 is a lie
+	 * the guest can observe. */
 	out->stx_mask = STATX_TYPE | STATX_MODE | STATX_NLINK |
-			STATX_UID | STATX_GID | STATX_SIZE;
+			STATX_UID | STATX_GID;
 }
 
 long tawcroot_shm_stat_name(const char *name, struct stat *out)

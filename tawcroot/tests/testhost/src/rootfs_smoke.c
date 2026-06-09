@@ -3737,6 +3737,62 @@ static int test_dev_shm_emulation(void)
 	return fails;
 }
 
+/* shm fidelity: an O_RDONLY opener must get a read-only fd (write
+ * fails EBADF), and two independent shm_opens of one name must have
+ * independent file offsets (re-open, not shared-description dup). */
+static int test_shm_rdonly_and_independent_offset(void)
+{
+	int fails = 0;
+	long w = inline_openat(AT_FDCWD, "/dev/shm/tawcroot-fidelity",
+			       O_RDWR | 0x40 /*O_CREAT*/, 0600);
+	fails += tawc_io_step("shm-fidelity: create RW", w >= 0);
+	if (w < 0) return fails;
+	long tr;
+	INLINE_SYS6(TAWC_SYS_ftruncate, w, 16, 0, 0, 0, 0, tr);
+	(void)tr;
+
+	/* O_RDONLY opener: a write must fail EBADF (wrong access mode),
+	 * proving it's not a dup of the RW internal fd. */
+	long ro = inline_openat(AT_FDCWD, "/dev/shm/tawcroot-fidelity",
+				O_RDONLY, 0);
+	fails += tawc_io_step("shm-fidelity: O_RDONLY reopen -> fd", ro >= 0);
+	if (ro >= 0) {
+		long wr;
+		char b = 'x';
+		INLINE_SYS6(TAWC_SYS_write, ro, &b, 1, 0, 0, 0, wr);
+		fails += tawc_io_step(
+			"shm-fidelity: write to O_RDONLY fd -> EBADF",
+			wr == TAWC_EBADF);
+		tawc_io_kv_dec("    write rv", wr);
+		tawc_close((int)ro);
+	}
+
+	/* Independent offsets: two separate shm_opens, lseek one, the
+	 * other's offset is unaffected (distinct file descriptions). */
+	long a = inline_openat(AT_FDCWD, "/dev/shm/tawcroot-fidelity",
+			       O_RDWR, 0);
+	long bfd = inline_openat(AT_FDCWD, "/dev/shm/tawcroot-fidelity",
+				 O_RDWR, 0);
+	if (a >= 0 && bfd >= 0) {
+		long pos;
+		INLINE_SYS6(TAWC_SYS_lseek, a, 8, 0 /*SEEK_SET*/, 0, 0, 0, pos);
+		(void)pos;
+		long bpos;
+		INLINE_SYS6(TAWC_SYS_lseek, bfd, 0, 1 /*SEEK_CUR*/, 0, 0, 0,
+			    bpos);
+		fails += tawc_io_step(
+			"shm-fidelity: second fd offset independent (== 0)",
+			bpos == 0);
+		tawc_io_kv_dec("    b offset", bpos);
+	}
+	if (a >= 0) tawc_close((int)a);
+	if (bfd >= 0) tawc_close((int)bfd);
+
+	(void)inline_unlinkat(AT_FDCWD, "/dev/shm/tawcroot-fidelity", 0);
+	tawc_close((int)w);
+	return fails;
+}
+
 /* Runtime-reserved fd survives a guest closefrom over the reserved
  * range. shm_open reserves an INTERNAL fd in [BASE, ∞) that the guest
  * never sees but its blind close loop (gpgme/pacman fd hygiene) walks.
@@ -4291,6 +4347,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_proc_sys_overflow_id_synthesis();
 	fails += test_proc_bus_pci_devices_synthesis();
 	fails += test_dev_shm_emulation();
+	fails += test_shm_rdonly_and_independent_offset();
 	fails += test_shm_survives_guest_closefrom();
 
 	/* chroot tests. The non-mutating cases run first (NULL, ENOTDIR,
