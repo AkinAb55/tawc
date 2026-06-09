@@ -317,6 +317,16 @@ tawcroot_path_result tawcroot_path_translate_with_ctx(
 		if (rf < 0) { r.err = rf; return r; }
 	}
 
+	/* A memo rewrite may have landed the path inside bind territory
+	 * (bind on /usr/lib, memo lib → usr/lib, input /lib/x). Route now,
+	 * BEFORE the resolver — otherwise the resolver walks the ROOTFS
+	 * oracle for a suffix that belongs to the bind src, and the
+	 * rootfs's own shadow of that subtree (conflicting symlinks, or a
+	 * file where the bind has a dir) drives resolution against the
+	 * wrong tree. */
+	route_through_binds(&r, out_suffix, ctx->binds, ctx->n_binds);
+	if (r.base_fd != ctx->rootfs_base_fd) return r;
+
 	/* Manual symlink resolver. See path_resolve.h banner. */
 	if (ctx->oracle) {
 		long er = tawcroot_path_resolve_symlinks(out_suffix, out_cap,

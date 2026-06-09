@@ -84,15 +84,25 @@ static void decorate_stat(struct stat *st);
 
 /* Pick the resolution mode for an openat based on the kernel flags.
  * O_NOFOLLOW + O_PATH means "don't follow the leaf even if it's a
- * symlink"; O_CREAT means the leaf may not exist. Both fall under
- * NOFOLLOW / PARENT_CREATE for memoizer purposes — we don't want a
- * `lstat`-style operation against the SYMLINK to be silently rewritten
- * to its target. (O_NOFOLLOW / O_CREAT are arch-specific bits — pulled
- * from <linux/fcntl.h> at the top of this file.) */
+ * symlink". Kernel O_CREAT semantics split on O_EXCL:
+ *   - O_CREAT|O_EXCL never follows the leaf (an existing symlink —
+ *     even dangling — is EEXIST), so the leaf must reach the kernel
+ *     un-resolved: PARENT_CREATE.
+ *   - plain O_CREAT FOLLOWS an existing leaf symlink (and creates at
+ *     the target of a dangling one). PARENT_CREATE here let the host
+ *     kernel chase an absolute symlink target against the HOST root —
+ *     `open("/etc/resolv.conf", O_WRONLY|O_CREAT)` with the usual
+ *     resolv.conf → /run/... symlink wrote outside the rootfs view.
+ *     FOLLOW makes our resolver walk (and clamp) the leaf; a missing
+ *     leaf stops the resolver early and the kernel creates it.
+ * (O_NOFOLLOW / O_CREAT are arch-specific bits — pulled from
+ * <linux/fcntl.h> at the top of this file.) */
 static tawcroot_path_mode openat_mode(int flags)
 {
 	if (flags & O_NOFOLLOW) return TAWCROOT_PATH_NOFOLLOW;
-	if (flags & O_CREAT)    return TAWCROOT_PATH_PARENT_CREATE;
+	if (flags & O_CREAT)
+		return (flags & O_EXCL) ? TAWCROOT_PATH_PARENT_CREATE
+					: TAWCROOT_PATH_FOLLOW;
 	return TAWCROOT_PATH_FOLLOW;
 }
 
@@ -390,20 +400,6 @@ static long fetch_and_translate(const char *guest_path,
 	return 0;
 }
 
-/* True iff `path` contains a `..` path component. Component-aware: treats
- * "foo..bar" / "..baz" as not-dotdot. */
-static int path_has_dotdot_component(const char *path)
-{
-	const char *p = path;
-	while (*p) {
-		if (p[0] == '.' && p[1] == '.' && (p[2] == 0 || p[2] == '/'))
-			return 1;
-		while (*p && *p != '/') p++;
-		while (*p == '/') p++;
-	}
-	return 0;
-}
-
 /* Variant that honours the guest's dirfd for fd-relative resolution.
  * See big comment above for why this matters. Returns -1 in
  * `*base_fd_out` and the literal guest-supplied path in `path_buf`
@@ -438,7 +434,26 @@ static long fetch_and_translate_at(int dirfd, const char *guest_path,
 		                                     guest_path);
 		if (n < 0) return n;
 		if (path_buf[0] != '/') {
-			if (path_has_dotdot_component(path_buf)) {
+			/* Lift EVERY non-empty fd-relative path to guest-
+			 * absolute via the dirfd's /proc/self/fd link, then
+			 * run the full translator so the `..` clamp AND the
+			 * symlink resolver apply (notes/tawcroot.md
+			 * §"Translation rules" item 4: escapes blocked for
+			 * both absolute and relative requests). Earlier only
+			 * paths containing `..` were lifted; a dotdot-free
+			 * relative path went to the kernel verbatim, and any
+			 * in-rootfs symlink with an absolute target along it
+			 * was chased against the HOST root — e.g.
+			 * openat(etc_fd, "resolv.conf") with resolv.conf →
+			 * /run/resolv.conf landed on the host's /run.
+			 * Cost: one /proc/self/fd readlink per *at call with
+			 * a relative path and real dirfd.
+			 *
+			 * The lift resolves via the dirfd's CURRENT path, so
+			 * a dirfd whose directory was renamed/unlinked after
+			 * open diverges from kernel inode-based resolution —
+			 * same trade proot makes. */
+			if (path_buf[0] != 0) {
 				TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 				char *abs = scratch->buf[0];
 				long al = tawcroot_fd_to_guest_abs(dirfd, abs,
@@ -471,7 +486,8 @@ static long fetch_and_translate_at(int dirfd, const char *guest_path,
 				 * the leak this branch protects against
 				 * doesn't apply. */
 			}
-			/* Relative path with explicit dirfd: kernel resolves
+			/* Empty path (kernel empty-path semantics must apply
+			 * verbatim) or outside-view dirfd: kernel resolves
 			 * off the dirfd. Copy path_buf into suffix so callers
 			 * with one output buffer still work.
 			 *

@@ -420,6 +420,37 @@ test(prod_legacy_open_translates_path)
 }
 #endif
 
+/* open(O_CREAT) on an existing absolute symlink leaf must follow the
+ * link INSIDE the rootfs view. The /etc/resolv.conf → /run/resolv.conf
+ * shape is the canonical real-world case. Pre-fix, the O_CREAT leaf
+ * reached the host kernel un-resolved and the absolute target was
+ * chased against the HOST root (write landing outside the view, or
+ * bogus ENOENT/EACCES). */
+test(prod_open_creat_symlink_leaf_stays_in_view)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+
+	char p[PATH_MAX], lnk[PATH_MAX];
+	snprintf(p, sizeof p, "%s/etc", FAKE_ROOTFS);
+	test_true(rh_mkdir_p(p, 0755));
+	snprintf(lnk, sizeof lnk, "%s/etc/resolv.conf", FAKE_ROOTFS);
+	(void)unlink(lnk);
+	test_int_eq(symlink("/run/resolv.conf", lnk), 0);
+
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--",
+		"/bin/static_open_creat_argv1", "/etc/resolv.conf", NULL
+	};
+	test_int_eq(run_with(args), 0);
+
+	/* The write must land at <rootfs>/run/resolv.conf. */
+	snprintf(p, sizeof p, "%s/run/resolv.conf", FAKE_ROOTFS);
+	test_int_eq(access(p, F_OK), 0);
+
+	rh_rmrf(FAKE_ROOTFS);
+}
+
 /* io_uring_setup, io_uring_enter, and io_uring_register all return
  * -ENOSYS regardless of args. The setup deny is the primary
  * correctness barrier (no ring fd → no SQE traffic); the enter and

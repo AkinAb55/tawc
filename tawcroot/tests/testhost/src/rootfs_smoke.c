@@ -786,6 +786,73 @@ static int test_fstatat_fake_root_decoration(void)
 	return fails;
 }
 
+/* dirfd-relative symlink escape: a dotdot-free relative path off a
+ * guest dirfd must still be lifted through the translator so an
+ * absolute-target symlink along it is clamped at the rootfs. Pre-fix,
+ * openat(etc_fd, "host-secret") went to the kernel verbatim and the
+ * kernel chased /etc/passwd against the HOST root (which exists —
+ * silent view escape). Post-fix it clamps to <rootfs>/etc/passwd →
+ * ENOENT. */
+static int test_dirfd_relative_symlink_escape_clamped(void)
+{
+	int fails = 0;
+	long dfd = inline_openat(AT_FDCWD, "/etc",
+				 O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+	fails += tawc_io_step("dirfd-escape: open /etc dirfd", dfd >= 0);
+	if (dfd < 0) return fails;
+	long fd = inline_openat((int)dfd, "host-secret", O_RDONLY, 0);
+	fails += tawc_io_step(
+		"openat(etc_fd, \"host-secret\") -> ENOENT (clamped, not host /etc/passwd)",
+		fd == TAWC_ENOENT);
+	tawc_io_kv_dec("    rv", fd);
+	if (fd >= 0) tawc_close((int)fd);
+	tawc_close((int)dfd);
+	return fails;
+}
+
+/* O_CREAT (without O_EXCL) on an existing symlink leaf must follow it
+ * (kernel semantics) — and the follow must be clamped at the rootfs.
+ * Pre-fix the leaf reached the host kernel un-resolved and an absolute
+ * target was chased against the HOST root. */
+static int test_open_creat_follows_symlink_leaf_clamped(void)
+{
+	int fails = 0;
+	long rv;
+	/* Dangling absolute-target symlink: /run/dangling → /run/created-target */
+	INLINE_SYS6(TAWC_SYS_symlinkat, "/run/created-target", AT_FDCWD,
+		    "/run/dangling", 0, 0, 0, rv);
+	fails += tawc_io_step("creat-follow: symlink(/run/dangling) -> 0",
+			      rv == 0);
+	long fd = inline_openat(AT_FDCWD, "/run/dangling",
+				O_WRONLY | O_CREAT, 0644);
+	fails += tawc_io_step(
+		"open(dangling abs symlink, O_CREAT) -> fd (target created in view)",
+		fd >= 0);
+	tawc_io_kv_dec("    rv", fd);
+	if (fd >= 0) tawc_close((int)fd);
+	struct stat st;
+	long sr = inline_fstatat(AT_FDCWD, "/run/created-target", &st,
+				 AT_SYMLINK_NOFOLLOW);
+	fails += tawc_io_step(
+		"creat-follow: /run/created-target exists inside rootfs",
+		sr == 0 && S_ISREG(st.st_mode));
+	tawc_io_kv_dec("    stat rv", sr);
+
+	/* O_CREAT|O_EXCL must NOT follow: existing symlink leaf (even
+	 * dangling) is EEXIST. */
+	(void)inline_unlinkat(AT_FDCWD, "/run/created-target", 0);
+	long xfd = inline_openat(AT_FDCWD, "/run/dangling",
+				 O_WRONLY | O_CREAT | O_EXCL, 0644);
+	fails += tawc_io_step(
+		"open(symlink leaf, O_CREAT|O_EXCL) -> EEXIST (no follow)",
+		xfd == TAWC_EEXIST);
+	tawc_io_kv_dec("    rv", xfd);
+	if (xfd >= 0) tawc_close((int)xfd);
+
+	(void)inline_unlinkat(AT_FDCWD, "/run/dangling", 0);
+	return fails;
+}
+
 /* fstat must decorate like stat/fstatat/statx do, and reserved fds
  * must answer EBADF (fdtab.h contract). */
 static int test_fstat_fake_root_decoration(void)
@@ -4059,6 +4126,8 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_dotdot_via_bind_dst_dirfd();
 	fails += test_dotdot_via_bind_dst_does_not_escape_to_host();
 	fails += test_fstatat_fake_root_decoration();
+	fails += test_dirfd_relative_symlink_escape_clamped();
+	fails += test_open_creat_follows_symlink_leaf_clamped();
 	fails += test_fstat_fake_root_decoration();
 	fails += test_openat2_fchmodat2_enosys();
 	fails += test_inotify_add_watch_translates();
