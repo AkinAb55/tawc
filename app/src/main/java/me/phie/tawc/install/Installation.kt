@@ -56,6 +56,14 @@ data class Installation(
      * it.
      */
     val tawcInstalls: List<TawcInstall> = emptyList(),
+    /**
+     * User-configured host-dir binds applied to every tawcroot spawn
+     * of this install (see [ExternalBind]). Set at install time (the
+     * service seeds defaults for fresh tawcroot installs) and edited
+     * via the manage-binds screen. Empty on legacy records and on
+     * non-tawcroot installs.
+     */
+    val externalBinds: List<ExternalBind> = emptyList(),
 ) {
     fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
@@ -77,6 +85,9 @@ data class Installation(
             put("tawcInstalls", JSONArray().apply {
                 for (e in tawcInstalls) put(e.toJson())
             })
+        }
+        if (externalBinds.isNotEmpty()) {
+            put("externalBinds", ExternalBind.toJsonArray(externalBinds))
         }
     }.toString(2)
 
@@ -172,6 +183,9 @@ data class Installation(
                     obj.getString("tawcStamp") else null,
                 tawcInstalls = if (obj.has("tawcInstalls"))
                     parseTawcInstalls(obj.getJSONArray("tawcInstalls"))
+                else emptyList(),
+                externalBinds = if (obj.has("externalBinds"))
+                    ExternalBind.fromJsonArray(obj.getJSONArray("externalBinds"))
                 else emptyList(),
             )
         }

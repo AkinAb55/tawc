@@ -24,6 +24,7 @@ import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
+import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
 /**
@@ -45,6 +46,30 @@ class InstallActivity : AppCompatActivity() {
     private var selectedMethod: String? = null
     private var selectedDistro: String? = null
     private var labelEdited: Boolean = false
+
+    /**
+     * External-storage binds the install starts with (see
+     * notes/external-binds.md). Seeded with the defaults, edited via
+     * [ManageBindsActivity], passed to the service as JSON. Only
+     * meaningful for tawcroot installs — the row hides (and
+     * [beginInstall] passes null) for other methods.
+     */
+    private val pendingBinds = mutableListOf<ExternalBind>()
+    private var bindsRow: LinearLayout? = null
+    private var bindsCountLabel: TextView? = null
+    private val manageBinds = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val json = result.data?.getStringExtra(ManageBindsActivity.EXTRA_BINDS)
+        if (result.resultCode == RESULT_OK && json != null) {
+            pendingBinds.clear()
+            pendingBinds.addAll(
+                runCatching { ExternalBind.fromJsonArray(org.json.JSONArray(json)) }
+                    .getOrDefault(emptyList())
+            )
+            updateBindsRow()
+        }
+    }
 
     /**
      * Tri-state for the "Use cache proxy" checkbox:
@@ -84,6 +109,18 @@ class InstallActivity : AppCompatActivity() {
             me.phie.tawc.BuildConfig.DEBUG -> true
             else -> false
         }
+        pendingBinds.clear()
+        val savedBinds = savedInstanceState?.getString(KEY_BINDS)
+        pendingBinds.addAll(
+            if (savedBinds != null) {
+                runCatching { ExternalBind.fromJsonArray(org.json.JSONArray(savedBinds)) }
+                    .getOrDefault(emptyList())
+            } else if (AllFilesAccess.declared(this)) {
+                AllFilesAccess.defaultBinds()
+            } else {
+                emptyList()
+            }
+        )
 
         scaffold = buildChildScreen(getString(R.string.title_install))
 
@@ -115,6 +152,7 @@ class InstallActivity : AppCompatActivity() {
         selectedMethod?.let { outState.putString(KEY_METHOD, it) }
         selectedDistro?.let { outState.putString(KEY_DISTRO, it) }
         useCacheProxy?.let { outState.putBoolean(KEY_USE_PROXY, it) }
+        outState.putString(KEY_BINDS, ExternalBind.toJsonArray(pendingBinds).toString())
     }
 
     private fun buildFormSection(pad: Int, savedLabelText: String?): LinearLayout {
@@ -162,6 +200,17 @@ class InstallActivity : AppCompatActivity() {
                 },
                 verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
             )
+        }
+
+        // External-storage binds row: count + Manage button. Hidden
+        // when the build doesn't ship MANAGE_EXTERNAL_STORAGE, and for
+        // non-tawcroot methods (the only consumer of the bind list) —
+        // see updateBindsRow / the method-picker listener.
+        if (AllFilesAccess.declared(this)) {
+            val row = buildBindsRow()
+            bindsRow = row
+            s.addView(row, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+            updateBindsRow()
         }
 
         // Dev-only "Use cache proxy" checkbox. Hidden in release builds
@@ -327,6 +376,41 @@ class InstallActivity : AppCompatActivity() {
     }
 
     /**
+     * "External storage binds: N" + Manage button. Tapping Manage
+     * round-trips [pendingBinds] through [ManageBindsActivity] so the
+     * binds are settled before the install starts — they're live
+     * during the installation process itself (first boot included).
+     */
+    private fun buildBindsRow(): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val count = TextView(this).apply { textSize = 14f }
+        bindsCountLabel = count
+        row.addView(count, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        row.addView(tonalButton(getString(R.string.action_manage)) {
+            manageBinds.launch(
+                ManageBindsActivity.intentForResult(
+                    this, ExternalBind.toJsonArray(pendingBinds).toString(),
+                )
+            )
+        })
+        return row
+    }
+
+    private fun updateBindsRow() {
+        bindsCountLabel?.text = getString(R.string.install_external_binds_label, pendingBinds.size)
+        // Only tawcroot consumes the bind list; hide the row when the
+        // user picks a debug method so the form doesn't promise binds
+        // the spawn path would ignore. selectedMethod is always set
+        // before the row exists (pinned for the single-method case,
+        // defaulted by buildMethodPicker otherwise).
+        bindsRow?.visibility =
+            if (selectedMethod == TawcrootMethod.KEY) View.VISIBLE else View.GONE
+    }
+
+    /**
      * Dev-only "Use cache proxy" checkbox. Drives [useCacheProxy],
      * which gates whether [beginInstall] passes a `mirrorProxy` URL to
      * the service. See `notes/cache-proxy.md`.
@@ -389,7 +473,7 @@ class InstallActivity : AppCompatActivity() {
         selectedMethod = initial
 
         methodGroup.setOnCheckedChangeListener { _, checkedId ->
-            keyById[checkedId]?.let { selectedMethod = it }
+            keyById[checkedId]?.let { selectedMethod = it; updateBindsRow() }
         }
         return container
     }
@@ -421,9 +505,41 @@ class InstallActivity : AppCompatActivity() {
         // stray value anyway.
         val mirrorProxyUrl = if (useCacheProxy == true) DEFAULT_PROXY_URL else null
 
-        InstallationService.startInstall(this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl)
-        startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
-        finish()
+        // Explicit bind list for tawcroot installs (even when empty —
+        // the user may have deliberately removed the defaults); null
+        // for methods that don't consume binds.
+        val bindsJson = if (methodKey == TawcrootMethod.KEY && AllFilesAccess.declared(this)) {
+            ExternalBind.toJsonArray(pendingBinds).toString()
+        } else {
+            null
+        }
+
+        val launch = {
+            InstallationService.startInstall(
+                this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl, bindsJson,
+            )
+            startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
+            finish()
+        }
+
+        // A shared-storage bind without the all-files grant fails
+        // closed at first spawn — i.e. during the install itself. Warn
+        // up front instead of letting the install run for minutes and
+        // then park in FAILED.
+        if (bindsJson != null &&
+            AllFilesAccess.requiresGrant(pendingBinds) && !AllFilesAccess.granted()
+        ) {
+            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                .setTitle(getString(R.string.install_binds_grant_title))
+                .setMessage(getString(R.string.install_binds_grant_message))
+                .setNegativeButton(getString(R.string.install_binds_grant_anyway)) { _, _ -> launch() }
+                .setPositiveButton(getString(R.string.install_binds_grant_grant)) { _, _ ->
+                    AllFilesAccess.openSettings(this)
+                }
+                .show()
+            return
+        }
+        launch()
     }
 
     companion object {
@@ -434,5 +550,6 @@ class InstallActivity : AppCompatActivity() {
         private const val KEY_LABEL_EDITED = "tawc.install.labelEdited"
         private const val KEY_LABEL_TEXT = "tawc.install.labelText"
         private const val KEY_USE_PROXY = "tawc.install.useCacheProxy"
+        private const val KEY_BINDS = "tawc.install.externalBinds"
     }
 }

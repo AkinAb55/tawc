@@ -61,6 +61,14 @@ fun booleanProjectProperty(name: String, default: Boolean): Boolean {
 // ABI, overrideable for lean builds with `-PtawcXwayland=false`.
 val xwaylandRequested: Boolean = booleanProjectProperty("tawcXwayland", true)
 
+// Ship MANAGE_EXTERNAL_STORAGE (the external-storage binds feature,
+// notes/external-binds.md)? Default yes; `-PtawcAllFilesAccess=false`
+// strips the permission via a build-type manifest overlay for
+// distribution channels that can't carry it (Google Play review). The
+// app detects the stripped permission at runtime and hides the binds
+// UI, so no code changes ride on this flag.
+val allFilesAccess: Boolean = booleanProjectProperty("tawcAllFilesAccess", true)
+
 // Build the Rust compositor for one or both Android ABIs and copy the
 // resulting .so into jniLibs/. Override the default by setting the
 // `tawcAbis` Gradle property: `-PtawcAbis=arm64-v8a` or
@@ -188,6 +196,18 @@ android {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")
         }
+        // Build-type manifests merge with higher priority than main's,
+        // so pointing them at the shared `tools:node="remove"` overlay
+        // strips MANAGE_EXTERNAL_STORAGE from every variant. Neither
+        // build type has a manifest of its own otherwise.
+        if (!allFilesAccess) {
+            getByName("debug") {
+                manifest.srcFile("src/overlays/no-all-files-access/AndroidManifest.xml")
+            }
+            getByName("release") {
+                manifest.srcFile("src/overlays/no-all-files-access/AndroidManifest.xml")
+            }
+        }
     }
 
     // BouncyCastle's three jars (bcpg, bcprov, bcutil) each carry the
@@ -259,6 +279,13 @@ dependencies {
     implementation(project(":terminal-view"))
     // Termux's extra-keys row (GPLv3 — see termux-extrakeys/build.gradle.kts).
     implementation(project(":termux-extrakeys"))
+
+    // Host-side unit tests (src/test): `./gradlew :app:testDebugUnitTest`.
+    // The real org.json artifact shadows the throw-on-use stubs in the
+    // mockable android.jar so metadata (de)serialization is testable
+    // off-device.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 val checkInputConnectionAudit = tasks.register<Exec>("checkInputConnectionAudit") {

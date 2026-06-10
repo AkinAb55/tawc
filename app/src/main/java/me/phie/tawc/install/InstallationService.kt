@@ -200,6 +200,7 @@ class InstallationService : Service() {
                 intent.getStringExtra(EXTRA_DISTRO),
                 intent.getStringExtra(EXTRA_LABEL),
                 intent.getStringExtra(EXTRA_MIRROR_PROXY),
+                intent.getStringExtra(EXTRA_EXTERNAL_BINDS),
             )
             ACTION_UNINSTALL -> startUninstall(rawId)
             else -> {
@@ -246,6 +247,7 @@ class InstallationService : Service() {
         distroKey: String? = null,
         label: String? = null,
         mirrorProxyUrl: String? = null,
+        externalBindsJson: String? = null,
     ) {
         if (!Installation.isValidId(id)) {
             rejectInstall(id, getString(R.string.install_reject_invalid_id))
@@ -338,6 +340,56 @@ class InstallationService : Service() {
         if (mirrorProxy != null) {
             appendLog("[install] using mirror proxy ${mirrorProxy.base}")
         }
+        // External-storage binds (notes/external-binds.md). An explicit
+        // JSON list is honoured as-is ("[]" = none); null means "the
+        // default set" — seeded only for tawcroot installs (the one
+        // method that consumes the list) and only when all-files access
+        // is both shipped in this build and already granted, so a
+        // defaulted install can't fail closed on its own first boot.
+        val externalBinds: List<ExternalBind>
+        if (externalBindsJson != null) {
+            val parsed = try {
+                ExternalBind.fromJsonArray(org.json.JSONArray(externalBindsJson))
+            } catch (e: org.json.JSONException) {
+                rejectInstall(id, getString(R.string.install_reject_bad_external_binds, e.message ?: ""))
+                return
+            }
+            if (parsed.isNotEmpty() && method.key != TawcrootMethod.KEY) {
+                rejectInstall(id, getString(R.string.install_reject_external_binds_method, method.key))
+                return
+            }
+            val problem = parsed.firstNotNullOfOrNull { it.validationError() }
+                ?: if (parsed.size > ExternalBind.MAX_BINDS) {
+                    "too many binds (${parsed.size} > ${ExternalBind.MAX_BINDS})"
+                } else {
+                    null
+                }
+                // Catch a typo'd host dir now rather than after the
+                // multi-minute download/extract. Shared-storage paths
+                // are exempt when the grant is missing — they can't be
+                // stat'd yet (same rule as the manage-binds dialog).
+                ?: parsed.firstOrNull {
+                    !(AllFilesAccess.requiresGrant(it.hostPath) && !AllFilesAccess.granted()) &&
+                        !java.io.File(it.hostPath).isDirectory
+                }?.let { "host dir ${it.hostPath} does not exist" }
+            if (problem != null) {
+                rejectInstall(id, getString(R.string.install_reject_bad_external_binds, problem))
+                return
+            }
+            externalBinds = parsed
+        } else {
+            externalBinds = if (method.key == TawcrootMethod.KEY &&
+                AllFilesAccess.declared(applicationContext) && AllFilesAccess.granted()
+            ) {
+                AllFilesAccess.defaultBinds()
+            } else {
+                emptyList()
+            }
+        }
+        if (externalBinds.isNotEmpty()) {
+            appendLog("[install] external binds: " +
+                externalBinds.joinToString { "${it.guestPath} <- ${it.hostPath}" })
+        }
         val rootfsPath = store.rootfsDir(id).absolutePath
         val op = MutableOperation(
             id = "install:$id",
@@ -364,7 +416,7 @@ class InstallationService : Service() {
         val job = scope.launch {
             val installer = Installer(
                 applicationContext, store, BootstrapCache(applicationContext),
-                distro, method, id, label, mirrorProxy,
+                distro, method, id, label, mirrorProxy, externalBinds,
             )
             try {
                 // runInterruptible maps coroutine cancellation onto a
@@ -831,6 +883,8 @@ class InstallationService : Service() {
         const val EXTRA_DISTRO = "distro"
         const val EXTRA_LABEL = "label"
         const val EXTRA_MIRROR_PROXY = "mirrorProxy"
+        /** JSON array of [ExternalBind]s; absent = default set, "[]" = none. */
+        const val EXTRA_EXTERNAL_BINDS = "externalBinds"
 
         fun startInstall(
             context: Context,
@@ -839,6 +893,7 @@ class InstallationService : Service() {
             distroKey: String? = null,
             label: String? = null,
             mirrorProxyUrl: String? = null,
+            externalBindsJson: String? = null,
         ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
@@ -847,6 +902,7 @@ class InstallationService : Service() {
             if (distroKey != null) i.putExtra(EXTRA_DISTRO, distroKey)
             if (label != null) i.putExtra(EXTRA_LABEL, label)
             if (mirrorProxyUrl != null) i.putExtra(EXTRA_MIRROR_PROXY, mirrorProxyUrl)
+            if (externalBindsJson != null) i.putExtra(EXTRA_EXTERNAL_BINDS, externalBindsJson)
             context.startForegroundService(i)
         }
 

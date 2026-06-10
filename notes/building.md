@@ -427,6 +427,12 @@ libhybris-zink skips `scripts/build-mesa-gfxstream.sh` entirely.
 production APKs do not ship libhybris-zink or gfxstream/kumquat unless
 `--graphics=...` or `TAWC_RELEASE_GRAPHICS` opts them back in.
 
+`-PtawcAllFilesAccess=false` strips `MANAGE_EXTERNAL_STORAGE` from the
+manifest (build-type overlay `app/src/overlays/no-all-files-access/`)
+for distribution channels that can't carry it; the app hides the
+external-binds UI when the permission is absent. See
+[external-binds.md](external-binds.md).
+
 ## Install and launch
 
 ```bash
@@ -500,3 +506,17 @@ See [testing.md](testing.md) for full details.
 ```bash
 scripts/run-integration-tests.sh           # package setup, deploy, cargo test
 ```
+
+## App unit tests
+
+Host-side JUnit tests for the Kotlin app live in `app/src/test/`
+(currently metadata/JSON parsing — see
+[external-binds.md](external-binds.md)):
+
+```bash
+./gradlew :app:testDebugUnitTest
+```
+
+Deps: `junit:junit` plus the real `org.json:json` artifact, which
+shadows the throw-on-use stubs in the mockable android.jar so
+`JSONObject`-based code runs off-device.

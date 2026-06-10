@@ -11,6 +11,7 @@ import android.view.MotionEvent
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.inputmethod.InputMethodManager
 import android.widget.LinearLayout
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -29,6 +30,7 @@ import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.install.TawcrootMethod
 import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ui.buildChildScreen
+import java.io.IOException
 
 /**
  * Interactive shell into one installed rootfs, built on termux's
@@ -135,7 +137,17 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
         val s = if (existing != null && existing.isRunning) {
             existing
         } else {
-            val exec = method.ptyShellExec(store.rootfsDir(distroId).absolutePath)
+            // ptyShellExec fails closed (IOException) on a bad external
+            // bind — revoked all-files access, missing host dir
+            // (notes/external-binds.md). Surface the message instead of
+            // crashing; the user fixes it under Manage binds / settings.
+            val exec = try {
+                method.ptyShellExec(store.rootfsDir(distroId).absolutePath)
+            } catch (e: IOException) {
+                Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
             TerminalSession(
                 exec.argv[0],
                 exec.cwd,

@@ -142,6 +142,21 @@ class DistroInfoActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
         )
         content.addView(rootfsRow, rowLp(pad))
+        if (installation.method == TawcrootMethod.KEY && AllFilesAccess.declared(this)) {
+            content.addView(
+                infoRow(
+                    getString(R.string.distro_info_row_external_binds),
+                    if (installation.externalBinds.isEmpty()) {
+                        getString(R.string.manage_binds_empty)
+                    } else {
+                        installation.externalBinds.joinToString("\n") {
+                            "${it.guestPath} ⇐ ${it.hostPath}"
+                        }
+                    },
+                ),
+                rowLp(pad),
+            )
+        }
         // READY and FAILED slots both have stable on-disk content
         // worth measuring — FAILED in particular is exactly when the
         // user wants to know how much space the half-installed
@@ -167,6 +182,23 @@ class DistroInfoActivity : AppCompatActivity() {
             android.view.View(this),
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f),
         )
+        // Manage binds is gated like Run plus FAILED: editing binds is
+        // exactly how the user recovers a slot that failed closed on a
+        // bad bind, but a mid-INSTALLING/UNINSTALLING edit would race
+        // the service's own metadata writes. Tawcroot-only — the other
+        // methods don't consume the list — and hidden when this build
+        // doesn't ship all-files access.
+        if (installation.method == TawcrootMethod.KEY && AllFilesAccess.declared(this) &&
+            (installation.state == Installation.State.READY ||
+                installation.state == Installation.State.FAILED)
+        ) {
+            content.addView(
+                tonalButton(getString(R.string.distro_info_manage_binds)) {
+                    startActivity(ManageBindsActivity.intentForInstall(this, installation.id))
+                },
+                verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+            )
+        }
         // Run is gated on READY — the other states either have no
         // rootfs to enter (no dir, INSTALLING) or are mid-mutation
         // (UNINSTALLING) or are likely broken (FAILED).

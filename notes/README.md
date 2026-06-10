@@ -6,6 +6,7 @@ Start here when looking for durable project context. `AGENTS.md` keeps only alwa
 
 - [building.md](building.md) - host packages, env vars, vendored deps, component builds, APK assembly.
 - [installation.md](installation.md) - in-app installer, distro state machine, install methods, shipped rootfs files, integrity policy.
+- [external-binds.md](external-binds.md) - per-install binds of host dirs (e.g. shared storage) into the rootfs; all-files-access gating.
 - [testing.md](testing.md) - integration-test layout, backend pins, test deps, debug app, input injection.
 - [cache-proxy.md](cache-proxy.md) - dev mirror cache behavior and safety rules.
 - [emulator.md](emulator.md) - AVD setup, rooted/rootless workflows, x86_64 limitations.

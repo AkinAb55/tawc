@@ -15,6 +15,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- All-files access backs the external-storage bind feature
+         (notes/external-binds.md): the user binds e.g.
+         /storage/emulated/0 into a rootfs as /home/android so Linux
+         apps see shared storage directly. Google Play treats this as a
+         sensitive permission; `-PtawcAllFilesAccess=false` strips it at
+         build time (see app/build.gradle.kts) and the app then hides
+         the binds UI (AllFilesAccess.declared). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <!--
       extractNativeLibs="true": the rootless install method ships proot
       as jniLibs/<abi>/libproot.so and exec's it from nativeLibraryDir.
@@ -86,6 +95,16 @@
             android:name=".install.InstallMethodInfoActivity"
             android:exported="false"
             android:label="@string/title_install_methods" />
+
+        <activity
+            android:name=".install.ManageBindsActivity"
+            android:exported="false"
+            android:label="@string/title_manage_binds" />
+
+        <activity
+            android:name=".install.DirectoryPickerActivity"
+            android:exported="false"
+            android:label="@string/title_directory_picker" />
 
         <activity
             android:name=".tasks.TaskManagerActivity"

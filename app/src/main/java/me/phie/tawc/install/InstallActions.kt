@@ -57,15 +57,21 @@ internal object InstallActions {
             val distro = args["distro"]
             val label = args["label"]
             val mirrorProxy = args["mirrorProxy"]
+            // JSON [ExternalBind] array; omit for the default set, pass
+            // `[]` for none. See notes/external-binds.md.
+            val externalBinds = args["externalBinds"]
 
             val opId = "install:$id"
             tryOpenLogScreen(ctx.appContext, opId)
 
             ctx.out("[action] install id=$id method=${method ?: "(default)"} " +
                 "distro=${distro ?: "(default)"} label=${label ?: "(default)"}" +
-                (mirrorProxy?.let { " mirrorProxy=$it" } ?: ""))
+                (mirrorProxy?.let { " mirrorProxy=$it" } ?: "") +
+                (externalBinds?.let { " externalBinds=$it" } ?: ""))
 
-            InstallationService.startInstall(ctx.appContext, id, method, distro, label, mirrorProxy)
+            InstallationService.startInstall(
+                ctx.appContext, id, method, distro, label, mirrorProxy, externalBinds,
+            )
             return mirrorOperation(opId, ctx)
         }
     }

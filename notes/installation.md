@@ -56,7 +56,7 @@ Everything lives under the app's private data dir:
       cache/install/bootstrap-<cacheKey>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
       distros/
         <id>/
-          metadata.json              # JSON: schemaVersion, id, label?, distro, arch, method, installedAtMillis, installedAtAppVersionCode, sourceUrl, state, failure?, tawcStamp?, tawcInstalls?
+          metadata.json              # JSON: schemaVersion, id, label?, distro, arch, method, installedAtMillis, installedAtAppVersionCode, sourceUrl, state, failure?, tawcStamp?, tawcInstalls?, externalBinds? (notes/external-binds.md)
           rootfs/                    # the chroot itself (what `arch-chroot` would chroot into)
 
 The on-disk layout, the [Installation] data class, and

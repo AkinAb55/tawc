@@ -67,6 +67,13 @@ class Installer(
      * `notes/cache-proxy.md`.
      */
     private val mirrorProxy: MirrorProxy? = null,
+    /**
+     * External-storage binds persisted into the initial metadata, so
+     * they're already live for every in-rootfs step of the install
+     * itself (first boot included). Resolved by [InstallationService]
+     * — defaults or an explicit caller-provided list.
+     */
+    private val externalBinds: List<ExternalBind> = emptyList(),
 ) {
     /** Throws on failure. Reports progress + log lines via the callbacks. */
     fun install(
@@ -129,6 +136,7 @@ class Installer(
                 state = Installation.State.INSTALLING,
                 installedAtAppVersionCode = appVersionCode,
                 label = label,
+                externalBinds = externalBinds,
             )
         )
 

@@ -9,6 +9,7 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - Run lxterminal: `scripts/rootfs-run.sh 'lxterminal'`
 - Integration tests: `scripts/run-integration-tests.sh [filter]` (builds/installs test deps as needed; `--no-build` reuses existing deploy)
 - tawcroot tests: `tawcroot/test.sh [--host|--device] [--no-build] [FILTER...]`
+- App unit tests: `./gradlew :app:testDebugUnitTest`
 - Logs: `adb logcat -s tawc-native` for Rust, `adb logcat -s tawc` for Kotlin
 - Screenshot: use `/data/local/tmp/tawc-dev/`; analyze screenshots with a sub-agent, then delete device and host copies.
 

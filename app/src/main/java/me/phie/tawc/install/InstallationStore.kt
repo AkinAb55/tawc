@@ -49,9 +49,14 @@ class InstallationStore(context: Context) {
      * it into place, so a crash mid-write leaves either the old contents
      * or the new ones — never a half-written file that fromJson can't
      * parse. All writes go through this one method (including
-     * [setState]'s read-modify-write), and [InstallationService]
-     * serialises jobs via `currentJob`, so concurrent writers don't
-     * exist.
+     * [setState]'s read-modify-write). Two writers exist:
+     * [InstallationService] (jobs serialised via `currentJob`) and
+     * [ManageBindsActivity], which only writes while the slot is
+     * READY/FAILED — i.e. no service job should be mutating it. A
+     * broker-started job can still race that activity's load→save
+     * window; both writers are in-process and atomic-rename, so the
+     * worst case is one side's field update being dropped, never a
+     * torn file.
      */
     fun save(installation: Installation) {
         installationDir(installation.id).mkdirs()

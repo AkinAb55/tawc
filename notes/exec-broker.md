@@ -98,6 +98,10 @@ ARG mirrorProxy=http://127.0.0.1:8080/proxy/
 
 ```
 
+The install action also takes `--arg externalBinds=<json>` — a JSON
+`ExternalBind` array (`[]` = none; omitted = the default bind set when
+all-files access is granted). See notes/external-binds.md.
+
 **RUNINSIDE form** — run a command inside an installed chroot. The
 broker reads the install's recorded method from `metadata.json` and
 calls `InstallationMethod.startInside`, the single Kotlin entry point

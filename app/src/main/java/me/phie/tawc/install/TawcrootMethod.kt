@@ -45,6 +45,7 @@ import java.io.IOException
 class TawcrootMethod(context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
     private val tawcShare: String = appPaths.shareDir.absolutePath
+    private val store = InstallationStore(context)
 
     /** Absolute path to the tawcroot binary on disk. */
     val tawcrootBin: String =
@@ -99,10 +100,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * locale and package PATH additions still apply.
      */
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
-        val tmpdir = prepareSpawn(rootfs)
+        val externalBinds = externalBindsFor(rootfs)
+        val tmpdir = prepareSpawn(rootfs, externalBinds)
         val argv = buildList {
             add("/system/bin/setsid")
-            addAll(rootfsArgv(rootfs, graphics))
+            addAll(rootfsArgv(rootfs, graphics, externalBinds))
             add("/bin/bash")
             if (command != null) {
                 add("-lc"); add(command)
@@ -141,9 +143,10 @@ class TawcrootMethod(context: Context) : InstallationMethod {
     data class PtyExec(val argv: List<String>, val hostEnv: List<String>, val cwd: String)
 
     fun ptyShellExec(rootfs: String, graphics: GraphicsBackend? = null): PtyExec {
-        val tmpdir = prepareSpawn(rootfs)
+        val externalBinds = externalBindsFor(rootfs)
+        val tmpdir = prepareSpawn(rootfs, externalBinds)
         val argv = buildList {
-            addAll(rootfsArgv(rootfs, graphics))
+            addAll(rootfsArgv(rootfs, graphics, externalBinds))
             add("TERM=xterm-256color")
             add("COLORTERM=truecolor")
             add("/bin/bash")
@@ -177,10 +180,13 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * tawcroot process — not propagated into the rootfs (env -i drops
      * it; the bash shell gets TMPDIR=/tmp from RootfsEnv instead).
      */
-    private fun prepareSpawn(rootfs: String): String {
+    private fun prepareSpawn(rootfs: String, externalBinds: List<ExternalBind>): String {
         File(rootfs, GUEST_TAWC_SHARE_DIR.removePrefix("/")).mkdirs()
         for (dir in LIBHYBRIS_BIND_DIRS) {
             File(rootfs, dir.removePrefix("/")).mkdirs()
+        }
+        for (bind in externalBinds) {
+            File(rootfs, bind.guestPath.removePrefix("/")).mkdirs()
         }
         File(tawcShare).mkdirs()
         File("$tawcShare/xtmp/.X11-unix").mkdirs()
@@ -192,12 +198,65 @@ class TawcrootMethod(context: Context) : InstallationMethod {
     /** `<tawcroot> -r <rootfs> -b … -- /usr/bin/env -i -C /root K=V …`
      * — the shared spawn prefix up to (and including) the rootfs env;
      * callers append the program to run. */
-    private fun rootfsArgv(rootfs: String, graphics: GraphicsBackend?): List<String> = buildList {
+    private fun rootfsArgv(
+        rootfs: String,
+        graphics: GraphicsBackend?,
+        externalBinds: List<ExternalBind>,
+    ): List<String> = buildList {
         add(tawcrootBin)
         addAll(listOf("-r", rootfs))
-        for ((src, dst) in bindSpecs()) addAll(listOf("-b", "$src:$dst"))
+        for ((src, dst) in bindSpecs(externalBinds)) addAll(listOf("-b", "$src:$dst"))
         add("--")
         addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
+    }
+
+    /**
+     * The install's configured external binds, validated for spawn.
+     * Resolves the install id from [rootfs]'s on-disk location
+     * (`<distros>/<id>/rootfs`) so every spawn surface — broker
+     * RUNINSIDE, RunCommandOp, the in-app terminal, install pipeline
+     * steps — picks the binds up without threading [Installation]
+     * through their call chains. A rootfs outside the store (shouldn't
+     * happen in practice) has no metadata and gets no external binds.
+     *
+     * Fail closed (notes/external-binds.md): a structurally bad bind, a
+     * missing host dir, or a revoked all-files grant refuses the spawn
+     * with an actionable error instead of silently launching without
+     * the bind — a session writing "into shared storage" that actually
+     * lands in an app-private stand-in dir would be data loss at
+     * uninstall time.
+     */
+    private fun externalBindsFor(rootfs: String): List<ExternalBind> {
+        val id = File(rootfs).absoluteFile.parentFile?.name ?: return emptyList()
+        if (store.rootfsDir(id).absolutePath != File(rootfs).absolutePath) return emptyList()
+        val binds = store.load(id)?.externalBinds ?: emptyList()
+        for (bind in binds) {
+            bind.validationError()?.let {
+                throw IOException("external bind ${bind.guestPath}: $it (edit it under Manage binds)")
+            }
+            // Grant check first: without it, even stat on shared
+            // storage can fail and the missing-dir error would
+            // misdiagnose a revoked grant as a deleted directory.
+            if (AllFilesAccess.requiresGrant(bind.hostPath) && !AllFilesAccess.granted()) {
+                throw IOException(
+                    "external bind ${bind.guestPath}: ${bind.hostPath} needs all-files access; " +
+                        "grant it in system settings (Manage binds > Grant access) or remove the bind"
+                )
+            }
+            if (!File(bind.hostPath).isDirectory) {
+                // requiresGrant only knows the canonical shared-storage
+                // prefixes; aliases like /mnt/user/0 stat as missing
+                // when the grant is absent, so hint at that here.
+                val grantHint = if (!AllFilesAccess.granted()) {
+                    " (if this is shared storage, granting all-files access may be required)"
+                } else ""
+                throw IOException(
+                    "external bind ${bind.guestPath}: host dir ${bind.hostPath} does not exist; " +
+                        "create it or remove the bind under Manage binds$grantHint"
+                )
+            }
+        }
+        return binds
     }
 
     private fun shellQuote(s: String): String =
@@ -321,14 +380,19 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * (`<appData>/share/xtmp/.X11-unix/X<n>`) at the canonical
      * `/tmp/.X11-unix` path because libxcb hardcodes that path for
      * the `:N` form of `$DISPLAY`. Asymmetric (src ≠ dst) — tawcroot's
-     * path-rewriting bind handles that natively. */
-    private fun bindSpecs(): List<Pair<String, String>> = buildList {
+     * path-rewriting bind handles that natively.
+     *
+     * User-configured external binds (shared storage etc., see
+     * [ExternalBind]) ride after every built-in bind so they can't
+     * shadow the system/share set. */
+    private fun bindSpecs(externalBinds: List<ExternalBind>): List<Pair<String, String>> = buildList {
         add("/dev" to "/dev")
         add("/proc" to "/proc")
         add("/sys" to "/sys")
         for (dir in LIBHYBRIS_BIND_DIRS) add(dir to dir)
         add(tawcShare to GUEST_TAWC_SHARE_DIR)
         add("$tawcShare/xtmp/.X11-unix" to "/tmp/.X11-unix")
+        for (bind in externalBinds) add(bind.hostPath to bind.guestPath)
     }
 
     companion object {
