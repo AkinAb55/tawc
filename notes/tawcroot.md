@@ -892,12 +892,18 @@ should not be reverse-translated into host paths.
 
 Then apply these rules to the guest-absolute path `P`:
 
-1. **`/proc` self-magic.** `/proc/self/{exe,cwd,root}` and
-   `/proc/<pid>/{exe,cwd,root}` for our own pid: synthesize from
-   the stashed original guest-requested exec path (see
-   §"`/proc/self/exe`" — the kernel's view points at the dynamic
-   linker after our exec dance, not at anything the guest would
-   recognize). Other `/proc` entries pass through unchanged.
+1. **`/proc` self-magic.** `/proc/self/<x>` and `/proc/<pid>/<x>`
+   for our own pid (any of our tids, optional `task/<tid>/`
+   segment), readlink side: `exe` is synthesized from the stashed
+   original guest-requested exec path (see §"`/proc/self/exe`" —
+   the kernel's view points at libtawcroot.so after our exec
+   dance); `cwd` is reverse-translated through the same
+   longest-prefix walk as `getcwd` (outside-view cwd → -ENOENT,
+   same no-host-leak stance); `root` passes through — we never
+   kernel-chroot, so the kernel's "/" answer already matches what
+   a guest expects, emulated chroot included. Other `/proc`
+   entries — and ALL of another process's — pass through unchanged
+   (see §"Accepted syscall-fidelity divergences").
 
 2. **Bind-mount longest-prefix match.** If `P` starts with a bound
    `dst`, rewrite to `<src><P after dst>` and resolve from the
@@ -1351,6 +1357,19 @@ proot does the same; the key insight is that the value the guest
 expects is the path it *originally* asked us to execve, before any
 of our rewriting.
 
+A second, result-side substitution catches readlinks that reach the
+same answer without a recognizable request path — glibc realpath's
+`readlinkat(O_PATH-fd, "")` on an fd opened from `/proc/self/exe`,
+and `readlink("/proc/self/fd/<n>")` on such an fd: when the kernel's
+result equals libtawcroot.so's own host path, the stashed guest path
+is returned instead. This check is suppressed when the *request*
+named a different process's exe link (`/proc/<other-pid>/exe`):
+every tawcroot guest's kernel exe is the same libtawcroot.so, so the
+equality test alone would hand the *caller's* guest exe path to a
+readlink of someone else's link (observed: `ls` reading bash's link
+got `/usr/bin/ls`). Cross-process exe links pass the kernel bytes
+through verbatim, like the rest of cross-process /proc.
+
 For `/proc/self/exe` *opens* (e.g. `open("/proc/self/exe",
 O_RDONLY)` to re-read the binary), we translate to the stashed
 guest path through the normal rootfs-relative path: the open
@@ -1368,6 +1387,10 @@ If the host prefix doesn't match (the guest somehow `chdir`'d
 outside the rootfs), we return `-ENOENT` rather than leaking host
 paths. proot returns the host path unchanged in that case which is
 a small info leak.
+
+`readlink("/proc/self/cwd")` synthesizes its answer through the same
+function (`tawcroot_cwd_to_guest_abs`), including the -ENOENT
+outside-view stance, so the two surfaces can't drift apart.
 
 ### chroot emulation
 
@@ -3244,6 +3267,57 @@ here so we don't ship MVP and discover them at runtime.
    Exit criteria: tests for `stat` vs `lstat`, `readlink`, `symlink`,
    `unlink` of a symlink, `open(O_NOFOLLOW)`, and fd-relative
    `openat`.
+
+## Accepted syscall-fidelity divergences
+
+Known, deliberate departures from exact kernel semantics, collected
+during the 2026-06 syscall-fidelity review. Each was judged not worth
+the complexity (or the rework) a faithful emulation would cost;
+re-litigate only if a real guest trips over one. (The field-relevant
+findings from that review — trailing-slash semantics, reserved-dirfd
+EBADF, chown existence probes, getdents64 mid-directory EOF, /proc
+shadow CLOEXEC, unlink/rmdir/linkat errno shapes, `/proc/self/cwd`
+synthesis, cross-process exe substitution — were all fixed and are
+covered by unit/hosted/smoke tests.)
+
+- **`execveat(AT_SYMLINK_NOFOLLOW)` → `-ENOSYS`.** Honest placeholder
+  in syscalls_exec.c. Nothing we run uses the flag (`fexecve(3)` is
+  AT_EMPTY_PATH), and -ENOSYS is safer than silently following the
+  symlink. If a caller ever appears: NOFOLLOW-translate, leaf
+  `fstatat`, symlink → -ELOOP, else proceed as the follow case.
+- **Signal-shadow staleness across fork.** A forked child inherits
+  the parent's tid-keyed `blocked` table (COW); kernel tid reuse
+  inside the child can read one stale "SIGSYS blocked" bit until that
+  thread's first `rt_sigprocmask`. Bounded to a single wrong
+  shadow-mask read; fixing it means resetting the table on the
+  fork/clone return path for a race nobody has observed.
+- **Path-scratch pool can in principle livelock.** One handler chain
+  holds 3–5 of the 128 slots while acquiring more, and acquire spins
+  forever on exhaustion — a few dozen threads all mid-chain could
+  wedge the pool. Theoretical at realistic guest thread counts; a
+  `TAWCROOT_SCRATCH_DEBUG_SPIN_TRAP` build traps the spin if it ever
+  needs debugging.
+- **`..` after a symlink component resolves lexically.** The fold
+  collapses `..` before the resolver can ask whether the preceding
+  component is a symlink, so `/a/sym/../x` (sym → /b/c) hits `/a/x`
+  where the kernel hits `/b/x` (demonstrated on the host build). This
+  is a structural tradeoff, not an oversight: post-fold suffixes
+  contain no `..`, which is what makes rootfs-escape containment
+  trivially auditable. Kernel-faithful `..` means the resolver must
+  handle it mid-walk with containment re-checked per step — a
+  fold/resolver rework, not a patch. (The related trailing-slash
+  erasure WAS fixed, since it only concerned the final component; see
+  `has_trailing_dir_marker` in path_orchestrate.c.)
+- **Deep paths cap at 256 components** (-ENAMETOOLONG from the fold);
+  the kernel accepts ~2040 single-byte components in its 4096-byte
+  limit. No real layout comes close to 256.
+- **Cross-process `/proc/<pid>/*` is not reverse-translated.** Only
+  the calling process's own /proc views get shadow/synthesis
+  treatment; another guest process's maps/cwd/exe/fd show host paths
+  verbatim. Same-uid processes can already read each other's /proc
+  wholesale, so this leaks nothing the kernel doesn't. Includes
+  `/proc/<pid>/root` of an emulated-chroot'd guest, which an outside
+  observer sees as "/" where a real kernel would show the chroot dir.
 
 ## Future work
 

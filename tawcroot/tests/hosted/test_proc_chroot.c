@@ -7,9 +7,11 @@
 #include <cleat/test.h>
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "hosted.h"
@@ -112,6 +114,151 @@ test(hosted_proc_self_exe_classifier)
 	test_int_eq(tawcroot_is_proc_self_exe("/proc/1/exe"), 0);
 	test_int_eq(tawcroot_is_proc_self_exe("/etc/exe"), 0);
 
+	/* exe classifier: another process's exe link is OTHER, not NONE —
+	 * the readlink handler uses this to suppress the result-equality
+	 * substitution for cross-process links. */
+	test_int_eq(tawcroot_proc_exe_classify("/proc/self/exe"),
+		    TAWCROOT_PROC_EXE_SELF);
+	test_int_eq(tawcroot_proc_exe_classify("/proc/1/exe"),
+		    TAWCROOT_PROC_EXE_OTHER);
+	test_int_eq(tawcroot_proc_exe_classify("/proc/1/task/1/exe"),
+		    TAWCROOT_PROC_EXE_OTHER);
+	test_int_eq(tawcroot_proc_exe_classify("/proc/self/exec"),
+		    TAWCROOT_PROC_EXE_NONE);
+	test_int_eq(tawcroot_proc_exe_classify("/etc/exe"),
+		    TAWCROOT_PROC_EXE_NONE);
+
+	/* cwd classifier mirrors the exe one (self-only). */
+	test_int_eq(tawcroot_is_proc_self_cwd("/proc/self/cwd"), 1);
+	snprintf(own, sizeof own, "/proc/%d/cwd", getpid());
+	test_int_eq(tawcroot_is_proc_self_cwd(own), 1);
+	test_int_eq(tawcroot_is_proc_self_cwd("/proc/1/cwd"), 0);
+	test_int_eq(tawcroot_is_proc_self_cwd("/proc/self/cwd2"), 0);
+	test_int_eq(tawcroot_is_proc_self_cwd("/proc/self/root"), 0);
+
+	th_teardown(&v);
+}
+
+test(hosted_readlink_proc_self_cwd_returns_guest_path)
+{
+	th_view v;
+	th_setup(&v, "proc-rdcwd");
+
+	char p[4200];
+	snprintf(p, sizeof p, "%s/etc/sub", v.root);
+	test_int_eq(chdir(p), 0);
+
+	char buf[256] = {0};
+	long n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, "/proc/self/cwd",
+			buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+
+	/* Numeric-pid form. */
+	char own[64];
+	snprintf(own, sizeof own, "/proc/%d/cwd", getpid());
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, own,
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+
+	/* Fd-relative form: readlinkat(<fd of /proc/self>, "cwd"). */
+	int pfd = open("/proc/self", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	test_true(pfd >= 0);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, pfd, "cwd", buf, sizeof buf - 1,
+		   0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+	test_int_eq(close(pfd), 0);
+
+	/* Truncation contract matches readlink(2): short buffer gets a
+	 * partial, non-NUL-padded copy. */
+	char tiny[6];
+	memset(tiny, 'Z', sizeof tiny);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, "/proc/self/cwd",
+		   tiny, 4, 0, 0);
+	test_int_eq(n, 4);
+	test_true(memcmp(tiny, "/etc", 4) == 0);
+	test_true(tiny[4] == 'Z');  /* untouched past bufsiz */
+
+	/* Kernel cwd outside the view: refuse (like getcwd), don't leak
+	 * the host path. */
+	test_int_eq(chdir("/"), 0);
+	test_int_eq(th_sys(TAWC_SYS_readlinkat, AT_FDCWD, "/proc/self/cwd",
+			   buf, sizeof buf - 1, 0, 0), TAWC_ENOENT);
+
+	th_teardown(&v);
+}
+
+/* Cross-process exe links must NOT be substituted with the caller's
+ * guest exe path. Every tawcroot guest's kernel exe is the same
+ * libtawcroot.so, so the handler's readlink-result equality check alone
+ * matches for another guest's /proc/<pid>/exe too; the request-path
+ * classification has to suppress it (observed in the field: `ls`
+ * reading bash's exe link got "/usr/bin/ls"). Simulated here with a
+ * forked child (same kernel exe as us) and tawcroot_self_host_path set
+ * to our real exe. */
+test(hosted_readlink_other_process_exe_not_substituted)
+{
+	th_view v;
+	th_setup(&v, "proc-oexe");
+
+	/* Route guest /proc to the host's so /proc/<pid>/exe is reachable
+	 * through translation (in production /proc is a bind). */
+	test_int_eq(tawcroot_path_add_bind("/proc", "/proc"), 0);
+
+	char real_exe[4096];
+	long rn = readlink("/proc/self/exe", real_exe, sizeof real_exe - 1);
+	test_true(rn > 0);
+	real_exe[rn] = 0;
+	memcpy(tawcroot_self_host_path, real_exe, (size_t)rn + 1);
+	tawcroot_self_host_path_len = (size_t)rn;
+	tawcroot_set_guest_exe_path("/usr/bin/guest-prog");
+
+	pid_t child = fork();
+	test_true(child >= 0);
+	if (child == 0) {
+		pause();
+		_exit(0);
+	}
+
+	/* Another process's exe link: kernel bytes pass through verbatim
+	 * (consistent with cross-process /proc in general), no
+	 * substitution. */
+	char link[64];
+	snprintf(link, sizeof link, "/proc/%d/exe", (int)child);
+	char buf[4096] = {0};
+	long n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+			buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, rn);
+	test_str_eq(buf, real_exe);
+
+	/* ... while a non-/proc symlink whose target happens to be our
+	 * exe still gets the substitution (that's the surface protecting
+	 * readlink("/proc/self/fd/<n>") and O_PATH empty-path reads). */
+	char lp[4300];
+	snprintf(lp, sizeof lp, "%s/etc/exelink", v.root);
+	test_int_eq(symlink(real_exe, lp), 0);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, "/etc/exelink",
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/usr/bin/guest-prog"));
+	test_str_eq(buf, "/usr/bin/guest-prog");
+
+	/* And our own exe link still synthesizes from the stash. */
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, "/proc/self/exe",
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/usr/bin/guest-prog"));
+	test_str_eq(buf, "/usr/bin/guest-prog");
+
+	test_int_eq(kill(child, SIGKILL), 0);
+	test_int_eq(waitpid(child, NULL, 0), child);
+
+	tawcroot_self_host_path[0]  = 0;
+	tawcroot_self_host_path_len = 0;
 	th_teardown(&v);
 }
 

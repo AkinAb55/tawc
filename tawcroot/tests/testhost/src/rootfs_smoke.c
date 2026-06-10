@@ -3065,6 +3065,42 @@ static int test_proc_self_exe_synthesis(void)
 	return fails;
 }
 
+/* /proc/self/cwd synthesis. The kernel's link target is the HOST cwd
+ * (e.g. /data/.../rootfs/etc); the guest must see the same answer
+ * getcwd gives. Pre-fix, readlink("/proc/self/cwd") returned the host
+ * path verbatim — getcwd was reverse-translated but the cwd symlink
+ * was not. */
+static int test_proc_self_cwd_synthesis(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_chdir, "/etc", 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("chdir(\"/etc\") for cwd-link probe", rv == 0);
+
+	char buf[256];
+	long n;
+	INLINE_SYS6(TAWC_SYS_readlinkat, AT_FDCWD,
+		    "/proc/self/cwd", buf, sizeof buf - 1, 0, 0, n);
+	fails += tawc_io_step(
+		"readlinkat(\"/proc/self/cwd\") -> guest cwd length",
+		n == 4);
+	if (n > 0) {
+		buf[n] = 0;
+		fails += tawc_io_step(
+			"/proc/self/cwd content is \"/etc\", not host path",
+			tawc_streq(buf, "/etc"));
+		tawc_io_str("    got = '"); tawc_io_str(buf);
+		tawc_io_str("'\n");
+	} else {
+		tawc_io_kv_dec("    rv", n);
+	}
+
+	/* Restore the guest cwd to "/" for downstream tests. */
+	INLINE_SYS6(TAWC_SYS_chdir, "/", 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("chdir back to \"/\"", rv == 0);
+	return fails;
+}
+
 /* Review finding B4 — rootfs prefix boundary in resolve_relative
  * and handle_getcwd. Without a component-boundary check, a kernel
  * cwd at "<rootfs>-evil/foo" would byte-match the rootfs prefix and
@@ -4498,6 +4534,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_rt_sigaction_b2_sizing();
 	fails += test_sigsys_block_shadow_multithread();
 	fails += test_proc_self_exe_synthesis();
+	fails += test_proc_self_cwd_synthesis();
 	fails += test_b4_rootfs_prefix_boundary(rootfs);
 	fails += test_b5_bind_over_symlink_memo();
 	fails += test_proc_self_maps_reverse_translation();

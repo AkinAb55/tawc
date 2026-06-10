@@ -16,15 +16,15 @@
 
 /* Fast-out: does this guest-relative leaf even have a chance of
  * composing into a /proc/<x> path that we shadow? Legitimate first chars
- * are {b,s,t,m,e,digit} — covering "bus/" (pci/devices), "self/", "sys/",
- * "task/", "maps", "exe", and numeric "<tid>/" forms. Anything else (the
- * vast majority of fd-relative opens — config files, dotfiles, library
- * names, etc.) skips the readlinkat. */
+ * are {b,c,s,t,m,e,digit} — covering "bus/" (pci/devices), "cwd",
+ * "self/", "sys/", "task/", "maps", "exe", and numeric "<tid>/" forms.
+ * Anything else (the vast majority of fd-relative opens — config files,
+ * dotfiles, library names, etc.) skips the readlinkat. */
 int tawcroot_could_be_proc_relative(const char *p)
 {
 	char c = p[0];
-	return c == 'b' || c == 's' || c == 't' || c == 'm' || c == 'e' ||
-	       (c >= '0' && c <= '9');
+	return c == 'b' || c == 'c' || c == 's' || c == 't' || c == 'm' ||
+	       c == 'e' || (c >= '0' && c <= '9');
 }
 
 
@@ -82,17 +82,22 @@ static int is_my_tid(long n)
 	return 0;
 }
 
-/* If `path` is "/proc/self/<x>" or "/proc/<tid>/<x>" — where <tid> is
- * our TGID or any TID belonging to it — return a pointer to "<x>". Also
- * peels an optional "task/<tid>/" segment after `self/` or `<tid>/`,
- * since /proc/<pid>/task/<tid>/maps is per-mm (identical to .../maps) and
- * /exe is a symlink to the same exe. Returns NULL on no match.
+/* If `path` is "/proc/self/<x>" or "/proc/<tid>/<x>", return a pointer
+ * to "<x>" and set `*mine` to whether <tid> names our process (our TGID
+ * or any TID belonging to it; "self" always does). Also peels an
+ * optional "task/<tid>/" segment after `self/` or `<tid>/`, since
+ * /proc/<pid>/task/<tid>/maps is per-mm (identical to .../maps) and
+ * /exe is a symlink to the same exe; a peeled inner tid re-decides
+ * `*mine` (the kernel ENOENTs a task dir under the wrong pid, so a
+ * mixed self/foreign pairing never produces output anyway). Returns
+ * NULL when the shape doesn't match at all.
  *
  * Strict on the prefix bytes: paths like "/proc/foo/../self/exe" are
  * caught only after the guest's libc canonicalizes them (the typical
  * flow). */
-static const char *strip_proc_self_prefix(const char *path)
+static const char *strip_proc_pid_prefix(const char *path, int *mine)
 {
+	*mine = 0;
 	if (path[0] != '/' || path[1] != 'p' || path[2] != 'r' ||
 	    path[3] != 'o' || path[4] != 'c' || path[5] != '/')
 		return 0;
@@ -100,6 +105,7 @@ static const char *strip_proc_self_prefix(const char *path)
 	const char *after_pid;
 	if (t[0] == 's' && t[1] == 'e' && t[2] == 'l' && t[3] == 'f' &&
 	    t[4] == '/') {
+		*mine = 1;
 		after_pid = t + 5;
 	} else if (t[0] >= '0' && t[0] <= '9') {
 		long n = 0;
@@ -109,19 +115,18 @@ static const char *strip_proc_self_prefix(const char *path)
 			if (n > 0x7fffffff) return 0;
 		}
 		if (p[0] != '/') return 0;
-		if (!is_my_tid(n)) return 0;
+		*mine = is_my_tid(n);
 		after_pid = p + 1;
 	} else {
 		return 0;
 	}
 
 	/* Optional "task/<tid>/" peel. On any structural problem with the
-	 * inner segment (no digits, overflow, missing trailing slash, or
-	 * the tid isn't ours) we leave `after_pid` alone; the caller's
-	 * tail-match (e.g. against "maps") then fails and synthesis
-	 * doesn't fire. Returning NULL would also be safe but loses the
-	 * outer match — and `/proc/self/task/<x>` is never a synthesis
-	 * target anyway, so the difference is academic. */
+	 * inner segment (no digits, overflow, missing trailing slash) we
+	 * leave `after_pid` alone; the caller's tail-match (e.g. against
+	 * "maps") then fails and synthesis doesn't fire. `/proc/self/task/`
+	 * itself is never a synthesis target, so the difference is
+	 * academic. */
 	if (after_pid[0] == 't' && after_pid[1] == 'a' &&
 	    after_pid[2] == 's' && after_pid[3] == 'k' &&
 	    after_pid[4] == '/') {
@@ -133,7 +138,7 @@ static const char *strip_proc_self_prefix(const char *path)
 			if (m > 0x7fffffff) return after_pid;
 		}
 		if (p == q || p[0] != '/') return after_pid;
-		if (!is_my_tid(m)) return after_pid;
+		*mine = is_my_tid(m);
 		return p + 1;
 	}
 	return after_pid;
@@ -160,16 +165,31 @@ long tawcroot_compose_fd_relative(int dirfd, const char *gpath_str,
 	return e ? e : (long)dl;
 }
 
+int tawcroot_proc_exe_classify(const char *path)
+{
+	int mine;
+	const char *tail = strip_proc_pid_prefix(path, &mine);
+	if (!tail || !tawc_streq(tail, "exe")) return TAWCROOT_PROC_EXE_NONE;
+	return mine ? TAWCROOT_PROC_EXE_SELF : TAWCROOT_PROC_EXE_OTHER;
+}
+
 int tawcroot_is_proc_self_exe(const char *path)
 {
-	const char *tail = strip_proc_self_prefix(path);
-	return tail && tawc_streq(tail, "exe");
+	return tawcroot_proc_exe_classify(path) == TAWCROOT_PROC_EXE_SELF;
+}
+
+int tawcroot_is_proc_self_cwd(const char *path)
+{
+	int mine;
+	const char *tail = strip_proc_pid_prefix(path, &mine);
+	return tail && mine && tawc_streq(tail, "cwd");
 }
 
 static int is_proc_self_maps(const char *path)
 {
-	const char *tail = strip_proc_self_prefix(path);
-	return tail && tawc_streq(tail, "maps");
+	int mine;
+	const char *tail = strip_proc_pid_prefix(path, &mine);
+	return tail && mine && tawc_streq(tail, "maps");
 }
 
 /* Match the /proc/sys/kernel/overflow{uid,gid} pair. Returns the memfd

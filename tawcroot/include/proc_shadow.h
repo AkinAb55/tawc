@@ -27,6 +27,23 @@ int tawcroot_proc_shadow_open(const char *path, long *out);
  * guest-exe synthesis. */
 int tawcroot_is_proc_self_exe(const char *path);
 
+/* Finer-grained exe-link classification: distinguishes "/proc/<x>/exe
+ * naming OUR process" (synthesize the stashed guest exe path) from
+ * "naming some OTHER process" (must NOT be substituted — every tawcroot
+ * guest's kernel exe is the same libtawcroot.so, so the readlink-result
+ * equality check alone would return the CALLER's guest exe for a
+ * different process's link). */
+#define TAWCROOT_PROC_EXE_NONE  0  /* not a /proc/<x>/exe path */
+#define TAWCROOT_PROC_EXE_SELF  1  /* our pid, or a tid of ours */
+#define TAWCROOT_PROC_EXE_OTHER 2  /* a (numeric) pid that isn't ours */
+int tawcroot_proc_exe_classify(const char *path);
+
+/* True iff `path` is /proc/self/cwd (or /proc/<own-tid>/cwd, with an
+ * optional task/<tid>/ segment). The readlink handler synthesizes the
+ * guest cwd via tawcroot_cwd_to_guest_abs — the kernel's link target is
+ * the host path, which the guest's world view doesn't contain. */
+int tawcroot_is_proc_self_cwd(const char *path);
+
 /* Fast-out for fd-relative opens: can this relative leaf even compose
  * into a /proc path we shadow? Cheap first-byte test that skips the
  * readlinkat for the vast majority of fd-relative opens. */

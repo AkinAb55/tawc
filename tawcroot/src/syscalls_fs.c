@@ -520,31 +520,55 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	if (!gpath || !buf) return TAWC_EFAULT;
 	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
 
-	/* Phase 2e: synthesize /proc/self/exe from the stashed guest exe
-	 * path. The kernel's view points at libtawcroot.so; the guest
-	 * wants the path it originally asked us to exec. The fd-relative
-	 * case (readlinkat(proc_self_fd, "exe", ...)) is caught by re-
-	 * composing through the dirfd's /proc/self/fd/<n> link. */
+	/* Phase 2e: synthesize the /proc self-magic links.
+	 *
+	 *   - exe: the kernel's view points at libtawcroot.so; the guest
+	 *     wants the path it originally asked us to exec.
+	 *   - cwd: the kernel's link target is the HOST cwd; reverse-
+	 *     translate through the same walk getcwd uses (and like
+	 *     getcwd, refuse with -ENOENT rather than leak a host path
+	 *     when the kernel cwd is outside the view).
+	 *   - root is left to the kernel: we never kernel-chroot, so its
+	 *     "/" answer is already what a guest expects, emulated
+	 *     chroot included.
+	 *
+	 * The fd-relative case (readlinkat(proc_self_fd, "exe", ...)) is
+	 * caught by re-composing through the dirfd's /proc/self/fd/<n>
+	 * link. `exe_kind` also remembers when the guest asked for some
+	 * OTHER process's exe link, so the result-equality substitution
+	 * below doesn't fire for it (every guest's kernel exe is the same
+	 * libtawcroot.so — substituting would return the CALLER's exe
+	 * path for a different process's link). */
 	char *path = scratch->buf[0];
 	long fe = fetch_guest_path(scratch, 0, gpath);
 	if (fe) return fe;
-	if (tawcroot_guest_exe_path_len > 0) {
-		int hit = tawcroot_is_proc_self_exe(path);
-		char *composed = scratch->buf[1];
-		if (!hit && dirfd != AT_FDCWD && path[0] != '/' &&
-		    tawcroot_could_be_proc_relative(path) &&
-		    tawcroot_compose_fd_relative(dirfd, path,
-					composed,
-					TAWCROOT_PATH_SCRATCH_SIZE) > 0)
-			hit = tawcroot_is_proc_self_exe(composed);
-		if (hit) {
-			size_t len = tawcroot_guest_exe_path_len;
-			if (len > (size_t)size) len = (size_t)size;
-			long ce = tawc_copy_to_guest(buf,
-				tawcroot_guest_exe_path, len);
-			if (ce < 0) return ce;
-			return (long)len;
-		}
+	const char *cls = path;
+	char *composed = scratch->buf[1];
+	if (dirfd != AT_FDCWD && path[0] != '/' &&
+	    tawcroot_could_be_proc_relative(path) &&
+	    tawcroot_compose_fd_relative(dirfd, path, composed,
+					 TAWCROOT_PATH_SCRATCH_SIZE) > 0)
+		cls = composed;
+	int exe_kind = tawcroot_proc_exe_classify(cls);
+	if (exe_kind == TAWCROOT_PROC_EXE_SELF &&
+	    tawcroot_guest_exe_path_len > 0) {
+		size_t len = tawcroot_guest_exe_path_len;
+		if (len > (size_t)size) len = (size_t)size;
+		long ce = tawc_copy_to_guest(buf,
+			tawcroot_guest_exe_path, len);
+		if (ce < 0) return ce;
+		return (long)len;
+	}
+	if (tawcroot_is_proc_self_cwd(cls)) {
+		/* `cls` may point into buf[1]; dead from here on. */
+		char *cwd = scratch->buf[1];
+		long cn = tawcroot_cwd_to_guest_abs(cwd,
+					TAWCROOT_PATH_SCRATCH_SIZE);
+		if (cn < 0) return cn;
+		if (cn > (long)size) cn = size;
+		long ce = tawc_copy_to_guest(buf, cwd, (size_t)cn);
+		if (ce < 0) return ce;
+		return cn;
 	}
 
 	struct fs_path t;
@@ -596,7 +620,8 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	long n = tawc_readlinkat(t.fd, p, readlink_scratch,
 				 (size_t)scratch_cap);
 	if (n < 0) return n;
-	if (tawcroot_guest_exe_path_len > 0 &&
+	if (exe_kind != TAWCROOT_PROC_EXE_OTHER &&
+	    tawcroot_guest_exe_path_len > 0 &&
 	    tawcroot_self_host_path_len > 0 &&
 	    (size_t)n == tawcroot_self_host_path_len &&
 	    memcmp(readlink_scratch, tawcroot_self_host_path,
