@@ -2,7 +2,7 @@
 name: default-code-reviewer
 description: Use this agent when explicitly asked to do a code review
 tools: "Read, Bash, TaskStop, WebFetch, WebSearch, mcp__claude_ai_Gmail__authenticate, mcp__claude_ai_Gmail__complete_authentication, mcp__claude_ai_Google_Calendar__authenticate, mcp__claude_ai_Google_Calendar__complete_authentication, mcp__claude_ai_Google_Drive__authenticate, mcp__claude_ai_Google_Drive__complete_authentication, LSP"
-model: opus
+model: inherit
 color: orange
 ---
 Hello Claude! Please perform a code review.
