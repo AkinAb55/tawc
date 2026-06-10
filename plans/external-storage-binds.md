@@ -2,14 +2,7 @@
 
 Goal: let users keep selected rootfs data somewhere outside app-private
 storage so it can survive uninstall and be visible to other Android apps.
-
-Do not make this the default Linux home layout. Keep `/root` inside app
-data by default and expose Android storage at dedicated guest paths
-(default binds `/android` and `/home/android`, see UX below).
-Putting all of `/root` on Android shared storage risks exposing dotfiles,
-browser profiles, SSH/GPG state, package caches, Unix permissions, and
-other Linux-private data to a storage model that does not preserve full
-POSIX semantics.
+Default binds `/android` and `/home/android` (see UX below).
 
 ## Approach: all-files access plus normal tawcroot binds
 
@@ -91,12 +84,9 @@ manage-binds activity (see UX).
 - New installs default to two binds, editable/removable like any other:
   - `/android` -> `/` (the Android root; much of it is unreadable to
     the app due to SELinux/DAC, which is expected)
-  - `/home/android` -> `/storage/emulated/0` (the Android user's home,
-    i.e. the user-visible shared-storage root)
+  - `/home/android` ->  the Android user's home (such as `/storage/emulated/0`)
 - Explain that files under bound host paths survive tawc uninstall and
   may be visible to other apps.
-- Binding over `/root` is possible by adding such an entry, but warn:
-  many Linux programs assume private, POSIX-like home semantics.
 
 ### Testing
 
@@ -124,10 +114,3 @@ would buy is Play Store policy compliance. Not worth it. If all-files
 access is ever unavailable, use SAF for import/export or a
 file-picker-driven "copy into shared directory" workflow instead of
 live mounts.
-
-## Recommended sequence
-
-1. Implement the bind mechanism plus the manage-binds activity (install
-   flow and manage screen entry points, default binds).
-2. Keep full external `/root` discouraged: supported via a manual bind
-   entry, warned against in the UI.
