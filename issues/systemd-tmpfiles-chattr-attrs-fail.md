@@ -53,3 +53,8 @@ package-side issue, not a tawcroot one.
 
 Low. Journal directory is created and writable; only the COW hint
 is missing, which costs a small amount of journal-rotation perf.
+
+Related wontfix: tmpfiles also logs `Failed to open path /dev/net/tun`
+during install (we don't stage `/dev/net/`). Equally cosmetic — no
+target workload uses tun, and we never run systemd as init; tmpfiles
+only fires via the pacman ALPM hook. Don't re-file it.
