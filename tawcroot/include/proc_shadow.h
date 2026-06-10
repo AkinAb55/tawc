@@ -22,6 +22,19 @@
  * a future shadow only needs one line added here. */
 int tawcroot_proc_shadow_open(const char *path, long *out);
 
+/* One-pass classification of the /proc magic links the readlink
+ * handler synthesizes or post-processes. Strips the /proc/<pid> prefix
+ * once and resolves pid ownership lazily (a /proc/<n>/status read) only
+ * for the kinds that need it — fd links skip it entirely. The
+ * single-kind helpers below are thin wrappers; prefer this in handlers
+ * that test more than one kind. */
+#define TAWCROOT_PROC_LINK_NONE      0  /* not a magic link we handle */
+#define TAWCROOT_PROC_LINK_EXE_SELF  1  /* /proc/<own>/exe */
+#define TAWCROOT_PROC_LINK_EXE_OTHER 2  /* /proc/<other-pid>/exe */
+#define TAWCROOT_PROC_LINK_CWD       3  /* /proc/<own>/cwd */
+#define TAWCROOT_PROC_LINK_FD        4  /* /proc/<any-pid>/fd/<n> */
+int tawcroot_proc_link_classify(const char *path);
+
 /* True iff `path` is /proc/self/exe (or /proc/<own-tid>/exe, with an
  * optional task/<tid>/ segment). Used by the readlink handlers for
  * guest-exe synthesis. */
@@ -43,6 +56,13 @@ int tawcroot_proc_exe_classify(const char *path);
  * guest cwd via tawcroot_cwd_to_guest_abs — the kernel's link target is
  * the host path, which the guest's world view doesn't contain. */
 int tawcroot_is_proc_self_cwd(const char *path);
+
+/* True iff `path` is /proc/self/fd/<n> or /proc/<pid>/fd/<n> (optional
+ * task/<tid>/ segment), for ANY pid. The kernel resolves these magic
+ * links to HOST paths; the readlink handler reverse-translates the
+ * result through the rootfs/bind prefix walk so in-view targets come
+ * back as guest paths (outside-view targets pass through verbatim). */
+int tawcroot_is_proc_fd_link(const char *path);
 
 /* Fast-out for fd-relative opens: can this relative leaf even compose
  * into a /proc path we shadow? Cheap first-byte test that skips the

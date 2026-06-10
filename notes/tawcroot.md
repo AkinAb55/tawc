@@ -1392,6 +1392,26 @@ O_RDONLY)` to re-read the binary), we translate to the stashed
 guest path through the normal rootfs-relative path: the open
 reaches the actual binary on disk.
 
+### `/proc/<pid>/fd/<n>` reverse translation
+
+readlink of an fd magic link returns the kernel's HOST path for the
+fd's target. When the *request* path classifies as
+`/proc/<pid>/fd/<n>` (any pid — sibling tawcroot processes share the
+view; `self`, numeric, and `task/<tid>/` forms; the fd-relative
+`readlinkat(<fd of /proc/self/fd>, "<n>")` shape `ls -l` uses is
+caught via the same compose-through-dirfd step as exe/cwd), the
+result is reverse-translated through the rootfs/bind longest-prefix
+walk — the same one `getcwd` uses. Outside-view results
+(`socket:[…]`, `pipe:[…]`, `/memfd:… (deleted)`, app-private host
+files) pass through verbatim: fd links legitimately point outside
+the view, so unlike `getcwd` we don't ENOENT them.
+
+Field reproducer: Bun-compiled binaries (Claude Code's native build)
+canonicalize their cwd via `open(dir)` +
+`readlink(/proc/self/fd/<n>)`, got the host rootfs path back, and
+died with "Can't access working directory" when the follow-up stat
+of that host path translated to nothing inside the view.
+
 ### `getcwd` reverse translation
 
 After a successful `chdir("<rootfs-rel>/foo/bar")` the kernel's CWD

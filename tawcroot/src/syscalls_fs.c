@@ -534,7 +534,7 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	 *
 	 * The fd-relative case (readlinkat(proc_self_fd, "exe", ...)) is
 	 * caught by re-composing through the dirfd's /proc/self/fd/<n>
-	 * link. `exe_kind` also remembers when the guest asked for some
+	 * link. `link_cls` also remembers when the guest asked for some
 	 * OTHER process's exe link, so the result-equality substitution
 	 * below doesn't fire for it (every guest's kernel exe is the same
 	 * libtawcroot.so — substituting would return the CALLER's exe
@@ -549,8 +549,8 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	    tawcroot_compose_fd_relative(dirfd, path, composed,
 					 TAWCROOT_PATH_SCRATCH_SIZE) > 0)
 		cls = composed;
-	int exe_kind = tawcroot_proc_exe_classify(cls);
-	if (exe_kind == TAWCROOT_PROC_EXE_SELF &&
+	int link_cls = tawcroot_proc_link_classify(cls);
+	if (link_cls == TAWCROOT_PROC_LINK_EXE_SELF &&
 	    tawcroot_guest_exe_path_len > 0) {
 		size_t len = tawcroot_guest_exe_path_len;
 		if (len > (size_t)size) len = (size_t)size;
@@ -559,7 +559,7 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 		if (ce < 0) return ce;
 		return (long)len;
 	}
-	if (tawcroot_is_proc_self_cwd(cls)) {
+	if (link_cls == TAWCROOT_PROC_LINK_CWD) {
 		/* `cls` may point into buf[1]; dead from here on. */
 		char *cwd = scratch->buf[1];
 		long cn = tawcroot_cwd_to_guest_abs(cwd,
@@ -620,7 +620,7 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 	long n = tawc_readlinkat(t.fd, p, readlink_scratch,
 				 (size_t)scratch_cap);
 	if (n < 0) return n;
-	if (exe_kind != TAWCROOT_PROC_EXE_OTHER &&
+	if (link_cls != TAWCROOT_PROC_LINK_EXE_OTHER &&
 	    tawcroot_guest_exe_path_len > 0 &&
 	    tawcroot_self_host_path_len > 0 &&
 	    (size_t)n == tawcroot_self_host_path_len &&
@@ -631,6 +631,28 @@ static long handle_readlinkat(const tawcroot_syscall_args *args,
 		long ce = tawc_copy_to_guest(buf, tawcroot_guest_exe_path, glen);
 		if (ce < 0) return ce;
 		return (long)glen;
+	}
+	/* /proc/<pid>/fd/<n> magic links resolve to HOST paths for fds
+	 * inside the rootfs/bind view. Bun's realpath (Claude Code et al.)
+	 * canonicalizes via open(dir) + readlink(/proc/self/fd/<n>), then
+	 * ENOENTs on the leaked host path. Reverse-translate through the
+	 * same longest-prefix walk as getcwd. Outside-view targets
+	 * (sockets, memfds, pipes) pass through verbatim — fd links
+	 * legitimately point outside the view, and "socket:[...]" isn't
+	 * a path at all. buf[0] holds the kernel result and buf[1] the
+	 * dead translated path; buf[2] is free for the guest rewrite. */
+	if (link_cls == TAWCROOT_PROC_LINK_FD && n > 0 &&
+	    readlink_scratch[0] == '/') {
+		char *guest = scratch->buf[2];
+		long gn = tawcroot_host_path_to_guest_abs(
+			readlink_scratch, (size_t)n,
+			guest, TAWCROOT_PATH_SCRATCH_SIZE);
+		if (gn > 0) {
+			if (gn > (long)size) gn = size;
+			long ge = tawc_copy_to_guest(buf, guest, (size_t)gn);
+			if (ge < 0) return ge;
+			return gn;
+		}
 	}
 	long ce = tawc_copy_to_guest(buf, readlink_scratch, (size_t)n);
 	if (ce < 0) return ce;

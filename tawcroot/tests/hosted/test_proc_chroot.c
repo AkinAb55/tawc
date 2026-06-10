@@ -192,6 +192,124 @@ test(hosted_readlink_proc_self_cwd_returns_guest_path)
 	th_teardown(&v);
 }
 
+/* /proc/<pid>/fd/<n> magic links resolve to HOST paths; in-view targets
+ * must come back reverse-translated as guest paths. Bun's realpath
+ * (Claude Code et al.) canonicalizes its cwd via open(dir) +
+ * readlink(/proc/self/fd/<n>), then ENOENT'd on the leaked host path.
+ * Outside-view targets ("pipe:[...]", app-private files) pass through
+ * verbatim — fd links legitimately point outside the view. */
+test(hosted_readlink_proc_fd_link_returns_guest_path)
+{
+	th_view v;
+	th_setup(&v, "proc-rdfd");
+
+	/* Classifier shapes. Any pid is accepted (sibling tawcroot
+	 * processes share the view; the prefix walk is a no-op for
+	 * foreign targets). */
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/self/fd/3"), 1);
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/1/fd/44"), 1);
+	char own[64];
+	snprintf(own, sizeof own, "/proc/%d/fd/0", getpid());
+	test_int_eq(tawcroot_is_proc_fd_link(own), 1);
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/self/fd"), 0);
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/self/fd/"), 0);
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/self/fd/3x"), 0);
+	test_int_eq(tawcroot_is_proc_fd_link("/proc/self/fdinfo/3"), 0);
+	test_int_eq(tawcroot_is_proc_fd_link("/etc/fd/3"), 0);
+
+	/* The single-kind helpers are wrappers over the one-pass
+	 * classifier; spot-check its raw answers too. */
+	test_int_eq(tawcroot_proc_link_classify("/proc/self/fd/3"),
+		    TAWCROOT_PROC_LINK_FD);
+	test_int_eq(tawcroot_proc_link_classify("/proc/self/cwd"),
+		    TAWCROOT_PROC_LINK_CWD);
+	test_int_eq(tawcroot_proc_link_classify("/proc/1/cwd"),
+		    TAWCROOT_PROC_LINK_NONE);
+	test_int_eq(tawcroot_proc_link_classify("/proc/self/exe"),
+		    TAWCROOT_PROC_LINK_EXE_SELF);
+	test_int_eq(tawcroot_proc_link_classify("/proc/1/exe"),
+		    TAWCROOT_PROC_LINK_EXE_OTHER);
+	test_int_eq(tawcroot_proc_link_classify("/proc/self/maps"),
+		    TAWCROOT_PROC_LINK_NONE);
+
+	/* Route guest /proc to the host's (in production /proc is a
+	 * bind) so the translated readlink reaches the real magic link. */
+	test_int_eq(tawcroot_path_add_bind("/proc", "/proc"), 0);
+
+	/* In-view directory fd: link reads back as the GUEST path. */
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/etc/sub",
+			 O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
+	test_true(fd >= 0);
+	char link[64];
+	snprintf(link, sizeof link, "/proc/self/fd/%ld", fd);
+	char buf[256] = {0};
+	long n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+			buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+
+	/* Numeric-pid form. */
+	snprintf(link, sizeof link, "/proc/%d/fd/%ld", getpid(), fd);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+
+	/* Fd-relative form, as `ls -l /proc/self/fd` issues it:
+	 * readlinkat(<fd of /proc/self/fd>, "<n>"). */
+	int pfd = open("/proc/self/fd", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	test_true(pfd >= 0);
+	char leaf[16];
+	snprintf(leaf, sizeof leaf, "%ld", fd);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, pfd, leaf, buf, sizeof buf - 1,
+		   0, 0);
+	test_int_eq(n, (long)strlen("/etc/sub"));
+	test_str_eq(buf, "/etc/sub");
+	test_int_eq(close(pfd), 0);
+	test_int_eq(close((int)fd), 0);
+
+	/* Rootfs root itself reads back as "/". */
+	long rfd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/",
+			  O_PATH | O_DIRECTORY | O_CLOEXEC, 0, 0, 0);
+	test_true(rfd >= 0);
+	snprintf(link, sizeof link, "/proc/self/fd/%ld", rfd);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, 1);
+	test_str_eq(buf, "/");
+	test_int_eq(close((int)rfd), 0);
+
+	/* Bind-source fd: link reads back as the bind DST. */
+	const char *bsrc = th_add_bind(&v, "/system");
+	int bfd = open(bsrc, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	test_true(bfd >= 0);
+	snprintf(link, sizeof link, "/proc/self/fd/%d", bfd);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+		   buf, sizeof buf - 1, 0, 0);
+	test_int_eq(n, (long)strlen("/system"));
+	test_str_eq(buf, "/system");
+	test_int_eq(close(bfd), 0);
+
+	/* Outside-view target: kernel bytes pass through verbatim (a
+	 * pipe's link text isn't a path at all). */
+	int pp[2];
+	test_int_eq(pipe(pp), 0);
+	snprintf(link, sizeof link, "/proc/self/fd/%d", pp[0]);
+	memset(buf, 0, sizeof buf);
+	n = th_sys(TAWC_SYS_readlinkat, AT_FDCWD, link,
+		   buf, sizeof buf - 1, 0, 0);
+	test_true(n > 5);
+	test_true(memcmp(buf, "pipe:", 5) == 0);
+	test_int_eq(close(pp[0]), 0);
+	test_int_eq(close(pp[1]), 0);
+
+	th_teardown(&v);
+}
+
 /* Cross-process exe links must NOT be substituted with the caller's
  * guest exe path. Every tawcroot guest's kernel exe is the same
  * libtawcroot.so, so the handler's readlink-result equality check alone

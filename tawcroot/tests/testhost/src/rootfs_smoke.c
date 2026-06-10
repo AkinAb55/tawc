@@ -3101,6 +3101,89 @@ static int test_proc_self_cwd_synthesis(void)
 	return fails;
 }
 
+/* /proc/<pid>/fd/<n> reverse-translation. The kernel resolves the magic
+ * link to the HOST path of the fd's target; in-view targets must come
+ * back as guest paths (Bun's realpath canonicalizes via open(dir) +
+ * readlink(/proc/self/fd/<n>) — Claude Code then ENOENT'd on the leaked
+ * host path). Outside-view targets pass through verbatim.
+ *
+ * This fixture has no /proc bind (the procesc containment probe needs
+ * /proc absent from the view), so the absolute-path form can't reach
+ * the kernel's magic link here — the hosted suite covers it with a
+ * /proc bind, matching production. What CAN run under the real filter
+ * is the fd-relative form `ls -l /proc/self/fd` uses:
+ * readlinkat(<fd of /proc/self/fd>, "<n>"), with the dirfd opened via
+ * the raw stub. Classification composes the dirfd's host path with the
+ * leaf, so it exercises the same /proc/<pid>/fd/<n> path as production. */
+static int test_proc_fd_link_readlink(void)
+{
+	int fails = 0;
+	long fd = inline_openat(AT_FDCWD, "/etc",
+				O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+	fails += tawc_io_step("openat(\"/etc\", O_PATH) for fd-link probe",
+			      fd >= 0);
+	if (fd < 0) return fails;
+
+	long pfd = tawc_openat(AT_FDCWD, "/proc/self/fd",
+			       O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+	fails += tawc_io_step("raw open of host /proc/self/fd", pfd >= 0);
+	if (pfd < 0) {
+		tawc_close((int)fd);
+		return fails;
+	}
+
+	char leaf[24];
+	size_t lp = 0;
+	(void)tawc_str_append_dec(leaf, sizeof leaf, &lp, fd);
+
+	char buf[256];
+	long n;
+	INLINE_SYS6(TAWC_SYS_readlinkat, pfd, leaf, buf,
+		    sizeof buf - 1, 0, 0, n);
+	fails += tawc_io_step(
+		"readlinkat(proc_fd_dir, \"<n>\") -> guest path length",
+		n == 4);
+	if (n > 0) {
+		buf[n] = 0;
+		fails += tawc_io_step(
+			"fd link content is \"/etc\", not host path",
+			tawc_streq(buf, "/etc"));
+		tawc_io_str("    got = '"); tawc_io_str(buf);
+		tawc_io_str("'\n");
+	} else {
+		tawc_io_kv_dec("    rv", n);
+	}
+	tawc_close((int)fd);
+
+	/* Outside-view target: a memfd's link text
+	 * ("/memfd:<name> (deleted)") matches no view prefix and must
+	 * pass through verbatim, not turn into -ENOENT. */
+	long mfd = tawc_memfd_create("tawcroot-fdlink-probe",
+				     1U /*MFD_CLOEXEC*/);
+	fails += tawc_io_step("memfd for outside-view fd-link probe",
+			      mfd >= 0);
+	if (mfd >= 0) {
+		lp = 0;
+		(void)tawc_str_append_dec(leaf, sizeof leaf, &lp, mfd);
+		INLINE_SYS6(TAWC_SYS_readlinkat, pfd, leaf, buf,
+			    sizeof buf - 1, 0, 0, n);
+		int is_memfd = n > 7 &&
+			buf[0] == '/' && buf[1] == 'm' && buf[2] == 'e' &&
+			buf[3] == 'm' && buf[4] == 'f' && buf[5] == 'd' &&
+			buf[6] == ':';
+		fails += tawc_io_step(
+			"memfd fd link passes through verbatim", is_memfd);
+		if (n > 0) {
+			buf[n] = 0;
+			tawc_io_str("    got = '"); tawc_io_str(buf);
+			tawc_io_str("'\n");
+		}
+		tawc_close((int)mfd);
+	}
+	tawc_close((int)pfd);
+	return fails;
+}
+
 /* Review finding B4 — rootfs prefix boundary in resolve_relative
  * and handle_getcwd. Without a component-boundary check, a kernel
  * cwd at "<rootfs>-evil/foo" would byte-match the rootfs prefix and
@@ -4535,6 +4618,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_sigsys_block_shadow_multithread();
 	fails += test_proc_self_exe_synthesis();
 	fails += test_proc_self_cwd_synthesis();
+	fails += test_proc_fd_link_readlink();
 	fails += test_b4_rootfs_prefix_boundary(rootfs);
 	fails += test_b5_bind_over_symlink_memo();
 	fails += test_proc_self_maps_reverse_translation();

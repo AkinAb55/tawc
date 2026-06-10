@@ -83,21 +83,23 @@ static int is_my_tid(long n)
 }
 
 /* If `path` is "/proc/self/<x>" or "/proc/<tid>/<x>", return a pointer
- * to "<x>" and set `*mine` to whether <tid> names our process (our TGID
- * or any TID belonging to it; "self" always does). Also peels an
- * optional "task/<tid>/" segment after `self/` or `<tid>/`, since
+ * to "<x>" and set `*tid_out` to the effective tid: -1 for a literal
+ * "self", else the numeric tid. Ownership is NOT resolved here — the
+ * caller decides via resolve_mine(), so classifications that don't
+ * care (fd links) skip the /proc/<n>/status read entirely. Also peels
+ * an optional "task/<tid>/" segment after `self/` or `<tid>/`, since
  * /proc/<pid>/task/<tid>/maps is per-mm (identical to .../maps) and
- * /exe is a symlink to the same exe; a peeled inner tid re-decides
- * `*mine` (the kernel ENOENTs a task dir under the wrong pid, so a
- * mixed self/foreign pairing never produces output anyway). Returns
+ * /exe is a symlink to the same exe; a peeled inner tid replaces the
+ * effective tid (the kernel ENOENTs a task dir under the wrong pid, so
+ * a mixed self/foreign pairing never produces output anyway). Returns
  * NULL when the shape doesn't match at all.
  *
  * Strict on the prefix bytes: paths like "/proc/foo/../self/exe" are
  * caught only after the guest's libc canonicalizes them (the typical
  * flow). */
-static const char *strip_proc_pid_prefix(const char *path, int *mine)
+static const char *strip_proc_pid_prefix(const char *path, long *tid_out)
 {
-	*mine = 0;
+	*tid_out = -1;
 	if (path[0] != '/' || path[1] != 'p' || path[2] != 'r' ||
 	    path[3] != 'o' || path[4] != 'c' || path[5] != '/')
 		return 0;
@@ -105,7 +107,6 @@ static const char *strip_proc_pid_prefix(const char *path, int *mine)
 	const char *after_pid;
 	if (t[0] == 's' && t[1] == 'e' && t[2] == 'l' && t[3] == 'f' &&
 	    t[4] == '/') {
-		*mine = 1;
 		after_pid = t + 5;
 	} else if (t[0] >= '0' && t[0] <= '9') {
 		long n = 0;
@@ -115,7 +116,7 @@ static const char *strip_proc_pid_prefix(const char *path, int *mine)
 			if (n > 0x7fffffff) return 0;
 		}
 		if (p[0] != '/') return 0;
-		*mine = is_my_tid(n);
+		*tid_out = n;
 		after_pid = p + 1;
 	} else {
 		return 0;
@@ -138,10 +139,17 @@ static const char *strip_proc_pid_prefix(const char *path, int *mine)
 			if (m > 0x7fffffff) return after_pid;
 		}
 		if (p == q || p[0] != '/') return after_pid;
-		*mine = is_my_tid(m);
+		*tid_out = m;
 		return p + 1;
 	}
 	return after_pid;
+}
+
+/* Resolve a strip_proc_pid_prefix tid to "names our process". -1
+ * ("self") is ours by definition; numeric tids pay the status read. */
+static int resolve_mine(long tid)
+{
+	return tid < 0 ? 1 : is_my_tid(tid);
 }
 
 /* Compose `dirfd`'s host path (resolved via /proc/self/fd/<n>) with a
@@ -165,12 +173,39 @@ long tawcroot_compose_fd_relative(int dirfd, const char *gpath_str,
 	return e ? e : (long)dl;
 }
 
+int tawcroot_proc_link_classify(const char *path)
+{
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	if (!tail) return TAWCROOT_PROC_LINK_NONE;
+	if (tawc_streq(tail, "exe"))
+		return resolve_mine(tid) ? TAWCROOT_PROC_LINK_EXE_SELF
+					 : TAWCROOT_PROC_LINK_EXE_OTHER;
+	/* Cross-process cwd links pass the kernel bytes through verbatim,
+	 * like the rest of cross-process /proc — only ours synthesizes. */
+	if (tawc_streq(tail, "cwd"))
+		return resolve_mine(tid) ? TAWCROOT_PROC_LINK_CWD
+					 : TAWCROOT_PROC_LINK_NONE;
+	/* fd links: pid ownership is irrelevant (the readlink result is
+	 * reverse-translated by prefix, equally correct for sibling
+	 * tawcroot processes and a no-op for outside-view targets), so
+	 * the status read is skipped entirely. */
+	if (tail[0] == 'f' && tail[1] == 'd' && tail[2] == '/') {
+		const char *p = tail + 3;
+		if (*p < '0' || *p > '9') return TAWCROOT_PROC_LINK_NONE;
+		while (*p >= '0' && *p <= '9') p++;
+		if (*p == 0) return TAWCROOT_PROC_LINK_FD;
+	}
+	return TAWCROOT_PROC_LINK_NONE;
+}
+
 int tawcroot_proc_exe_classify(const char *path)
 {
-	int mine;
-	const char *tail = strip_proc_pid_prefix(path, &mine);
-	if (!tail || !tawc_streq(tail, "exe")) return TAWCROOT_PROC_EXE_NONE;
-	return mine ? TAWCROOT_PROC_EXE_SELF : TAWCROOT_PROC_EXE_OTHER;
+	switch (tawcroot_proc_link_classify(path)) {
+	case TAWCROOT_PROC_LINK_EXE_SELF:  return TAWCROOT_PROC_EXE_SELF;
+	case TAWCROOT_PROC_LINK_EXE_OTHER: return TAWCROOT_PROC_EXE_OTHER;
+	default:                           return TAWCROOT_PROC_EXE_NONE;
+	}
 }
 
 int tawcroot_is_proc_self_exe(const char *path)
@@ -180,16 +215,19 @@ int tawcroot_is_proc_self_exe(const char *path)
 
 int tawcroot_is_proc_self_cwd(const char *path)
 {
-	int mine;
-	const char *tail = strip_proc_pid_prefix(path, &mine);
-	return tail && mine && tawc_streq(tail, "cwd");
+	return tawcroot_proc_link_classify(path) == TAWCROOT_PROC_LINK_CWD;
+}
+
+int tawcroot_is_proc_fd_link(const char *path)
+{
+	return tawcroot_proc_link_classify(path) == TAWCROOT_PROC_LINK_FD;
 }
 
 static int is_proc_self_maps(const char *path)
 {
-	int mine;
-	const char *tail = strip_proc_pid_prefix(path, &mine);
-	return tail && mine && tawc_streq(tail, "maps");
+	long tid;
+	const char *tail = strip_proc_pid_prefix(path, &tid);
+	return tail && tawc_streq(tail, "maps") && resolve_mine(tid);
 }
 
 /* Match the /proc/sys/kernel/overflow{uid,gid} pair. Returns the memfd
