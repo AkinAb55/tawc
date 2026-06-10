@@ -16,6 +16,7 @@ use wayland_server::Display;
 
 #[cfg(feature = "gfxstream")]
 mod ahb_export;
+mod ando;
 mod app_paths;
 #[cfg(feature = "gfxstream")]
 mod bridge;
@@ -65,6 +66,56 @@ static STATE_QUERY_SENDER: Mutex<Option<smithay::reexports::calloop::channel::Se
 /// `onCreate` after a process restart).
 static COMPOSITOR_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// android_logger + panic hook setup shared by every JNI entry point
+/// that can be the first native call in the process
+/// (`nativeStartCompositor` from the service, `nativeStartAndoBroker`
+/// from `TawcApplication.onCreate`). Both are idempotent.
+fn init_native_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("tawc-native")
+            // smithay's gles backend traces every frame at info level
+            // via tracing → log bridge ("renderer_gles2_frame; …"),
+            // which floods logcat at the framerate. Drop to warn so we
+            // still see real renderer errors.
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse("debug,smithay::backend::renderer::gles=warn")
+                    .build(),
+            ),
+    );
+    // The default Rust panic handler writes to stderr, which Bionic
+    // routes to /dev/null for app processes — so a panic in a native
+    // thread vanishes silently and is misdiagnosed as a hang. Route
+    // panics through `error!` (i.e. android_logger / logcat).
+    //
+    // Then: abort, with one exception. The compositor is the only
+    // thing this process is for, so a panic there is fatal and we'd
+    // rather show up as a clean SIGABRT with a useful message than
+    // leave the JVM running on a dead native worker. The ando broker
+    // threads (`ando-*`) instead unwind into their per-connection
+    // `catch_unwind` — a malformed request must not take down the app.
+    static PANIC_HOOK: OnceLock<()> = OnceLock::new();
+    PANIC_HOOK.get_or_init(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let location = info.location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".into());
+            let msg = info.payload()
+                .downcast_ref::<&'static str>().copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("<non-string panic payload>");
+            let thread = std::thread::current();
+            let name = thread.name().unwrap_or("<unnamed>");
+            log::error!("panic in thread {} at {}: {}", name, location, msg);
+            if !name.starts_with("ando-") {
+                std::process::abort();
+            }
+        }));
+    });
+}
+
 /// Cache the JavaVM and NativeBridge class on the first JNI call so the
 /// compositor thread can do reverse-JNI from any thread later.
 fn cache_jni_globals(env: &mut JNIEnv) {
@@ -102,39 +153,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     xwayland: jboolean,
     gtk3_broken_menus_workaround: jboolean,
 ) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Debug)
-            .with_tag("tawc-native")
-            // smithay's gles backend traces every frame at info level
-            // via tracing → log bridge ("renderer_gles2_frame; …"),
-            // which floods logcat at the framerate. Drop to warn so we
-            // still see real renderer errors.
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .parse("debug,smithay::backend::renderer::gles=warn")
-                    .build(),
-            ),
-    );
-    // The default Rust panic handler writes to stderr, which Bionic
-    // routes to /dev/null for app processes — so a panic in the
-    // compositor thread vanishes silently and is misdiagnosed as a
-    // hang. Route panics through `error!` (i.e. android_logger /
-    // logcat) and then abort: the compositor is the only thing this
-    // process is for, so a panic here is fatal and we'd rather show
-    // up as a clean SIGABRT with a useful message than leave the JVM
-    // running on a dead native worker.
-    std::panic::set_hook(Box::new(|info| {
-        let location = info.location()
-            .map(|l| format!("{}:{}", l.file(), l.line()))
-            .unwrap_or_else(|| "<unknown>".into());
-        let msg = info.payload()
-            .downcast_ref::<&'static str>().copied()
-            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
-            .unwrap_or("<non-string panic payload>");
-        log::error!("compositor panic at {}: {}", location, msg);
-        std::process::abort();
-    }));
+    init_native_logging();
     cache_jni_globals(&mut env);
     app_paths::init_from_env();
 
@@ -207,6 +226,29 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
         COMPOSITOR_RUNNING.store(false, Ordering::SeqCst);
         info!("Compositor thread exited");
     });
+}
+
+/// Start the ando broker listener thread (see ando.rs / notes/ando.md).
+/// Called once from `TawcApplication`'s startup thread — all build
+/// types, independent of compositor startup, so the broker is alive
+/// whenever the app process is. `socket_path` is the host-side
+/// filesystem socket path (`AppPaths.andoSocket`, exposed to guests at
+/// `/usr/share/tawc/ando.sock` via the share bind).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartAndoBroker(
+    mut env: JNIEnv,
+    _class: JClass,
+    socket_path: JString,
+) {
+    init_native_logging();
+    let socket_path: String = match env.get_string(&socket_path) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log::error!("nativeStartAndoBroker: bad socket path string: {}", e);
+            return;
+        }
+    };
+    ando::start(socket_path);
 }
 
 /// Stop the compositor thread. Called from `CompositorService.onDestroy`.

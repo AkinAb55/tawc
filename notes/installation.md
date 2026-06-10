@@ -290,13 +290,15 @@ reported as `InstallProgress` to the UI and per-line logged to logcat
    - `TawcInstaller.installInto` lays down the APK-bundled libhybris
      tree (and its glvnd vendor JSON) as **real files** inside the
      rootfs, not symlinks and not bind mounts. Same generic mechanism
-     handles any future "ship file X into every rootfs" need; only
-     consumer today is `LibhybrisInstallProvider`. Files land at
+     handles any future "ship file X into every rootfs" need. Files
+     from `LibhybrisInstallProvider` land at
      `/usr/lib/hybris/{*.so,gl-shims/,libhybris/}` (a tawc-owned
      namespace; `/usr/local/lib/` stays free for the user's own
      installs — same pattern for `/usr/lib/gfxstream/` shipped by
      [BridgeInstallProvider] and `/usr/lib/mesa-zink/` shipped by
      [MesaZinkInstallProvider]) plus `/usr/share/glvnd/egl_vendor.d/00_libhybris.json`.
+     [AndoInstallProvider] ships the ando client at
+     `/usr/local/bin/ando` (notes/ando.md).
       `LD_LIBRARY_PATH` (set by [RootfsEnv]) is
       `/usr/lib/hybris/gl-shims:/usr/lib/hybris`. The source tree at
       `<filesDir>/libhybris/` is extracted from

@@ -4,7 +4,8 @@ A debug-build-only in-app service that lets the host run commands as the
 app uid/domain — same SELinux context (`untrusted_app`) the production
 launch path uses. Replaces all `run-as` and most `su` use in dev/test
 workflows with a path that genuinely mirrors how things execute when a
-user launches the app.
+user launches the app. Its production sibling for rootfs guests (not
+the host) is the ando broker — see [ando.md](ando.md).
 
 ## Why this exists
 

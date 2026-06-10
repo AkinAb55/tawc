@@ -481,6 +481,21 @@ tawcAbis.forEach { abi ->
     tasks.named("preBuild") {
         dependsOn(buildTawcrootTask)
     }
+
+    // Cross-build the ando guest client (static bionic) and stage
+    // libando.so under jniLibs. Same shape as buildTawcroot.
+    val andoBin = "$tawcRoot/app/src/main/jniLibs/$abi/libando.so"
+    val buildAndoTask = tasks.register<Exec>("buildAndo$capAbi") {
+        workingDir = tawcRoot
+        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+        commandLine("tools/ando/build.sh", "--abi=$scriptAbi")
+        inputs.file("$tawcRoot/tools/ando/build.sh")
+        inputs.dir("$tawcRoot/tools/ando/src")
+        outputs.file(andoBin)
+    }
+    tasks.named("preBuild") {
+        dependsOn(buildAndoTask)
+    }
 }
 
 // Cross-build the gfxstream host renderer (libgfxstream_backend.so) for

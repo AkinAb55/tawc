@@ -79,3 +79,12 @@ only if that becomes a real complaint.
 The compositor is *not* started or waited for. The Wayland/X11 env
 vars are still set, so GUI apps launched from the terminal connect
 only if a compositor session is already up; CLI work needs nothing.
+
+## Running Android commands
+
+`ando <cmd>` (installed in every rootfs at `/usr/local/bin/ando`) runs
+a command as a plain Android process — useful from a terminal session
+for `getprop`, `am`/`pm`, copying into shared storage, or `ando su -c
+'…'` on rooted devices. Since the terminal child holds the real pty,
+ando children inherit working tty semantics (no job control — the
+rootfs shell owns the pty session). See [ando.md](ando.md).

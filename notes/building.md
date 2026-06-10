@@ -395,6 +395,22 @@ cross-builds (the shipped artifacts) are untouched.
 
 See [tawcroot.md](tawcroot.md) for the design.
 
+### ando client (→ ships in APK as jniLib)
+
+The guest-side client for the ando broker (`ando <cmd>` — run an
+Android command from inside the rootfs; see [ando.md](ando.md)).
+Single-file C, NDK clang `-static` against bionic's libc.a (static so
+the tawcroot loader needs no `/system/bin/linker64` or per-distro
+glibc). Output: `app/src/main/jniLibs/<abi>/libando.so`; installed
+into each rootfs at `/usr/local/bin/ando` by `AndoInstallProvider`.
+Auto-invoked by Gradle's `buildAndo<Abi>` task; standalone:
+
+```bash
+tools/ando/build.sh --abi=aarch64
+tools/ando/build.sh --abi=x86_64
+tools/ando/build.sh --abi=both
+```
+
 ### APK assembly
 
 ```bash

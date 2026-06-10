@@ -46,6 +46,7 @@ internal object TawcInstaller {
         LibhybrisInstallProvider,
         BridgeInstallProvider,
         MesaZinkInstallProvider,
+        AndoInstallProvider,
     )
 
     /**
