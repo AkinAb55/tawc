@@ -27,6 +27,7 @@ import com.termux.view.TerminalViewClient
 import me.phie.tawc.install.InstallationMethod
 import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.install.TawcrootMethod
+import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ui.buildChildScreen
 
 /**
@@ -77,7 +78,7 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
             return
         }
 
-        val scaffold = buildChildScreen(installation.label ?: distroId)
+        val scaffold = buildChildScreen(DistroRegistry.displayLabel(installation))
         // Replace the scaffold's system-bar-only inset padding with one
         // that includes the IME, so the keyboard resizes the terminal
         // and the prompt stays visible above it.

@@ -38,6 +38,18 @@ object DistroRegistry {
         all.firstOrNull { it.key == inst.distro && it.androidAbi == inst.arch }
 
     /**
+     * User-facing name for an installation: the user's label if set,
+     * else the distro's default label (what the install form would
+     * have pre-filled, e.g. "Arch") for legacy records that predate
+     * the label field, else a raw "<distro> (<arch>)" fall-back for
+     * unknown-distro records.
+     */
+    fun displayLabel(inst: Installation): String =
+        inst.label
+            ?: forInstallation(inst)?.defaultLabel
+            ?: "${inst.distro.replaceFirstChar { it.titlecase() }} (${inst.arch})"
+
+    /**
      * Distros that can be installed on this host (matching the host's
      * primary Android ABI). The install activity uses this for its
      * distro radio; the service uses [forKey] to resolve the user's

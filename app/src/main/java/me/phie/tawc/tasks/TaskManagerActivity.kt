@@ -171,12 +171,8 @@ class TaskManagerActivity : AppCompatActivity() {
         }
     }
 
-    private fun installLabel(inst: Installation): String {
-        val resolved = DistroRegistry.forInstallation(inst)
-        val displayName = resolved?.displayName
-            ?: "${inst.distro.replaceFirstChar { it.titlecase() }} (${inst.arch})"
-        return inst.label ?: displayName
-    }
+    private fun installLabel(inst: Installation): String =
+        DistroRegistry.displayLabel(inst)
 
     private fun buildGroupCard(
         title: String,

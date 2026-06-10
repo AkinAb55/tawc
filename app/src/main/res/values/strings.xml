@@ -29,7 +29,6 @@
     <string name="hint_run_command">e.g. firefox</string>
 
     <string name="home_empty_no_distros">You have no installed Linux distros, install one to get started.</string>
-    <string name="home_subtitle_separator">&#8212;</string>
     <string name="install_state_installing">installing&#8230;</string>
     <string name="install_state_uninstalling">uninstalling&#8230;</string>
     <string name="install_state_ready">ready</string>
@@ -53,18 +52,17 @@
     <string name="install_already_installed_at">Already installed at %1$s</string>
     <string name="install_use_cache_proxy">Use local cache proxy</string>
     <string name="install_method_label">Install method</string>
-    <string name="install_method_tawcroot_recommended">TAWCroot (recommended)</string>
+    <string name="install_method_tawcroot_recommended">tawcroot (recommended)</string>
     <string name="install_method_proot">proot</string>
     <string name="install_method_chroot_requires_root">chroot (requires root)</string>
-    <string name="install_root_unavailable">root (su) not available &#8212; pick proot or TAWCroot, or grant Magisk root.</string>
-    <string name="install_method_info_tawcroot_title">TAWCroot (recommended)</string>
+    <string name="install_root_unavailable">root (su) not available &#8212; pick proot or tawcroot, or grant Magisk root.</string>
+    <string name="install_method_info_tawcroot_title">tawcroot (recommended)</string>
     <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator written for TAWC. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the Wayland / GPU paths the compositor needs. Default for new installs and the only officially supported method.</string>
     <string name="install_method_info_proot_title">proot (dev only)</string>
-    <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most desktop apps work. Slower than TAWCroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
+    <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most desktop apps work. Slower than tawcroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
     <string name="install_method_info_chroot_title">chroot (requires root, dev only)</string>
     <string name="install_method_info_chroot_body">Real Linux chroot via su. Fastest path with no syscall translation overhead, but only works on rooted devices (Magisk / Phh-style su). The chroot mounts /apex, /vendor, /system and /linkerconfig from Android so libhybris GPU drivers can resolve their dependencies. Available in debug builds; not shipped to release users.</string>
 
-    <string name="distro_info_row_id">ID:</string>
     <string name="distro_info_row_label">Label:</string>
     <string name="distro_info_row_distro">Distro:</string>
     <string name="distro_info_row_architecture">Architecture:</string>
@@ -80,6 +78,8 @@
     <string name="distro_info_size_unavailable">not available</string>
     <string name="distro_info_computing">computing&#8230;</string>
     <string name="distro_info_run_command_title">Run command in %1$s</string>
+    <string name="action_copy_rootfs_path">Copy rootfs path</string>
+    <string name="copied_to_clipboard">Copied to clipboard</string>
     <string name="distro_info_delete_title">Delete %1$s?</string>
     <string name="distro_info_delete_message">This permanently deletes the rootfs at\n%1$s,\nincluding all files in your Linux home directory.</string>
 

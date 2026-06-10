@@ -29,6 +29,8 @@ import me.phie.tawc.tasks.TaskManagerActivity
 import me.phie.tawc.ui.buildHomeScreen
 import me.phie.tawc.ui.tawcCard
 import me.phie.tawc.ui.tonalButton
+import me.phie.tawc.ui.tawcButtonSizePx
+import me.phie.tawc.ui.tonalIconButton
 import me.phie.tawc.ui.verticalLp
 
 /**
@@ -122,6 +124,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildCard(inst: Installation): View {
         val card = tawcCard()
+        // Bottom padding is set at the end of this function: when the
+        // bottom row is shown, the terminal button's bottom margin
+        // (which drops it onto the search underline) already provides
+        // part of the gap, so the column's own bottom padding shrinks
+        // by the same amount to keep the button's distance from the
+        // card's bottom edge equal to its distance from the left edge.
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(cardPad, cardPad, cardPad, cardPad)
@@ -130,16 +138,28 @@ class MainActivity : AppCompatActivity() {
         // Header: title/subtitle on the left, Manage button on the top-right.
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val textCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val (title, subtitle) = displayParts(inst)
+        val title = DistroRegistry.displayLabel(inst)
         textCol.addView(TextView(this).apply {
             text = title
             textSize = 18f
         })
-        if (subtitle.isNotEmpty()) {
+        // Distro line under the title — dropped when the title already
+        // equals the display name (legacy records without a label).
+        val displayName = DistroRegistry.forInstallation(inst)?.displayName
+            ?: "${inst.distro.replaceFirstChar { it.titlecase() }} (${inst.arch})"
+        if (title != displayName) {
             textCol.addView(TextView(this).apply {
-                text = subtitle
+                text = displayName
                 textSize = 14f
                 alpha = 0.7f
+            })
+        }
+        // Non-READY state marker, in red so a stuck/failed install pops.
+        stateLine(inst.state)?.let { state ->
+            textCol.addView(TextView(this).apply {
+                text = state
+                textSize = 14f
+                setTextColor(getColor(R.color.tawc_danger))
             })
         }
         val gap = (8 * resources.displayMetrics.density).toInt()
@@ -147,23 +167,69 @@ class MainActivity : AppCompatActivity() {
             textCol,
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).also { it.marginEnd = gap },
         )
-        // Manage with Terminal stacked under it on the top-right.
-        // MATCH_PARENT inside the wrap-content column keeps the two
-        // buttons equal width (the wider one wins).
-        val buttonCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        buttonCol.addView(
-            tonalButton(getString(R.string.action_manage)) {
+        val btnSize = tawcButtonSizePx()
+        header.addView(
+            tonalIconButton(
+                R.drawable.ic_settings_gear,
+                getString(R.string.action_manage),
+                iconSizeDp = 24,
+            ) {
                 val i = Intent(this@MainActivity, DistroInfoActivity::class.java)
                     .putExtra(DistroInfoActivity.EXTRA_ID, inst.id)
                 startActivity(i)
             },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            LinearLayout.LayoutParams(btnSize, btnSize).also { it.gravity = Gravity.TOP },
         )
+        column.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // Bottom row: Terminal icon button + search-apps stub. The stub
+        // looks like a search field but never holds focus — tapping it
+        // forwards into LauncherActivity, which is the real search UI.
+        // Hidden on FAILED (no usable launcher) and disabled while
+        // installing/uninstalling so it returns once ready.
+        val topMargin = (8 * resources.displayMetrics.density).toInt()
+        // BOTTOM, not CENTER_VERTICAL: the search box's underline sits
+        // at its bottom edge, so that's the line the terminal button
+        // should sit on. baselineAligned must go — with it on (the
+        // horizontal-LinearLayout default) the row aligns the button's
+        // empty-text baseline to the EditText's instead of honoring
+        // BOTTOM, pushing the button up out of the row's clip bounds.
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            isBaselineAligned = false
+        }
+        val searchBox = EditText(this).apply {
+            hint = getString(R.string.hint_search_apps)
+            isSingleLine = true
+            isFocusable = false
+            isClickable = true
+            setTextColor(getColor(R.color.tawc_on_tonal))
+            isEnabled = inst.state == Installation.State.READY
+            setOnClickListener {
+                val i = Intent(this@MainActivity, LauncherActivity::class.java)
+                    .putExtra(LauncherActivity.EXTRA_ID, inst.id)
+                startActivity(i)
+            }
+        }
+        // The search box's underline draws a few px above the view's
+        // bottom inside its bottom padding; this margin drops the
+        // terminal button so its bottom edge lands a hair below the
+        // line rather than above it (the extra +1px is deliberate —
+        // dead-even read as the button floating half a pixel high).
+        val underlineNudge = (3 * resources.displayMetrics.density).toInt() + 1
+        val buttonDrop = (searchBox.paddingBottom - underlineNudge).coerceAtLeast(0)
         // Terminal needs a runnable rootfs and the tawcroot spawn path
         // (chroot needs su, proot is dev-only — see TerminalActivity).
         if (inst.state == Installation.State.READY && inst.method == TawcrootMethod.KEY) {
-            buttonCol.addView(
-                tonalButton(getString(R.string.action_terminal)) {
+            // 28dp icon (over the 24dp default) so the ">_" reads at a
+            // glance instead of floating in button padding.
+            bottomRow.addView(
+                tonalIconButton(
+                    R.drawable.ic_terminal,
+                    getString(R.string.action_terminal),
+                    iconSizeDp = 28,
+                ) {
                     val i = Intent(this@MainActivity, TerminalActivity::class.java)
                         .putExtra(TerminalActivity.EXTRA_ID, inst.id)
                         // Unique per-distro document URI — see the
@@ -171,70 +237,37 @@ class MainActivity : AppCompatActivity() {
                         .setData(Uri.parse("tawc://terminal/${inst.id}"))
                     startActivity(i)
                 },
-                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+                LinearLayout.LayoutParams(btnSize, btnSize).also {
+                    it.marginEnd = gap
+                    it.bottomMargin = buttonDrop
+                },
             )
         }
-        header.addView(
-            buttonCol,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).also { it.gravity = Gravity.TOP },
-        )
-        column.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        // Search-apps stub: looks like a search field but never holds focus
-        // — tapping it forwards into LauncherActivity, which is the real
-        // search UI. Hidden on FAILED (no usable launcher) and disabled
-        // while installing/uninstalling so it returns once ready.
-        val topMargin = (4 * resources.displayMetrics.density).toInt()
-        val searchBox = EditText(this).apply {
-            hint = getString(R.string.hint_search_apps)
-            isSingleLine = true
-            isFocusable = false
-            isClickable = true
-            setTextColor(getColor(R.color.tawc_on_tonal))
-            setOnClickListener {
-                val i = Intent(this@MainActivity, LauncherActivity::class.java)
-                    .putExtra(LauncherActivity.EXTRA_ID, inst.id)
-                startActivity(i)
-            }
-        }
-        searchBox.visibility = if (inst.state == Installation.State.FAILED) View.GONE else View.VISIBLE
-        searchBox.isEnabled = inst.state == Installation.State.READY
+        bottomRow.addView(searchBox, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val rowVisible = inst.state != Installation.State.FAILED
+        bottomRow.visibility = if (rowVisible) View.VISIBLE else View.GONE
         column.addView(
-            searchBox,
+            bottomRow,
             LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).also { it.topMargin = topMargin },
         )
+        // See the comment at the top of this function: the button's
+        // bottom margin counts toward the visual gap to the card edge.
+        if (rowVisible) {
+            column.setPadding(cardPad, cardPad, cardPad, (cardPad - buttonDrop).coerceAtLeast(0))
+        }
 
         card.addView(column)
         return card
     }
 
-    /**
-     * Split an installation into (card title, card subtitle).
-     *
-     * Title is the user-set label (which defaults to `distro.defaultLabel`
-     * at install time, e.g. "Arch"). Subtitle is the registry-resolved
-     * display name (e.g. "Arch Linux (x86)") plus any non-READY state
-     * marker. If the title already equals the display name (legacy
-     * records without a label), drop the redundant distro subtitle and
-     * keep only the state marker (if any).
-     */
-    private fun displayParts(inst: Installation): Pair<String, String> {
-        val resolved = DistroRegistry.forInstallation(inst)
-        val displayName = resolved?.displayName
-            ?: "${inst.distro.replaceFirstChar { it.titlecase() }} (${inst.arch})"
-        val title = inst.label ?: displayName
-        val distroLine = if (title == displayName) "" else displayName
-        val stateLine = when (inst.state) {
-            Installation.State.READY -> ""
+    /** Card state marker; null for READY (no marker). */
+    private fun stateLine(state: Installation.State): String? =
+        when (state) {
+            Installation.State.READY -> null
             Installation.State.INSTALLING -> getString(R.string.install_state_installing)
             Installation.State.UNINSTALLING -> getString(R.string.install_state_uninstalling)
             Installation.State.FAILED -> getString(R.string.install_state_failed)
         }
-        val subtitle = listOf(distroLine, stateLine)
-            .filter { it.isNotEmpty() }
-            .joinToString(" ${getString(R.string.home_subtitle_separator)} ")
-        return title to subtitle
-    }
 
     private companion object {
         const val REQUEST_NOTIFICATIONS = 1

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.Log
 import kotlinx.coroutines.flow.MutableSharedFlow
 import me.phie.tawc.R
+import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.ops.MutableOperation
 import me.phie.tawc.ops.OperationProgress
@@ -57,7 +58,11 @@ internal object RunCommandOp {
         }
         val op = MutableOperation(
             id = opId,
-            title = app.getString(R.string.operation_title_run_command, installation.id, command),
+            title = app.getString(
+                R.string.operation_title_run_command,
+                DistroRegistry.displayLabel(installation),
+                command,
+            ),
             log = sink,
             cancelHandler = {
                 if (cancelled.compareAndSet(false, true)) {

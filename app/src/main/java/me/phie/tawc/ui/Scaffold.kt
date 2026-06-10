@@ -87,11 +87,32 @@ private fun View.applySystemBarPadding() {
 // MaterialButton's default fully-rounded "pill" looks slick but reads
 // as a chip more than an action; the app prefers near-square buttons
 // with just enough corner softening to not feel sharp. 6dp on the
-// usual ~52dp button height lands at "barely rounded".
+// 48dp button height lands at "barely rounded".
 private const val BUTTON_CORNER_DP = 6f
 
-private fun AppCompatActivity.applyNearSquareCorners(btn: MaterialButton) {
-    btn.cornerRadius = (BUTTON_CORNER_DP * resources.displayMetrics.density).toInt()
+// Uniform visible height for every app button (text and icon). The
+// Material default is ~48dp of layout with 6dp transparent insets top
+// and bottom, which makes mixed text/icon rows look misaligned; zero
+// the insets and pin minHeight instead so the painted area is the
+// same everywhere. 44dp: 48 read slightly chunky next to the cards'
+// text rows.
+private const val BUTTON_HEIGHT_DP = 44
+
+/**
+ * The uniform button height in pixels — also the exact width/height
+ * callers should give [tonalIconButton]s' layout params so the squares
+ * can't be squeezed by their row (LinearLayout only guarantees
+ * minHeight for exact-size children).
+ */
+fun Context.tawcButtonSizePx(): Int = (BUTTON_HEIGHT_DP * resources.displayMetrics.density).toInt()
+
+private fun MaterialButton.applyTawcButtonShape() {
+    val density = resources.displayMetrics.density
+    insetTop = 0
+    insetBottom = 0
+    minHeight = (BUTTON_HEIGHT_DP * density).toInt()
+    minimumHeight = minHeight
+    cornerRadius = (BUTTON_CORNER_DP * density).toInt()
 }
 
 /**
@@ -101,7 +122,7 @@ private fun AppCompatActivity.applyNearSquareCorners(btn: MaterialButton) {
 fun AppCompatActivity.primaryButton(label: CharSequence, onClick: () -> Unit): MaterialButton =
     MaterialButton(this).apply {
         text = label
-        applyNearSquareCorners(this)
+        applyTawcButtonShape()
         setOnClickListener { onClick() }
     }
 
@@ -116,7 +137,7 @@ fun AppCompatActivity.destructiveButton(label: CharSequence, onClick: () -> Unit
         backgroundTintList = ColorStateList.valueOf(getColor(R.color.tawc_danger))
         setTextColor(getColor(R.color.tawc_on_danger))
         iconTint = ColorStateList.valueOf(getColor(R.color.tawc_on_danger))
-        applyNearSquareCorners(this)
+        applyTawcButtonShape()
         setOnClickListener { onClick() }
     }
 
@@ -132,7 +153,41 @@ fun Context.tonalButton(label: CharSequence, onClick: () -> Unit): MaterialButto
         text = label
         backgroundTintList = ColorStateList.valueOf(getColor(R.color.tawc_tonal_bg))
         setTextColor(getColor(R.color.tawc_on_tonal))
-        cornerRadius = (BUTTON_CORNER_DP * resources.displayMetrics.density).toInt()
+        applyTawcButtonShape()
+        setOnClickListener { onClick() }
+    }
+
+/**
+ * Square icon-only variant of [tonalButton] (e.g. the per-distro
+ * gear/Terminal buttons on the home screen). Fixed
+ * [BUTTON_HEIGHT_DP]-square so every icon button matches the text
+ * buttons' height regardless of icon size. MaterialButton centers a
+ * TEXT_START icon when there's no text and iconPadding is 0.
+ * Colors default to the tonal pair; pass e.g. [R.color.tawc_accent]
+ * for an accent-filled button (same pairing as the primary-styled
+ * install button).
+ */
+fun Context.tonalIconButton(
+    iconRes: Int,
+    description: CharSequence,
+    backgroundColor: Int = R.color.tawc_tonal_bg,
+    foregroundColor: Int = R.color.tawc_on_tonal,
+    iconSizeDp: Int? = null,
+    onClick: () -> Unit,
+): MaterialButton =
+    MaterialButton(this).apply {
+        icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, iconRes)
+        if (iconSizeDp != null) iconSize = (iconSizeDp * resources.displayMetrics.density).toInt()
+        iconPadding = 0
+        iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+        applyTawcButtonShape()
+        val size = (BUTTON_HEIGHT_DP * resources.displayMetrics.density).toInt()
+        minWidth = size
+        minimumWidth = size
+        setPadding(0, 0, 0, 0)
+        contentDescription = description
+        backgroundTintList = ColorStateList.valueOf(getColor(backgroundColor))
+        iconTint = ColorStateList.valueOf(getColor(foregroundColor))
         setOnClickListener { onClick() }
     }
 

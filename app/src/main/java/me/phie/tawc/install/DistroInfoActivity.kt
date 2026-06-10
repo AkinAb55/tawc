@@ -1,6 +1,8 @@
 package me.phie.tawc.install
 
 import android.graphics.Typeface
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
 import android.text.InputType
@@ -13,8 +15,10 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import android.content.DialogInterface
 import com.google.android.material.color.MaterialColors
@@ -36,7 +40,7 @@ import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
 /**
- * Per-installation detail screen. Shows id/distro/arch/method/source
+ * Per-installation detail screen. Shows label/distro/arch/method/source
  * URL/installed-at/full rootfs path, kicks off an async `du -sk`-via-su
  * to fill in size, and exposes the (red, destructive) Delete button
  * (Are-You-Sure dialog → [InstallationService.startUninstall] +
@@ -90,19 +94,16 @@ class DistroInfoActivity : AppCompatActivity() {
 
     private fun renderContent(installation: Installation) {
         val resolvedDistro: Distro? = DistroRegistry.forInstallation(installation)
-        val titleText = installation.label
-            ?: resolvedDistro?.displayName
-            ?: targetId
-        scaffold.toolbar.title = titleText
+        scaffold.toolbar.title = DistroRegistry.displayLabel(installation)
 
         val pad = (16 * resources.displayMetrics.density).toInt()
         val content = scaffold.content
         content.removeAllViews()
 
-        content.addView(infoRow(getString(R.string.distro_info_row_id), installation.id), rowLp(pad))
-        if (installation.label != null) {
-            content.addView(infoRow(getString(R.string.distro_info_row_label), installation.label), rowLp(pad))
-        }
+        content.addView(
+            infoRow(getString(R.string.distro_info_row_label), DistroRegistry.displayLabel(installation)),
+            rowLp(pad),
+        )
         content.addView(
             infoRow(getString(R.string.distro_info_row_distro), resolvedDistro?.displayName ?: installation.distro),
             rowLp(pad),
@@ -133,10 +134,14 @@ class DistroInfoActivity : AppCompatActivity() {
             ),
             rowLp(pad),
         )
-        content.addView(
-            infoRow(getString(R.string.distro_info_row_rootfs_path), store.rootfsDir(installation.id).absolutePath),
-            rowLp(pad),
+        val rootfsPath = store.rootfsDir(installation.id).absolutePath
+        val rootfsRow = infoRow(getString(R.string.distro_info_row_rootfs_path), rootfsPath)
+        rootfsRow.gravity = android.view.Gravity.CENTER_VERTICAL
+        rootfsRow.addView(
+            copyButton(getString(R.string.action_copy_rootfs_path), rootfsPath),
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
         )
+        content.addView(rootfsRow, rowLp(pad))
         // READY and FAILED slots both have stable on-disk content
         // worth measuring — FAILED in particular is exactly when the
         // user wants to know how much space the half-installed
@@ -280,18 +285,31 @@ class DistroInfoActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderDistroLabel(installation: Installation): String =
+        DistroRegistry.displayLabel(installation)
+
     /**
-     * Friendly name for the installation: the user's label if set,
-     * else the registry-resolved display name (which already carries
-     * the ARM/(x86) disambiguator), else a raw "<distro> (<arch>)"
-     * fall-back for unknown-distro records.
+     * Borderless clipboard icon button. Skips the "copied" toast on
+     * T+ where the system already shows its own clipboard overlay.
      */
-    private fun renderDistroLabel(installation: Installation): String {
-        val resolved = DistroRegistry.forInstallation(installation)
-        return installation.label
-            ?: resolved?.displayName
-            ?: "${installation.distro.replaceFirstChar { it.titlecase() }} (${installation.arch})"
-    }
+    private fun copyButton(description: String, text: String): ImageButton =
+        ImageButton(this).apply {
+            setImageResource(R.drawable.ic_content_copy)
+            imageTintList = android.content.res.ColorStateList.valueOf(
+                MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
+            )
+            val outValue = android.util.TypedValue()
+            context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
+            setBackgroundResource(outValue.resourceId)
+            contentDescription = description
+            setOnClickListener {
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard.setPrimaryClip(ClipData.newPlainText(description, text))
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+                    Toast.makeText(context, R.string.copied_to_clipboard, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
     private fun stateLabel(state: Installation.State): String =
         when (state) {

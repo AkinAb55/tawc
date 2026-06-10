@@ -270,6 +270,7 @@ class InstallActivity : AppCompatActivity() {
         locationLabel = TextView(this).apply {
             textSize = 12f
             typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
             setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
         }
         container.addView(locationLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
