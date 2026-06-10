@@ -178,6 +178,11 @@ pub struct TawcState {
     /// Text input protocol state.
     pub text_input_state: TextInputState,
 
+    /// In-flight mirror of a client-owned clipboard selection into
+    /// Android. A newer selection (or fresh Android clipboard text)
+    /// cancels and replaces it; see clipboard.rs.
+    pub clipboard_pull: Option<crate::clipboard::ActivePull>,
+
     /// Hardware keys accepted from Android and currently held in the Smithay
     /// seat. Releases must be honored even if Android Activity foreground
     /// bookkeeping changes between key-down and key-up.
@@ -336,6 +341,7 @@ impl TawcState {
             output_logical_size,
             output_physical_size,
             text_input_state: TextInputState::new(),
+            clipboard_pull: None,
             hardware_keys_down: HashSet::new(),
             client_count: Arc::new(AtomicU32::new(0)),
             client_ids: Arc::new(Mutex::new(Vec::new())),
@@ -1135,7 +1141,10 @@ impl SelectionHandler for TawcState {
 
         if ty == SelectionTarget::Clipboard {
             if let Some(mime_types) = mime_types {
-                crate::clipboard::queue_wayland_pull(mime_types);
+                crate::clipboard::queue_selection_pull(
+                    crate::clipboard::PullSource::Wayland,
+                    &mime_types,
+                );
             }
         }
     }

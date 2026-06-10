@@ -461,18 +461,22 @@ pub fn run(
     // --- Source 4: Android clipboard channel ---
     //
     // Kotlin listens to Android's real ClipboardManager and forwards text
-    // changes here. Client-owned Wayland selections are pulled eagerly only
-    // after Smithay has installed them in seat state; the SelectionHandler
-    // queues PullWaylandSelection for this source to perform that deferred
-    // request.
-    loop_handle.insert_source(clipboard_channel, |event, _, data: &mut TawcState| {
+    // changes here. Client-owned selections are pulled eagerly only after
+    // Smithay has installed them in seat state; the selection handlers
+    // queue PullSelection for this source to perform that deferred request.
+    let loop_handle_for_clipboard = loop_handle.clone();
+    loop_handle.insert_source(clipboard_channel, move |event, _, data: &mut TawcState| {
         let evt = match event {
             ChannelEvent::Msg(e) => e,
             ChannelEvent::Closed => return,
         };
+        let handle = &loop_handle_for_clipboard;
 
         match evt {
             ClipboardEvent::AndroidText(text) => {
+                // Android's clipboard is now the newest state; a pull of an
+                // older client selection must not overwrite it later.
+                crate::clipboard::cancel_pull(handle, data);
                 smithay::wayland::selection::data_device::set_data_device_selection(
                     &data.display_handle,
                     &data.seat,
@@ -491,26 +495,49 @@ pub fn run(
                     error!("flush_clients error after Android clipboard update: {}", e);
                 }
             }
-            ClipboardEvent::PullWaylandSelection { mime_type } => {
+            ClipboardEvent::PullSelection { source, mime_type } => {
                 let (read_fd, write_fd) = match crate::clipboard::pipe() {
                     Ok(fds) => fds,
                     Err(e) => {
-                        log::warn!("clipboard: pipe failed for Wayland pull: {}", e);
+                        log::warn!("clipboard: pipe failed for selection pull: {}", e);
                         return;
                     }
                 };
-                match smithay::wayland::selection::data_device::request_data_device_client_selection(
-                    &data.seat,
-                    mime_type,
-                    write_fd,
-                ) {
-                    Ok(()) => {
-                        if let Err(e) = data.display_handle.flush_clients() {
-                            error!("flush_clients error after Wayland clipboard request: {}", e);
+                let requested = match source {
+                    crate::clipboard::PullSource::Wayland => {
+                        match smithay::wayland::selection::data_device::request_data_device_client_selection(
+                            &data.seat,
+                            mime_type,
+                            write_fd,
+                        ) {
+                            Ok(()) => {
+                                // Flush so the owner sees the send request
+                                // without waiting for the frame timer.
+                                if let Err(e) = data.display_handle.flush_clients() {
+                                    error!("flush_clients error after clipboard request: {}", e);
+                                }
+                                true
+                            }
+                            Err(e) => {
+                                log::warn!("clipboard: wayland selection request failed: {:?}", e);
+                                false
+                            }
                         }
-                        crate::clipboard::read_fd_for_android(read_fd, "wayland");
                     }
-                    Err(_) => {}
+                    crate::clipboard::PullSource::X11 => match data.xwm.as_mut() {
+                        Some(xwm) => xwm
+                            .send_selection(
+                                smithay::wayland::selection::SelectionTarget::Clipboard,
+                                mime_type,
+                                write_fd,
+                            )
+                            .map_err(|e| log::warn!("clipboard: x11 selection request failed: {:?}", e))
+                            .is_ok(),
+                        None => false,
+                    },
+                };
+                if requested {
+                    crate::clipboard::start_pull(handle, data, read_fd, source);
                 }
             }
         }

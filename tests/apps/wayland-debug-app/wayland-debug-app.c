@@ -18,6 +18,7 @@
  *   text-input-no-surrounding   Text-input surface that never sends surrounding
  *   text-input-stale-newline    Reports cursor before trailing newlines
  *   clipboard-copy <text>       Set wl_data_device clipboard text
+ *   clipboard-copy-double <text> Set clipboard text twice per copy (GTK3 style)
  *   clipboard-copy-overcap      Set a clipboard source larger than 1 MiB
  *   clipboard-copy-timeout      Set a clipboard source that never closes
  *   clipboard-paste             Read focused wl_data_device clipboard text
@@ -283,6 +284,7 @@ struct app {
     int copy_clipboard_on_focus;
     int paste_clipboard_on_selection;
     int clipboard_set;
+    int clipboard_double_set;
     size_t clipboard_generated_bytes;
     int clipboard_leave_fd_open;
     int scene_kind;
@@ -340,6 +342,7 @@ struct wayland_mode {
     int request_decoration;
     int use_data_device;
     const char *clipboard_copy_text;
+    int clipboard_double_set;
     size_t clipboard_generated_bytes;
     int clipboard_leave_fd_open;
     int clipboard_paste;
@@ -788,6 +791,22 @@ static const struct wl_data_source_listener data_source_listener = {
     .action = data_source_action,
 };
 
+static struct wl_data_source *create_clipboard_source(struct app *app,
+                                                      int with_save_targets)
+{
+    struct wl_data_source *source =
+        wl_data_device_manager_create_data_source(app->data_device_manager);
+    require_true(source != NULL, "create_data_source returned NULL");
+    wl_data_source_add_listener(source, &data_source_listener, app);
+    wl_data_source_offer(source, "text/plain;charset=utf-8");
+    wl_data_source_offer(source, "text/plain");
+    wl_data_source_offer(source, "UTF8_STRING");
+    wl_data_source_offer(source, "STRING");
+    if (with_save_targets)
+        wl_data_source_offer(source, "SAVE_TARGETS");
+    return source;
+}
+
 static void maybe_set_clipboard_selection(struct app *app)
 {
     if (!app->copy_clipboard_on_focus || app->clipboard_set ||
@@ -795,16 +814,18 @@ static void maybe_set_clipboard_selection(struct app *app)
         app->keyboard_enter_serial == 0)
         return;
 
-    app->clipboard_source =
-        wl_data_device_manager_create_data_source(app->data_device_manager);
-    require_true(app->clipboard_source != NULL,
-                 "create_data_source returned NULL");
-    wl_data_source_add_listener(app->clipboard_source, &data_source_listener,
-                                app);
-    wl_data_source_offer(app->clipboard_source, "text/plain;charset=utf-8");
-    wl_data_source_offer(app->clipboard_source, "text/plain");
-    wl_data_source_offer(app->clipboard_source, "UTF8_STRING");
-    wl_data_source_offer(app->clipboard_source, "STRING");
+    if (app->clipboard_double_set) {
+        /* GTK3-style clipboard-manager dance (Firefox, VTE terminals):
+         * set the selection, then immediately replace it with a second
+         * source re-announcing the same targets plus SAVE_TARGETS. The
+         * compositor must mirror the final selection of the burst. */
+        struct wl_data_source *first = create_clipboard_source(app, 0);
+        wl_data_device_set_selection(app->data_device, first,
+                                     app->keyboard_enter_serial);
+        app->clipboard_source = create_clipboard_source(app, 1);
+    } else {
+        app->clipboard_source = create_clipboard_source(app, 0);
+    }
     wl_data_device_set_selection(app->data_device, app->clipboard_source,
                                  app->keyboard_enter_serial);
     checked_flush(app->display);
@@ -2374,6 +2395,7 @@ static void setup_wayland(struct app *app, const struct wayland_mode *mode)
     app->render_pattern = mode->render_pattern;
     app->use_data_device = mode->use_data_device;
     app->paste_clipboard_on_selection = mode->clipboard_paste;
+    app->clipboard_double_set = mode->clipboard_double_set;
     app->clipboard_generated_bytes = mode->clipboard_generated_bytes;
     app->clipboard_leave_fd_open = mode->clipboard_leave_fd_open;
     app->scene_kind = mode->scene_kind;
@@ -2679,13 +2701,14 @@ static int cmd_text_input_stale_newline(int argc, char **argv)
 
 static int run_scene_command(const struct wayland_mode *mode);
 
-static int cmd_clipboard_copy(int argc, char **argv)
+static int run_clipboard_copy(int argc, char **argv, int double_set)
 {
     char text[MAX_TEXT];
     struct wayland_mode mode = {
         .title = "tawc wayland clipboard copy debug",
         .app_id = "wayland-debug-app-clipboard-copy",
         .use_data_device = 1,
+        .clipboard_double_set = double_set,
         .editable = 0,
         .provide_surrounding = 0,
     };
@@ -2705,6 +2728,16 @@ static int cmd_clipboard_copy(int argc, char **argv)
     }
     mode.clipboard_copy_text = text;
     return run_scene_command(&mode);
+}
+
+static int cmd_clipboard_copy(int argc, char **argv)
+{
+    return run_clipboard_copy(argc, argv, 0);
+}
+
+static int cmd_clipboard_copy_double(int argc, char **argv)
+{
+    return run_clipboard_copy(argc, argv, 1);
 }
 
 static int cmd_clipboard_copy_overcap(int argc, char **argv)
@@ -2969,6 +3002,9 @@ static const struct command commands[] = {
       cmd_text_input_stale_newline },
     { "clipboard-copy", "Set wl_data_device clipboard text",
       cmd_clipboard_copy },
+    { "clipboard-copy-double",
+      "Set wl_data_device clipboard text twice per copy (GTK3 style)",
+      cmd_clipboard_copy_double },
     { "clipboard-copy-overcap", "Set oversized wl_data_device clipboard text",
       cmd_clipboard_copy_overcap },
     { "clipboard-copy-timeout", "Set non-closing wl_data_device clipboard text",

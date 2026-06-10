@@ -48,7 +48,8 @@ use tawc_integration::adb;
 use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
     assert_broker_ok, assert_compositor_clean, start_wayland_debug_clipboard_copy,
-    start_wayland_debug_clipboard_overcap, start_wayland_debug_clipboard_paste,
+    start_wayland_debug_clipboard_copy_double, start_wayland_debug_clipboard_overcap,
+    start_wayland_debug_clipboard_paste,
     start_wayland_debug_clipboard_timeout, start_wayland_debug_text_input,
     start_wayland_debug_text_input_no_surrounding, start_wayland_debug_text_input_stale_newline,
     start_wayland_debug_touch, TIMEOUT,
@@ -1039,22 +1040,33 @@ fn test_client_clipboard_text_to_android() {
     let wayland_text = "wayland clipboard to android";
     let mut copy_app =
         start_wayland_debug_clipboard_copy(INPUT_BACKEND, WAYLAND_DEBUG_ENV, wayland_text);
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let got = adb::clipboard_get_text().expect("get Android clipboard");
-        if got == wayland_text {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Android clipboard did not receive Wayland text; last={:?}",
-            got
-        );
-        thread::sleep(Duration::from_millis(100));
-    }
+    wait_for_android_clipboard(wayland_text, TIMEOUT);
     copy_app
         .stop()
         .expect("clipboard copy app crashed or failed to stop cleanly");
+
+    assert_compositor_clean();
+}
+
+/// GTK3 apps (Firefox, VTE terminals like lxterminal) set the clipboard
+/// selection twice per copy: once plain, then immediately again with
+/// SAVE_TARGETS appended. The bridge must mirror the final selection of
+/// the burst instead of dropping it (the single-set test above keeps the
+/// quiet path covered).
+#[test]
+fn test_client_clipboard_double_set_text_to_android() {
+    tawc_integration::helpers::test_init();
+    let sentinel = "android clipboard before double set";
+    adb::clipboard_set_text(sentinel).expect("set Android clipboard sentinel");
+    wait_for_android_clipboard(sentinel, TIMEOUT);
+
+    let wayland_text = "wayland double-set clipboard to android";
+    let mut copy_app =
+        start_wayland_debug_clipboard_copy_double(INPUT_BACKEND, WAYLAND_DEBUG_ENV, wayland_text);
+    wait_for_android_clipboard(wayland_text, TIMEOUT);
+    copy_app
+        .stop()
+        .expect("clipboard double-set copy app crashed or failed to stop cleanly");
 
     assert_compositor_clean();
 }

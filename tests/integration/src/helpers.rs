@@ -104,16 +104,35 @@ pub fn start_wayland_debug_clipboard_copy(
     env: &str,
     text: &str,
 ) -> DebugApp {
+    start_wayland_debug_clipboard_text_source(backend, env, "clipboard-copy", text)
+}
+
+/// GTK3-style copy: the debug app sets the clipboard selection twice
+/// back-to-back, the second time re-announcing SAVE_TARGETS.
+pub fn start_wayland_debug_clipboard_copy_double(
+    backend: GraphicsBackend,
+    env: &str,
+    text: &str,
+) -> DebugApp {
+    start_wayland_debug_clipboard_text_source(backend, env, "clipboard-copy-double", text)
+}
+
+fn start_wayland_debug_clipboard_text_source(
+    backend: GraphicsBackend,
+    env: &str,
+    command: &str,
+    text: &str,
+) -> DebugApp {
     let binary = ensure_wayland_debug_app();
-    let subcommand = format!("clipboard-copy '{}'", text.replace('\'', "'\\''"));
+    let subcommand = format!("{} '{}'", command, text.replace('\'', "'\\''"));
     let app = DebugApp::start(backend, &binary, &subcommand, env)
-        .expect("Failed to start wayland clipboard-copy debug app");
+        .unwrap_or_else(|e| panic!("Failed to start wayland {command} debug app: {e}"));
     app.wait_ready()
-        .expect("Wayland clipboard-copy debug app did not become ready");
+        .unwrap_or_else(|e| panic!("Wayland {command} debug app did not become ready: {e}"));
     app.wait_for("CLIPBOARD_SET", TIMEOUT)
-        .expect("Wayland clipboard-copy debug app did not set clipboard");
+        .unwrap_or_else(|e| panic!("Wayland {command} debug app did not set clipboard: {e}"));
     app.wait_for("CLIPBOARD_SEND", TIMEOUT)
-        .expect("Wayland clipboard-copy debug app did not receive clipboard send request");
+        .unwrap_or_else(|e| panic!("Wayland {command} debug app did not receive send request: {e}"));
     app
 }
 

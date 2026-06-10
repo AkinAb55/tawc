@@ -1,22 +1,36 @@
 //! Text clipboard bridge between Android and Wayland selections.
 //!
 //! Smithay owns the Wayland data-device protocol mechanics. This module
-//! owns tawc's platform bridge policy: text MIME selection, bounded eager
-//! reads for mirroring client-owned selections into Android, and async
-//! writes for compositor-owned Android selections.
+//! owns tawc's platform bridge policy: text MIME selection, eager
+//! mirroring of client-owned selections into Android, and async writes
+//! for compositor-owned Android selections.
+//!
+//! Mirroring is "latest selection wins". At most one pull is in flight,
+//! owned by the event loop as `TawcState::clipboard_pull`; a newer
+//! selection (or fresh Android text) cancels and replaces it. Clients
+//! routinely set the clipboard more than once per copy — GTK3 apps
+//! (Firefox, VTE terminals) immediately re-announce the selection with
+//! `SAVE_TARGETS` appended — so the bridge must survive bursts and
+//! mirror the final state.
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use log::{error, info, warn};
-use smithay::reexports::calloop::channel;
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::{
+    channel, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+};
 use smithay::wayland::selection::SelectionTarget;
+
+use crate::compositor::TawcState;
 
 /// Hard cap for eager clipboard pulls into Android. A broken or malicious
 /// Wayland/X11 client can keep writing forever; we stop once the transfer
@@ -38,14 +52,32 @@ pub enum SelectionUserData {
     X11(SelectionTarget),
 }
 
+/// Which side owns the selection a pull reads from.
+#[derive(Clone, Copy)]
+pub enum PullSource {
+    Wayland,
+    X11,
+}
+
+impl PullSource {
+    fn label(self) -> &'static str {
+        match self {
+            PullSource::Wayland => "wayland",
+            PullSource::X11 => "x11",
+        }
+    }
+}
+
 pub enum ClipboardEvent {
     AndroidText(String),
-    PullWaylandSelection { mime_type: String },
+    PullSelection {
+        source: PullSource,
+        mime_type: String,
+    },
 }
 
 static CLIPBOARD_SENDER: Mutex<Option<channel::Sender<ClipboardEvent>>> = Mutex::new(None);
-static READ_ACTIVE: AtomicBool = AtomicBool::new(false);
-static READ_GENERATION: AtomicU64 = AtomicU64::new(0);
+static NEXT_PULL_ID: AtomicU64 = AtomicU64::new(0);
 static PULL_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub fn debug_state() -> String {
@@ -78,12 +110,15 @@ pub fn send_android_text(text: String) {
     }
 }
 
-pub fn queue_wayland_pull(mime_types: Vec<String>) {
-    let Some(mime_type) = preferred_text_mime(&mime_types) else {
+/// Queue a pull of a freshly set client selection into Android. Deferred
+/// through the clipboard channel because Smithay invokes the selection
+/// handlers before installing the new selection in seat state.
+pub fn queue_selection_pull(source: PullSource, mime_types: &[String]) {
+    let Some(mime_type) = preferred_text_mime(mime_types) else {
         return;
     };
     if let Some(sender) = CLIPBOARD_SENDER.lock().unwrap().as_ref() {
-        let _ = sender.send(ClipboardEvent::PullWaylandSelection { mime_type });
+        let _ = sender.send(ClipboardEvent::PullSelection { source, mime_type });
     }
 }
 
@@ -113,31 +148,164 @@ pub fn pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((read, write))
 }
 
-pub fn read_fd_for_android(fd: OwnedFd, label: &'static str) {
-    let generation = READ_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    if READ_ACTIVE.swap(true, Ordering::AcqRel) {
+/// The in-flight selection read, owned by the event loop. Both event
+/// sources (pipe + timeout timer) are deregistered together on every
+/// completion, cancellation, or failure path.
+pub struct ActivePull {
+    /// Defensive only: callbacks act only when their captured id matches
+    /// the current pull's. Cancellation already removes both sources, and
+    /// calloop's token versioning prevents stale dispatch, so a mismatch
+    /// should be unreachable.
+    id: u64,
+    fd_token: RegistrationToken,
+    timer_token: RegistrationToken,
+    buf: Vec<u8>,
+    label: &'static str,
+}
+
+/// Begin mirroring the selection readable on `fd` into Android,
+/// canceling any pull already in flight.
+pub fn start_pull(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+    fd: OwnedFd,
+    source: PullSource,
+) {
+    let label = source.label();
+    cancel_pull(handle, state);
+
+    if let Err(e) = set_nonblocking(fd.as_raw_fd()) {
+        warn!("clipboard: failed to set {} pull nonblocking: {}", label, e);
         return;
     }
+    let id = NEXT_PULL_ID.fetch_add(1, Ordering::Relaxed);
 
-    if let Err(e) = std::thread::Builder::new()
-        .name(format!("clipboard-read-{label}"))
-        .spawn(move || {
-            let result = read_capped_utf8(fd);
-            READ_ACTIVE.store(false, Ordering::Release);
-            if generation != READ_GENERATION.load(Ordering::Acquire) {
-                return;
+    let fd_handle = handle.clone();
+    let fd_source = Generic::new(File::from(fd), Interest::READ, Mode::Level);
+    let fd_token = match handle.insert_source(fd_source, move |_, file, data: &mut TawcState| {
+        Ok(pull_readable(&fd_handle, data, id, file.as_ref()))
+    }) {
+        Ok(token) => token,
+        Err(e) => {
+            warn!("clipboard: failed to register {} pull source: {}", label, e);
+            return;
+        }
+    };
+
+    let timer_handle = handle.clone();
+    let timer = Timer::from_duration(PULL_TIMEOUT);
+    // If the deadline and the pipe's final readable event land in the same
+    // poll batch with the timer ordered first, a completed transfer is
+    // miscounted as a timeout. Accepted: it needs the source to finish in
+    // the same wakeup as the 5s deadline, and costs one copy.
+    let timer_token = match handle.insert_source(timer, move |_, _, data: &mut TawcState| {
+        if let Some(pull) = take_pull_if_current(data, id) {
+            timer_handle.remove(pull.fd_token);
+            warn!("clipboard: timed out waiting for {} selection source", pull.label);
+            PULL_TIMEOUTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        TimeoutAction::Drop
+    }) {
+        Ok(token) => token,
+        Err(e) => {
+            warn!("clipboard: failed to register {} pull timer: {}", label, e);
+            handle.remove(fd_token);
+            return;
+        }
+    };
+
+    state.clipboard_pull = Some(ActivePull {
+        id,
+        fd_token,
+        timer_token,
+        buf: Vec::new(),
+        label,
+    });
+}
+
+/// Drop any in-flight pull. Closing the pipe is the cancellation: the
+/// selection owner sees EPIPE and stops writing.
+pub fn cancel_pull(handle: &LoopHandle<'static, TawcState>, state: &mut TawcState) {
+    if let Some(pull) = state.clipboard_pull.take() {
+        handle.remove(pull.fd_token);
+        handle.remove(pull.timer_token);
+    }
+}
+
+fn take_pull_if_current(state: &mut TawcState, id: u64) -> Option<ActivePull> {
+    if state.clipboard_pull.as_ref().is_some_and(|p| p.id == id) {
+        state.clipboard_pull.take()
+    } else {
+        None
+    }
+}
+
+/// Terminal-path helper for the fd-source callback: detach the pull from
+/// state and deregister its timer. The caller publishes or drops it, and
+/// removes the fd source itself by returning `PostAction::Remove`.
+fn finish_pull(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+    id: u64,
+) -> ActivePull {
+    let pull = take_pull_if_current(state, id).unwrap();
+    handle.remove(pull.timer_token);
+    pull
+}
+
+fn pull_readable(
+    handle: &LoopHandle<'static, TawcState>,
+    state: &mut TawcState,
+    id: u64,
+    mut file: &File,
+) -> PostAction {
+    if !state.clipboard_pull.as_ref().is_some_and(|p| p.id == id) {
+        return PostAction::Remove;
+    }
+
+    let mut chunk = [0u8; 8192];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => {
+                publish_to_android(finish_pull(handle, state, id));
+                return PostAction::Remove;
             }
-            match result {
-                Ok(Some(text)) => {
-                    info!("clipboard: mirrored {} text to Android ({} bytes)", label, text.len());
-                    crate::set_android_clipboard_text(&text);
+            Ok(n) => {
+                let pull = state.clipboard_pull.as_mut().unwrap();
+                pull.buf.extend_from_slice(&chunk[..n]);
+                if pull.buf.len() > MAX_TEXT_BYTES {
+                    let pull = finish_pull(handle, state, id);
+                    warn!(
+                        "clipboard: {} selection exceeded {} byte cap; dropping",
+                        pull.label, MAX_TEXT_BYTES
+                    );
+                    return PostAction::Remove;
                 }
-                Ok(None) => {}
-                Err(e) => warn!("clipboard: failed reading {} selection: {}", label, e),
             }
-        }) {
-        READ_ACTIVE.store(false, Ordering::Release);
-        error!("clipboard: failed to spawn reader: {}", e);
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return PostAction::Continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                let pull = finish_pull(handle, state, id);
+                warn!("clipboard: failed reading {} selection: {}", pull.label, e);
+                return PostAction::Remove;
+            }
+        }
+    }
+}
+
+fn publish_to_android(pull: ActivePull) {
+    match String::from_utf8(pull.buf) {
+        Ok(text) => {
+            info!(
+                "clipboard: mirrored {} text to Android ({} bytes)",
+                pull.label,
+                text.len()
+            );
+            crate::set_android_clipboard_text(&text);
+        }
+        Err(e) => warn!("clipboard: {} selection was not valid UTF-8: {}", pull.label, e),
     }
 }
 
@@ -152,49 +320,6 @@ pub fn write_text_to_fd(fd: OwnedFd, text: String) {
     }
 }
 
-fn read_capped_utf8(fd: OwnedFd) -> std::io::Result<Option<String>> {
-    set_nonblocking(fd.as_raw_fd())?;
-    let raw_fd = fd.as_raw_fd();
-    let mut file = File::from(fd);
-    let deadline = Instant::now() + PULL_TIMEOUT;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-
-    loop {
-        match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > MAX_TEXT_BYTES {
-                    warn!(
-                        "clipboard: selection exceeded {} byte cap; dropping",
-                        MAX_TEXT_BYTES
-                    );
-                    return Ok(None);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                let now = Instant::now();
-                if now >= deadline {
-                    warn!("clipboard: timed out waiting for selection source");
-                    PULL_TIMEOUTS_TOTAL.fetch_add(1, Ordering::Relaxed);
-                    return Ok(None);
-                }
-                poll_readable(raw_fd, deadline - now)?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    match String::from_utf8(buf) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) => {
-            warn!("clipboard: selection was not valid UTF-8: {}", e);
-            Ok(None)
-        }
-    }
-}
-
 fn set_nonblocking(fd: i32) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -205,19 +330,4 @@ fn set_nonblocking(fd: i32) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
-}
-
-fn poll_readable(fd: i32, timeout: Duration) -> std::io::Result<()> {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
-        revents: 0,
-    };
-    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    if rc < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }

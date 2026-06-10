@@ -732,27 +732,16 @@ impl XwmHandler for TawcState {
     ) {
         match selection {
             SelectionTarget::Clipboard => {
-                let preferred_mime = crate::clipboard::preferred_text_mime(&mime_types);
+                crate::clipboard::queue_selection_pull(
+                    crate::clipboard::PullSource::X11,
+                    &mime_types,
+                );
                 set_data_device_selection(
                     &self.display_handle,
                     &self.seat,
                     mime_types,
                     crate::clipboard::SelectionUserData::X11(selection),
                 );
-                if let Some(mime_type) = preferred_mime {
-                    if let Some(xwm) = self.xwm.as_mut() {
-                        match crate::clipboard::pipe() {
-                            Ok((read_fd, write_fd)) => {
-                                if let Err(e) = xwm.send_selection(selection, mime_type, write_fd) {
-                                    warn!("xwayland: failed to request X11 clipboard for Android: {:?}", e);
-                                } else {
-                                    crate::clipboard::read_fd_for_android(read_fd, "x11");
-                                }
-                            }
-                            Err(e) => warn!("xwayland: clipboard pipe failed: {}", e),
-                        }
-                    }
-                }
             }
             SelectionTarget::Primary => {}
         }

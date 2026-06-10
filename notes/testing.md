@@ -90,7 +90,7 @@ TAWC_DEBUG:TOUCH_DOWN:<id>:<x>:<y>:<active>
 | `text-input` | Opens a Wayland toplevel with text-input-v3 enabled |
 | `text-input-no-surrounding` | Text-input client that never sends surrounding text |
 | `touch` / `subsurface` / `popup` | Touch routing scenes |
-| `clipboard-copy` / `clipboard-paste` | Wayland/Android clipboard bridge probes |
+| `clipboard-copy` / `clipboard-copy-double` / `clipboard-paste` | Wayland/Android clipboard bridge probes (`-double` replays GTK3's set-twice-with-SAVE_TARGETS copy) |
 
 ### Building
 
