@@ -99,32 +99,10 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * locale and package PATH additions still apply.
      */
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
-        // Pre-create bind targets. tawcroot's `tawcroot_path_add_bind`
-        // opens the SRC dir at startup; the in-rootfs DST dir doesn't
-        // need to exist (it's purely a name-rewriting key). We still
-        // mkdir each to match the proot path's habit, since some
-        // workflows assume the dst path materializes on disk.
-        File(rootfs, GUEST_TAWC_SHARE_DIR.removePrefix("/")).mkdirs()
-        for (dir in LIBHYBRIS_BIND_DIRS) {
-            File(rootfs, dir.removePrefix("/")).mkdirs()
-        }
-        // Source for the X11-socket fake bind plus the wayland socket
-        // dir. Compositor mkdirs the X11-unix subdir before launching
-        // Xwayland too; recreating here is harmless and lets pre-
-        // compositor entries (install steps, tests) bind it without
-        // relying on launch order. The bare /share dir is also mkdir'd
-        // so tawcroot can open it as the bind src on a fresh device
-        // before the compositor has run.
-        File(tawcShare).mkdirs()
-        File("$tawcShare/xtmp/.X11-unix").mkdirs()
-
+        val tmpdir = prepareSpawn(rootfs)
         val argv = buildList {
             add("/system/bin/setsid")
-            add(tawcrootBin)
-            addAll(listOf("-r", rootfs))
-            for ((src, dst) in bindSpecs()) addAll(listOf("-b", "$src:$dst"))
-            add("--")
-            addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
+            addAll(rootfsArgv(rootfs, graphics))
             add("/bin/bash")
             if (command != null) {
                 add("-lc"); add(command)
@@ -132,13 +110,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 add("-l")
             }
         }
-        // TMPDIR points inside the rootfs so getcwd reverse-translation
-        // works cleanly and daemons pacman-key spawns (gpg-agent) get
-        // a sane writable tmp. Set on the host-side tawcroot process —
-        // not propagated into the rootfs (env -i drops it; the bash
-        // shell gets TMPDIR=/tmp from RootfsEnv instead).
-        val tmpdir = "$rootfs/tmp"
-        File(tmpdir).mkdirs()
         return ProcessBuilder(argv)
             .directory(File(tmpdir))
             .also {
@@ -146,6 +117,87 @@ class TawcrootMethod(context: Context) : InstallationMethod {
                 it.environment()["TMPDIR"] = tmpdir
             }
             .start()
+    }
+
+    /**
+     * Spawn parameters for an interactive in-rootfs login shell on a
+     * caller-owned pty — the in-app terminal
+     * ([me.phie.tawc.terminal.TerminalActivity]), whose termux
+     * terminal-emulator JNI forks the pty pair and execs [argv]
+     * directly. Same envelope as [startInside] minus the `setsid`
+     * prefix: the pty spawn setsid()s the child itself, which both
+     * upholds the rootfs-session invariant (notes/rootfs-sessions.md)
+     * and makes the shell the session leader of the new pty so job
+     * control works. TERM/COLORTERM ride after [RootfsEnv]'s map
+     * because the pipe-stdio paths share that map and aren't ttys.
+     *
+     * [hostEnv] / [cwd] carry the same TMPDIR/tmpdir [startInside]
+     * sets on the host-side tawcroot process (see [prepareSpawn]) —
+     * though unlike [startInside]'s cleared ProcessBuilder env, the
+     * termux JNI putenv()s entries over the inherited app environment.
+     * Harmless: tawcroot reads no env vars and the guest env is fully
+     * reset by `env -i`.
+     */
+    data class PtyExec(val argv: List<String>, val hostEnv: List<String>, val cwd: String)
+
+    fun ptyShellExec(rootfs: String, graphics: GraphicsBackend? = null): PtyExec {
+        val tmpdir = prepareSpawn(rootfs)
+        val argv = buildList {
+            addAll(rootfsArgv(rootfs, graphics))
+            add("TERM=xterm-256color")
+            add("COLORTERM=truecolor")
+            add("/bin/bash")
+            add("-l")
+        }
+        return PtyExec(argv, listOf("TMPDIR=$tmpdir"), tmpdir)
+    }
+
+    /**
+     * Pre-create everything a tawcroot spawn expects on disk; returns
+     * the host-side tmpdir (`<rootfs>/tmp`) the tawcroot process should
+     * run in.
+     *
+     * Bind targets: tawcroot's `tawcroot_path_add_bind` opens the SRC
+     * dir at startup; the in-rootfs DST dir doesn't need to exist (it's
+     * purely a name-rewriting key). We still mkdir each to match the
+     * proot path's habit, since some workflows assume the dst path
+     * materializes on disk.
+     *
+     * Share dir: source for the X11-socket fake bind plus the wayland
+     * socket dir. Compositor mkdirs the X11-unix subdir before
+     * launching Xwayland too; recreating here is harmless and lets
+     * pre-compositor entries (install steps, tests) bind it without
+     * relying on launch order. The bare /share dir is also mkdir'd so
+     * tawcroot can open it as the bind src on a fresh device before
+     * the compositor has run.
+     *
+     * Tmpdir: TMPDIR points inside the rootfs so getcwd reverse-
+     * translation works cleanly and daemons pacman-key spawns
+     * (gpg-agent) get a sane writable tmp. Set on the host-side
+     * tawcroot process — not propagated into the rootfs (env -i drops
+     * it; the bash shell gets TMPDIR=/tmp from RootfsEnv instead).
+     */
+    private fun prepareSpawn(rootfs: String): String {
+        File(rootfs, GUEST_TAWC_SHARE_DIR.removePrefix("/")).mkdirs()
+        for (dir in LIBHYBRIS_BIND_DIRS) {
+            File(rootfs, dir.removePrefix("/")).mkdirs()
+        }
+        File(tawcShare).mkdirs()
+        File("$tawcShare/xtmp/.X11-unix").mkdirs()
+        val tmpdir = "$rootfs/tmp"
+        File(tmpdir).mkdirs()
+        return tmpdir
+    }
+
+    /** `<tawcroot> -r <rootfs> -b … -- /usr/bin/env -i -C /root K=V …`
+     * — the shared spawn prefix up to (and including) the rootfs env;
+     * callers append the program to run. */
+    private fun rootfsArgv(rootfs: String, graphics: GraphicsBackend?): List<String> = buildList {
+        add(tawcrootBin)
+        addAll(listOf("-r", rootfs))
+        for ((src, dst) in bindSpecs()) addAll(listOf("-b", "$src:$dst"))
+        add("--")
+        addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
     }
 
     private fun shellQuote(s: String): String =

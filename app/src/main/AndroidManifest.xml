@@ -115,6 +115,22 @@
             android:name=".ops.CancelOperationReceiver"
             android:exported="false" />
 
+        <!-- In-app terminal, one per distro. Same document trick as
+             CompositorActivity: documentLaunchMode="intoExisting" +
+             taskAffinity="" + a unique tawc://terminal/<id> data URI
+             gives each distro's terminal its own recents card and
+             reuses the existing instance on relaunch. The shell session
+             itself lives in TerminalSessions, so relaunch/rotation
+             reattaches instead of respawning. adjustResize so the soft
+             keyboard resizes the terminal grid. -->
+        <activity
+            android:name=".terminal.TerminalActivity"
+            android:exported="false"
+            android:documentLaunchMode="intoExisting"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
+
         <activity
             android:name=".launcher.LauncherActivity"
             android:exported="false"

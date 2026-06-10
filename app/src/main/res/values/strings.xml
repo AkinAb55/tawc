@@ -16,6 +16,7 @@
     <string name="action_install">Install</string>
     <string name="action_install_new_distro">Install new distro</string>
     <string name="action_manage">Manage</string>
+    <string name="action_terminal">Terminal</string>
     <string name="action_run">Run</string>
     <string name="action_stop">Stop</string>
     <string name="action_stop_all">Stop all</string>

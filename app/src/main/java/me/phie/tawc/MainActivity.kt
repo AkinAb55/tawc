@@ -3,6 +3,7 @@ package me.phie.tawc
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.content.res.ColorStateList
 import android.os.Build
 import android.os.Bundle
@@ -20,8 +21,10 @@ import me.phie.tawc.install.DistroInfoActivity
 import me.phie.tawc.install.InstallActivity
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationStore
+import me.phie.tawc.install.TawcrootMethod
 import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.launcher.LauncherActivity
+import me.phie.tawc.terminal.TerminalActivity
 import me.phie.tawc.tasks.TaskManagerActivity
 import me.phie.tawc.ui.buildHomeScreen
 import me.phie.tawc.ui.tawcCard
@@ -144,12 +147,35 @@ class MainActivity : AppCompatActivity() {
             textCol,
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).also { it.marginEnd = gap },
         )
-        header.addView(
+        // Manage with Terminal stacked under it on the top-right.
+        // MATCH_PARENT inside the wrap-content column keeps the two
+        // buttons equal width (the wider one wins).
+        val buttonCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        buttonCol.addView(
             tonalButton(getString(R.string.action_manage)) {
                 val i = Intent(this@MainActivity, DistroInfoActivity::class.java)
                     .putExtra(DistroInfoActivity.EXTRA_ID, inst.id)
                 startActivity(i)
             },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+        )
+        // Terminal needs a runnable rootfs and the tawcroot spawn path
+        // (chroot needs su, proot is dev-only — see TerminalActivity).
+        if (inst.state == Installation.State.READY && inst.method == TawcrootMethod.KEY) {
+            buttonCol.addView(
+                tonalButton(getString(R.string.action_terminal)) {
+                    val i = Intent(this@MainActivity, TerminalActivity::class.java)
+                        .putExtra(TerminalActivity.EXTRA_ID, inst.id)
+                        // Unique per-distro document URI — see the
+                        // manifest comment on TerminalActivity.
+                        .setData(Uri.parse("tawc://terminal/${inst.id}"))
+                    startActivity(i)
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        header.addView(
+            buttonCol,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).also { it.gravity = Gravity.TOP },
         )
         column.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))

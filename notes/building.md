@@ -160,6 +160,7 @@ silently tolerated as long as HEAD matches the pin).
 | `./deps/libxkbcommon/`                     | `scripts/build-libxkbcommon.sh`                   |
 | `./deps/proot/` (+ `./deps/proot-deps/talloc-*` tarball) | `scripts/build-proot.sh`                |
 | `./deps/cleat/`                            | `tawcroot/build.sh` (host + device test runners) |
+| `./deps/termux-app/`                       | Gradle included projects `:terminal-emulator` + `:terminal-view` (in-app terminal; ensured at settings-evaluation time by `settings.gradle.kts`) |
 | `./deps/xwayland-src/<lib>/` (~22 repos)   | `scripts/build-xwayland.sh`               |
 | `./deps/smithay/`                     | Rust compositor (`scripts/ensure-deps.sh smithay`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
 | `./deps/mesa/`                             | `scripts/build-mesa-gfxstream.sh` (gfxstream-vk and Mesa-Zink assets) |

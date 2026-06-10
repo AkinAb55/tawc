@@ -251,6 +251,12 @@ dependencies {
     // back-arrow up affordance, and MaterialButton for the accented /
     // destructive button styles. AppCompat is pulled in transitively.
     implementation("com.google.android.material:material:1.12.0")
+
+    // Termux's terminal widget (Apache-2.0): VT emulation + pty spawn
+    // (terminal-emulator, pulled in transitively) and the Android View
+    // with IME/scroll/selection handling (terminal-view). Vendored from
+    // deps/termux-app — see settings.gradle.kts. Used by TerminalActivity.
+    implementation(project(":terminal-view"))
 }
 
 val checkInputConnectionAudit = tasks.register<Exec>("checkInputConnectionAudit") {
