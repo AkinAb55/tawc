@@ -28,6 +28,17 @@
  *
  * Abstract sockets (`sun_path[0] == '\0'`) and non-AF_UNIX families
  * pass through unchanged.
+ *
+ * The recvmsg msg_name / recvfrom src_addr datagram source address is
+ * deliberately NOT reverse-translated. msg_name lives inside the guest
+ * msghdr, so the seccomp filter can't trap conditionally, and recvmsg
+ * is the hottest receive syscall in the system (every Wayland/X11/dbus
+ * message) — trapping it would tax all guest receive traffic to cover
+ * datagrams from peers that explicitly bound a filesystem path, which
+ * no known consumer reads (glibc syslog and sd_notify senders don't
+ * bind). Revisit if a workload does path-addressed datagram
+ * request/reply: the symptom is vanishing replies, because the
+ * host-path source address gets forward-translated again by sendto.
  */
 
 #include <stddef.h>

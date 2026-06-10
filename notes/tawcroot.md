@@ -1144,6 +1144,23 @@ the dispatch table is generated from a syscall list at build time.
   storage; the value of trapping is that the failure is against the
   guest-visible path, not a host-relative one.
 
+- AF_UNIX sockaddr translation (`syscalls_socket.c`): `bind`/
+  `connect`/`sendto`/`sendmsg` forward-translate a pathname
+  `sun_path`; `getsockname`/`getpeername`/`accept`/`accept4`
+  reverse-translate the out-param address back into the guest view.
+  The `recvmsg` `msg_name` / `recvfrom` `src_addr` datagram source
+  address is **deliberately not** reverse-translated: `msg_name`
+  lives inside the guest msghdr, so the BPF filter can't trap
+  conditionally, and `recvmsg` is the hottest receive syscall in
+  the system (every Wayland/X11/dbus message) — trapping it taxes
+  all guest receive traffic to cover a case with no known consumer.
+  A datagram source address only carries a path when the sender
+  explicitly `bind()`s a pathname socket; glibc `syslog(3)` and
+  sd_notify don't. Revisit if a workload does path-addressed
+  datagram request/reply (symptom: replies vanish because the
+  host-path source address gets forward-translated again on the
+  way back out through `sendto`).
+
 - `mount`, `umount` — translate paths. Most will fail at the
   kernel layer; that's fine.
 
