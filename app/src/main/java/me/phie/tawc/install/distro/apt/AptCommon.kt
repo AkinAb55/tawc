@@ -28,6 +28,9 @@ internal object AptCommon {
         "/var/cache/apt/archives",
     )
 
+    // No hostname provider needed here: Debian's `hostname` package is
+    // Essential, so debootstrap bases always ship /usr/bin/hostname
+    // (arch/void get inetutils in their base lists for this).
     val DEFAULT_BASE_PACKAGES: List<String> = listOf(
         "dbus-x11",
         "libwayland-client0",
