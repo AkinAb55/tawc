@@ -295,6 +295,51 @@ test(maps_preserves_deleted_tag)
 		"7f1234567000-7f1234589000 r--p 00000000 08:01 999 /tmp/scratch (deleted)\n");
 }
 
+test(maps_host_prefix_containing_paren_space_still_translates)
+{
+	/* A rootfs host prefix containing " (" used to trip the tag-split
+	 * (it split at the FIRST " ("), leaking the host path verbatim.
+	 * The tag is now matched as the literal " (deleted)" suffix. */
+	tawcroot_proc_rewrite_ctx ctx = {
+		.rootfs_host_path     = "/data/app (1)/rootfs",
+		.rootfs_host_path_len = 20,
+		.binds                = nullptr,
+		.n_binds              = 0,
+	};
+	const char in[] =
+		"a000-b000 r-xp 00000000 08:01 1 /data/app (1)/rootfs/usr/lib/libfoo.so\n"
+		"c000-d000 r--p 00000000 08:01 2 /data/app (1)/rootfs/tmp/scratch (deleted)\n";
+	char out[512];
+	long n = tawcroot_proc_maps_rewrite(&ctx, in, strlen(in),
+					    out, sizeof out);
+	test_int_eq(n > 0, 1);
+	out[n] = 0;
+	test_str_eq(out,
+		"a000-b000 r-xp 00000000 08:01 1 /usr/lib/libfoo.so\n"
+		"c000-d000 r--p 00000000 08:01 2 /tmp/scratch (deleted)\n");
+}
+
+test(maps_deleted_tag_split_only_at_literal_suffix)
+{
+	/* " (" mid-path is path content, not a tag; only a trailing
+	 * " (deleted)" is split off. */
+	tawcroot_proc_rewrite_ctx ctx = {
+		.rootfs_host_path     = "/data/rootfs",
+		.rootfs_host_path_len = 12,
+		.binds                = nullptr,
+		.n_binds              = 0,
+	};
+	const char in[] =
+		"a000-b000 r--p 00000000 08:01 3 /data/rootfs/x (y)/z (deleted)\n";
+	char out[256];
+	long n = tawcroot_proc_maps_rewrite(&ctx, in, strlen(in),
+					    out, sizeof out);
+	test_int_eq(n > 0, 1);
+	out[n] = 0;
+	test_str_eq(out,
+		"a000-b000 r--p 00000000 08:01 3 /x (y)/z (deleted)\n");
+}
+
 test(maps_passes_unmapped_host_paths_through)
 {
 	/* Paths outside the rootfs and any bind src have no guest-visible

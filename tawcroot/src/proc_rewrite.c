@@ -104,11 +104,9 @@ long tawcroot_proc_reverse_translate_path(
  * Path may be empty, a real path starting with '/', a `[bracketed]`
  * marker, or `(deleted)` etc. The kernel's show_map_vma escapes only
  * '\n' inside the path (as '\012'); spaces appear literally — the
- * '\040' space-escaping is /proc/mounts, not maps. Spaces in the
- * SUFFIX survive our rewrite because the tail is re-attached verbatim,
- * but a rootfs/bind-src prefix containing " (" would confuse the
- * downstream tag-split heuristic. Once we've crossed the
- * inode/whitespace boundary, everything until '\n' is the path field.
+ * '\040' space-escaping is /proc/mounts, not maps. Once we've crossed
+ * the inode/whitespace boundary, everything until '\n' is the path
+ * field.
  *
  * Returns the byte offset within `line[0..len)` of the first byte of
  * the path field, or `len` if no path is present (line is shorter
@@ -134,6 +132,23 @@ static size_t find_path_offset(const char *line, size_t len)
 		fields++;
 	}
 	return i;  /* end-of-line: no path field */
+}
+
+/* The kernel appends exactly one tag to a maps path: " (deleted)" for
+ * unlinked files (fs/proc/task_mmu.c show_map_vma). Split it off by
+ * matching that literal suffix; any other " (" sequence is part of the
+ * path itself. A file whose real name ends in " (deleted)" is
+ * indistinguishable from the kernel tag — we split it anyway, same as
+ * every other maps consumer. Returns the path length with the tag (if
+ * present) excluded. */
+static size_t split_deleted_tag(const char *path, size_t len)
+{
+	static const char tag[]   = " (deleted)";
+	const size_t      tag_len = sizeof tag - 1;
+	if (len >= tag_len &&
+	    memcmp(path + len - tag_len, tag, tag_len) == 0)
+		return len - tag_len;
+	return len;
 }
 
 /* Write `n` bytes; returns -ENOSPC if buffer would overflow. */
@@ -179,19 +194,9 @@ long tawcroot_proc_maps_rewrite(
 		if (e < 0) return e;
 
 		if (do_rewrite) {
-			/* The path field may have a trailing " (deleted)" or
-			 * similar tag the kernel appends. Reverse-translate
-			 * only the leading path; the tag, if any, is preserved
-			 * verbatim. We define the leading path as bytes up to
-			 * the first ' ' that's followed by '(' — covers
-			 * "(deleted)" without tripping on '\040'-escaped
-			 * spaces inside the path. */
-			size_t plen = 0;
-			while (plen < path_len) {
-				if (plen + 1 < path_len &&
-				    p[plen] == ' ' && p[plen + 1] == '(') break;
-				plen++;
-			}
+			/* Reverse-translate only the path proper; the kernel
+			 * " (deleted)" tag, if any, is re-attached verbatim. */
+			size_t plen = split_deleted_tag(p, path_len);
 
 			char xlated[4096];
 			long rl = tawcroot_proc_reverse_translate_path(
