@@ -2666,14 +2666,11 @@ static int test_rt_sigaction_b2_sizing(void)
 		/* PROT_NONE the second page. */
 		(void)TAWC_RAW(TAWC_SYS_mprotect,
 			       (long)region + 4096, 4096, 0, 0, 0, 0);
-		/* Place a minimum-arch-correct sigaction struct
-		 * (24 bytes on aarch64, 32 on x86_64) right before
-		 * the PROT_NONE boundary. */
-#if defined(__x86_64__)
+		/* Place a minimum-arch-correct sigaction struct right
+		 * before the PROT_NONE boundary. arm64 defines
+		 * SA_RESTORER (AArch32 compat), so the kernel struct is
+		 * handler+flags+restorer+mask = 32 bytes on both arches. */
 		const size_t sa_size = 32;
-#else
-		const size_t sa_size = 24;
-#endif
 		unsigned char *p = (unsigned char *)region + 4096 - sa_size;
 		for (size_t i = 0; i < sa_size; i++) p[i] = 0;
 
