@@ -121,9 +121,9 @@ fn test_supertuxkart_launches() {
 ///   - Compositor cleans up on a normal client exit (no leftover
 ///     toplevel/client).
 ///
-/// `lxterminal` ships in the distro's [DEFAULT_BASE_PACKAGES], so a
-/// fresh install already has it — no extra test package install
-/// rerun needed.
+/// `lxterminal` is installed as an integration test dep by
+/// `scripts/run-integration-tests.sh` (it is not in the distro base
+/// package set).
 #[test]
 fn test_lxterminal_input_and_exit() {
     tawc_integration::helpers::test_init();

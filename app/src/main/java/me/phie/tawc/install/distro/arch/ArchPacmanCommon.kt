@@ -554,13 +554,11 @@ PACMAN_EOF
 
     /**
      * Common base package set for every Arch flavour. Kept minimal —
-     * `lxterminal` as a sanity-check launcher (gives a fresh
-     * install one usable app to open from the launcher) and
      * `inetutils` for `hostname` (shell hooks like wezterm's fall
      * back to `hostnamectl` without it, which spams systemd errors
      * in our systemd-less rootfs).
      * Test/dev subsystems install their own deps via
      * `scripts/run-integration-tests.sh`.
      */
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("inetutils", "lxterminal")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("inetutils")
 }

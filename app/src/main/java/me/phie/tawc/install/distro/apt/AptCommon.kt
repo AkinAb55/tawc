@@ -35,7 +35,6 @@ internal object AptCommon {
         "dbus-x11",
         "libwayland-client0",
         "libwayland-server0",
-        "lxterminal",
     )
 
     fun configure(

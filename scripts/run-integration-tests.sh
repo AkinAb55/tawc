@@ -105,7 +105,7 @@ set_required_packages() {
         arch|manjaro)
             REQUIRED_PKGS=(
                 gtk4 cairo wayland libx11 libxcb libglvnd
-                gtk3 gtk3-demos gtk4-demos firefox supertuxkart
+                gtk3 gtk3-demos gtk4-demos firefox supertuxkart lxterminal
                 mesa-utils weston vulkan-tools
                 xorg-xclock
                 mesa-demos
@@ -116,7 +116,7 @@ set_required_packages() {
         void)
             REQUIRED_PKGS=(
                 gtk4 cairo wayland libX11 libxcb libglvnd
-                gtk+3 gtk+3-demo gtk4-demo firefox supertuxkart
+                gtk+3 gtk+3-demo gtk4-demo firefox supertuxkart lxterminal
                 glxinfo weston Vulkan-Tools
                 xclock
                 mesa-demos mesa-dri
@@ -128,7 +128,7 @@ set_required_packages() {
         debian-sid)
             REQUIRED_PKGS=(
                 libgtk-4-1 libcairo2 libwayland-client0 libx11-6 libxcb1 libglvnd0
-                libgtk-3-0 gtk-3-examples gtk-4-examples firefox supertuxkart
+                libgtk-3-0 gtk-3-examples gtk-4-examples firefox supertuxkart lxterminal
                 mesa-utils mesa-utils-extra weston vulkan-tools gstreamer1.0-plugins-base
                 x11-apps dbus-x11
                 libgl1-mesa-dri mesa-vulkan-drivers fonts-dejavu-core

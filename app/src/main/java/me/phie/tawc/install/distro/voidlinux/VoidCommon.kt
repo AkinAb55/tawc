@@ -72,10 +72,9 @@ internal object VoidCommon {
      * package that's a hard dep of something installed; we only list
      * leaves of the dep graph plus their leaf-only deps.
      *
-     * Anything pulled in transitively by `lxterminal` (the package
-     * in [DEFAULT_BASE_PACKAGES]) is left alone — removing it would
-     * just see it reinstalled on the next `xbps-install` of the base
-     * set.
+     * Anything pulled in transitively by [DEFAULT_BASE_PACKAGES] is
+     * left alone — removing it would just see it reinstalled on the
+     * next `xbps-install` of the base set.
      */
     private val CRUFT_PACKAGES: List<String> = listOf(
         // init system — there's no PID 1 in a chroot
@@ -290,7 +289,7 @@ internal object VoidCommon {
     // inetutils-hostname provides `hostname` (Void splits inetutils
     // into per-tool subpackages); without it shell hooks fall back to
     // `hostnamectl`, which errors in our systemd-less rootfs.
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("inetutils-hostname", "lxterminal")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf("inetutils-hostname")
 
     /**
      * Wrap [log] to drop xbps's per-package noise. xbps writes
