@@ -4,20 +4,40 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ClipDescription
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 
 /**
  * Process-local bridge between Android's real ClipboardManager and the
  * native Wayland selection state. Text-only by design for now.
+ *
+ * Since Android 10, clip-changed listeners only fire while this app holds
+ * input focus, so copies made in other apps are invisible until the user
+ * returns. [syncOnWindowFocusGained] re-reads the clipboard when a
+ * compositor window regains focus to pick those up.
  */
 object ClipboardBridge {
     private const val TAG = "tawc"
     private const val MAX_TEXT_BYTES = 1024 * 1024
 
+    /** Clipboard reads can still be denied (null) for a short window
+     *  after `onWindowFocusChanged(true)`; retry briefly before giving up. */
+    private const val FOCUS_SYNC_ATTEMPTS = 3
+    private const val FOCUS_SYNC_RETRY_MS = 250L
+
+    private val handler = Handler(Looper.getMainLooper())
     private var clipboard: ClipboardManager? = null
     private var suppressText: String? = null
     private var suppressUntilMs: Long = 0
+
+    /** Last text either side has seen, in either direction. Focus-gain
+     *  syncs skip matching text so they never replace a live client-owned
+     *  Wayland selection (which may offer richer MIME types) with a
+     *  compositor-owned text-only copy of itself. */
+    private var lastSyncedText: String? = null
+    private var focusSyncAttemptsLeft = 0
 
     private val listener = ClipboardManager.OnPrimaryClipChangedListener {
         val text = currentText() ?: return@OnPrimaryClipChangedListener
@@ -29,11 +49,20 @@ object ClipboardBridge {
             return@OnPrimaryClipChangedListener
         }
 
-        if (text.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
-            Log.w(TAG, "ClipboardBridge: dropping Android clipboard text over ${MAX_TEXT_BYTES}B")
-            return@OnPrimaryClipChangedListener
+        pushTextToNative(text, "listener")
+    }
+
+    private val focusSyncRunnable = object : Runnable {
+        override fun run() {
+            focusSyncAttemptsLeft--
+            val text = currentText()
+            if (text == null) {
+                if (focusSyncAttemptsLeft > 0) handler.postDelayed(this, FOCUS_SYNC_RETRY_MS)
+                return
+            }
+            if (text == lastSyncedText) return
+            pushTextToNative(text, "focus sync")
         }
-        NativeBridge.nativeOnAndroidClipboardText(text)
     }
 
     fun attach(context: Context) {
@@ -45,9 +74,12 @@ object ClipboardBridge {
 
     fun detach() {
         clipboard?.removePrimaryClipChangedListener(listener)
+        handler.removeCallbacks(focusSyncRunnable)
         clipboard = null
         suppressText = null
         suppressUntilMs = 0
+        lastSyncedText = null
+        focusSyncAttemptsLeft = 0
     }
 
     fun setTextFromCompositor(text: String) {
@@ -58,6 +90,7 @@ object ClipboardBridge {
         }
         suppressText = text
         suppressUntilMs = SystemClock.uptimeMillis() + 1000
+        lastSyncedText = text
         cm.setPrimaryClip(ClipData.newPlainText("tawc", text))
     }
 
@@ -76,10 +109,24 @@ object ClipboardBridge {
 
     fun syncCurrentTextToNative() {
         val text = currentText() ?: return
+        pushTextToNative(text, "startup sync")
+    }
+
+    /** Re-read the clipboard now that the app regained window focus,
+     *  catching copies made in other apps while we were backgrounded. */
+    fun syncOnWindowFocusGained() {
+        if (clipboard == null) return
+        handler.removeCallbacks(focusSyncRunnable)
+        focusSyncAttemptsLeft = FOCUS_SYNC_ATTEMPTS
+        focusSyncRunnable.run()
+    }
+
+    private fun pushTextToNative(text: String, why: String) {
         if (text.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
-            Log.w(TAG, "ClipboardBridge: dropping current Android clipboard text over ${MAX_TEXT_BYTES}B")
+            Log.w(TAG, "ClipboardBridge: dropping Android clipboard text over ${MAX_TEXT_BYTES}B ($why)")
             return
         }
+        lastSyncedText = text
         NativeBridge.nativeOnAndroidClipboardText(text)
     }
 

@@ -190,6 +190,9 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         if (hasFocus) {
             surfaceView.requestFocus()
             applyCompositorFullscreen(compositorFullscreen)
+            // Copies made in other apps don't fire the clip-changed
+            // listener while we're backgrounded (Android 10+); catch up.
+            ClipboardBridge.syncOnWindowFocusGained()
         }
         compositorService?.setWindowFocused(activityId, hasFocus)
         NativeBridge.nativeOnActivityFocusChanged(activityId, hasFocus)
