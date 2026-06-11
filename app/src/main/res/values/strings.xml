@@ -120,6 +120,7 @@
     <string name="launcher_installation_state_wait">Installation is %1$s &#8212; wait for it to finish.</string>
     <string name="launcher_no_launchable_apps">No launchable apps found in this rootfs.\nInstall GUI packages from a shell first.</string>
     <string name="launcher_no_matches">No matches.</string>
+    <string name="launcher_launch_failed_title">Launching %1$s failed</string>
 
     <string name="operation_not_in_flight">No operation in flight for \'%1$s\'.</string>
     <string name="operation_channel_name">Operations</string>

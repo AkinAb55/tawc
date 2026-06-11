@@ -150,6 +150,16 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- Launch-failure dialog. Started from the application context
+             by LauncherActivity's fire-and-forget failure handler (the
+             launcher itself is finished by then). -->
+        <activity
+            android:name=".launcher.LaunchErrorActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Tawc.DialogHost"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:excludeFromRecents="true" />
+
         <activity
             android:name=".launcher.LauncherActivity"
             android:exported="false"

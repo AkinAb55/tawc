@@ -329,6 +329,13 @@ class LauncherActivity : AppCompatActivity() {
      * correct behaviour anyway — the program needs the JVM alive for
      * the compositor's Wayland socket, so there's nothing to gain
      * from detaching.
+     *
+     * Spawn failures (compositor start, Wayland socket wait, the
+     * fail-closed bind IOException from startInside) surface via
+     * [LaunchErrorActivity] started from the application context —
+     * this Activity is already finished by the time they arrive. A
+     * nonzero exit of the program itself returns normally and is
+     * intentionally not surfaced.
      */
     private fun launchEntry(entry: LauncherEntry) {
         val inst = installation ?: return
@@ -338,7 +345,14 @@ class LauncherActivity : AppCompatActivity() {
         val app = applicationContext
         LAUNCH_SCOPE.launch {
             runCatching { UserRootfsSession.runInside(app, method, rootfs, cmd) }
-                .onFailure { android.util.Log.w(TAG, "launch ${entry.id}: $it") }
+                .onFailure { e ->
+                    android.util.Log.w(TAG, "launch ${entry.id}: $e")
+                    val title = app.getString(
+                        R.string.launcher_launch_failed_title,
+                        entry.name.ifEmpty { entry.id },
+                    )
+                    LaunchErrorActivity.start(app, title, e.message ?: e.javaClass.simpleName)
+                }
         }
         finish()
     }

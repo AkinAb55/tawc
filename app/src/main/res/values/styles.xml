@@ -48,6 +48,17 @@
         <item name="android:windowMinWidthMinor">0%</item>
     </style>
 
+    <!-- Host theme for activities that only show a dialog
+         (LaunchErrorActivity): the window itself is invisible; the
+         MaterialAlertDialog provides the surface and dim. -->
+    <style name="Theme.Tawc.DialogHost" parent="Theme.Tawc">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
     <!-- Compositor activity stays on the device-default theme: it draws
          its own surface and never inflates Material widgets, so pulling
          Material3 in here would just bloat the resource table for no win.
