@@ -360,7 +360,7 @@ fn start_xwayland(
                     let android_clipboard_active = current_data_device_selection_userdata(&data.seat)
                         .as_deref()
                         .is_some_and(|user_data| {
-                            matches!(user_data, crate::clipboard::SelectionUserData::AndroidText(_))
+                            matches!(user_data, crate::clipboard::SelectionUserData::Android)
                         });
                     if android_clipboard_active {
                         if let Err(e) = wm.new_selection(
@@ -702,12 +702,14 @@ impl XwmHandler for TawcState {
     ) {
         match selection {
             SelectionTarget::Clipboard => {
-                let user_data = current_data_device_selection_userdata(&self.seat)
+                let android_owned = current_data_device_selection_userdata(&self.seat)
                     .as_deref()
-                    .cloned();
-                if let Some(crate::clipboard::SelectionUserData::AndroidText(text)) = user_data {
+                    .is_some_and(|user_data| {
+                        matches!(user_data, crate::clipboard::SelectionUserData::Android)
+                    });
+                if android_owned {
                     if crate::clipboard::is_supported_text_mime(&mime_type) {
-                        crate::clipboard::write_text_to_fd(fd, text);
+                        crate::clipboard::write_android_clipboard_to_fd(fd);
                     } else {
                         warn!("xwayland: refusing unsupported Android clipboard MIME {}", mime_type);
                     }

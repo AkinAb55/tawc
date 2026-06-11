@@ -1023,6 +1023,8 @@ fn test_hardware_keyboard_dispatches_wl_keyboard() {
 fn test_android_clipboard_text_to_client() {
     tawc_integration::helpers::test_init();
     let android_text = "android clipboard to wayland";
+    let fetches_before =
+        adb::clipboard_android_fetches_total().expect("clipboard debug state before");
     adb::clipboard_set_text(android_text).expect("set Android clipboard");
 
     let mut paste_app = start_wayland_debug_clipboard_paste(INPUT_BACKEND, WAYLAND_DEBUG_ENV);
@@ -1032,6 +1034,16 @@ fn test_android_clipboard_text_to_client() {
     paste_app
         .stop()
         .expect("clipboard paste app crashed or failed to stop cleanly");
+
+    // The Android→client direction is announce-only; the paste above must
+    // have gone through the lazy paste-time fetch.
+    let fetches_after =
+        adb::clipboard_android_fetches_total().expect("clipboard debug state after");
+    assert!(
+        fetches_after > fetches_before,
+        "paste did not go through the lazy Android clipboard fetch \
+         (fetches before={fetches_before}, after={fetches_after})"
+    );
 }
 
 /// Firefox/Gecko copies of web content are HTML clips: the ClipDescription

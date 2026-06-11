@@ -2,8 +2,9 @@
 //!
 //! Smithay owns the Wayland data-device protocol mechanics. This module
 //! owns tawc's platform bridge policy: text MIME selection, eager
-//! mirroring of client-owned selections into Android, and async writes
-//! for compositor-owned Android selections.
+//! mirroring of client-owned selections into Android, and paste-time
+//! fetches for compositor-owned Android selections (announces are
+//! content-free so Android's paste toast only fires on actual pastes).
 //!
 //! Mirroring is "latest selection wins". At most one pull is in flight,
 //! owned by the event loop as `TawcState::clipboard_pull`; a newer
@@ -48,7 +49,11 @@ const TEXT_MIMES: &[&str] = &[
 
 #[derive(Clone)]
 pub enum SelectionUserData {
-    AndroidText(String),
+    /// Android's clipboard owns the selection. Payloadless: the content
+    /// is fetched from Android at paste time (see
+    /// [`write_android_clipboard_to_fd`]) so the OS paste toast fires
+    /// only when a client actually pastes.
+    Android,
     X11(SelectionTarget),
 }
 
@@ -69,7 +74,11 @@ impl PullSource {
 }
 
 pub enum ClipboardEvent {
-    AndroidText(String),
+    /// Android's clipboard holds a text clip; only its description was
+    /// read. `ts` is the clip's `ClipDescription.getTimestamp()` (0 on
+    /// OEM builds that don't stamp clips); `own_write` means the clip
+    /// was written by tawc's own Wayland→Android mirror.
+    AndroidClipAvailable { ts: i64, own_write: bool },
     PullSelection {
         source: PullSource,
         mime_type: String,
@@ -79,11 +88,13 @@ pub enum ClipboardEvent {
 static CLIPBOARD_SENDER: Mutex<Option<channel::Sender<ClipboardEvent>>> = Mutex::new(None);
 static NEXT_PULL_ID: AtomicU64 = AtomicU64::new(0);
 static PULL_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ANDROID_FETCHES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub fn debug_state() -> String {
     format!(
-        "clipboard_pull_timeouts_total={}",
-        PULL_TIMEOUTS_TOTAL.load(Ordering::Relaxed)
+        "clipboard_pull_timeouts_total={} clipboard_android_fetches_total={}",
+        PULL_TIMEOUTS_TOTAL.load(Ordering::Relaxed),
+        ANDROID_FETCHES_TOTAL.load(Ordering::Relaxed)
     )
 }
 
@@ -97,17 +108,36 @@ pub fn clear_clipboard_sender() {
     *CLIPBOARD_SENDER.lock().unwrap() = None;
 }
 
-pub fn send_android_text(text: String) {
-    if text.len() > MAX_TEXT_BYTES {
-        warn!(
-            "clipboard: dropping Android clipboard text over cap: {} bytes",
-            text.len()
-        );
-        return;
-    }
+pub fn send_android_clip_available(ts: i64, own_write: bool) {
     if let Some(sender) = CLIPBOARD_SENDER.lock().unwrap().as_ref() {
-        let _ = sender.send(ClipboardEvent::AndroidText(text));
+        let _ = sender.send(ClipboardEvent::AndroidClipAvailable { ts, own_write });
     }
+}
+
+/// MIME no client ever offers, used by [`selection_exists`] to probe
+/// selection state without requesting data.
+const PROBE_MIME: &str = "x-tawc/selection-probe";
+
+/// True when any clipboard selection is installed, client- or
+/// compositor-owned. Smithay has no direct query, and it clears a dead
+/// client source's selection internally without telling the handler, so
+/// asking is the only way that survives client death. A request for a
+/// MIME nobody offers fails with `NoSelection` (none) or
+/// `InvalidMimetype` (some; Smithay checks the MIME before the
+/// compositor-vs-client split) without transferring anything. If a
+/// client ever did offer the probe MIME the request degrades to one
+/// spurious `send` into /dev/null — still "a selection exists".
+pub fn selection_exists(state: &TawcState) -> bool {
+    use smithay::wayland::selection::data_device::{
+        request_data_device_client_selection, SelectionRequestError,
+    };
+    let Ok(devnull) = File::options().write(true).open("/dev/null") else {
+        return false;
+    };
+    !matches!(
+        request_data_device_client_selection(&state.seat, PROBE_MIME.to_string(), devnull.into()),
+        Err(SelectionRequestError::NoSelection)
+    )
 }
 
 /// Queue a pull of a freshly set client selection into Android. Deferred
@@ -317,6 +347,31 @@ pub fn write_text_to_fd(fd: OwnedFd, text: String) {
             let _ = file.write_all(text.as_bytes());
         }) {
         error!("clipboard: failed to spawn writer: {}", e);
+    }
+}
+
+/// Serve a paste of the compositor-owned Android selection: fetch the
+/// clipboard content from Android (the real `getPrimaryClip()` read — the
+/// OS paste toast moment) off the event loop, then write it to `fd`. A
+/// failed fetch (no focus, non-text clip, over the size cap) drops the fd
+/// so the pasting client sees EOF and an empty paste.
+///
+/// The counter counts paste requests routed through the Android fetch
+/// path — including Kotlin-side cache hits and failed fetches — not raw
+/// `getPrimaryClip()` reads.
+pub fn write_android_clipboard_to_fd(fd: OwnedFd) {
+    ANDROID_FETCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if let Err(e) = std::thread::Builder::new()
+        .name("clipboard-fetch-android".into())
+        .spawn(move || {
+            let Some(text) = crate::fetch_android_clipboard_text() else {
+                warn!("clipboard: Android clipboard fetch failed; sending empty paste");
+                return;
+            };
+            let mut file = File::from(fd);
+            let _ = file.write_all(text.as_bytes());
+        }) {
+        error!("clipboard: failed to spawn android fetcher: {}", e);
     }
 }
 

@@ -460,8 +460,9 @@ pub fn run(
 
     // --- Source 4: Android clipboard channel ---
     //
-    // Kotlin listens to Android's real ClipboardManager and forwards text
-    // changes here. Client-owned selections are pulled eagerly only after
+    // Kotlin listens to Android's real ClipboardManager and forwards
+    // content-free clip announces here (the content is fetched only when
+    // a client pastes). Client-owned selections are pulled eagerly only after
     // Smithay has installed them in seat state; the selection handlers
     // queue PullSelection for this source to perform that deferred request.
     let loop_handle_for_clipboard = loop_handle.clone();
@@ -473,15 +474,32 @@ pub fn run(
         let handle = &loop_handle_for_clipboard;
 
         match evt {
-            ClipboardEvent::AndroidText(text) => {
+            ClipboardEvent::AndroidClipAvailable { ts, own_write } => {
+                // Skip echoes of our own Wayland→Android mirror and
+                // re-announces of an already-announced clip (focus syncs)
+                // — but only while some selection is live. With none
+                // (e.g. the mirrored owner died), announce anyway so the
+                // compositor takes ownership and paste keeps working.
+                // ts == 0 (OEM builds that don't stamp clips) never
+                // matches, so foreign-clip focus syncs re-announce on
+                // every focus gain there. Mostly idempotent; the real
+                // cost is a client selection whose mirror never
+                // completed (non-text, over cap, timeout) getting
+                // replaced — completed mirrors are own-label writes.
+                let already_announced =
+                    ts != 0 && data.last_announced_android_clip_ts == Some(ts);
+                if (own_write || already_announced) && crate::clipboard::selection_exists(data) {
+                    return;
+                }
                 // Android's clipboard is now the newest state; a pull of an
                 // older client selection must not overwrite it later.
                 crate::clipboard::cancel_pull(handle, data);
+                data.last_announced_android_clip_ts = Some(ts);
                 smithay::wayland::selection::data_device::set_data_device_selection(
                     &data.display_handle,
                     &data.seat,
                     crate::clipboard::text_mime_types(),
-                    crate::clipboard::SelectionUserData::AndroidText(text),
+                    crate::clipboard::SelectionUserData::Android,
                 );
                 if let Some(xwm) = data.xwm.as_mut() {
                     if let Err(e) = xwm.new_selection(

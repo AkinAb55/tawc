@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use jni::sys::{jboolean, jint, jobject};
+use jni::sys::{jboolean, jint, jlong, jobject};
 use jni::JavaVM;
 use log::info;
 
@@ -597,19 +597,13 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeCloseAllC
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnAndroidClipboardText(
-    mut env: JNIEnv,
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnAndroidClipAvailable(
+    _env: JNIEnv,
     _class: JClass,
-    text: JString,
+    timestamp_ms: jlong,
+    own_write: jboolean,
 ) {
-    let text: String = match env.get_string(&text) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            log::error!("nativeOnAndroidClipboardText: bad text string: {}", e);
-            return;
-        }
-    };
-    clipboard::send_android_text(text);
+    clipboard::send_android_clip_available(timestamp_ms, own_write != 0);
 }
 
 #[unsafe(no_mangle)]
@@ -678,29 +672,48 @@ fn with_native_bridge(
     context: &str,
     f: impl FnOnce(&mut JNIEnv, JClass) -> jni::errors::Result<()>,
 ) {
+    with_native_bridge_result(context, f);
+}
+
+/// Like [`with_native_bridge`], but propagates the callback's value.
+/// `None` means the JVM plumbing or the callback itself failed.
+fn with_native_bridge_result<T>(
+    context: &str,
+    f: impl FnOnce(&mut JNIEnv, JClass) -> jni::errors::Result<T>,
+) -> Option<T> {
     let vm = match JAVA_VM.get() {
         Some(vm) => vm,
-        None => { log::error!("JavaVM not cached for {}", context); return; }
+        None => { log::error!("JavaVM not cached for {}", context); return None; }
     };
     let class_ref = match NATIVE_BRIDGE_CLASS.get() {
         Some(r) => r,
-        None => { log::error!("NativeBridge class not cached for {}", context); return; }
+        None => { log::error!("NativeBridge class not cached for {}", context); return None; }
     };
     let mut env = match vm.attach_current_thread() {
         Ok(env) => env,
-        Err(e) => { log::error!("attach_current_thread failed for {}: {}", context, e); return; }
+        Err(e) => { log::error!("attach_current_thread failed for {}: {}", context, e); return None; }
     };
 
     let local_class = match env.new_local_ref(class_ref.as_obj()) {
         Ok(class) => class,
         Err(e) => {
             log::error!("new_local_ref(NativeBridge) failed for {}: {}", context, e);
-            return;
+            return None;
         }
     };
     let class = unsafe { JClass::from_raw(local_class.as_raw()) };
-    if let Err(e) = f(&mut env, class) {
-        log::error!("Reverse JNI {} failed: {}", context, e);
+    match f(&mut env, class) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::error!("Reverse JNI {} failed: {}", context, e);
+            // A Java exception left pending kills the process when the
+            // thread detaches; log and clear it here so no callee has to.
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            None
+        }
     }
 }
 
@@ -775,10 +788,30 @@ pub fn update_ime_content_type_from_native(activity_id: &str, input_type: i32, i
     });
 }
 
+/// Reverse-JNI: the real Android clipboard read backing a paste of the
+/// compositor-owned Android selection. Runs on a clipboard-fetch thread,
+/// never the event loop (ClipboardManager is a binder proxy, safe off the
+/// main thread). `None` means no readable text clip: read denied (tawc
+/// not focused), non-text clip, or over the size cap.
+pub fn fetch_android_clipboard_text() -> Option<String> {
+    with_native_bridge_result("fetchClipboardText", |env, class| {
+        let result = env
+            .call_static_method(class, "fetchClipboardText", "()Ljava/lang/String;", &[])?
+            .l()?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        let jstr = JString::from(result);
+        let text: String = env.get_string(&jstr)?.into();
+        Ok(Some(text))
+    })
+    .flatten()
+}
+
 /// Reverse-JNI: push compositor/Wayland-owned text into Android's real
-/// ClipboardManager. Kotlin suppresses the resulting clipboard listener
-/// bounce so the Wayland owner is not immediately replaced by our own
-/// Android mirror.
+/// ClipboardManager. Kotlin's announce path tags the write with tawc's
+/// own clip label so the resulting clipboard-changed announce doesn't
+/// replace the live Wayland owner with our own mirror.
 pub fn set_android_clipboard_text(text: &str) {
     with_native_bridge("onSetAndroidClipboardText", |env, class| {
         let text_jstr = env.new_string(text)?;

@@ -183,6 +183,11 @@ pub struct TawcState {
     /// cancels and replaces it; see clipboard.rs.
     pub clipboard_pull: Option<crate::clipboard::ActivePull>,
 
+    /// `ClipDescription` timestamp of the last Android clip announced as
+    /// a Wayland selection, for deduping repeat announces (focus syncs
+    /// re-announce the same clip). Compositor restarts reset it.
+    pub last_announced_android_clip_ts: Option<i64>,
+
     /// Hardware keys accepted from Android and currently held in the Smithay
     /// seat. Releases must be honored even if Android Activity foreground
     /// bookkeeping changes between key-down and key-up.
@@ -342,6 +347,7 @@ impl TawcState {
             output_physical_size,
             text_input_state: TextInputState::new(),
             clipboard_pull: None,
+            last_announced_android_clip_ts: None,
             hardware_keys_down: HashSet::new(),
             client_count: Arc::new(AtomicU32::new(0)),
             client_ids: Arc::new(Mutex::new(Vec::new())),
@@ -1158,11 +1164,11 @@ impl SelectionHandler for TawcState {
         user_data: &Self::SelectionUserData,
     ) {
         match user_data {
-            crate::clipboard::SelectionUserData::AndroidText(text) => {
+            crate::clipboard::SelectionUserData::Android => {
                 if ty != SelectionTarget::Clipboard {
                     return;
                 }
-                crate::clipboard::write_text_to_fd(fd, text.clone());
+                crate::clipboard::write_android_clipboard_to_fd(fd);
             }
             crate::clipboard::SelectionUserData::X11(selection) => {
                 if let Some(xwm) = self.xwm.as_mut() {

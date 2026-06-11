@@ -157,7 +157,7 @@ class CompositorService : Service() {
             me.phie.tawc.Settings.xwayland,
             me.phie.tawc.Settings.gtk3BrokenMenusWorkaround,
         )
-        ClipboardBridge.syncCurrentTextToNative()
+        ClipboardBridge.announceCurrentClip()
         // Push the saved render-time settings into the compositor. The
         // Rust side defaults match the Settings defaults, so this is
         // only strictly needed when the user has flipped a toggle, but

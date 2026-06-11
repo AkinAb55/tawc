@@ -245,8 +245,12 @@ object NativeBridge {
     /** Test hook: ask every attached Wayland/XWayland client window to close. */
     external fun nativeCloseAllClientsForTest(): Int
 
-    /** Forward Android ClipboardManager text changes into the compositor. */
-    external fun nativeOnAndroidClipboardText(text: String)
+    /** Announce that Android's clipboard holds a text clip, without reading
+     *  it. [timestampMs] is the ClipDescription timestamp (0 if the OEM
+     *  build doesn't stamp clips); [ownWrite] marks tawc's own
+     *  Wayland→Android mirror writes. Content is fetched lazily at paste
+     *  time via [fetchClipboardText]. */
+    external fun nativeOnAndroidClipAvailable(timestampMs: Long, ownWrite: Boolean)
 
     /** Structured debug counters for clipboard integration tests. */
     external fun nativeClipboardDebugState(): String?
@@ -440,5 +444,21 @@ object NativeBridge {
         mainHandler.post {
             ClipboardBridge.setTextFromCompositor(text)
         }
+    }
+
+    /** Called from a native clipboard-fetch thread when a client pastes the
+     *  compositor-owned Android selection. Runs the real clipboard read —
+     *  deliberately not posted to the main thread, the fetch thread blocks
+     *  on the result. Null when the clip is unreadable (tawc not focused),
+     *  not text, or over the size cap. Never throws: some OEM builds throw
+     *  SecurityException instead of returning null for unfocused reads, and
+     *  an exception left pending on the fetch thread would kill the process
+     *  on detach. */
+    @JvmStatic
+    fun fetchClipboardText(): String? = try {
+        ClipboardBridge.getTextForPaste()
+    } catch (e: Exception) {
+        Log.w(TAG, "fetchClipboardText: clipboard read failed", e)
+        null
     }
 }

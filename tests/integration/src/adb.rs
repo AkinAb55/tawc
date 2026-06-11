@@ -544,15 +544,23 @@ pub fn clipboard_get_text() -> io::Result<String> {
 }
 
 pub fn clipboard_pull_timeouts_total() -> io::Result<u64> {
+    clipboard_debug_counter("clipboard_pull_timeouts_total")
+}
+
+/// Paste requests served through the lazy Android→client fetch path
+/// (cache hits and failed fetches included; not raw clipboard reads).
+pub fn clipboard_android_fetches_total() -> io::Result<u64> {
+    clipboard_debug_counter("clipboard_android_fetches_total")
+}
+
+fn clipboard_debug_counter(key: &str) -> io::Result<u64> {
     let output = broker_action("clipboard-debug-state", &[])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let prefix = format!("{key}=");
     stdout
         .split_whitespace()
-        .find_map(|part| {
-            part.strip_prefix("clipboard_pull_timeouts_total=")
-                .and_then(|v| v.parse().ok())
-        })
-        .ok_or_else(|| io::Error::other(format!("missing clipboard timeout counter: {stdout:?}")))
+        .find_map(|part| part.strip_prefix(&prefix).and_then(|v| v.parse().ok()))
+        .ok_or_else(|| io::Error::other(format!("missing clipboard counter {key}: {stdout:?}")))
 }
 
 // ---- Touch / observation -------------------------------------------------
