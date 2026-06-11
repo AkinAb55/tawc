@@ -75,6 +75,11 @@ class LauncherActivity : AppCompatActivity() {
 
     private var installationId: String = ""
     private var installation: Installation? = null
+
+    /** One launch per Activity instance. A hardware Enter arrives both as
+     *  a key event and as the IME editor action (~10ms apart), and finish()
+     *  isn't instant, so without this guard one press launches twice. */
+    private var launched = false
     private var popupWidthPx = 0
     private var popupHeightPx = 0
 
@@ -338,8 +343,10 @@ class LauncherActivity : AppCompatActivity() {
      * intentionally not surfaced.
      */
     private fun launchEntry(entry: LauncherEntry) {
+        if (launched) return
         val inst = installation ?: return
         val method = InstallationMethod.forKey(this, inst.method) ?: return
+        launched = true
         val rootfs = store.rootfsDir(inst.id).absolutePath
         val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
         val app = applicationContext
