@@ -56,7 +56,7 @@ import java.io.IOException
  * multi-session pattern — background sessions keep a stale pty size
  * until selected). Tab labels follow the session's xterm window title
  * (OSC 0/2; tawc's shipped bashrc defaults set a cwd-only title —
- * see ShellDefaults), falling back to a static "Terminal" while unset.
+ * see ShellDefaults); unset and `~` titles show as "Term <n>".
  *
  * tawcroot-only: chroot spawns via su and proot is dev-only, so the
  * home-screen Terminal button is gated on the tawcroot method.
@@ -250,11 +250,15 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
 
     private fun labelFor(session: TerminalSession, index: Int): CharSequence {
         val title = session.title?.takeUnless { it.isBlank() }
-            ?: return getString(R.string.terminal_tab_fallback)
         // The shipped bashrc defaults title tabs with the cwd
         // (ShellDefaults), so every fresh tab would read `~` — number
-        // those by tab position instead.
-        return if (title == "~") getString(R.string.terminal_tab_home, index + 1) else title
+        // those by tab position instead, and use the same numbering
+        // while no title is set yet.
+        return if (title == null || title == "~") {
+            getString(R.string.terminal_tab_home, index + 1)
+        } else {
+            title
+        }
     }
 
     /** Reapply every tab's label (index-derived labels shift on close). */
