@@ -447,10 +447,15 @@ fn cleanup_xwayland_runtime_state(state: &mut TawcState) {
     }
 }
 
-fn kill_xwayland_processes() {
+/// Enumerate live Xwayland processes owned by our uid (same /proc walk
+/// the kill sweep uses). Also surfaced through the `query-state` debug
+/// payload so host tests can watch launch/idle-stop/restart without
+/// `adb shell pidof`.
+pub fn xwayland_pids() -> Vec<libc::pid_t> {
     let uid = unsafe { libc::getuid() };
+    let mut pids = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return;
+        return pids;
     };
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -469,6 +474,21 @@ fn kill_xwayland_processes() {
         if proc_uid(pid) != Some(uid) {
             continue;
         }
+        // Skip zombies (empty cmdline): a SIGKILLed Xwayland lingers in
+        // /proc until reaped, but it's gone for every purpose callers
+        // care about. Matches `pidof` semantics, which tests relied on
+        // before this enumeration was exposed via query-state.
+        match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(cmdline) if !cmdline.is_empty() => {}
+            _ => continue,
+        }
+        pids.push(pid);
+    }
+    pids
+}
+
+fn kill_xwayland_processes() {
+    for pid in xwayland_pids() {
         let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
         if rc == 0 {
             info!("xwayland: killed Xwayland pid {}", pid);

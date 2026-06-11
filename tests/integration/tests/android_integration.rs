@@ -24,13 +24,8 @@ fn inject_touch(kind: &str) {
 }
 
 fn press_back(label: &str) {
-    let output = adb::input_back().unwrap_or_else(|e| panic!("{label}: {e}"));
-    assert!(
-        output.status.success(),
-        "{label} failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // adb::back() only returns Ok on broker success.
+    adb::back().unwrap_or_else(|e| panic!("{label}: {e}"));
 }
 
 #[test]

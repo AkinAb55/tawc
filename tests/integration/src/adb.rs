@@ -12,10 +12,10 @@
 //! client-visible Wayland behavior — not private tawc state. See
 //! `notes/text-input.md` ("Test infrastructure note") for the rationale.
 //!
-//! Tap / cursor events either come from the OS-level [`input_tap`] helper or
-//! from [`inject_touch_logical`], which dispatches a MotionEvent through the
-//! focused SurfaceView at a stable Wayland logical coordinate. Neither is an
-//! IC bypass — touches don't go through the IC in production either.
+//! Tap / cursor events come from [`inject_touch`] / [`inject_touch_logical`],
+//! which dispatch MotionEvents through the focused SurfaceView (at a stable
+//! Wayland logical coordinate for the latter). Not an IC bypass — touches
+//! don't go through the IC in production either.
 
 use std::io;
 use std::process::{Command, Output};
@@ -565,17 +565,34 @@ fn clipboard_debug_counter(key: &str) -> io::Result<u64> {
 
 // ---- Touch / observation -------------------------------------------------
 
-/// Send a tap at physical screen coordinates (x, y) via the OS-level
-/// `input tap` command. Real touch event from the SurfaceView's
-/// perspective — same path a finger on the screen takes. The compositor
-/// divides by the current output scale to get logical coordinates.
-pub fn input_tap(x: u32, y: u32) -> io::Result<Output> {
-    shell(&format!("input tap {} {}", x, y))
-}
-
-/// Send Android Back through the system input path.
-pub fn input_back() -> io::Result<Output> {
-    shell("input keyevent BACK")
+/// Dispatch Android Back through the focused compositor activity's
+/// back-press path (broker `back` action) — the same entry the system
+/// OnBackInvoked callback routes into. Activity-level rather than
+/// system input dispatch; the compositor Back handling tests assert
+/// lives below that boundary either way.
+///
+/// Retries briefly while no CompositorActivity has window focus: tests
+/// press Back right after a client's first configure, and Android
+/// grants window focus to the freshly launched activity slightly later.
+/// (The system input path this replaced waited implicitly.)
+pub fn back() -> io::Result<Output> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let output = broker_action_raw("back", &[])?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("no focused CompositorActivity") || Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "broker action back failed with {} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                stderr
+            )));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Ask the debug broker to inject a normalized touch sequence into the

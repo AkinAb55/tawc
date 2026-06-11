@@ -190,7 +190,7 @@ Host (cargo test)                    Phone
   │                                    │ (test programs already compiled
   │                                    │  and deployed by the runner; the
   │                                    │  harness only checks they exist)
-  ├─ adb shell (start client) ─────────┤──→ wayland-debug-app / stock apps / …
+  ├─ broker RUNINSIDE (start client) ──┤──→ wayland-debug-app / stock apps / …
   │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
   │                                    │
   ├─ broker action ic-commit-text ─────┤──→ ExecBroker / InputActions
@@ -200,7 +200,7 @@ Host (cargo test)                    Phone
   │                                    │           └─ GTK text view
   │     └─ TAWC_DEBUG:TEXT_CHANGED ←───┤
   │                                    │
-  ├─ adb shell input tap X Y ──────────┤──→ SurfaceView.onTouchEvent
+  ├─ broker action inject-touch ───────┤──→ SurfaceView dispatch (MotionEvent)
   │                                    │     └─ nativeOnTouchEvent
   │                                    │       └─ wl_touch → GDK_TOUCH_BEGIN
   │                                    │         └─ GtkGestureMultiPress

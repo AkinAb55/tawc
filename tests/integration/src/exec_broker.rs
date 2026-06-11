@@ -362,8 +362,17 @@ pub fn spawn(invocation: Invocation) -> io::Result<BrokerChild> {
 
 fn connect(invocation: &Invocation) -> io::Result<(TcpStream, Option<AdbForward>)> {
     let serial = env::var("ANDROID_SERIAL").ok();
-    ensure_broker_ready(invocation, serial.as_deref())?;
 
+    // Suite mode: scripts/run-integration-tests.sh started the app,
+    // owns the forward, and no test force-stops the app — so skip the
+    // per-request pidof probe and the implicit RUNINSIDE am-start
+    // entirely. An explicit foreground_app request (install/uninstall
+    // helpers need the foreground-app BAL allowance) is still honored.
+    // If the app died mid-suite (or the suite was run without the
+    // script), fail loudly instead of papering over it with a restart.
+    // Note adb accepts the host TCP connection before dialing the
+    // device-side socket, so a dead app usually surfaces as a reset on
+    // the header write, not at connect — wrap both.
     if let Ok(port) = env::var("TAWC_EXEC_BROKER_PORT") {
         let port = port.parse::<u16>().map_err(|e| {
             io::Error::new(
@@ -371,12 +380,30 @@ fn connect(invocation: &Invocation) -> io::Result<(TcpStream, Option<AdbForward>
                 format!("invalid TAWC_EXEC_BROKER_PORT={port:?}: {e}"),
             )
         })?;
-        let mut sock = TcpStream::connect(("127.0.0.1", port))?;
+        if invocation.foreground_app {
+            start_main_activity(serial.as_deref())?;
+        }
+        let suite_err = |e: io::Error| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "exec broker request on suite port {port} failed: {e}; the app \
+                     died mid-suite or the forward is gone — re-run \
+                     scripts/run-integration-tests.sh"
+                ),
+            )
+        };
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).map_err(suite_err)?;
         sock.set_nodelay(true)?;
-        write_header(&mut sock, &invocation.request)?;
-        sock.flush()?;
+        write_header(&mut sock, &invocation.request)
+            .and_then(|()| sock.flush())
+            .map_err(suite_err)?;
         return Ok((sock, None));
     }
+
+    // CLI path (scripts/tawc-exec.sh): must keep working against a cold
+    // app, so check the process and start MainActivity if needed.
+    ensure_broker_ready(invocation, serial.as_deref())?;
 
     // Pick a free port on 127.0.0.1, drop the listener immediately so
     // adbd can bind. Race window is tiny and the port is otherwise

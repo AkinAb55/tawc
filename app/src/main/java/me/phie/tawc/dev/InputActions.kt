@@ -74,6 +74,7 @@ import me.phie.tawc.tasks.ProcessScanner
  * | `ic-send-modified-key-event` | `keycode`, `ctrl`, `alt`, `shift` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))` |
  * | `ic-finish-hidden-composing` | — | `RecordingImeOutput` stale hidden IC `finishComposingText()` |
  * | `hardware-key` | `keycode`, `action=down|up|press`, `repeat` | focused Activity/view `dispatchKeyEvent(KeyEvent(...))` |
+ * | `back` | — | focused Activity back-press path (same entry as the system OnBackInvoked callback) |
  * | `inject-touch` | `kind=tap|tap-logical|tap-outside-popup|drag|multitouch` | Dispatch MotionEvents to the focused SurfaceView |
  *
  * Test-mode helpers:
@@ -108,6 +109,7 @@ internal object InputActions {
         ActionRegistry.register("ic-send-modified-key-event", IcSendModifiedKeyEventAction)
         ActionRegistry.register("ic-finish-hidden-composing", IcFinishHiddenComposingAction)
         ActionRegistry.register("hardware-key", HardwareKeyAction)
+        ActionRegistry.register("back", BackAction)
         ActionRegistry.register("inject-touch", InjectTouchAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
@@ -163,6 +165,8 @@ internal object InputActions {
         val ran = onMainBlocking {
             val activity = service.focusedActivity()
             if (activity == null) {
+                // Host-side retry loops (adb::back, inject_touch) match on
+                // the "no focused CompositorActivity" prefix; keep it stable.
                 ctx.err("no focused CompositorActivity (no client window has focus)")
             } else {
                 block(activity)
@@ -390,6 +394,24 @@ internal object InputActions {
             }
             if (status != 0) return status
             return if (handled) 0 else ctx.fail("hardware-key: keycode $keycode was not handled")
+        }
+    }
+
+    /**
+     * Dispatch Android Back through the focused activity's back-press
+     * path on the main thread — the entry the system OnBackInvoked
+     * callback / legacy onBackPressed route into. Activity-level rather
+     * than system input dispatch; the compositor Back handling under
+     * test lives below that boundary either way.
+     */
+    private object BackAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            var handled = false
+            val status = withFocusedActivity(ctx) { activity ->
+                handled = activity.dispatchBackForDev()
+            }
+            if (status != 0) return status
+            return if (handled) 0 else ctx.fail("back: focused activity not initialized")
         }
     }
 

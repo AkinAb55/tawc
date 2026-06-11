@@ -206,6 +206,16 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         return ic.takeIf { it.targetsView(surfaceView) }
     }
 
+    /**
+     * Dev-broker Back dispatch: same entry the system OnBackInvoked
+     * callback (API 33+) and legacy [onBackPressed] route into.
+     */
+    internal fun dispatchBackForDev(): Boolean {
+        if (!initialized) return false
+        NativeBridge.nativeOnBackPressed(activityId)
+        return true
+    }
+
     internal fun activityIdForDev(): String = activityId
 
     internal fun updateEditableTextFromCompositor(text: String, selStart: Int, selEnd: Int) {

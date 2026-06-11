@@ -18,6 +18,9 @@ pub struct CompositorState {
     pub hosts: u32,
     pub bound_hosts: u32,
     pub xwayland_running: bool,
+    /// Live Xwayland process ids (compositor-side /proc walk, same
+    /// enumeration the idle-stop kill sweep uses).
+    pub xwayland_pids: Vec<u32>,
     pub x11_surfaces: u32,
     pub x11_surfaces_with_host: u32,
     pub wlegl_create_buffer_total: u64,
@@ -93,6 +96,7 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
     let mut hosts = None;
     let mut bound_hosts = None;
     let mut xwayland_running = None;
+    let mut xwayland_pids = None;
     let mut x11_surfaces = None;
     let mut x11_surfaces_with_host = None;
     let mut wlegl_create_buffer_total = None;
@@ -117,6 +121,14 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
                 "hosts" => hosts = Some(val.parse().ok()?),
                 "bound_hosts" => bound_hosts = Some(val.parse().ok()?),
                 "xwayland_running" => xwayland_running = Some(val.parse().ok()?),
+                "xwayland_pids" => {
+                    xwayland_pids = Some(
+                        val.split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.parse().ok())
+                            .collect::<Option<Vec<u32>>>()?,
+                    )
+                }
                 "x11_surfaces" => x11_surfaces = Some(val.parse().ok()?),
                 "x11_surfaces_with_host" => x11_surfaces_with_host = Some(val.parse().ok()?),
                 "wlegl_create_buffer_total" => wlegl_create_buffer_total = Some(val.parse().ok()?),
@@ -143,6 +155,7 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
         hosts: hosts.unwrap_or_default(),
         bound_hosts: bound_hosts.unwrap_or_default(),
         xwayland_running: xwayland_running.unwrap_or_default(),
+        xwayland_pids: xwayland_pids.unwrap_or_default(),
         x11_surfaces: x11_surfaces.unwrap_or_default(),
         x11_surfaces_with_host: x11_surfaces_with_host.unwrap_or_default(),
         wlegl_create_buffer_total: wlegl_create_buffer_total.unwrap_or_default(),
@@ -221,20 +234,18 @@ pub fn assert_running() {
     }
 }
 
-/// True iff the tawc app process is alive AND the chroot-visible
-/// Wayland socket exists. Both conditions matter: `am force-stop`
-/// leaves the unix-domain socket file behind on disk even though no
-/// process is listening, so the file alone would falsely indicate
-/// readiness on the very next test run.
+/// True iff the compositor loop answers a `query-state` round-trip AND
+/// the chroot-visible Wayland socket exists. The broker round-trip is
+/// stronger than a pidof check — it proves the app process is up and
+/// the compositor event loop is dispatching. The socket probe still
+/// matters: the compositor starts lazily on the first RUNINSIDE, so
+/// the broker can answer before the socket exists.
 pub fn is_running() -> io::Result<bool> {
-    // The compositor binds its socket at <appData>/share/wayland-0;
-    // pidof is shell-readable (process is in untrusted_app but `pidof`
-    // just walks /proc, world-readable). The socket file lives in app
-    // data, so probe it through the broker (runs as app uid).
-    let pid_output = adb::shell("pidof me.phie.tawc")?;
-    if pid_output.stdout.iter().filter(|b| b.is_ascii_digit()).count() == 0 {
+    if query_state_once().is_err() {
         return Ok(false);
     }
+    // The socket file lives in app data, so probe it through the
+    // broker (runs as app uid).
     let exists = adb::rootfs_host_exec(&[
         "/system/bin/sh", "-c",
         "test -e /data/data/me.phie.tawc/share/wayland-0",

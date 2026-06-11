@@ -309,7 +309,7 @@ before any client connection arrives.
 |--------|--------|---------|
 | `install` | InstallActions | Run the install state machine; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. Use `--foreground-app`. |
 | `uninstall` | InstallActions | Same shape, opposite direction. Use `--foreground-app`. |
-| `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` so the compositor logs a `COMPOSITOR_STATE …` line under `tawc-native`. Observational only — doesn't change input state. Needs no focused activity. |
+| `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` and prints a one-line `key=value` compositor-thread snapshot on stdout: client/toplevel/surface counts, frame + wlegl debug counters, output geometry, `xwayland_running`, and `xwayland_pids` (comma-separated live uid-owned Xwayland pids, zombies excluded). Schema lives in the format string in `compositor/src/event_loop.rs` and the parser in `tests/integration/src/compositor.rs`; unknown keys are ignored, so adding fields is backward-compatible. Observational only — doesn't change input state. Needs no focused activity. |
 | `test-init` | InputActions | Per-test reset: swap `Settings` to an in-memory factory-default store, push live runtime settings, swap `NativeBridge.imeOutput` to a fresh `RecordingImeOutput`, clear the active IC, and ask attached Wayland/XWayland client windows to close. Prints `closed=N`; the Rust harness waits for a clean compositor only when `N > 0`, so the normal no-client path stays fast. Does not write `SharedPreferences`; app process death discards it. |
 | `input-ready` | InputActions | Succeeds only when the focused `CompositorActivity` has an active `TawcInputConnection` for its own `SurfaceView`. Used by tests after `onShowKeyboard` so the first `ic-*` action cannot race IC creation. |
 | `focused-editor-info` | InputActions | Test-mode observation of the last `EditorInfo` produced by `RecordingImeOutput` when it created/restarted the IC. Used for activity-scoped content-type coverage. |
@@ -328,6 +328,7 @@ before any client connection arrives.
 | `ic-send-modified-key-event` (`keycode`, `ctrl`, `alt`, `shift`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))`. |
 | `ic-finish-hidden-composing` | InputActions | Test-only stale-callback hook: calls `finishComposingText()` on the hidden test IC retained by `RecordingImeOutput` after keyboard hide. Normal `ic-*` actions still require the current focused IC. |
 | `hardware-key` (`keycode`, optional `action`, `repeat`) | InputActions | Dispatch a `KeyEvent` through the focused Activity/view path; `action` is `press` (default), `down`, or `up`. |
+| `back` | InputActions | Dispatch Android Back through the focused activity's back-press path (the entry the system OnBackInvoked callback routes into). Activity-level rather than system input dispatch — compositor Back handling lives below that boundary either way. |
 | `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream` / `cpu`). In test mode this only mutates the in-memory store. Tests normally pass `--graphics` on each RUNINSIDE spawn instead. |
 | `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
 | `set-output-scale` (`value`) | SettingsActions | Snap to the 0.25x grid, save `Settings.outputScale`, and push the live compositor output scale. In test mode this only mutates the in-memory store. |
@@ -409,8 +410,9 @@ tawc-exec [--foreground-app] --in-rootfs ID [--graphics KEY] [--op-title TITLE] 
 `--foreground-app` starts `MainActivity` even when the app process is
 already running. Install/uninstall actions need it because they start
 `InstallationService` as a foreground service. `RUNINSIDE` does this
-implicitly in the host helper because the app may need to start the
-lazy compositor foreground service before entering the rootfs.
+implicitly in CLI mode because the app may need to start the lazy
+compositor foreground service before entering the rootfs; suite mode
+honors only the explicit flag (see "Connect modes" below).
 
 `--op-title TITLE` opts into the in-app log-screen mirror — the broker
 posts an Operation, opens `LogScreenActivity`, and streams stdout /
@@ -434,6 +436,45 @@ It:
 
 The TCP port is bound to `127.0.0.1` only and lives just long enough
 for the one connection.
+
+### Connect modes: suite port vs CLI
+
+The host side has two connect modes, decided by `TAWC_EXEC_BROKER_PORT`:
+
+- **Suite mode** (env var set): `scripts/run-integration-tests.sh` starts
+  the app once, opens a single `adb forward` for the whole run, and
+  exports the port. Every broker request just connects to it — no
+  per-request `adb forward`, no `pidof` app-running probe, no implicit
+  `am start` foregrounding on RUNINSIDE. An explicit `foreground_app`
+  request (install/uninstall helpers needing the foreground-app BAL
+  allowance) still runs `am start`. A refused connection or header-write
+  failure is a loud error ("re-run scripts/run-integration-tests.sh"),
+  not a recovery path: no test force-stops the app, so a dead app
+  mid-suite is a bug. (adb accepts the host TCP connection before
+  dialing the device socket, so a dead app usually surfaces on the
+  header write rather than at connect.)
+- **CLI mode** (env var unset; `scripts/tawc-exec.sh` from a shell):
+  must work against a cold app, so each request probes
+  `pidof me.phie.tawc`, starts `MainActivity` if needed (and always for
+  RUNINSIDE, which may need the foreground app to launch the lazy
+  compositor service), and opens its own short-lived forward.
+
+Host-transport rule for integration tests: per-request host process
+spawns are banned; everything app- or compositor-facing goes through the
+broker (`query-state` carries the debug counters and `xwayland_pids`,
+`compositor::is_running` is a query-state round-trip, Back is the `back`
+action). Allowed `Command::new("adb")` exceptions: `screencap_raw` for
+pixel tests, the CLI/fallback paths inside `exec_broker.rs`, suite
+setup/teardown in shell scripts, the wrapped tawcroot suite
+(`tawcroot/test.sh --device`), and `adb::shell` for genuinely shell- or
+su-side work that cannot run as the app uid (`ando` process counting,
+`external_binds` shared-storage fixtures, `uninstall_wipe` su sweeps).
+
+Deliberately rejected while killing the old per-request spawns:
+force-stopping the Xwayland wayland connection in `test-init` (the
+rootfs kill sweep already ends X11 clients; Xwayland restarts add churn
+without isolation value) and a multiplexed long-lived broker protocol
+(per-request local TCP connects are cheap).
 
 ## What's not yet done
 

@@ -28,11 +28,9 @@ const XWAYLAND_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 const XWAYLAND_IDLE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn xwayland_pids() -> Vec<u32> {
-    let output = adb::shell("pidof Xwayland").expect("pidof Xwayland");
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|part| part.parse::<u32>().ok())
-        .collect()
+    compositor::query_state(TIMEOUT)
+        .expect("query-state for xwayland pids")
+        .xwayland_pids
 }
 
 fn wait_for_xwayland_running(expected: bool, timeout: Duration) -> Vec<u32> {
@@ -61,6 +59,17 @@ fn wait_for_xwayland_restarted(old_pids: &[u32], timeout: Duration) -> Vec<u32> 
         assert!(
             Instant::now() < deadline,
             "Xwayland did not restart; old_pids={old_pids:?} current_pids={pids:?}",
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_first_xclock_render(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !has_shm_surface() {
+        assert!(
+            Instant::now() < deadline,
+            "xclock never produced an SHM surface"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -145,6 +154,13 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
         .expect("spawn first lazy-start xclock");
     first.ensure_pgid();
     let initial_pids = wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+    // Let xclock finish its first present before killing it. Killing the
+    // X client mid-present wedges Xwayland holding gralloc buffers and an
+    // unsignaled fence, and it never idle-terminates (see
+    // issues/xwayland-no-idle-stop-after-midpresent-client-kill.md). The
+    // old pidof-based polling was slow enough to hide this; the broker
+    // query-state polls are not.
+    wait_for_first_xclock_render(XWAYLAND_LAUNCH_TIMEOUT);
     first.stop().expect("first xclock failed to stop cleanly");
     wait_for_xwayland_running(false, XWAYLAND_IDLE_STOP_TIMEOUT);
     wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
