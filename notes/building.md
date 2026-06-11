@@ -153,6 +153,13 @@ of truth. Build scripts source `scripts/lib/deps.sh` and call
 the existing checkout is at the wrong commit (uncommitted edits are
 silently tolerated as long as HEAD matches the pin).
 
+On top of that, any `dep_ensure`/`dep_apply_patches` call first verifies
+*every* existing checkout against its pin (missing checkouts are skipped —
+they're cloned on demand), so a build that touches one dep fails on drift
+in any other. APK builds also run `scripts/ensure-deps.sh --verify-all`
+via the never-up-to-date `verifyDeps` Gradle task on `preBuild`, which
+catches drift even when every dep-consuming task is cached.
+
 | Path                                  | Used by                                       |
 |---------------------------------------|-----------------------------------------------|
 | `./deps/libhybris/`                        | `scripts/build-libhybris.sh`              |

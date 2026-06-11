@@ -55,7 +55,7 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - Do not clone external repos into `$HOME`. Use `deps/` for vendored/tooling checkouts, and delete temporary checkouts before finishing.
 
 ## Vendored Deps
-- `deps/deps.list` is the single source of truth for pinned git deps. Build scripts call `dep_ensure <name>` from `scripts/lib/deps.sh`, cloning if missing and erroring if HEAD differs from the pin. Uncommitted edits are tolerated; wrong HEAD is not.
+- `deps/deps.list` is the single source of truth for pinned git deps. Build scripts call `dep_ensure <name>` from `scripts/lib/deps.sh`, cloning if missing and erroring if HEAD differs from the pin. Uncommitted edits are tolerated; wrong HEAD is not. Every `dep_ensure` (and the Gradle `verifyDeps` task on `preBuild`) also verifies all *other* existing checkouts against their pins, so any build fails on drift anywhere.
 - To follow manifest changes, run `scripts/update-deps.sh [name...]`. It is the only command that should mutate dep checkouts behind your back.
 - When updating a vendored git dep, update its commit in `deps/deps.list` in the same change. Tarball deps such as `talloc`/`libmd` are versioned by URLs in build scripts, not `deps.list`.
 

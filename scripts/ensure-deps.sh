@@ -9,6 +9,10 @@
 #   scripts/ensure-deps.sh smithay
 #   scripts/ensure-deps.sh smithay rutabaga_gfx
 #   scripts/ensure-deps.sh --patches rutabaga_gfx deps/rutabaga-patches/rutabaga_gfx
+#   scripts/ensure-deps.sh --verify-all   # check every existing checkout, clone nothing
+#
+# Any dep_ensure also verifies every *existing* checkout against its pin
+# (see scripts/lib/deps.sh), so naming one dep still catches drift in all.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -35,6 +39,10 @@ while [ "$#" -gt 0 ]; do
             esac
             dep_apply_patches "$dep" "$patch_dir"
             shift 3
+            ;;
+        --verify-all)
+            deps_verify_all
+            shift
             ;;
         -*)
             echo "ERROR: unknown option '$1'" >&2

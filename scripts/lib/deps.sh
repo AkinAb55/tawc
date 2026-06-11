@@ -15,7 +15,14 @@
 #                         per-dep `.tawc-patches-applied-*` sentinel so
 #                         the build's apply_patches stage re-runs. Used
 #                         exclusively by `scripts/update-deps.sh`.
+#   deps_verify_all    -- error if any *existing* checkout's HEAD differs
+#                         from its pin. Missing checkouts are skipped
+#                         (cloned on demand by whichever build needs them).
 #   deps_all_names     -- echo every dep name, one per line, in manifest order.
+#
+# dep_ensure and dep_apply_patches run deps_verify_all first (once per
+# process), so any build that touches one dep fails on drift in any other.
+# dep_reset is exempt — update-deps.sh exists to fix exactly that drift.
 #
 # Concurrency: callers serialise clone/checkout via flock on
 # `$DEPS_REPO_DIR/build/.deps.lock` so two parallel `dep_ensure` calls
@@ -160,6 +167,39 @@ _dep_with_lock() {
     ) 9>"$DEPS_LOCKFILE"
 }
 
+_deps_verify_all_inner() {
+    local name repo commit ref dest actual bad=0
+    while IFS=$'\t' read -r name repo commit ref dest; do
+        [ -d "$DEPS_REPO_DIR/$dest/.git" ] || continue
+        actual="$(git -C "$DEPS_REPO_DIR/$dest" rev-parse HEAD 2>/dev/null || echo '<unreadable>')"
+        if [ "$actual" != "$commit" ]; then
+            echo "ERROR: dep '$name' is at the wrong commit." >&2
+            echo "       expected: $commit  (from deps/deps.list)" >&2
+            echo "       got:      $actual  (HEAD of $dest)" >&2
+            bad=$((bad + 1))
+        fi
+    done < <(_deps_emit)
+    if [ "$bad" -ne 0 ]; then
+        echo "Run \`scripts/update-deps.sh\` to align checkouts with deps/deps.list, OR —" >&2
+        echo "if you deliberately moved a dep — bump its commit in deps/deps.list." >&2
+        return 1
+    fi
+}
+
+deps_verify_all() {
+    _dep_with_lock _deps_verify_all_inner
+}
+
+# Once-per-process front door for the dep_ensure/dep_apply_patches hook.
+# The flag must be set outside _dep_with_lock — its subshell can't export
+# back to us.
+_deps_verify_all_once() {
+    if [ "${_DEPS_VERIFIED_ALL:-}" != "1" ]; then
+        deps_verify_all || return 1
+        _DEPS_VERIFIED_ALL=1
+    fi
+}
+
 _dep_ensure_inner() {
     if [ ! -d "$DEP_DEST/.git" ]; then
         _dep_clone || return 1
@@ -177,6 +217,7 @@ _dep_ensure_inner() {
 
 dep_ensure() {
     _dep_lookup "$1" || return 1
+    _deps_verify_all_once || return 1
     _dep_with_lock _dep_ensure_inner
 }
 
@@ -214,6 +255,7 @@ _dep_apply_patches_inner() {
 
 dep_apply_patches() {
     _dep_lookup "$1" || return 1
+    _deps_verify_all_once || return 1
     _dep_with_lock _dep_apply_patches_inner "$2" "${3:-}"
 }
 
