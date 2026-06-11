@@ -1,0 +1,77 @@
+From: tawc
+Origin: own; candidate for upstreaming
+
+With `-terminate <delay>`, the terminate timer is only (re)armed from
+CloseDownClient: when a client disconnects and every remaining client
+has marked itself disconnectable via XFixesSetClientDisconnectMode,
+the server schedules its exit. A compositor's window manager client
+sets that flag once, during its own startup.
+
+That leaves a hole for socket-activated Xwayland: if the X11 client
+whose connection triggered the activation dies before the WM client
+has set its disconnect mode (e.g. SIGKILLed while Xwayland is still
+starting up), its CloseDownClient runs while the WM still looks
+non-disconnectable, so no timer is armed — and with no further client
+ever connecting or disconnecting, the condition is never evaluated
+again. Xwayland then idles forever with zero real clients, defeating
+-terminate.
+
+Fix: re-evaluate the terminate condition whenever a client changes its
+disconnect mode. SetDispatchExceptionTimerIfIdle() arms the timer only
+when every remaining client (including the caller) is disconnectable,
+and SendConnSetup already cancels it when a real client completes its
+handshake, so a healthy activating client keeps the server alive
+exactly as before.
+diff --git a/dix/dispatch.c b/dix/dispatch.c
+index 7fc3a0554..2e5d18e06 100644
+--- a/dix/dispatch.c
++++ b/dix/dispatch.c
+@@ -452,6 +452,13 @@ ShouldDisconnectRemainingClients(void)
+     return TRUE;
+ }
+ 
++void
++SetDispatchExceptionTimerIfIdle(void)
++{
++    if (ShouldDisconnectRemainingClients())
++        SetDispatchExceptionTimer();
++}
++
+ void
+ EnableLimitedSchedulingLatency(void)
+ {
+diff --git a/dix/dix_priv.h b/dix/dix_priv.h
+index 43eb0c706..fb5f93eca 100644
+--- a/dix/dix_priv.h
++++ b/dix/dix_priv.h
+@@ -24,6 +24,10 @@ extern char dispatchExceptionAtReset;
+ extern int terminateDelay;
+ extern Bool touchEmulatePointer;
+ 
++/* Arm the dispatch exception timer if every remaining client is
++ * disconnectable (XFixes client disconnect mode). */
++void SetDispatchExceptionTimerIfIdle(void);
++
+ extern HWEventQueuePtr checkForInput[2];
+ 
+ static inline _X_NOTSAN Bool
+diff --git a/xfixes/disconnect.c b/xfixes/disconnect.c
+index b3529af31..3e6b22f42 100644
+--- a/xfixes/disconnect.c
++++ b/xfixes/disconnect.c
+@@ -73,6 +73,15 @@ ProcXFixesSetClientDisconnectMode(ClientPtr client)
+ 
+     pDisconnect->disconnect_mode = stuff->disconnect_mode;
+ 
++    /* The terminate timer is only re-evaluated when a client closes.
++     * If the last real client died before this client marked itself
++     * disconnectable (e.g. an Xwayland window manager setting the flag
++     * during startup while the socket-activating client is already
++     * gone), no further disconnect ever happens and the server lingers
++     * forever. Re-evaluate now that the set of disconnectable clients
++     * has changed. */
++    SetDispatchExceptionTimerIfIdle();
++
+     return Success;
+ }
+ 

@@ -154,12 +154,9 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
         .expect("spawn first lazy-start xclock");
     first.ensure_pgid();
     let initial_pids = wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
-    // Let xclock finish its first present before killing it. Killing the
-    // X client mid-present wedges Xwayland holding gralloc buffers and an
-    // unsignaled fence, and it never idle-terminates (see
-    // issues/xwayland-no-idle-stop-after-midpresent-client-kill.md). The
-    // old pidof-based polling was slow enough to hide this; the broker
-    // query-state polls are not.
+    // Wait for xclock's first rendered SHM buffer before the kill: this
+    // test verifies the full start-render-stop cycle. The early-kill
+    // (pre-render) window has its own regression test below.
     wait_for_first_xclock_render(XWAYLAND_LAUNCH_TIMEOUT);
     first.stop().expect("first xclock failed to stop cleanly");
     wait_for_xwayland_running(false, XWAYLAND_IDLE_STOP_TIMEOUT);
@@ -212,6 +209,33 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
     }
     app.stop().ok();
     panic!("xclock did not render after Xwayland re-enable");
+}
+
+/// An X client SIGKILLed while Xwayland is still starting — before the
+/// compositor's WM connection has marked itself disconnectable — must not
+/// leave Xwayland lingering past its `-terminate` delay. The xserver only
+/// re-evaluated the terminate condition on client close, so the activating
+/// client's early EOF was processed while the WM still looked like a real
+/// client and the idle timer never armed; fixed by
+/// `deps/xwayland-patches/xwayland/03-terminate-rearm-on-disconnect-mode.patch`.
+#[test]
+fn test_xwayland_idle_stops_after_early_client_kill() {
+    tawc_integration::helpers::test_init();
+    require_compositor();
+
+    assert_broker_ok(adb::set_xwayland(true).expect("enable xwayland"), "set-xwayland");
+    wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
+
+    let mut app = RootfsProcess::spawn_with(SHM_BACKEND, "DISPLAY=:0 xclock -update 1")
+        .expect("spawn xclock for early kill");
+    wait_for_xwayland_running(true, XWAYLAND_LAUNCH_TIMEOUT);
+    // Kill as soon as the Xwayland process exists: this reliably lands
+    // before xclock's X11 handshake completes, the window that used to
+    // wedge the idle-stop.
+    app.stop().expect("early-killed xclock failed to stop cleanly");
+    wait_for_xwayland_running(false, XWAYLAND_IDLE_STOP_TIMEOUT);
+    wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
+    assert_compositor_clean();
 }
 
 #[test]

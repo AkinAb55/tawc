@@ -265,6 +265,7 @@ spawning Xwayland. That is where the compositor mkdirs `.X11-unix/`,
 | `libxfont2` | `OPEN_MAX` fallback | bionic doesn't define `NOFILES_MAX` or `NOFILE` |
 | `wayland` | XDG_RUNTIME_DIR fallback to `/tmp` prefix | defense-in-depth; libwayland-client fails ENOENT otherwise |
 | `xwayland` | drop `setgid()`/`setuid()` from `Popen()` on `__ANDROID__` | Android's seccomp filter SIGKILLs those calls; we run as the app uid anyway |
+| `xwayland` | re-arm `-terminate` timer on `XFixesSetClientDisconnectMode` | upstream bug: see "Idle termination" below |
 
 ### Stages built (in dep order)
 
@@ -677,7 +678,8 @@ that Kotlin exports before `nativeStartCompositor`. No `su`, no
   when Xwayland is enabled, then socket-activates the Xwayland process
   when the first X11 client connects. Xwayland gets `-terminate 5`, so
   it exits after its last real X11 client has been gone for five seconds;
-  tawc then recreates the activation socket. The same module wires
+  tawc then recreates the activation socket. See "Idle termination"
+  below for the startup race this depends on us having patched. The same module wires
   `X11Wm` on `XWaylandEvent::Ready` and implements `XwmHandler` +
   `XWaylandShellHandler` directly on `TawcState` (the calloop data type).
 - `xwayland` feature added to the smithay dep in
@@ -715,6 +717,32 @@ that Kotlin exports before `nativeStartCompositor`. No `su`, no
   `libc.so.6` and the load collapses. Server-side AHB allocation
   needs only the bionic libnativewindow already in `/system/lib64`,
   so libhybris stays out of the X server's link path.
+
+## Idle termination
+
+Xwayland runs with `-terminate 5`. In the xserver, that timer is only
+(re)armed inside `CloseDownClient`: when a client disconnects and every
+*remaining* client has marked itself disconnectable via
+`XFixesSetClientDisconnectMode(Terminate)`. Smithay's X11Wm connection
+sets that flag once, partway through `X11Wm::start_wm`.
+
+That left a startup hole (upstream bug, present on xserver main as of
+2026-06): if the X client whose connection socket-activated Xwayland is
+SIGKILLed before the WM sets its flag, the dead client's
+`CloseDownClient` runs while the WM still looks like a real client, so
+the timer isn't armed — and with no later connect/disconnect the
+condition is never re-evaluated. Xwayland then lingers forever with
+zero real clients (main loop idle in epoll, *not* blocked on
+buffers/fences — an earlier diagnosis suspected the present path, but
+a `/proc/<pid>/wchan` check disproved that). Recovery only via a new X
+client or the `set_xwayland(false)` kill sweep.
+
+Fix: `deps/xwayland-patches/xwayland/03-terminate-rearm-on-disconnect-mode.patch`
+re-evaluates the terminate condition in `ProcXFixesSetClientDisconnectMode`
+(new dix helper `SetDispatchExceptionTimerIfIdle`). A healthy client
+cancels the armed timer when its handshake completes (`SendConnSetup`),
+so normal startups are unaffected; verified live plus
+`xwayland::test_xwayland_idle_stops_after_early_client_kill`.
 
 ## Smithay fork patches
 
@@ -1011,3 +1039,8 @@ The parked glibc-built Xwayland approach lives in [xwayland-glibc-alternative.md
   Verification: `xwayland::test_es2gears_x11_renders_via_ahb`
   asserts ≥100 AHB imports + 0 createFromHandle failures + 0
   Xwayland protocol-error disconnects over a 4s run.
+- **2026-06-10** — Fixed the "Xwayland never idle-terminates after an
+  early client kill" wedge (was
+  `issues/xwayland-no-idle-stop-after-midpresent-client-kill.md`) with
+  `03-terminate-rearm-on-disconnect-mode.patch`. See "Idle
+  termination" above.
