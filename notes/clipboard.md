@@ -45,6 +45,10 @@ eagerly:
   1MB cap) drops the fd: the client sees EOF / empty paste. Known
   regression, accepted: pasting while tawc has no Android input focus
   yields an empty paste instead of stale mirrored text.
+- The fetch thread writes into the client pipe with a 5s deadline
+  (nonblocking + poll), so a client that pastes and never reads can't
+  pin the thread/fd. The reverse-JNI ClipboardManager binder call has
+  no deadline of its own; bounding it is harder and hasn't mattered.
 - `getTextForPaste()` keeps a one-entry `(timestamp → text)` cache,
   checked via the toast-free description, so repeat pastes of an
   unchanged clip don't re-read — kills repeat toasts on per-read-toast
@@ -77,8 +81,9 @@ bursts. See the module doc in clipboard.rs.
 - `nativeClipboardDebugState` counters:
   `clipboard_pull_timeouts_total`, `clipboard_android_fetches_total`
   (paste requests routed through the lazy fetch path, cache hits
-  included — not raw `getPrimaryClip()` reads; accessors in
-  `tests/integration/src/adb.rs`).
+  included — not raw `getPrimaryClip()` reads),
+  `clipboard_write_timeouts_total` (paste pipe drains that hit the 5s
+  write deadline); accessors in `tests/integration/src/adb.rs`.
 - Coverage: clipboard cases in `tests/integration/tests/text_input.rs`
   and `xwayland.rs` (filter `clipboard`), plus
   `apps.rs::test_gtk4_widget_factory_copy_paste_and_text_input`.

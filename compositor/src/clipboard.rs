@@ -23,7 +23,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{
@@ -39,6 +39,11 @@ use crate::compositor::TawcState;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 const PULL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for draining a paste into a client-supplied pipe. A client
+/// that requests a paste and never reads must not pin a writer thread
+/// (and the fd) for the life of the process.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const TEXT_MIMES: &[&str] = &[
     "text/plain;charset=utf-8",
@@ -89,12 +94,14 @@ static CLIPBOARD_SENDER: Mutex<Option<channel::Sender<ClipboardEvent>>> = Mutex:
 static NEXT_PULL_ID: AtomicU64 = AtomicU64::new(0);
 static PULL_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ANDROID_FETCHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WRITE_TIMEOUTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub fn debug_state() -> String {
     format!(
-        "clipboard_pull_timeouts_total={} clipboard_android_fetches_total={}",
+        "clipboard_pull_timeouts_total={} clipboard_android_fetches_total={} clipboard_write_timeouts_total={}",
         PULL_TIMEOUTS_TOTAL.load(Ordering::Relaxed),
-        ANDROID_FETCHES_TOTAL.load(Ordering::Relaxed)
+        ANDROID_FETCHES_TOTAL.load(Ordering::Relaxed),
+        WRITE_TIMEOUTS_TOTAL.load(Ordering::Relaxed)
     )
 }
 
@@ -339,17 +346,6 @@ fn publish_to_android(pull: ActivePull) {
     }
 }
 
-pub fn write_text_to_fd(fd: OwnedFd, text: String) {
-    if let Err(e) = std::thread::Builder::new()
-        .name("clipboard-write-android".into())
-        .spawn(move || {
-            let mut file = File::from(fd);
-            let _ = file.write_all(text.as_bytes());
-        }) {
-        error!("clipboard: failed to spawn writer: {}", e);
-    }
-}
-
 /// Serve a paste of the compositor-owned Android selection: fetch the
 /// clipboard content from Android (the real `getPrimaryClip()` read — the
 /// OS paste toast moment) off the event loop, then write it to `fd`. A
@@ -368,10 +364,65 @@ pub fn write_android_clipboard_to_fd(fd: OwnedFd) {
                 warn!("clipboard: Android clipboard fetch failed; sending empty paste");
                 return;
             };
-            let mut file = File::from(fd);
-            let _ = file.write_all(text.as_bytes());
+            write_to_fd_with_deadline(fd, text.as_bytes());
         }) {
         error!("clipboard: failed to spawn android fetcher: {}", e);
+    }
+}
+
+/// Drain `buf` into a client-supplied pipe, giving up at [`WRITE_TIMEOUT`].
+/// The deadline is absolute: a reader that drains slower than the clip
+/// size over 5s gets truncated too, like the pull side's `PULL_TIMEOUT`.
+/// Write errors (e.g. EPIPE from a client that closed early) just drop the
+/// fd: the client sees a truncated/empty paste.
+fn write_to_fd_with_deadline(fd: OwnedFd, mut buf: &[u8]) {
+    if let Err(e) = set_nonblocking(fd.as_raw_fd()) {
+        warn!("clipboard: failed to set paste fd nonblocking: {}", e);
+        return;
+    }
+    let timed_out = || {
+        WRITE_TIMEOUTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            "clipboard: paste client did not drain pipe within {:?}; dropping",
+            WRITE_TIMEOUT
+        );
+    };
+    let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+    let mut file = File::from(fd);
+    while !buf.is_empty() {
+        match file.write(buf) {
+            Ok(0) => return,
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+                else {
+                    timed_out();
+                    return;
+                };
+                let mut pfd = libc::pollfd {
+                    fd: file.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+                if rc < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.kind() != std::io::ErrorKind::Interrupted {
+                        warn!("clipboard: poll on paste fd failed: {}", e);
+                        return;
+                    }
+                } else if rc == 0 {
+                    timed_out();
+                    return;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                debug!("clipboard: paste fd write failed: {}", e);
+                return;
+            }
+        }
     }
 }
 

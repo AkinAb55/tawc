@@ -553,6 +553,11 @@ pub fn clipboard_android_fetches_total() -> io::Result<u64> {
     clipboard_debug_counter("clipboard_android_fetches_total")
 }
 
+/// Paste pipe drains that hit the write deadline (client never read).
+pub fn clipboard_write_timeouts_total() -> io::Result<u64> {
+    clipboard_debug_counter("clipboard_write_timeouts_total")
+}
+
 fn clipboard_debug_counter(key: &str) -> io::Result<u64> {
     let output = broker_action("clipboard-debug-state", &[])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
