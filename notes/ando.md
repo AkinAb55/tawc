@@ -64,7 +64,7 @@ tawcroot doesn't trap `recvmsg` at all.
   Kotlin: the whole data path is unix-syscall-shaped (peercred,
   SCM_RIGHTS, setpgid/fchdir, waitid, kill), which Kotlin's
   LocalSocket handles poorly.
-- **Client**: `tools/ando/` → static bionic binary, shipped as
+- **Client**: `tawcroot/ando/` → static bionic binary, shipped as
   `jniLibs/<abi>/libando.so`, installed into each rootfs at
   `/usr/local/bin/ando` by `AndoInstallProvider` (rides
   `TawcInstaller`, so APK upgrades re-stamp it). It connects to the
@@ -174,8 +174,8 @@ uid and could just as well kill the app; not a security boundary.
 ## See also
 
 - `compositor/src/ando.rs` — broker (protocol docs in module header).
-- `tools/ando/src/ando.c` — guest client.
-- `tools/ando/build.sh` — static bionic build → jniLibs staging.
+- `tawcroot/ando/src/ando.c` — guest client.
+- `tawcroot/ando/build.sh` — static bionic build → jniLibs staging.
 - `app/src/main/java/me/phie/tawc/AppPaths.kt` — `andoSocket` path.
 - `app/src/main/java/me/phie/tawc/install/AndoInstallProvider.kt`.
 - `tests/integration/tests/ando.rs` — integration coverage.

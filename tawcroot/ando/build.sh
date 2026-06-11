@@ -12,10 +12,10 @@
 # glibc questions and the /system/bin/linker64 dependency.
 #
 # Usage:
-#   tools/ando/build.sh                  # current host's primary ABI
-#   tools/ando/build.sh --abi=aarch64
-#   tools/ando/build.sh --abi=x86_64
-#   tools/ando/build.sh --abi=both
+#   tawcroot/ando/build.sh                  # current host's primary ABI
+#   tawcroot/ando/build.sh --abi=aarch64
+#   tawcroot/ando/build.sh --abi=x86_64
+#   tawcroot/ando/build.sh --abi=both
 
 set -euo pipefail
 

@@ -8,7 +8,7 @@ import java.io.File
  * from inside the rootfs; see notes/ando.md) into every rootfs.
  *
  * The binary is a static bionic executable built by
- * `tools/ando/build.sh`, shipped in the APK as
+ * `tawcroot/ando/build.sh`, shipped in the APK as
  * `jniLibs/<abi>/libando.so` (the usual jniLib-extractor trick), so
  * `applicationInfo.nativeLibraryDir` already holds exactly the device
  * ABI's build — no asset tar needed. [TawcInstaller.applyToRootfs]

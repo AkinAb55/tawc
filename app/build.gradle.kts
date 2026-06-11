@@ -488,9 +488,9 @@ tawcAbis.forEach { abi ->
     val buildAndoTask = tasks.register<Exec>("buildAndo$capAbi") {
         workingDir = tawcRoot
         environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("tools/ando/build.sh", "--abi=$scriptAbi")
-        inputs.file("$tawcRoot/tools/ando/build.sh")
-        inputs.dir("$tawcRoot/tools/ando/src")
+        commandLine("tawcroot/ando/build.sh", "--abi=$scriptAbi")
+        inputs.file("$tawcRoot/tawcroot/ando/build.sh")
+        inputs.dir("$tawcRoot/tawcroot/ando/src")
         outputs.file(andoBin)
     }
     tasks.named("preBuild") {

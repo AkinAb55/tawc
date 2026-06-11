@@ -22,7 +22,7 @@ ando [-E] [--preserve-env[=LIST]] [-D dir] [-s] [-u user | -r]
 
 ## Key fact: client-only change
 
-Everything lands in `tools/ando/src/ando.c`. The broker
+Everything lands in `tawcroot/ando/src/ando.c`. The broker
 (`compositor/src/ando.rs`) and the wire protocol stay at `TAWCANDO 1`
 untouched:
 
@@ -203,9 +203,9 @@ hygiene (no `-E` → still only TERM + extras) and option-stop behavior.
 
 ## Deliverables / order of work
 
-1. `tools/ando/src/ando.c`: getopt_long rework + all flags + usage
+1. `tawcroot/ando/src/ando.c`: getopt_long rework + all flags + usage
    text (keep it terse).
-2. Rebuild via `tools/ando/build.sh --abi=both`; the binary rides the
+2. Rebuild via `tawcroot/ando/build.sh --abi=both`; the binary rides the
    APK (`jniLibs/<abi>/libando.so`) and `AndoInstallProvider`
    re-stamps `/usr/local/bin/ando` on upgrade — no installer changes.
 3. Tests in `tests/integration/tests/ando.rs` per above

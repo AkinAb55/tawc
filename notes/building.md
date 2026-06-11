@@ -406,9 +406,9 @@ into each rootfs at `/usr/local/bin/ando` by `AndoInstallProvider`.
 Auto-invoked by Gradle's `buildAndo<Abi>` task; standalone:
 
 ```bash
-tools/ando/build.sh --abi=aarch64
-tools/ando/build.sh --abi=x86_64
-tools/ando/build.sh --abi=both
+tawcroot/ando/build.sh --abi=aarch64
+tawcroot/ando/build.sh --abi=x86_64
+tawcroot/ando/build.sh --abi=both
 ```
 
 ### APK assembly

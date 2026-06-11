@@ -1,6 +1,6 @@
 //! ando broker — lets rootfs guests run plain Android commands
 //! (`ando <cmd>`: no tawcroot seccomp filter, no guest env, stdio on
-//! the caller's own fds via SCM_RIGHTS). Guest client: `tools/ando/`.
+//! the caller's own fds via SCM_RIGHTS). Guest client: `tawcroot/ando/`.
 //! Protocol, security model, and design rationale: notes/ando.md.
 //!
 //! A standalone thread, deliberately not part of the compositor event

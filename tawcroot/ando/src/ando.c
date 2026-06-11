@@ -12,7 +12,7 @@
 // stderr, cwd]), then the text header, then "SIG <n>" lines out /
 // one "EXIT <code>" line back.
 //
-// Static bionic build (tools/ando/build.sh), installed into every
+// Static bionic build (tawcroot/ando/build.sh), installed into every
 // rootfs at /usr/local/bin/ando by AndoInstallProvider.
 
 #define _GNU_SOURCE  // O_PATH

@@ -26,7 +26,7 @@ data class AppPaths(
     /** ando broker socket (notes/ando.md). Guests see it at
      *  `/usr/share/tawc/ando.sock` via the share bind — keep the
      *  basename in sync with the client default in
-     *  `tools/ando/src/ando.c`. */
+     *  `tawcroot/ando/src/ando.c`. */
     val andoSocket: File get() = File(shareDir, "ando.sock")
 
     companion object {

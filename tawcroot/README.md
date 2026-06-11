@@ -11,5 +11,8 @@ Layout:
                                     tawcroot + testhost + fixtures to a device
                                     and runs it there (`--device`)
 - `perf/`                         — micro-benchmark harness comparing backends
+- `ando/`                         — guest client for the compositor's exec
+                                    broker (static bionic, runs as a guest
+                                    under the loader; see ../notes/ando.md)
 
 Design + plan: ../notes/tawcroot.md
