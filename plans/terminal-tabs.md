@@ -1,5 +1,10 @@
 # Terminal tabs
 
+**Status (2026-06-10): implemented** (registry + tab bar + activity +
+JVM tests + notes/terminal.md updated; APK builds). Remaining: the
+manual on-device pass under Testing — `.tawctarget` was `none` at
+implementation time. Delete this plan once that pass is done.
+
 Replace TerminalActivity's scaffold toolbar (~56dp MaterialToolbar with
 title + up arrow, mostly dead space) with a compact tab bar, and allow
 multiple shell sessions per distro as tabs.

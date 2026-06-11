@@ -192,6 +192,12 @@ android {
         jvmTarget = "11"
     }
 
+    // TerminalSessionsTest constructs real TerminalSessions, whose
+    // android.os.Handler field must no-op (not throw) on the plain JVM.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")

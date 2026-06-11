@@ -67,14 +67,35 @@ proot is dev-only, so the button is gated on
 
 ## Session model
 
-`TerminalSessions` is a process-wide map of installation id →
-`TerminalSession`: one shell per distro, reattached on reopen/rotation
-(`TerminalActivity` uses the CompositorActivity document trick —
-`documentLaunchMode="intoExisting"` + `tawc://terminal/<id>` URI — for
-one activity/recents card per distro). Shell exit finishes the
-activity and drops the session. No foreground service: sessions die if
-Android kills the app process in the background; promote to a service
-only if that becomes a real complaint.
+`TerminalSessions` is a process-wide registry of installation id → an
+ordered list of `TerminalSession`s plus the selected index: multiple
+shells per distro shown as tabs, reattached (sessions, labels, and
+selection) on reopen/rotation (`TerminalActivity` uses the
+CompositorActivity document trick — `documentLaunchMode="intoExisting"`
++ `tawc://terminal/<id>` URI — for one activity/recents card per
+distro). The registry is dumb bookkeeping (`@Synchronized` order +
+selection, JVM-unit-tested); tab policy lives in the activity. One
+`TerminalView` shows the selected session via `attachSession()`
+(termux-app's multi-session pattern: it resets emulator state and
+`updateSize()`s, so background tabs keep a stale pty size until
+selected). Last shell exiting (or its tab closed) finishes the
+activity and drops the recents card; swiping the card kills all of the
+distro's shells. No foreground service: sessions die if Android kills
+the app process in the background; promote to a service only if that
+becomes a real complaint.
+
+Tab labels are the session's xterm window title (OSC 0/2, parsed by
+the vendored emulator, surfaced via `TerminalSession.getTitle()` /
+`onTitleChanged`). Debian-family rootfses set `user@host: ~/dir`
+automatically — their default PS1 includes the title escape when
+`TERM` matches `xterm*` and we export `TERM=xterm-256color` — and apps
+that set their own title (vim, htop, ssh) show through. While the
+title is null/blank (fresh shell, or a distro whose bashrc never sets
+one, e.g. Alpine/Arch) the label is a static "Terminal"; duplicate
+labels are fine (desktop terminals behave the same). The compact
+`TerminalTabBar` (fixed dark palette against the always-black terminal
+surface) replaced the scaffold toolbar; system back still just
+backgrounds the task.
 
 The compositor is *not* started or waited for. The Wayland/X11 env
 vars are still set, so GUI apps launched from the terminal connect

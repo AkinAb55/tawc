@@ -6,40 +6,80 @@ import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 
 /**
- * Process-wide registry of live terminal sessions, one per installation
- * id. Sessions outlive [TerminalActivity] — recreation (uncaught config
- * changes, system pressure) and re-opening from the home screen reattach
- * to the running shell instead of spawning a second one. (Back merely
- * backgrounds the task, keeping the activity itself alive.) Sessions
- * die with the app process; there is
- * deliberately no foreground service keeping shells alive, so a
- * backgrounded app's shell can be reaped with the process.
+ * Process-wide registry of live terminal sessions: per installation id,
+ * an ordered tab list plus the selected index. Sessions outlive
+ * [TerminalActivity] — recreation (uncaught config changes, system
+ * pressure) and re-opening from the home screen reattach to the running
+ * shells instead of spawning new ones. (Back merely backgrounds the
+ * task, keeping the activity itself alive.) Selection lives here too so
+ * recreation restores which tab was showing. Sessions die with the app
+ * process; there is deliberately no foreground service keeping shells
+ * alive, so a backgrounded app's shells can be reaped with the process.
+ *
+ * Dumb bookkeeping only (order + selection): tab policy — what to
+ * select after a close, when to finish the activity — lives in
+ * [TerminalActivity].
  */
 internal object TerminalSessions {
-    private val sessions = HashMap<String, TerminalSession>()
-
-    @Synchronized
-    fun get(id: String): TerminalSession? = sessions[id]
-
-    @Synchronized
-    fun put(id: String, session: TerminalSession) {
-        sessions[id] = session
+    private class Entry {
+        val sessions = ArrayList<TerminalSession>()
+        var selected = 0
     }
 
-    /** Remove [session] if it is still the registered one for [id] —
-     * guards against a finished session clobbering its replacement. */
+    private val entries = HashMap<String, Entry>()
+
+    /** Live sessions for [id] in tab order (snapshot copy). */
+    @Synchronized
+    fun list(id: String): List<TerminalSession> =
+        entries[id]?.sessions?.toList() ?: emptyList()
+
+    /** Append [session] as the last tab for [id]. */
+    @Synchronized
+    fun add(id: String, session: TerminalSession) {
+        entries.getOrPut(id) { Entry() }.sessions.add(session)
+    }
+
+    /**
+     * Drop [session] from [id]'s list if present, keeping the selection
+     * pointing at the same session when possible and clamped in range
+     * otherwise (closing the selected tab lands on its next neighbor,
+     * or the previous one if it was last).
+     */
     @Synchronized
     fun remove(id: String, session: TerminalSession) {
-        if (sessions[id] === session) sessions.remove(id)
+        val entry = entries[id] ?: return
+        val index = entry.sessions.indexOfFirst { it === session }
+        if (index < 0) return
+        entry.sessions.removeAt(index)
+        if (entry.sessions.isEmpty()) {
+            entries.remove(id)
+            return
+        }
+        if (index < entry.selected) entry.selected--
+        entry.selected = entry.selected.coerceIn(0, entry.sessions.size - 1)
+    }
+
+    /** Drop every session for [id], returning them (in tab order). */
+    @Synchronized
+    fun removeAll(id: String): List<TerminalSession> =
+        entries.remove(id)?.sessions ?: emptyList()
+
+    @Synchronized
+    fun selected(id: String): Int = entries[id]?.selected ?: 0
+
+    @Synchronized
+    fun setSelected(id: String, index: Int) {
+        val entry = entries[id] ?: return
+        entry.selected = index.coerceIn(0, entry.sessions.size - 1)
     }
 }
 
 /**
- * Client swapped in by [TerminalActivity.onDestroy] so a retained
- * session doesn't keep the destroyed activity (and its view tree)
+ * Client swapped in by [TerminalActivity.onDestroy] so retained
+ * sessions don't keep the destroyed activity (and its view tree)
  * reachable until the next reattach. The pty reader threads keep
- * draining output into the transcript regardless of client. If the
- * shell exits while detached, drop the registry entry here — the
+ * draining output into the transcript regardless of client. If a
+ * shell exits while detached, drop its registry entry here — the
  * activity's own [TerminalActivity.onSessionFinished] is gone.
  */
 internal class DetachedTerminalClient(private val id: String) : TerminalSessionClient {

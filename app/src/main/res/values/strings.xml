@@ -171,6 +171,10 @@
     <string name="install_progress_deleting_rootfs">Deleting rootfs&#8230;</string>
     <string name="install_progress_deleted">Deleted</string>
 
+    <string name="terminal_tab_fallback">Terminal</string>
+    <string name="terminal_new_tab">New tab</string>
+    <string name="terminal_close_tab">Close tab</string>
+
     <string name="task_manager_empty">No Linux processes running.</string>
     <string name="task_manager_uninstalled_group">(uninstalled: %1$s)</string>
     <string name="task_manager_unknown_command">unknown command</string>
