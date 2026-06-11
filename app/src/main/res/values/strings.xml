@@ -53,16 +53,17 @@
     <string name="install_label_invalid">Label must contain at least one letter or digit</string>
     <string name="install_already_installed_at">Already installed at %1$s</string>
     <string name="install_use_cache_proxy">Use local cache proxy</string>
-    <string name="install_external_binds_label">External storage binds: %1$d</string>
+    <string name="install_external_binds_label">Storage binds: %1$d</string>
     <string name="install_binds_grant_title">All files access not granted</string>
     <string name="install_binds_grant_message">A configured bind points at shared storage, which needs the \"All files access\" permission. Without it the distro will refuse to launch until access is granted or the bind is removed.</string>
     <string name="install_binds_grant_grant">Grant access</string>
     <string name="install_binds_grant_anyway">Install anyway</string>
 
-    <string name="manage_binds_intro">Each bind makes an Android directory visible inside the distro at the guest path. Files under bound directories survive uninstall and may be visible to other Android apps.</string>
-    <string name="manage_binds_empty">No external binds configured.</string>
+    <string name="manage_binds_intro">Each bind makes an Android directory visible inside the distro at the guest path. Bound files survive uninstall.</string>
+    <string name="manage_binds_warning">Warning: binds allow Linux programs to modify or delete shared data</string>
+    <string name="manage_binds_empty">No storage binds configured.</string>
     <string name="manage_binds_grant_banner">All files access is not granted. Binds to shared storage will refuse to launch until it is.</string>
-    <string name="manage_binds_grant_button">Grant access</string>
+    <string name="manage_binds_grant_button">Grant</string>
     <string name="manage_binds_add">Add bind</string>
     <string name="manage_binds_add_title">Add bind</string>
     <string name="manage_binds_edit_title">Edit bind</string>
@@ -73,6 +74,7 @@
     <string name="manage_binds_duplicate_guest">A bind for guest path \'%1$s\' already exists</string>
     <string name="manage_binds_too_many">At most %1$d external binds are supported</string>
     <string name="action_save">Save</string>
+    <string name="action_add">Add</string>
     <string name="action_edit">Edit</string>
     <string name="action_remove">Remove</string>
 
@@ -102,8 +104,8 @@
     <string name="distro_info_row_app_version_at_install">App version at install:</string>
     <string name="distro_info_row_rootfs_path">Rootfs path:</string>
     <string name="distro_info_row_size">Size:</string>
-    <string name="distro_info_row_external_binds">External binds:</string>
-    <string name="distro_info_manage_binds">Manage storage binds</string>
+    <string name="distro_info_row_external_binds">Storage binds:</string>
+    <string name="distro_info_manage_binds">Manage binds</string>
     <string name="distro_info_unknown">unknown</string>
     <string name="distro_info_size_unavailable">not available</string>
     <string name="distro_info_computing">computing&#8230;</string>

@@ -17,18 +17,12 @@ import android.provider.Settings
  *     `-PtawcAllFilesAccess=false` build strips it; every binds UI
  *     surface hides itself when this is false.
  *   - [granted]: the user has flipped the "All files access" toggle in
- *     system settings ([settingsIntent] deep-links there). Binds whose
+ *     system settings ([openSettings] deep-links there). Binds whose
  *     host path needs the grant ([requiresGrant]) refuse to spawn
  *     without it — fail closed, never an empty stand-in dir.
  */
 object AllFilesAccess {
     private const val PERMISSION = "android.permission.MANAGE_EXTERNAL_STORAGE"
-
-    /** In-rootfs path the Android user's home (shared storage) is bound at by default. */
-    const val DEFAULT_GUEST_HOME = "/home/android"
-
-    /** In-rootfs path the Android root dir is bound at by default. */
-    const val DEFAULT_GUEST_ROOT = "/android"
 
     fun declared(context: Context): Boolean {
         // The all-files-access model is Android 11+; on the one older
@@ -71,7 +65,7 @@ object AllFilesAccess {
     /**
      * Does binding [hostPath] need the all-files grant? Shared storage
      * (`/storage/...`, `/sdcard/...`) is unreadable to the app uid
-     * without it. Everything else (e.g. the default `/` bind) is
+     * without it. Everything else (e.g. the suggested `/` bind) is
      * governed by ordinary SELinux/DAC, where partial unreadability is
      * expected and not a config error.
      */
@@ -85,21 +79,48 @@ object AllFilesAccess {
         binds.any { requiresGrant(it.hostPath) }
 
     /**
-     * Default bind set for fresh tawcroot installs: the Android root
-     * at /android (much of it unreadable to the app uid — expected)
-     * and the Android user's home (shared storage) at /home/android.
-     * Editable/removable like any user-added bind.
+     * Is [hostPath] known to be missing? Shared-storage paths are
+     * unstattable without the grant — those return false (can't
+     * verify), so configuring binds stays possible pre-grant. Shared
+     * rule for every surface that pre-checks a bind's host dir; the
+     * spawn path stays fail-closed regardless.
      */
-    fun defaultBinds(): List<ExternalBind> = listOf(
-        ExternalBind(
-            hostPath = "/",
-            guestPath = DEFAULT_GUEST_ROOT,
-            label = "Android root",
-        ),
-        ExternalBind(
-            hostPath = Environment.getExternalStorageDirectory().absolutePath,
-            guestPath = DEFAULT_GUEST_HOME,
-            label = "Android home",
-        ),
-    )
+    fun hostDirVerifiablyMissing(hostPath: String): Boolean {
+        if (requiresGrant(hostPath) && !granted()) return false
+        return !java.io.File(hostPath).isDirectory
+    }
+
+    /**
+     * The suggested bind set the manage-binds screen offers: the
+     * Android root at /android (much of it unreadable to the app uid —
+     * expected), shared storage as the Android home at /home/android,
+     * and the shared-storage folders with a standard name on both
+     * sides — Android's public directories mapped to the matching XDG
+     * user dir under the in-rootfs home (`/root`, see RootfsEnv).
+     * Movies maps to XDG's Videos; DCIM has no XDG name and keeps its
+     * own; XDG dirs with no Android equivalent (Desktop, Templates,
+     * Public) are omitted. Nothing is bound by default.
+     *
+     * [sharedStorage] is injectable for unit tests, where
+     * [Environment.getExternalStorageDirectory] is unavailable.
+     */
+    fun commonDirBinds(
+        sharedStorage: String = Environment.getExternalStorageDirectory().absolutePath,
+    ): List<ExternalBind> = buildList {
+        add(ExternalBind(hostPath = "/", guestPath = "/android"))
+        add(ExternalBind(hostPath = sharedStorage, guestPath = "/home/android"))
+        for ((androidDir, guestName) in listOf(
+            // Literal Environment.DIRECTORY_* values (non-final
+            // statics, null in plain unit tests; the names are fixed
+            // public API).
+            "Download" to "Downloads",
+            "Documents" to "Documents",
+            "Pictures" to "Pictures",
+            "Music" to "Music",
+            "Movies" to "Videos",
+            "DCIM" to "DCIM",
+        )) {
+            add(ExternalBind("$sharedStorage/$androidDir", "/root/$guestName"))
+        }
+    }
 }

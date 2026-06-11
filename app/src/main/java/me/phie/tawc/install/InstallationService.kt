@@ -341,11 +341,8 @@ class InstallationService : Service() {
             appendLog("[install] using mirror proxy ${mirrorProxy.base}")
         }
         // External-storage binds (notes/external-binds.md). An explicit
-        // JSON list is honoured as-is ("[]" = none); null means "the
-        // default set" — seeded only for tawcroot installs (the one
-        // method that consumes the list) and only when all-files access
-        // is both shipped in this build and already granted, so a
-        // defaulted install can't fail closed on its own first boot.
+        // JSON list is honoured as-is; null/absent means none — there
+        // is no default bind set.
         val externalBinds: List<ExternalBind>
         if (externalBindsJson != null) {
             val parsed = try {
@@ -365,26 +362,16 @@ class InstallationService : Service() {
                     null
                 }
                 // Catch a typo'd host dir now rather than after the
-                // multi-minute download/extract. Shared-storage paths
-                // are exempt when the grant is missing — they can't be
-                // stat'd yet (same rule as the manage-binds dialog).
-                ?: parsed.firstOrNull {
-                    !(AllFilesAccess.requiresGrant(it.hostPath) && !AllFilesAccess.granted()) &&
-                        !java.io.File(it.hostPath).isDirectory
-                }?.let { "host dir ${it.hostPath} does not exist" }
+                // multi-minute download/extract.
+                ?: parsed.firstOrNull { AllFilesAccess.hostDirVerifiablyMissing(it.hostPath) }
+                    ?.let { "host dir ${it.hostPath} does not exist" }
             if (problem != null) {
                 rejectInstall(id, getString(R.string.install_reject_bad_external_binds, problem))
                 return
             }
             externalBinds = parsed
         } else {
-            externalBinds = if (method.key == TawcrootMethod.KEY &&
-                AllFilesAccess.declared(applicationContext) && AllFilesAccess.granted()
-            ) {
-                AllFilesAccess.defaultBinds()
-            } else {
-                emptyList()
-            }
+            externalBinds = emptyList()
         }
         if (externalBinds.isNotEmpty()) {
             appendLog("[install] external binds: " +

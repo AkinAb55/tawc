@@ -19,13 +19,11 @@ import org.json.JSONObject
  */
 data class ExternalBind(
     /** Absolute host directory, e.g. `/storage/emulated/0`. Picked by
-     * the user (or a built-in default); never auto-created. */
+     * the user (or a common-dir suggestion); never auto-created. */
     val hostPath: String,
     /** Absolute in-rootfs path the host dir appears at. Pre-created
      * before each spawn. */
     val guestPath: String,
-    /** Optional display name for the manage-binds UI. */
-    val label: String? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         // "kind" reserves room for non-path bind sources later;
@@ -33,7 +31,6 @@ data class ExternalBind(
         put("kind", KIND_PATH)
         put("hostPath", hostPath)
         put("guestPath", guestPath)
-        if (label != null) put("label", label)
     }
 
     /**
@@ -76,7 +73,8 @@ data class ExternalBind(
             JSONArray().apply { for (b in binds) put(b.toJson()) }
 
         /** Parse a persisted bind list. Entries with an unknown `kind`
-         * are skipped (forward compat); malformed entries throw. */
+         * are skipped (forward compat — ditto unknown keys, e.g. the
+         * retired `label`); malformed entries throw. */
         fun fromJsonArray(arr: JSONArray): List<ExternalBind> = buildList {
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
@@ -84,7 +82,6 @@ data class ExternalBind(
                 add(ExternalBind(
                     hostPath = o.getString("hostPath"),
                     guestPath = o.getString("guestPath"),
-                    label = if (o.has("label") && !o.isNull("label")) o.getString("label") else null,
                 ))
             }
         }

@@ -33,7 +33,7 @@ settings toggle. Two independent runtime gates in
   code ships both ways.
 - `granted()` — `Environment.isExternalStorageManager()`. The
   manage-binds screen deep-links to the settings toggle
-  (`settingsIntent`).
+  (`openSettings`).
 
 SAF was rejected as an alternative: a `content://` tree URI has no
 filesystem path tawcroot could bind; faking one would mean a multi-week
@@ -42,9 +42,10 @@ broker-backed VFS with poor POSIX fidelity.
 ## Data model
 
 `Installation.externalBinds` — a list of `ExternalBind(hostPath,
-guestPath, label?)` persisted in `metadata.json` (absent on legacy
-records = empty). Entries carry `"kind": "path"`; unknown kinds are
-skipped on parse so future bind sources stay forward-compatible. There
+guestPath)` persisted in `metadata.json` (absent on legacy records =
+empty). Entries carry `"kind": "path"`; unknown kinds are skipped on
+parse so future bind sources stay forward-compatible (ditto unknown
+keys, e.g. the retired `label`). There
 is intentionally no `writable` flag — tawcroot's bind table has no
 read-only mode (see plans/tawcroot-readonly-binds.md); add the flag
 when it does.
@@ -73,36 +74,34 @@ of spawning. Never substitute an empty app-private dir — a session
 "writing to shared storage" that actually lands app-private would be
 data loss at uninstall.
 
-## Install-time defaults
+## Install-time binds
 
-Fresh tawcroot installs default to two binds (editable/removable like
-any other):
-
-- `/android` ⇐ `/` — the Android root; much of it is unreadable to the
-  app uid (SELinux/DAC), which is expected.
-- `/home/android` ⇐ `Environment.getExternalStorageDirectory()`
-  (`/storage/emulated/0`).
-
-Binds are settled before the install starts and persisted in the
-initial metadata write, so they're live during the installation process
-and first boot. `InstallationService.startInstall` takes an optional
-JSON list (`externalBinds` intent extra / broker `--arg`): an explicit
-list is honoured as-is (`[]` = none); absent means "defaults", seeded
-only when the permission is declared *and* already granted so a
-defaulted CLI install can't fail closed on its own first boot. The
+No binds exist by default. Binds configured on the install form are
+persisted in the initial metadata write, so they're live during the
+installation process and first boot. `InstallationService.startInstall`
+takes an optional JSON list (`externalBinds` intent extra / broker
+`--arg`): an explicit list is honoured as-is; absent means none. The
 install form warns (grant / install anyway) when the pending binds need
 a grant that's missing, since the fail-closed error would otherwise hit
 mid-install.
 
 ## UI
 
-- `ManageBindsActivity` — add/edit/remove. Two modes: editing an
+- `ManageBindsActivity` — add/edit/remove. `AllFilesAccess.
+  commonDirBinds()` is the suggested set: `/android` ⇐ `/` (the Android
+  root; much of it unreadable to the app uid — expected),
+  `/home/android` ⇐ shared storage, and the shared-storage folders with
+  a standard name on both sides (Download→`/root/Downloads`, Documents,
+  Pictures, Music, Movies→`/root/Videos`, plus non-XDG DCIM). Unbound
+  common dirs (matched by guest path, skipping host dirs that
+  verifiably don't exist) render below the active binds as suggestion
+  cards with a one-tap accent Add. Two modes: editing an
   existing install's metadata (from `DistroInfoActivity`, gated to
   READY/FAILED so edits don't race the service's metadata writes;
   FAILED included because editing binds is how a user recovers a
   fail-closed slot), or round-tripping a JSON list via activity result
-  (from `InstallActivity`, pre-install). Shows a grant banner with a
-  settings deep link when a configured bind needs the missing grant.
+  (from `InstallActivity`, pre-install). Shows a grant notice with a
+  settings deep link whenever the all-files grant is missing.
 - `DirectoryPickerActivity` — minimal in-app browser over real paths
   for picking host dirs (deliberately not SAF; see above). Host paths
   can also be typed, which matters when the grant isn't given yet and
@@ -114,8 +113,8 @@ mid-install.
   parse/round-trip/validator), `./gradlew :app:testDebugUnitTest`.
 - Integration: `tests/integration/tests/external_binds.rs` — full
   lifecycle on a disposable `extbinds` install: invalid-binds reject,
-  default seeding, both-direction shared-storage round-trip, metadata
-  edit taking effect, revoked-grant fail-closed, contents surviving
-  uninstall. Needs the dev cache proxy. The grant is flipped from the
-  host with `appops set --uid me.phie.tawc MANAGE_EXTERNAL_STORAGE
+  no binds by default, metadata edits taking effect on the next spawn,
+  both-direction shared-storage round-trip, revoked-grant fail-closed,
+  contents surviving uninstall. Needs the dev cache proxy. The grant is
+  flipped from the host with `appops set --uid me.phie.tawc MANAGE_EXTERNAL_STORAGE
   allow|deny` (the appop is what `isExternalStorageManager` reads).

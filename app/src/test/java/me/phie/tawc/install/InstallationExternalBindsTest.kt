@@ -31,7 +31,7 @@ class InstallationExternalBindsTest {
     @Test
     fun bindsRoundTripThroughJson() {
         val binds = listOf(
-            ExternalBind("/", "/android", label = "Android root"),
+            ExternalBind("/", "/android"),
             ExternalBind("/storage/emulated/0", "/home/android"),
         )
         val inst = Installation.fromJson(minimalRecord()).copy(externalBinds = binds)
@@ -66,10 +66,11 @@ class InstallationExternalBindsTest {
     }
 
     @Test
-    fun labelSurvivesRoundTrip() {
-        val bind = ExternalBind("/storage/emulated/0", "/home/android", label = "Android home")
-        val parsed = ExternalBind.fromJsonArray(ExternalBind.toJsonArray(listOf(bind)))
-        assertEquals(listOf(bind), parsed)
+    fun retiredLabelKeyIsIgnored() {
+        val parsed = ExternalBind.fromJsonArray(
+            JSONArray("""[{"hostPath": "/", "guestPath": "/android", "label": "Android root"}]""")
+        )
+        assertEquals(listOf(ExternalBind("/", "/android")), parsed)
     }
 
     @Test
@@ -93,5 +94,23 @@ class InstallationExternalBindsTest {
         assertNotNull(ExternalBind("/storage/emulated/0", "/home/../../evil").validationError())
         // Control characters.
         assertNotNull(ExternalBind("/storage/emulated/0", "/home/an\ndroid").validationError())
+    }
+
+    @Test
+    fun commonDirBindsAreValidAndWellFormed() {
+        val common = AllFilesAccess.commonDirBinds("/storage/emulated/0")
+        for (bind in common) {
+            assertNull(bind.validationError())
+        }
+        // Unique guest paths (the manage-binds duplicate rule) and room
+        // under the cap.
+        assertEquals(common.size, common.map { it.guestPath }.toSet().size)
+        assertTrue(common.size <= ExternalBind.MAX_BINDS)
+        // Android root and home.
+        assertTrue(common.any { it.hostPath == "/" && it.guestPath == "/android" })
+        assertTrue(common.any { it.hostPath == "/storage/emulated/0" && it.guestPath == "/home/android" })
+        // The two platform-specific renames in the XDG mapping.
+        assertTrue(common.any { it.hostPath.endsWith("/Movies") && it.guestPath == "/root/Videos" })
+        assertTrue(common.any { it.hostPath.endsWith("/Download") && it.guestPath == "/root/Downloads" })
     }
 }

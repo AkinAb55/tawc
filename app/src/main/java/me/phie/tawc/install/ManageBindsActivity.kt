@@ -25,7 +25,6 @@ import me.phie.tawc.ui.tawcCard
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 import org.json.JSONArray
-import java.io.File
 
 /**
  * Add/edit/remove screen for an install's [ExternalBind] list
@@ -71,6 +70,10 @@ class ManageBindsActivity : AppCompatActivity() {
 
         binds.clear()
         binds.addAll(loadInitialBinds(savedInstanceState?.getString(KEY_BINDS)))
+        // Recreation (e.g. rotation) clears any result set by the old
+        // instance; re-arm it or edits made before the config change
+        // would vanish if the user backs out without further edits.
+        if (installId == null) publishResult()
 
         scaffold = buildChildScreen(getString(R.string.title_manage_binds))
         val pad = (16 * resources.displayMetrics.density).toInt()
@@ -79,6 +82,14 @@ class ManageBindsActivity : AppCompatActivity() {
             TextView(this).apply {
                 text = getString(R.string.manage_binds_intro)
                 textSize = 14f
+            },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+        )
+        scaffold.content.addView(
+            TextView(this).apply {
+                text = getString(R.string.manage_binds_warning)
+                textSize = 14f
+                setTextColor(getColor(R.color.tawc_warning))
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
@@ -148,43 +159,44 @@ class ManageBindsActivity : AppCompatActivity() {
             }
             store.save(current.copy(externalBinds = binds.toList()))
         } else {
-            setResult(
-                Activity.RESULT_OK,
-                Intent().putExtra(EXTRA_BINDS, ExternalBind.toJsonArray(binds).toString()),
-            )
+            publishResult()
         }
         renderList()
         updateGrantBanner()
     }
 
+    /** Result mode: hand the caller the current list. */
+    private fun publishResult() {
+        setResult(
+            Activity.RESULT_OK,
+            Intent().putExtra(EXTRA_BINDS, ExternalBind.toJsonArray(binds).toString()),
+        )
+    }
+
     private fun buildGrantBanner(pad: Int): LinearLayout {
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        column.addView(
+        row.addView(
             TextView(this).apply {
                 text = getString(R.string.manage_binds_grant_banner)
                 textSize = 14f
                 setTextColor(getColor(R.color.tawc_danger))
             },
-            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
         )
-        column.addView(
+        row.addView(
             tonalButton(getString(R.string.manage_binds_grant_button)) {
                 AllFilesAccess.openSettings(this)
             },
-            verticalLp(WRAP_CONTENT, WRAP_CONTENT),
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = pad / 2 },
         )
-        val card = tawcCard().apply { addView(column) }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(card, verticalLp(MATCH_PARENT, WRAP_CONTENT))
-        }
+        return row
     }
 
     private fun updateGrantBanner() {
-        val show = AllFilesAccess.requiresGrant(binds) && !AllFilesAccess.granted()
+        val show = !AllFilesAccess.granted()
         grantBanner.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
     }
 
@@ -199,51 +211,99 @@ class ManageBindsActivity : AppCompatActivity() {
                 },
                 verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
             )
-            return
         }
         for ((index, bind) in binds.withIndex()) {
             listColumn.addView(bindCard(bind, index, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
         }
+        // Unbound common dirs (matched by guest path) trail the active
+        // list as one-tap suggestions. Host dirs that verifiably don't
+        // exist are left out; without the grant they can't be stat'd,
+        // so all suggestions show.
+        for (common in AllFilesAccess.commonDirBinds()) {
+            if (binds.any { it.guestPath == common.guestPath }) continue
+            if (AllFilesAccess.hostDirVerifiablyMissing(common.hostPath)) continue
+            listColumn.addView(suggestionCard(common, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+        }
     }
 
     private fun bindCard(bind: ExternalBind, index: Int, pad: Int): android.view.View {
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(pad, pad / 2, pad, pad / 2)
         }
-        if (bind.label != null) {
-            column.addView(TextView(this).apply {
-                text = bind.label
-                textSize = 14f
-            })
-        }
-        column.addView(TextView(this).apply {
+        // Guest (Linux) path over a down arrow over the Android path
+        // it's linked to.
+        val paths = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        paths.addView(TextView(this).apply {
             text = bind.guestPath
             textSize = 16f
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         })
-        column.addView(TextView(this).apply {
-            text = "⇐ ${bind.hostPath}"
+        paths.addView(TextView(this).apply {
+            text = "↓"
+            textSize = 14f
+            typeface = Typeface.MONOSPACE
+            setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+        })
+        paths.addView(TextView(this).apply {
+            text = bind.hostPath
             textSize = 14f
             typeface = Typeface.MONOSPACE
             setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
             setTextIsSelectable(true)
         })
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        buttons.addView(tonalButton(getString(R.string.action_edit)) { showEditDialog(index) })
+        row.addView(paths, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        buttons.addView(
+            tonalButton(getString(R.string.action_edit)) { showEditDialog(index) },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 4),
+        )
         buttons.addView(
             tonalButton(getString(R.string.action_remove)) {
                 binds.removeAt(index)
                 commit()
             },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT),
+        )
+        row.addView(
+            buttons,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = pad / 2 },
         )
-        column.addView(buttons, verticalLp(MATCH_PARENT, WRAP_CONTENT))
-        return tawcCard().apply { addView(column) }
+        return tawcCard().apply { addView(row) }
+    }
+
+    /** One-tap suggestion for an unbound common dir: guest path plus
+     * an accent Add button. */
+    private fun suggestionCard(bind: ExternalBind, pad: Int): android.view.View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(pad, pad / 2, pad, pad / 2)
+        }
+        row.addView(
+            TextView(this).apply {
+                text = bind.guestPath
+                textSize = 16f
+                typeface = Typeface.MONOSPACE
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        row.addView(
+            primaryButton(getString(R.string.action_add)) {
+                val problem = validate(bind, null)
+                if (problem != null) {
+                    Toast.makeText(this, problem, Toast.LENGTH_LONG).show()
+                    return@primaryButton
+                }
+                binds.add(bind)
+                commit()
+            },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = pad / 2 },
+        )
+        return tawcCard().apply { addView(row) }
     }
 
     /** Add (`editIndex == null`) or edit (`editIndex` set) one bind. */
@@ -308,7 +368,6 @@ class ManageBindsActivity : AppCompatActivity() {
                 guestPath = guestField.text.toString().trim().let {
                     if (it.length > 1) it.trimEnd('/') else it
                 },
-                label = existing?.label,
             )
             val problem = validate(candidate, editIndex)
             if (problem != null) {
@@ -330,13 +389,8 @@ class ManageBindsActivity : AppCompatActivity() {
             return getString(R.string.manage_binds_duplicate_guest, candidate.guestPath)
         }
         // Sources are never auto-created, so a typo here would
-        // otherwise surface only at launch time. Shared-storage paths
-        // are exempt when the grant is missing — they can't be stat'd
-        // yet, and blocking the edit would force users to grant before
-        // configuring.
-        val needsUncheckableGrant =
-            AllFilesAccess.requiresGrant(candidate.hostPath) && !AllFilesAccess.granted()
-        if (!needsUncheckableGrant && !File(candidate.hostPath).isDirectory) {
+        // otherwise surface only at launch time.
+        if (AllFilesAccess.hostDirVerifiablyMissing(candidate.hostPath)) {
             return getString(R.string.manage_binds_host_missing, candidate.hostPath)
         }
         return null

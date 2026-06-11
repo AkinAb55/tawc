@@ -7,6 +7,8 @@
     <!-- Brighter green for dark mode so the "Installed" / "Deleted"
          status reads cleanly on the dark surface. -->
     <color name="tawc_success">#3BE646</color>
+    <!-- Brighter warning yellow for dark surfaces. -->
+    <color name="tawc_warning">#FFD54F</color>
 
     <!-- Window background. Lifted off pure-black towards a neutral
          dark grey so cards (which are darker) recess into the page.

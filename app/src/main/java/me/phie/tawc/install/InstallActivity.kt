@@ -49,7 +49,7 @@ class InstallActivity : AppCompatActivity() {
 
     /**
      * External-storage binds the install starts with (see
-     * notes/external-binds.md). Seeded with the defaults, edited via
+     * notes/external-binds.md). Starts empty, edited via
      * [ManageBindsActivity], passed to the service as JSON. Only
      * meaningful for tawcroot installs — the row hides (and
      * [beginInstall] passes null) for other methods.
@@ -110,17 +110,12 @@ class InstallActivity : AppCompatActivity() {
             else -> false
         }
         pendingBinds.clear()
-        val savedBinds = savedInstanceState?.getString(KEY_BINDS)
-        pendingBinds.addAll(
-            if (savedBinds != null) {
+        savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
+            pendingBinds.addAll(
                 runCatching { ExternalBind.fromJsonArray(org.json.JSONArray(savedBinds)) }
                     .getOrDefault(emptyList())
-            } else if (AllFilesAccess.declared(this)) {
-                AllFilesAccess.defaultBinds()
-            } else {
-                emptyList()
-            }
-        )
+            )
+        }
 
         scaffold = buildChildScreen(getString(R.string.title_install))
 
@@ -505,9 +500,8 @@ class InstallActivity : AppCompatActivity() {
         // stray value anyway.
         val mirrorProxyUrl = if (useCacheProxy == true) DEFAULT_PROXY_URL else null
 
-        // Explicit bind list for tawcroot installs (even when empty —
-        // the user may have deliberately removed the defaults); null
-        // for methods that don't consume binds.
+        // Bind list for tawcroot installs; null for methods that
+        // don't consume binds.
         val bindsJson = if (methodKey == TawcrootMethod.KEY && AllFilesAccess.declared(this)) {
             ExternalBind.toJsonArray(pendingBinds).toString()
         } else {

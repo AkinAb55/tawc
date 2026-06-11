@@ -11,6 +11,11 @@
     <color name="tawc_danger">#C62828</color>
     <color name="tawc_on_danger">#FFFFFF</color>
 
+    <!-- Warning yellow for cautionary text (e.g. the storage-binds
+         data-safety note). Dark mustard so it reads on the light
+         surfaces; values-night brightens it. -->
+    <color name="tawc_warning">#8F6F00</color>
+
     <!-- Success green for terminal "operation finished" status text. Sits
          in the same family as Material's tertiary green; tuned to read
          as a clear positive on both the light and dark surfaces without

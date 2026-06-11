@@ -1,7 +1,7 @@
 //! End-to-end coverage for external-storage binds
-//! (notes/external-binds.md): a fresh tawcroot install seeded with the
-//! default binds, shared-storage round-trips in both directions, a
-//! metadata edit taking effect on the next spawn, fail-closed launch on
+//! (notes/external-binds.md): a fresh tawcroot install starting with no
+//! binds, binds added via metadata taking effect on the next spawn,
+//! shared-storage round-trips in both directions, fail-closed launch on
 //! a revoked all-files grant, and bind-target contents surviving
 //! uninstall.
 //!
@@ -155,9 +155,8 @@ fn test_external_binds_lifecycle() {
         "rejected install left a slot dir behind"
     );
 
-    // --- Fresh install with no externalBinds arg: the service seeds
-    // the default /android + /home/android binds (all-files access is
-    // granted above).
+    // --- Fresh install with no externalBinds arg: no binds — there is
+    // no default set (an empty list is omitted from the metadata).
     let out = action("install", &[("id", TEST_ID), ("mirrorProxy", PROXY)]);
     assert!(out.status.success(), "install failed:\n{}", combined(&out));
     // Android's JSONStringer escapes `/` as `\/`; normalise before the
@@ -165,8 +164,24 @@ fn test_external_binds_lifecycle() {
     let meta = String::from_utf8_lossy(&host_sh(&format!("cat {}", metadata_path())).stdout)
         .replace("\\/", "/");
     assert!(
-        meta.contains("\"guestPath\": \"/home/android\"") && meta.contains("\"guestPath\": \"/android\""),
-        "fresh install missing default binds in metadata:\n{meta}"
+        !meta.contains("externalBinds"),
+        "fresh install unexpectedly has binds in metadata:\n{meta}"
+    );
+
+    // --- Binds added by editing the persisted metadata (one layer
+    // below ManageBindsActivity, which writes the same list) drive the
+    // next spawn: the /android + /home/android pair the UI suggests.
+    let sed = host_sh(&format!(
+        r#"sed -i 's|"state": "READY"|"externalBinds": [{{"kind": "path", "hostPath": "/", "guestPath": "/android"}}, {{"kind": "path", "hostPath": "/storage/emulated/0", "guestPath": "/home/android"}}], "state": "READY"|' {}"#,
+        metadata_path()
+    ));
+    assert!(sed.status.success(), "metadata bind insert failed: {}", combined(&sed));
+    // sed exits 0 on no match; catch a formatting drift of the
+    // `"state": "READY"` anchor here, not three steps later.
+    let meta = String::from_utf8_lossy(&host_sh(&format!("cat {}", metadata_path())).stdout).to_string();
+    assert!(
+        meta.contains("externalBinds"),
+        "bind insert did not take (anchor drifted?):\n{meta}"
     );
 
     // --- Guest → host: a file created under /home/android lands in
@@ -189,7 +204,7 @@ fn test_external_binds_lifecycle() {
     let guest_read = run_inside_ok("cat /home/android/tawc-bind-test/from-host.txt");
     assert_eq!(guest_read.trim(), "from-host");
 
-    // --- Default /android bind exposes the Android root.
+    // --- The /android bind exposes the Android root.
     run_inside_ok("test -d /android/system && echo ANDROID_ROOT_OK");
 
     // --- Edited metadata drives the next spawn: move the home bind to

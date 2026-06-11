@@ -146,13 +146,7 @@ class DistroInfoActivity : AppCompatActivity() {
             content.addView(
                 infoRow(
                     getString(R.string.distro_info_row_external_binds),
-                    if (installation.externalBinds.isEmpty()) {
-                        getString(R.string.manage_binds_empty)
-                    } else {
-                        installation.externalBinds.joinToString("\n") {
-                            "${it.guestPath} ⇐ ${it.hostPath}"
-                        }
-                    },
+                    installation.externalBinds.size.toString(),
                 ),
                 rowLp(pad),
             )
