@@ -10,6 +10,7 @@ design, build, and operational notes in [`../notes/`](../notes/).
 - [integration-test-host-transport.md](integration-test-host-transport.md) - plan to remove per-test adb/logcat/tawc-exec process churn from integration tests.
 - [tawcroot-future-work.md](tawcroot-future-work.md) - deferred tawcroot syscall, `/proc`, and performance work.
 - [tawcroot-readonly-binds.md](tawcroot-readonly-binds.md) - future read-only fake bind support in tawcroot.
+- [tawcroot-virtual-identity.md](tawcroot-virtual-identity.md) - stateful fake uid/gid tracking so privilege-dropping daemons (stock sshd) work; replaces the reverted passwd/group workarounds.
 - [terminal-tabs.md](terminal-tabs.md) - replace the terminal's toolbar with a compact tab bar; multiple shell sessions per distro, OSC-title tab names.
 - [verify-libhybris-ahb-alpha.md](verify-libhybris-ahb-alpha.md) - verify sampled-alpha AHB rendering on device after removing the force-opaque workaround.
 - [xwayland-server-side-gl.md](xwayland-server-side-gl.md) - parked Xwayland server-side GL acceleration plan.
