@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, assert_renders_via_ahb,
-    firefox_profile_cleanup, launch_and_wait_for_ahb, require_compositor, TIMEOUT,
+    firefox_profile_cleanup, launch_and_wait_for_ahb, TIMEOUT,
 };
 use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
 
@@ -86,8 +86,14 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
     let bin = rootfs::ensure_libhybris_tls_repro().expect("libhybris-tls-repro build");
 
     // Run from inside the companion library dir so the repro's relative
-    // weak_lib.so guard remains self-contained.
-    let cmd = format!("cd /usr/local/lib && {} ./tls_lib.so", bin);
+    // weak_lib.so guard remains self-contained. The dir is /data-prefixed
+    // because the bionic linker's namespace isolation rejects dlopen
+    // from other rootfs paths — see rootfs::LIBHYBRIS_TLS_REPRO_LIB_DIR.
+    let cmd = format!(
+        "cd {} && {} ./tls_lib.so",
+        rootfs::LIBHYBRIS_TLS_REPRO_LIB_DIR,
+        bin
+    );
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run libhybris-tls-repro");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -160,7 +166,6 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
 )]
 fn test_vulkaninfo_loads_android_driver() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "vulkaninfo --summary")
         .expect("failed to run vulkaninfo in chroot");
@@ -206,7 +211,6 @@ fn test_vulkaninfo_loads_android_driver() {
 )]
 fn test_eglinfo_loads_android_driver() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "eglinfo -B")
         .expect("failed to run eglinfo in chroot");
@@ -378,10 +382,18 @@ fn test_firefox_renders_via_ahb() {
         FIREFOX_LAUNCH_TIMEOUT,
     );
 
-    let state = compositor::query_state(TIMEOUT)
+    let before = compositor::query_state(TIMEOUT)
         .expect("Failed to query compositor state while Firefox running");
-    let frames_before = state.frames;
-    std::thread::sleep(Duration::from_secs(2));
+    // Steady state: Firefox chrome keeps committing for a while after
+    // first paint (session/layout settle), so several more commits must
+    // land. Waits on the per-commit `frames` counter instead of
+    // sleeping a flat 2 s window.
+    let delta = compositor::wait_for_frames_advance(before.frames, 5, Duration::from_secs(5));
+    assert!(
+        delta >= 5,
+        "Compositor frames counter advanced only {delta} in 5 s — Firefox \
+         appears wedged / not committing. before={before:?}"
+    );
     let state = compositor::query_state(TIMEOUT)
         .expect("Failed to query compositor steady-state");
     assert!(
@@ -396,11 +408,6 @@ fn test_firefox_renders_via_ahb() {
          libhybris EGL probe regression (Firefox auto-detects WebRender \
          and dmabuf via libhybris stubs — see notes/firefox.md). \
          state={state:?}"
-    );
-    assert!(
-        state.frames > frames_before,
-        "Compositor frames counter did not advance over 2 s — Firefox \
-         appears wedged / not committing. before={frames_before} after={state:?}"
     );
 
     firefox.stop().expect("Firefox session failed to stop cleanly");

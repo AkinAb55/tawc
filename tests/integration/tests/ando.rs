@@ -98,8 +98,19 @@ fn test_ando_client_death_reaps_android_child() {
     let (rc, out, _) = run("ando sleep 988 & p=$!; sleep 1; kill -KILL $p; wait $p; echo rc=$?");
     assert_eq!(rc, 0);
     assert_eq!(out, "rc=137");
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    assert_eq!(android_proc_count("[s]leep 988"), 0, "orphaned Android-side sleep");
+    // The broker reaps the orphan asynchronously after the socket EOF —
+    // poll instead of sleeping a fixed grace.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if android_proc_count("[s]leep 988") == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "orphaned Android-side sleep survived 3s after client SIGKILL"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 #[test]

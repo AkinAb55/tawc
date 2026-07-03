@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, assert_renders_via_shm,
-    has_shm_surface, require_compositor, TIMEOUT,
+    has_shm_surface, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, compositor, GraphicsBackend};
@@ -36,7 +36,6 @@ const GTK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 #[test]
 fn test_eglinfo_reports_software_renderer() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "eglinfo -B")
         .expect("failed to run eglinfo in chroot");
@@ -72,7 +71,6 @@ fn test_eglinfo_reports_software_renderer() {
 #[test]
 fn test_weston_simple_shm_renders_via_shm() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let mut app = RootfsProcess::spawn_with(BACKEND, "weston-simple-shm")
         .expect("spawn weston-simple-shm");
@@ -91,7 +89,6 @@ fn test_weston_simple_shm_renders_via_shm() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    std::thread::sleep(Duration::from_millis(500));
 
     assert!(
         saw_buffer,

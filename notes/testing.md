@@ -240,8 +240,8 @@ Host (cargo test)                    Phone
 - **`helpers.rs`**: Shared test helpers. Every spawn helper takes an
   explicit `GraphicsBackend` so the in-rootfs env is hermetic — the
   user's UI pick never leaks in.
-  - `require_compositor`, `assert_compositor_clean`, `saw_ahb_import`,
-    `saw_shm_import` — observation primitives.
+  - `require_compositor`, `assert_compositor_clean`, `has_ahb_surface`,
+    `has_shm_surface`, `assert_client_animating` — observation primitives.
   - `start_wayland_debug_text_input` and related Wayland debug app
     launchers — for `text_input::` and `touch_input::`.
   - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
@@ -265,6 +265,41 @@ Host (cargo test)                    Phone
   isn't running, telling the developer to use the run script instead
   of invoking `cargo test` directly. The OnceLock state means
   one-time setup checks run once per `cargo test` invocation.
+
+## Waits, not sleeps
+
+Tests and helpers key waits off `query-state` observables instead of
+fixed grace sleeps wherever a discrete signal exists (2026-07 pass;
+the old sleeps cost ~0.5–2 s per test and still raced):
+
+- "window actually on screen" → `wait_for_rendered_toplevels_at_least`
+  (`rendered_toplevels` counts toplevels in the last rendered frame).
+  Used by `launch_and_wait_for_toplevel` / `launch_and_wait_for_ahb`
+  after first commit.
+- "client committed again / still animating" → `wait_for_frames_advance`
+  (`frames` ticks on every client commit). `assert_client_animating`
+  passes as soon as the frames land; the window is a deadline, not a
+  fixed measurement cost. Firefox steady-state checks use the same
+  signal.
+- teardown → `wait_for_clean_state` polls clients/toplevels/surfaces
+  **and host counts** in one condition; host teardown goes through an
+  async Activity finish() round trip, so asserting `hosts == 0`
+  point-in-time after the surface wait was a real flake.
+- input readiness → `wait_for_active_input_connection` (broker
+  `input-ready`), not a launch-grace proxy.
+- IC state after client edits → the IC learns the client's cursor via
+  an async surrounding-text update; assertions about what the IC
+  accepts/rejects right after a text change must poll (see
+  `test_stale_newline_context_editing_paths`).
+- debug-app event order: within one text-input transaction the app
+  emits `PREEDIT` before `TEXT_CHANGED`, so "wait for preedit then
+  read last_text()" is a race — poll for the text condition itself.
+
+Sleeps that remain are deliberate: negative assertions ("nothing
+happens within N ms", e.g. Xwayland lazy-start), liveness soaks
+("still running 1 s after first paint"), IC-op pacing against real GTK
+entries with no per-op observable, and screencap settle before pixel
+sampling.
 
 ## Adding New Tests
 

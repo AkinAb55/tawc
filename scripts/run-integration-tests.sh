@@ -172,7 +172,14 @@ copy_test_app() {
     local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
     local staging="$TAWC_SCRATCH/$name-out"
     local bin_dir="$ROOTFS_DIR/usr/local/bin"
-    local lib_dir="$ROOTFS_DIR/usr/local/lib"
+    # The repro's bionic-side companion .so files must live under a
+    # guest path starting with /data: the libhybris bionic linker
+    # parses the device's real linker config, and on current firmware
+    # the default namespace is isolated with /data in permitted_paths —
+    # a dlopen from e.g. /usr/local/lib is rejected ("is not accessible
+    # for the namespace"). This is a guest path inside the rootfs, not
+    # device scratch.
+    local lib_dir="$ROOTFS_DIR/data/tawc-tests"
     local srcs=("$out_dir/$name")
     local dsts=("$bin_dir/$name")
 

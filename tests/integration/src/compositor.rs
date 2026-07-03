@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -189,7 +190,81 @@ pub fn wait_for_state(
                 expected_clients, expected_toplevels, timeout, state
             ));
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Wait until the compositor is fully clean: no clients, toplevels,
+/// surfaces, or Android hosts. Host teardown goes through an async
+/// Activity `finish()` round trip, so the host counts can legitimately
+/// trail the surface counts by a moment — poll them all together
+/// instead of asserting the host counts point-in-time.
+pub fn wait_for_clean_state(timeout: Duration) -> Result<CompositorState, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = query_state(Duration::from_secs(2))?;
+        if state.clients == 0
+            && state.toplevels == 0
+            && state.surfaces_wlegl == 0
+            && state.surfaces_shm == 0
+            && state.hosts == 0
+            && state.bound_hosts == 0
+        {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "Compositor did not reach a clean state within {timeout:?} (last: {state:?})"
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Wait until the last rendered frame shows at least `min` toplevels —
+/// i.e. the newly mapped window has actually reached the screen, not
+/// just the compositor's client state.
+pub fn wait_for_rendered_toplevels_at_least(
+    min: u32,
+    timeout: Duration,
+) -> Result<CompositorState, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = query_state(Duration::from_secs(2))?;
+        if state.rendered_toplevels >= min {
+            return Ok(state);
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "Screen shows {} toplevels (expected >= {}), compositor state: {:?}",
+                state.rendered_toplevels, min, state
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Wait until the compositor's monotonic `frames` counter has advanced
+/// by at least `min_delta` beyond `baseline`. The counter ticks on
+/// every client commit, so this is the "the client committed again"
+/// signal. Returns the observed delta, which is less than `min_delta`
+/// only when the deadline passed — callers that treat the extra
+/// commits as optional (grace-period replacements) can ignore the
+/// shortfall, callers that require progress should assert on it.
+pub fn wait_for_frames_advance(baseline: u64, min_delta: u64, timeout: Duration) -> u64 {
+    let deadline = Instant::now() + timeout;
+    let mut last = 0;
+    loop {
+        if let Ok(state) = query_state(Duration::from_secs(2)) {
+            last = state.frames.saturating_sub(baseline);
+            if last >= min_delta {
+                return last;
+            }
+        }
+        if Instant::now() > deadline {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -239,10 +314,17 @@ pub fn assert_running() {
 /// stronger than a pidof check — it proves the app process is up and
 /// the compositor event loop is dispatching. The socket probe still
 /// matters: the compositor starts lazily on the first RUNINSIDE, so
-/// the broker can answer before the socket exists.
+/// the broker can answer before the socket exists. Once seen, the
+/// socket persists for the life of the compositor process (and this
+/// check runs per test), so a success is cached and later calls
+/// collapse to the single query-state round-trip.
 pub fn is_running() -> io::Result<bool> {
+    static SOCKET_SEEN: OnceLock<()> = OnceLock::new();
     if query_state_once().is_err() {
         return Ok(false);
+    }
+    if SOCKET_SEEN.get().is_some() {
+        return Ok(true);
     }
     // The socket file lives in app data, so probe it through the
     // broker (runs as app uid).
@@ -250,5 +332,8 @@ pub fn is_running() -> io::Result<bool> {
         "/system/bin/sh", "-c",
         "test -e /data/data/me.phie.tawc/share/wayland-0",
     ])?;
+    if exists.status.success() {
+        let _ = SOCKET_SEEN.set(());
+    }
     Ok(exists.status.success())
 }

@@ -469,18 +469,35 @@ fn ensure_broker_ready(invocation: &Invocation, serial: Option<&str>) -> io::Res
 }
 
 fn start_main_activity(serial: Option<&str>) -> io::Result<()> {
-    let mut start = Command::new("adb");
-    if let Some(s) = serial {
-        start.args(["-s", s]);
+    // One retry with a short pause: a single `am start` can fail
+    // transiently (adb hiccup, activity manager busy right after a
+    // force-stop) and a whole suite run shouldn't die on that.
+    let mut last = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let mut start = Command::new("adb");
+        if let Some(s) = serial {
+            start.args(["-s", s]);
+        }
+        start.args(["shell", "am", "start", "-n", "me.phie.tawc/.MainActivity"]);
+        let out = start.output()?;
+        // `am start` exits 0 but prints `Error:` for some failures
+        // (e.g. unresolvable intent); treat those as failures too.
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() && !text.contains("Error") {
+            return Ok(());
+        }
+        last = format!("{}: {}", out.status, text.trim());
     }
-    start.args(["shell", "am", "start", "-n", "me.phie.tawc/.MainActivity"]);
-    start.stdout(Stdio::null()).stderr(Stdio::null());
-    let status = start.status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("failed to start MainActivity"))
-    }
+    Err(io::Error::other(format!(
+        "failed to start MainActivity (2 attempts): {last}"
+    )))
 }
 
 fn write_header(s: &mut TcpStream, p: &Request) -> io::Result<()> {
@@ -756,8 +773,11 @@ fn pump_pipes(
         let mut hdr = [0u8; 5];
         match read_exact_cancelable(&mut sock, &mut hdr, &cancel) {
             Ok(()) => {}
+            // Cancel first: kill() shuts the socket down, which can
+            // surface as EOF, ECONNRESET, or the Interrupted marker
+            // depending on where the read was — all mean "cancelled".
+            Err(_) if cancel.load(Ordering::Relaxed) => return Ok(-1),
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok(-1),
             Err(e) => return Err(e),
         }
         let stream = hdr[0];
@@ -769,7 +789,14 @@ fn pump_pipes(
             ));
         }
         let mut payload = vec![0u8; len];
-        read_exact_cancelable(&mut sock, &mut payload, &cancel)?;
+        match read_exact_cancelable(&mut sock, &mut payload, &cancel) {
+            Ok(()) => {}
+            // kill() can land mid-payload (chatty children make this
+            // likely): both the cancel flag and the socket shutdown it
+            // triggers must count as a normal cancel, not an error.
+            Err(_) if cancel.load(Ordering::Relaxed) => return Ok(-1),
+            Err(e) => return Err(e),
+        }
         match stream {
             STREAM_STDOUT => stdout.write_all(&payload)?,
             STREAM_STDERR | STREAM_ERR => stderr.write_all(&payload)?,

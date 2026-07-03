@@ -715,9 +715,20 @@ fn test_composing_region_replacement_paths() {
         adb::ic_set_composing_text("HELLO").expect("setComposingText 'HELLO'");
         app.wait_for_preedit("HELLO", TIMEOUT)
             .expect("preedit 'HELLO'");
+        // The debug app emits PREEDIT before TEXT_CHANGED within the
+        // same text-input transaction, so poll for the deletion
+        // instead of asserting last_text point-in-time (this was a
+        // full-suite flake).
+        let deadline = Instant::now() + TIMEOUT;
+        while Instant::now() < deadline
+            && app.last_text().unwrap_or_default().starts_with("hello")
+        {
+            thread::sleep(Duration::from_millis(50));
+        }
         assert!(
             !app.last_text().unwrap_or_default().starts_with("hello"),
-            "setComposingText over region did not delete original bytes"
+            "setComposingText over region did not delete original bytes: {:?}",
+            app.last_text()
         );
 
         adb::ic_finish_composing().expect("finishComposingText");
@@ -883,7 +894,24 @@ fn test_stale_newline_context_editing_paths() {
 
     build_stale_newline_context(&app, "hello", 5);
 
-    adb::ic_set_selection(5, 5).expect("no-op setSelection at stale reported cursor");
+    // The IC learns the client's (stale) reported cursor via an async
+    // surrounding-text update, so right after the last text change the
+    // no-op check can still see an older cursor and reject. Poll until
+    // the IC accepts; rejection past the deadline is the real failure.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let out = adb::ic_set_selection_raw(5, 5).expect("ic setSelection request");
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no-op setSelection at stale reported cursor was still rejected \
+             after {TIMEOUT:?}: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
     adb::ic_set_composing_region(0, 5).expect("ic setComposingRegion 0..5");
     let rejected_commit = adb::ic_commit_text_raw("HELLO").expect("ic commitText replacement");
     assert!(

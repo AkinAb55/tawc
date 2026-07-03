@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, assert_renders_via_ahb,
-    firefox_profile_cleanup, launch_and_wait_for_ahb, require_compositor, TIMEOUT,
+    firefox_profile_cleanup, launch_and_wait_for_ahb, TIMEOUT,
 };
 use tawc_integration::{adb, compositor, GraphicsBackend};
 
@@ -53,7 +53,6 @@ const FIREFOX_CMD: &str = "firefox --no-remote";
 #[ignore = "gfxstream not yet working"]
 fn test_eglinfo_loads_mesa_via_gfxstream() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "eglinfo -B")
         .expect("failed to run eglinfo in chroot");
@@ -199,10 +198,16 @@ fn test_firefox_renders_via_ahb() {
         FIREFOX_LAUNCH_TIMEOUT,
     );
 
-    let state = compositor::query_state(TIMEOUT)
+    let before = compositor::query_state(TIMEOUT)
         .expect("Failed to query compositor state while Firefox running");
-    let frames_before = state.frames;
-    std::thread::sleep(Duration::from_secs(2));
+    // See libhybris::test_firefox_renders_via_ahb for why this waits on
+    // the frames counter instead of sleeping a flat window.
+    let delta = compositor::wait_for_frames_advance(before.frames, 5, Duration::from_secs(5));
+    assert!(
+        delta >= 5,
+        "Compositor frames counter advanced only {delta} in 5 s under \
+         gfxstream — Firefox wedged. before={before:?}"
+    );
     let state = compositor::query_state(TIMEOUT)
         .expect("Failed to query compositor steady-state");
     assert!(
@@ -215,11 +220,6 @@ fn test_firefox_renders_via_ahb() {
         "Firefox attached SHM buffers during steady-state rendering — \
          WebRender / dmabuf detection broken on the bridge path? \
          state={state:?}"
-    );
-    assert!(
-        state.frames > frames_before,
-        "Compositor frames counter did not advance over 2 s under \
-         gfxstream — Firefox wedged. before={frames_before} after={state:?}"
     );
 
     firefox.stop().expect("Firefox session failed to stop cleanly");

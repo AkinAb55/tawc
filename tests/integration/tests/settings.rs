@@ -213,7 +213,11 @@ fn launch_gtk3_demo_application_with_wayland_debug() -> (RootfsProcess, mpsc::Re
         "gtk3-demo-application did not reach first paint within {:?}",
         GTK3_DEMO_APPLICATION_LAUNCH_TIMEOUT
     );
-    thread::sleep(Duration::from_secs(1));
+    // The menu tap that follows needs the window actually on screen,
+    // not just first-committed — wait for the rendered frame instead
+    // of a flat 1 s grace.
+    compositor::wait_for_rendered_toplevels_at_least(1, TIMEOUT)
+        .expect("gtk3-demo-application window never reached the screen");
     (app, rx)
 }
 

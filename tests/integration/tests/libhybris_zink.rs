@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use tawc_integration::helpers::{
     assert_client_animating, assert_compositor_clean, launch_and_wait_for_ahb,
-    require_compositor, TIMEOUT,
+    TIMEOUT,
 };
 use tawc_integration::{adb, compositor, GraphicsBackend};
 
@@ -46,7 +46,6 @@ const WESTON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 )]
 fn test_vulkaninfo_loads_android_driver() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "vulkaninfo --summary")
         .expect("failed to run vulkaninfo in chroot");
@@ -85,7 +84,6 @@ fn test_vulkaninfo_loads_android_driver() {
 #[ignore = "libhybris+zink not yet working"]
 fn test_eglinfo_reports_zink_renderer() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let out = adb::rootfs_run_with(BACKEND, "eglinfo -B")
         .expect("failed to run eglinfo in chroot");

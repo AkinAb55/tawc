@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use tawc_integration::debug_app::DebugApp;
 use tawc_integration::helpers::{
-    assert_broker_ok, assert_compositor_clean, has_shm_surface, require_compositor, TIMEOUT,
+    assert_broker_ok, assert_compositor_clean, has_shm_surface, TIMEOUT,
 };
 use tawc_integration::rootfs_process::RootfsProcess;
 use tawc_integration::{adb, compositor, rootfs, GraphicsBackend};
@@ -136,7 +136,6 @@ fn wait_for_android_clipboard(expected: &str, timeout: Duration) {
 #[test]
 fn test_xwayland_setting_starts_and_stops_process_live() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     assert_broker_ok(adb::set_xwayland(false).expect("disable xwayland"), "set-xwayland");
     wait_for_xwayland_running(false, XWAYLAND_LAUNCH_TIMEOUT);
@@ -221,7 +220,6 @@ fn test_xwayland_setting_starts_and_stops_process_live() {
 #[test]
 fn test_xwayland_idle_stops_after_early_client_kill() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     assert_broker_ok(adb::set_xwayland(true).expect("enable xwayland"), "set-xwayland");
     wait_for_x11_socket(true, XWAYLAND_LAUNCH_TIMEOUT);
@@ -241,7 +239,6 @@ fn test_xwayland_idle_stops_after_early_client_kill() {
 #[test]
 fn test_android_clipboard_text_to_x11() {
     tawc_integration::helpers::test_init();
-    require_compositor();
     let android_text = "android clipboard to x11";
     adb::clipboard_set_text(android_text).expect("set Android clipboard");
     wait_for_android_clipboard(android_text, XWAYLAND_LAUNCH_TIMEOUT);
@@ -261,7 +258,6 @@ fn test_android_clipboard_text_to_x11() {
 #[test]
 fn test_x11_clipboard_text_to_android() {
     tawc_integration::helpers::test_init();
-    require_compositor();
     let x11_text = "x11 clipboard to android";
     let sentinel = "android clipboard before x11";
     adb::clipboard_set_text(sentinel).expect("set Android clipboard sentinel");
@@ -296,7 +292,6 @@ fn test_x11_clipboard_text_to_android() {
 #[test]
 fn test_xwayland_xclock_renders_via_shm() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     // `-update 1` forces a redraw every second so the client keeps
     // pushing buffers — without it xclock draws once and goes silent,
@@ -360,7 +355,6 @@ fn test_xwayland_xclock_renders_via_shm() {
 )]
 fn test_tawc_dri_ahb_present_round_trip() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let bin = rootfs::ensure_tawc_dri_test().expect("build tawc-dri-test");
     // HOLD_SECS=1 is enough — the test client commits the AHB once, the
@@ -436,7 +430,6 @@ fn test_tawc_dri_ahb_present_round_trip() {
 )]
 fn test_tawc_dri_ahb_present_animated_loop() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let bin = rootfs::ensure_tawc_dri_test().expect("build tawc-dri-test");
     // 120 frames at 60fps = 2 seconds. Long enough to surface a leak
@@ -525,7 +518,6 @@ fn test_tawc_dri_ahb_present_animated_loop() {
 )]
 fn test_eglx11_renders_via_ahb() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     let bin = rootfs::ensure_eglx11_test().expect("build eglx11-test");
     // The swap loop can finish before the compositor's next frame tick.
@@ -591,7 +583,6 @@ fn test_eglx11_renders_via_ahb() {
 )]
 fn test_es2gears_x11_renders_via_ahb() {
     tawc_integration::helpers::test_init();
-    require_compositor();
 
     // 4s gives es2gears time to hit hundreds of swap cycles even on a
     // slow device. The release-listener fix bounds the live AHB

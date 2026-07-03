@@ -260,21 +260,20 @@ pub fn has_ahb_surface() -> bool {
 /// of an existing wl_buffer (`buffer_commit_pending`). A client blocked in
 /// `vkAcquireNextImageKHR` or otherwise wedged keeps the counter flat.
 ///
-/// Samples `frames` twice over `window`. Fails if the delta is below
-/// `min_frames`, which should be set well below the steady-state rate
-/// (~60 fps × window) but high enough that "0 frames" is unambiguous.
+/// Polls `frames` until it has advanced by `min_frames`, failing if
+/// that doesn't happen within `window`. `min_frames` should be set
+/// well below the steady-state rate (~60 fps × window) but high
+/// enough that "0 frames" is unambiguous. A healthy client passes as
+/// soon as the frames land, so the window is a deadline, not a fixed
+/// measurement cost.
 pub fn assert_client_animating(name: &str, window: Duration, min_frames: u64) {
     let before = compositor::query_state(TIMEOUT)
         .unwrap_or_else(|e| panic!("query compositor state before {name} animation check: {e}"));
-    thread::sleep(window);
-    let after = compositor::query_state(TIMEOUT)
-        .unwrap_or_else(|e| panic!("query compositor state after {name} animation check: {e}"));
-
-    let delta = after.frames.saturating_sub(before.frames);
+    let delta = compositor::wait_for_frames_advance(before.frames, min_frames, window);
     assert!(
         delta >= min_frames,
         "{name} appears stuck — compositor rendered {delta} frames in {window:?} \
-         (expected >= {min_frames}). before={before:?} after={after:?}. \
+         (expected >= {min_frames}). before={before:?}. \
          Likely the client is blocked on its swapchain (no buffer release / \
          frame callback from the compositor)."
     );
@@ -294,28 +293,12 @@ pub fn has_shm_surface() -> bool {
 /// previous client).
 pub fn assert_compositor_clean() {
     let _ = adb::cleanup_rootfs();
-    let state = compositor::wait_for_state(0, 0, TIMEOUT)
+    // All counts (clients, toplevels, surfaces, hosts) are polled in
+    // one condition: host teardown goes through an async Android
+    // Activity finish() round trip, so the host counts can trail the
+    // surface counts by a moment and must not be asserted point-in-time.
+    compositor::wait_for_clean_state(TIMEOUT)
         .expect("Compositor did not return to clean state");
-    assert_eq!(
-        state.surfaces_wlegl, 0,
-        "Expected no wlegl surfaces after cleanup, got {:?}",
-        state
-    );
-    assert_eq!(
-        state.surfaces_shm, 0,
-        "Expected no SHM surfaces after cleanup, got {:?}",
-        state
-    );
-    assert_eq!(
-        state.hosts, 0,
-        "Expected no Android hosts after cleanup, got {:?}",
-        state
-    );
-    assert_eq!(
-        state.bound_hosts, 0,
-        "Expected no bound Android hosts after cleanup, got {:?}",
-        state
-    );
     // Verify the screen reflects the clean state — the last rendered frame
     // should show 0 toplevels, not a stale frame from the previous client.
     compositor::wait_for_rendered_toplevels(0, TIMEOUT)
@@ -413,17 +396,19 @@ pub fn launch_and_wait_for_toplevel(
         thread::sleep(Duration::from_millis(200));
     }
 
-    // Let the app finish opening before the caller acts. Same grace
-    // period as `launch_and_wait_for_ahb` so tests that drive input
-    // immediately after launch (e.g. `lxterminal`) get the IM-enable +
-    // shell-readiness window they used to get from the AHB-import wait.
-    thread::sleep(Duration::from_millis(1000));
-
     assert!(
         painted,
         "{name} did not reach first paint within {:?}",
         timeout
     );
+
+    // Wait until the window actually shows up in a rendered frame
+    // (not just in client state) before the caller acts. Replaces a
+    // flat 1s grace sleep; tests that drive input immediately after
+    // launch (e.g. `lxterminal`) additionally gate on
+    // `wait_for_keyboard_shown`, which is the real IM-readiness signal.
+    compositor::wait_for_rendered_toplevels_at_least(1, TIMEOUT)
+        .unwrap_or_else(|e| panic!("{name} window never reached the screen: {e}"));
     proc
 }
 
@@ -461,17 +446,20 @@ pub fn launch_and_wait_for_ahb(
             saw_ahb = true;
             break;
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(200));
     }
-
-    // Let the app finish opening its window before the caller kills it
-    thread::sleep(Duration::from_millis(1000));
 
     assert!(
         saw_ahb,
         "{name} did not produce hardware (AHB) buffer imports within {:?}",
         timeout
     );
+
+    // Wait for the window to land in a rendered frame so the caller
+    // doesn't act on (or kill) an app that is still opening. Replaces
+    // a flat 1s grace sleep.
+    compositor::wait_for_rendered_toplevels_at_least(1, TIMEOUT)
+        .unwrap_or_else(|e| panic!("{name} window never reached the screen: {e}"));
     proc
 }
 
@@ -494,27 +482,32 @@ pub fn assert_renders_via_shm(backend: GraphicsBackend, cmd: &str, name: &str, t
     app.ensure_pgid();
 
     let deadline = Instant::now() + timeout;
-    let mut saw = false;
+    let mut saw = None;
     while Instant::now() < deadline {
         if !app.is_running() {
             app.stop().ok();
             panic!("{name} crashed/exited before rendering");
         }
-        if has_shm_surface() {
-            saw = true;
-            break;
+        if let Ok(state) = compositor::query_state(Duration::from_secs(2)) {
+            if state.surfaces_shm >= 1 {
+                saw = Some(state);
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(200));
     }
-    // Grace period so a regression that only manifests on the second
-    // SHM commit (e.g. GTK4's cairo double-release bug) still trips
-    // the no-AHB / still-running checks below.
-    thread::sleep(Duration::from_millis(500));
-
-    assert!(
-        saw,
-        "{name} did not produce SHM buffer imports or an attached SHM surface within {timeout:?}"
-    );
+    let Some(first_seen) = saw else {
+        panic!(
+            "{name} did not produce SHM buffer imports or an attached SHM surface within {timeout:?}"
+        );
+    };
+    // Give the client a chance to make a second commit so a regression
+    // that only manifests then (e.g. GTK4's cairo double-release bug)
+    // still trips the no-AHB / still-running checks below. Waits on the
+    // compositor's per-commit `frames` counter instead of a flat 500ms;
+    // a client that stays static after one commit is fine, so a
+    // shortfall at the deadline is not an error.
+    compositor::wait_for_frames_advance(first_seen.frames, 1, Duration::from_millis(500));
 
     let state =
         compositor::query_state(TIMEOUT).expect("query compositor state while client running");
