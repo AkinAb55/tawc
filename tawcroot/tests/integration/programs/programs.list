@@ -28,6 +28,8 @@ static_unix_bind_argv1
 static_check_proc_self_fd
 static_check_proc_exe_argv0
 static_io_uring_deny
+static_drop_ids_execve
+static_check_ids_exit42
 dynamic_exit42
 dynamic_argv_check
 dynamic_big_stack

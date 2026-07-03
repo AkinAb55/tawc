@@ -10,6 +10,7 @@
 
 #include "errno_neg.h"
 #include "exec_state.h"
+#include "identity.h"
 #include "io.h"
 #include "loader_elf.h"
 #include "loader_exec.h"
@@ -468,6 +469,12 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 		if (st.guest_exe) tawcroot_set_guest_exe_path(st.guest_exe);
 		else              tawcroot_set_guest_exe_path(st.path);
 	}
+
+	/* Restore the pre-exec virtual identity AFTER supervisor_init —
+	 * dispatch init inside it resets identity to root defaults, and
+	 * a guest that dropped privileges must not resurface as fake
+	 * root in the exec'd image. */
+	if (st.has_identity) tawcroot_identity_load(&st.identity);
 
 	/* Don't bother closing — we're about to hand control to the guest
 	 * and any leftover fd dies on the next execve. */

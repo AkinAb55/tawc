@@ -58,6 +58,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "identity.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -69,8 +71,11 @@ extern "C" {
  * the execveat; we ferry their (name, fd_int) pairs through here so
  * the new tawcroot incarnation can re-register them. v2 readers don't
  * exist outside the tree — both ends are the same binary — so we
- * don't maintain back-compat. */
-#define TAWCROOT_EXEC_STATE_VERSION 3
+ * don't maintain back-compat.
+ * Version 4: adds the virtual identity snapshot (has_identity +
+ * identity) so a guest that dropped privileges keeps its tracked
+ * uid/gid across execve. */
+#define TAWCROOT_EXEC_STATE_VERSION 4
 /* MAX_ARGS at 4096: shell glob expansions, linker invocations, and
  * pacman hooks routinely pass hundreds-to-thousands of args; the kernel
  * allows ~2 MB of argv strings. MAX_ENV at 1024 covers the busiest bash
@@ -105,6 +110,11 @@ typedef struct {
 	uint32_t n_shm;
 	uint32_t shm_name_off[TAWCROOT_EXEC_STATE_MAX_SHM];
 	uint32_t shm_fd[TAWCROOT_EXEC_STATE_MAX_SHM];
+	/* Virtual identity snapshot (identity.c). Fixed-size value, not
+	 * strings — embedded directly. has_identity == 0 means "absent"
+	 * (restore keeps the register-time root defaults). */
+	uint32_t      has_identity;
+	tawc_identity identity;
 } tawcroot_exec_state_header;
 
 /* Total memfd bytes when both header + strings are written. */
@@ -134,6 +144,8 @@ typedef struct {
 	uint32_t     n_shm;
 	const char  *shm_name[TAWCROOT_EXEC_STATE_MAX_SHM];
 	int          shm_fd[TAWCROOT_EXEC_STATE_MAX_SHM];
+	int           has_identity;
+	tawc_identity identity;      /* valid iff has_identity */
 } tawcroot_exec_state;
 
 /* Optional inputs for the writer — may all be NULL/0 to indicate "no
@@ -147,6 +159,7 @@ typedef struct {
 	uint32_t           n_shm;
 	const char *const *shm_name;        /* size n_shm */
 	const int         *shm_fd;          /* size n_shm */
+	const tawc_identity *identity;      /* may be NULL */
 } tawcroot_exec_state_extras;
 
 /* ---- Writer (handler side) ----

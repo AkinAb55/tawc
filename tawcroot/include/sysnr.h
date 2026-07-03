@@ -90,7 +90,8 @@
 # define TAWC_SYS_io_uring_register 427
 # define TAWC_SYS_getresuid       148
 # define TAWC_SYS_getresgid       150
-/* set*id family — faked to success under fake-root (identity.c).
+# define TAWC_SYS_getgroups       158
+/* set*id family — virtual identity rules in identity.c.
  * There is no seteuid/setegid syscall; libc routes through setres*id. */
 # define TAWC_SYS_setregid        143
 # define TAWC_SYS_setgid          144
@@ -230,7 +231,8 @@
 # define TAWC_SYS_io_uring_register 427
 # define TAWC_SYS_getresuid       118
 # define TAWC_SYS_getresgid       120
-/* set*id family — faked to success under fake-root (identity.c). */
+# define TAWC_SYS_getgroups       115
+/* set*id family — virtual identity rules in identity.c. */
 # define TAWC_SYS_setuid          105
 # define TAWC_SYS_setgid          106
 # define TAWC_SYS_setreuid        113

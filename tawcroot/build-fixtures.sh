@@ -118,6 +118,8 @@ build_static  static_unix_bind_argv1
 build_static  static_check_proc_self_fd
 build_static  static_check_proc_exe_argv0
 build_static  static_io_uring_deny
+build_static  static_drop_ids_execve
+build_static  static_check_ids_exit42
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
 build_dynamic_big_stack

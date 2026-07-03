@@ -421,6 +421,19 @@ $(OUT)/programs/static_check_proc_exe_argv0: $(SRC_TS)/integration/programs/stat
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
+# static_drop_ids_execve + static_check_ids_exit42: virtual-identity
+# exec persistence. The first drops to uid/gid 994 (sshd's preauth
+# shape), verifies setuid(0) now EPERMs, then execve's the second,
+# which asserts the getters still report 994 in the post-exec image —
+# the exec_state identity ferry end-to-end.
+$(OUT)/programs/static_drop_ids_execve: $(SRC_TS)/integration/programs/static_drop_ids_execve_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
+$(OUT)/programs/static_check_ids_exit42: $(SRC_TS)/integration/programs/static_check_ids_exit42_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
 # static_io_uring_deny: probe io_uring_setup, io_uring_enter, and
 # io_uring_register; expect -ENOSYS from each. Validates the
 # defense-in-depth deny that closes the inheritance edge case in

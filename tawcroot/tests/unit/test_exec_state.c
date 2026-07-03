@@ -189,6 +189,85 @@ test(exec_state_carries_shm_table)
 	free(buf);
 }
 
+test(exec_state_carries_identity)
+{
+	const char *argv[] = { "/p", NULL };
+	const char *envp[] = { NULL };
+
+	tawc_identity id = { 0 };
+	id.ruid = id.euid = id.suid = id.fsuid = 994;
+	id.rgid = id.egid = id.sgid = id.fsgid = 994;
+	id.ngroups   = 2;
+	id.groups[0] = 994;
+	id.groups[1] = 5;
+
+	tawcroot_exec_state_extras ex = { 0 };
+	ex.identity = &id;
+
+	size_t need = tawcroot_exec_state_estimate_bytes("/p", 1, argv, envp,
+							 &ex);
+	uint8_t *buf = malloc(need);
+	test_nonnull(buf);
+	long w = tawcroot_exec_state_write(buf, need, "/p", 1, argv, envp, &ex);
+	test_int_eq((int)w, (int)need);
+
+	const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
+	const char *ebuf[TAWCROOT_EXEC_STATE_MAX_ENV + 1];
+	tawcroot_exec_state out;
+	test_int_eq((int)tawcroot_exec_state_read(buf, need, abuf, ebuf, &out),
+		    0);
+	test_int_eq(out.has_identity, 1);
+	test_int_eq((int)out.identity.ruid, 994);
+	test_int_eq((int)out.identity.suid, 994);
+	test_int_eq((int)out.identity.fsgid, 994);
+	test_int_eq((int)out.identity.ngroups, 2);
+	test_int_eq((int)out.identity.groups[1], 5);
+	free(buf);
+
+	/* Absent identity reads back as absent. */
+	need = tawcroot_exec_state_estimate_bytes("/p", 1, argv, envp, NULL);
+	buf = malloc(need);
+	test_nonnull(buf);
+	test_int_eq((int)tawcroot_exec_state_write(buf, need, "/p", 1, argv,
+						   envp, NULL),
+		    (int)need);
+	test_int_eq((int)tawcroot_exec_state_read(buf, need, abuf, ebuf, &out),
+		    0);
+	test_int_eq(out.has_identity, 0);
+	free(buf);
+}
+
+test(exec_state_rejects_oversize_identity_ngroups)
+{
+	const char *argv[] = { "/p", NULL };
+	const char *envp[] = { NULL };
+	tawc_identity id = { 0 };
+	id.ngroups = 1;
+	tawcroot_exec_state_extras ex = { 0 };
+	ex.identity = &id;
+
+	size_t need = tawcroot_exec_state_estimate_bytes("/p", 1, argv, envp,
+							 &ex);
+	uint8_t *buf = malloc(need);
+	test_nonnull(buf);
+	long w = tawcroot_exec_state_write(buf, need, "/p", 1,
+					   argv, envp, &ex);
+	test_true(w > 0);
+
+	/* Corrupt the embedded ngroups past the shadow capacity; the
+	 * reader must reject rather than let --exec-child copy OOB. */
+	tawcroot_exec_state_header *h = (tawcroot_exec_state_header *)buf;
+	h->identity.ngroups = TAWC_IDENTITY_NGROUPS + 1;
+
+	const char *abuf[TAWCROOT_EXEC_STATE_MAX_ARGS + 1];
+	const char *ebuf[TAWCROOT_EXEC_STATE_MAX_ENV + 1];
+	tawcroot_exec_state out;
+	test_int_eq((int)tawcroot_exec_state_read(buf, (size_t)w, abuf, ebuf,
+						  &out),
+		    -22 /* EINVAL */);
+	free(buf);
+}
+
 test(exec_state_too_many_shm)
 {
 	const char *argv[] = { "/p", NULL };

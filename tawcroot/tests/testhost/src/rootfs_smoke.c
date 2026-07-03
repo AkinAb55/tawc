@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 
 #include "rootfs_smoke.h"
+#include "identity.h"
 #include "io.h"
 #include "raw_sys.h"
 #include "filter.h"
@@ -216,38 +217,225 @@ static int test_identity_getegid(void)
 	return fails;
 }
 
-/* set*id family must fake success: a guest that believes it is root
- * calls setuid(0)/setgroups() (daemons dropping privileges, runuser,
- * maintainer scripts) and aborts on the kernel's real EPERM. */
-static int test_identity_setid_family_fakes_success(void)
+/* set*id family from virtual root: setting ids you already hold (or
+ * that root may set) succeeds — daemons dropping privileges, runuser,
+ * maintainer scripts must not see the kernel's real EPERM. */
+static int test_identity_setid_family_root_success(void)
 {
 	int fails = 0;
 	long rv;
 	INLINE_SYS6(TAWC_SYS_setuid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setuid(0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setuid(0) -> 0 (root)", rv == 0);
 	tawc_io_kv_dec("    rv", rv);
 	INLINE_SYS6(TAWC_SYS_setgid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setgid(0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setgid(0) -> 0 (root)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setresuid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setresuid(0,0,0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setresuid(0,0,0) -> 0 (root)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setresgid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setresgid(0,0,0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setresgid(0,0,0) -> 0 (root)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setreuid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setreuid(0,0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setreuid(0,0) -> 0 (root)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setregid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setregid(0,0) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setregid(0,0) -> 0 (root)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setfsuid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setfsuid(0) -> 0 (prev fsuid faked)", rv == 0);
+	fails += tawc_io_step("setfsuid(0) -> 0 (prev fsuid)", rv == 0);
 	INLINE_SYS6(TAWC_SYS_setfsgid, 0, 0, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setfsgid(0) -> 0 (prev fsgid faked)", rv == 0);
+	fails += tawc_io_step("setfsgid(0) -> 0 (prev fsgid)", rv == 0);
 	/* Non-trivial setgroups: a real kernel call from the app uid would
-	 * EPERM; the dropped-groups list content is irrelevant to us. */
+	 * EPERM; virtual root may set any list. */
 	unsigned int one_group[1] = { 0 };
 	INLINE_SYS6(TAWC_SYS_setgroups, 1, one_group, 0, 0, 0, 0, rv);
-	fails += tawc_io_step("setgroups(1, [0]) -> 0 (faked)", rv == 0);
+	fails += tawc_io_step("setgroups(1, [0]) -> 0 (root)", rv == 0);
 	/* And the guest still sees uid 0 afterwards. */
 	fails += tawc_io_step("getuid still 0 after set*id dance",
 			      inline_getuid() == 0);
+	return fails;
+}
+
+/* ----- stateful virtual identity ----------------------------------
+ *
+ * Each test that drops privileges calls tawcroot_identity_reset() (a
+ * direct in-process call — the smoke shares the handler's globals)
+ * before returning, so test order stays irrelevant. */
+
+/* The sshd permanently_set_uid shape: drop gids, groups, then uids;
+ * verify the drop is irreversible and the getters report the target. */
+static int test_identity_drop_is_irreversible(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_setresgid, 994, 994, 994, 0, 0, 0, rv);
+	fails += tawc_io_step("setresgid(994,994,994) from root -> 0", rv == 0);
+	unsigned int grp[1] = { 994 };
+	INLINE_SYS6(TAWC_SYS_setgroups, 1, grp, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgroups(1,[994]) with euid 0 -> 0", rv == 0);
+	INLINE_SYS6(TAWC_SYS_setresuid, 994, 994, 994, 0, 0, 0, rv);
+	fails += tawc_io_step("setresuid(994,994,994) from root -> 0", rv == 0);
+
+	INLINE_SYS6(TAWC_SYS_setuid, 0, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setuid(0) after drop -> EPERM", rv == TAWC_EPERM);
+	tawc_io_kv_dec("    rv", rv);
+	INLINE_SYS6(TAWC_SYS_setresuid, -1, 0, -1, 0, 0, 0, rv);
+	fails += tawc_io_step("setresuid(-1,0,-1) after drop -> EPERM",
+			      rv == TAWC_EPERM);
+	INLINE_SYS6(TAWC_SYS_setreuid, -1, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setreuid(-1,0) after drop -> EPERM",
+			      rv == TAWC_EPERM);
+	INLINE_SYS6(TAWC_SYS_setgid, 0, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgid(0) after drop -> EPERM", rv == TAWC_EPERM);
+	INLINE_SYS6(TAWC_SYS_setresgid, -1, 0, -1, 0, 0, 0, rv);
+	fails += tawc_io_step("setresgid(-1,0,-1) after drop -> EPERM",
+			      rv == TAWC_EPERM);
+	INLINE_SYS6(TAWC_SYS_setgroups, 1, grp, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgroups after drop -> EPERM",
+			      rv == TAWC_EPERM);
+
+	fails += tawc_io_step("getuid -> 994 after drop",
+			      inline_getuid() == 994);
+	fails += tawc_io_step("geteuid -> 994 after drop",
+			      inline_geteuid() == 994);
+	fails += tawc_io_step("getgid -> 994 after drop",
+			      inline_getgid() == 994);
+	fails += tawc_io_step("getegid -> 994 after drop",
+			      inline_getegid() == 994);
+	unsigned int ruid = 1, euid = 1, suid = 1;
+	INLINE_SYS6(TAWC_SYS_getresuid, &ruid, &euid, &suid, 0, 0, 0, rv);
+	fails += tawc_io_step("getresuid triple all 994 after drop",
+			      rv == 0 && ruid == 994 && euid == 994 &&
+			      suid == 994);
+
+	/* Re-privileging still works from a process that never dropped:
+	 * reset stands in for the sshd monitor's un-dropped state. */
+	tawcroot_identity_reset();
+	fails += tawc_io_step("reset -> getuid 0 again", inline_getuid() == 0);
+	return fails;
+}
+
+/* setreuid saved-id update rule: setreuid(1000,1000) from root must
+ * leave suid == 1000 (this is what OpenSSH implicitly relies on). */
+static int test_identity_setreuid_saved_id_rule(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_setreuid, 1000, 1000, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setreuid(1000,1000) from root -> 0", rv == 0);
+	unsigned int ruid = 1, euid = 1, suid = 1;
+	INLINE_SYS6(TAWC_SYS_getresuid, &ruid, &euid, &suid, 0, 0, 0, rv);
+	fails += tawc_io_step("saved uid followed euid (suid == 1000)",
+			      rv == 0 && ruid == 1000 && euid == 1000 &&
+			      suid == 1000);
+	tawc_io_kv_dec("    suid", (long)suid);
+	tawcroot_identity_reset();
+	return fails;
+}
+
+/* setfsuid returns the PREVIOUS fsuid, never an error; an unprivileged
+ * setfsuid to an unrelated id is a silent no-op. */
+static int test_identity_setfsuid_semantics(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_setfsuid, 994, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setfsuid(994) from root -> prev 0", rv == 0);
+	INLINE_SYS6(TAWC_SYS_setfsuid, 994, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setfsuid(994) again -> prev 994", rv == 994);
+	/* Drop; fsuid follows euid on the way down. */
+	INLINE_SYS6(TAWC_SYS_setresuid, 994, 994, 994, 0, 0, 0, rv);
+	fails += tawc_io_step("drop to 994", rv == 0);
+	INLINE_SYS6(TAWC_SYS_setfsuid, 4321, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("unprivileged setfsuid(4321) -> prev 994, no-op",
+			      rv == 994);
+	INLINE_SYS6(TAWC_SYS_setfsuid, 4321, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("fsuid unchanged (still 994)", rv == 994);
+	tawcroot_identity_reset();
+	return fails;
+}
+
+/* getgroups answers from the shadow (initially {0}); without the trap
+ * the kernel leaks the app's Android gids into `id` output. */
+static int test_identity_getgroups_shadow(void)
+{
+	int fails = 0;
+	long rv;
+	tawcroot_identity_reset();
+	unsigned int buf[TAWC_IDENTITY_NGROUPS];
+	INLINE_SYS6(TAWC_SYS_getgroups, 0, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("getgroups(0) -> initial count 1", rv == 1);
+	tawc_io_kv_dec("    rv", rv);
+	buf[0] = 77;
+	INLINE_SYS6(TAWC_SYS_getgroups, TAWC_IDENTITY_NGROUPS, buf,
+		    0, 0, 0, 0, rv);
+	fails += tawc_io_step("initial shadow is {0}", rv == 1 && buf[0] == 0);
+
+	unsigned int two[2] = { 5, 7 };
+	INLINE_SYS6(TAWC_SYS_setgroups, 2, two, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgroups(2,[5,7]) from root -> 0", rv == 0);
+	INLINE_SYS6(TAWC_SYS_getgroups, 1, buf, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("getgroups(1) with 2 groups -> EINVAL",
+			      rv == TAWC_EINVAL);
+	buf[0] = buf[1] = 0;
+	INLINE_SYS6(TAWC_SYS_getgroups, 2, buf, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("getgroups round-trips [5,7]",
+			      rv == 2 && buf[0] == 5 && buf[1] == 7);
+
+	/* Over-capacity list: kernel-plausible ENOMEM (fixed shadow). */
+	unsigned int big[TAWC_IDENTITY_NGROUPS + 1] = { 0 };
+	INLINE_SYS6(TAWC_SYS_setgroups, TAWC_IDENTITY_NGROUPS + 1, big,
+		    0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgroups beyond shadow capacity -> ENOMEM",
+			      rv == TAWC_ENOMEM);
+
+	INLINE_SYS6(TAWC_SYS_setgroups, 0, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("setgroups(0,NULL) clears -> 0", rv == 0);
+	INLINE_SYS6(TAWC_SYS_getgroups, 0, 0, 0, 0, 0, 0, rv);
+	fails += tawc_io_step("getgroups(0) -> 0 after clear", rv == 0);
+
+	tawcroot_identity_reset();
+	return fails;
+}
+
+/* Privilege-gated chmod/chown fakes: after a genuine drop, the host's
+ * real permission errors surface instead of fake success. /dev/null is
+ * root-owned via the /dev bind, so the host denies both ops for our
+ * unprivileged test uid. */
+static int test_identity_dropped_chmod_chown_real_errors(void)
+{
+	int fails = 0;
+	long rv;
+	INLINE_SYS6(TAWC_SYS_setresgid, 994, 994, 994, 0, 0, 0, rv);
+	fails += tawc_io_step("drop gids to 994", rv == 0);
+	INLINE_SYS6(TAWC_SYS_setresuid, 994, 994, 994, 0, 0, 0, rv);
+	fails += tawc_io_step("drop uids to 994", rv == 0);
+
+	INLINE_SYS6(TAWC_SYS_fchmodat, AT_FDCWD, "/dev/null",
+		    0666, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"dropped fchmodat(/dev/null) -> real EPERM/EACCES",
+		rv == TAWC_EPERM || rv == TAWC_EACCES);
+	tawc_io_kv_dec("    rv", rv);
+	INLINE_SYS6(TAWC_SYS_fchownat, AT_FDCWD, "/dev/null",
+		    0, 0, 0, 0, rv);
+	fails += tawc_io_step(
+		"dropped fchownat(/dev/null) -> real EPERM/EACCES",
+		rv == TAWC_EPERM || rv == TAWC_EACCES);
+	tawc_io_kv_dec("    rv", rv);
+
+	long fd = inline_openat(AT_FDCWD, "/dev/null", O_RDONLY, 0);
+	fails += tawc_io_step("open /dev/null for dropped fchown", fd >= 0);
+	if (fd >= 0) {
+		INLINE_SYS6(TAWC_SYS_fchown, fd, 0, 0, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"dropped fchown(/dev/null fd) -> real EPERM/EACCES",
+			rv == TAWC_EPERM || rv == TAWC_EACCES);
+		INLINE_SYS6(TAWC_SYS_close, fd, 0, 0, 0, 0, 0, rv);
+	}
+
+	tawcroot_identity_reset();
+	/* Back at virtual root the fake applies again. */
+	INLINE_SYS6(TAWC_SYS_fchmodat, AT_FDCWD, "/dev/null",
+		    0666, 0, 0, 0, rv);
+	fails += tawc_io_step("root fchmodat(/dev/null) faked again -> 0",
+			      rv == 0);
 	return fails;
 }
 
@@ -4609,7 +4797,11 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_identity_geteuid();
 	fails += test_identity_getgid();
 	fails += test_identity_getegid();
-	fails += test_identity_setid_family_fakes_success();
+	fails += test_identity_setid_family_root_success();
+	fails += test_identity_drop_is_irreversible();
+	fails += test_identity_setreuid_saved_id_rule();
+	fails += test_identity_setfsuid_semantics();
+	fails += test_identity_getgroups_shadow();
 	fails += test_openat_absolute_translates();
 	fails += test_openat_null_efault();
 	fails += test_openat_unmapped_efault();
@@ -4661,6 +4853,7 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 	fails += test_fchownat_fake_root();
 	fails += test_fchown_fake_root();
 	fails += test_fchmodat_swallows_perm_errors();
+	fails += test_identity_dropped_chmod_chown_real_errors();
 	fails += test_socket_netlink_audit_eprotonosupport();
 	fails += test_root_op_errno_shapes();
 	fails += test_fstatat_at_empty_path();

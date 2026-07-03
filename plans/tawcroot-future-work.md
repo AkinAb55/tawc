@@ -65,11 +65,12 @@ These are throughput wins, not correctness fixes. Profile before implementing.
 3. **fd-provenance table.** Track `fd -> rootfs/bind/host provenance` at fd
    creation and duplication sites to avoid `/proc/self/fd/<n>` lookups for
    fd-relative path operations.
-4. **Return fake identity directly from BPF.** `getuid`, `geteuid`, `getgid`,
-   and `getegid` could use `SECCOMP_RET_ERRNO | 0` instead of trapping into
-   `fake_zero`.
-5. **io_uring SQE rewriter.** Promote the deny-and-fallback behavior to full
+4. **io_uring SQE rewriter.** Promote the deny-and-fallback behavior to full
    interception once a real workload needs io_uring throughput.
+
+(A former item — returning fake identity directly from BPF via
+`SECCOMP_RET_ERRNO | 0` — was dropped: identity is now stateful
+(identity.c virtual identity) and BPF cannot return dynamic values.)
 
 Micro-optimizations such as BPF-chain reshaping or `gettid` caching should wait
 for a profile that points at them.

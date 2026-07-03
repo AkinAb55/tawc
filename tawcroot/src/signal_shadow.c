@@ -310,6 +310,13 @@ static void action_writer_acquire(uint32_t *out_s)
 						__ATOMIC_RELAXED))
 			break;
 	}
+	/* Order the odd-seq claim store before the caller's data stores
+	 * (the seqlock write barrier — see identity.c's
+	 * ident_writer_release). Without it a reader can observe fresh
+	 * action bytes while both its seq reads still return the stale
+	 * even value, accepting a torn copy. x86_64 TSO hides this;
+	 * aarch64 does not. */
+	__atomic_thread_fence(__ATOMIC_RELEASE);
 	*out_s = s;
 }
 

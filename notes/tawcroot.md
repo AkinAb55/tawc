@@ -1023,37 +1023,79 @@ Then apply these rules to the guest-absolute path `P`:
 The minimal set that covers our usage. Numbers are arch-specific;
 the dispatch table is generated from a syscall list at build time.
 
-**Fake-root identity and metadata (MVP, because current proot uses
-`-0`):**
+**Virtual identity and metadata (stateful, like proot's `fake_id0`):**
 
-- `getuid`, `geteuid`, `getgid`, `getegid` → return 0.
-- `setuid`, `setgid`, `seteuid`, `setegid`, `setresuid`,
-  `setresgid`, `setreuid`, `setregid` → return 0 only for root-like
-  transitions we claim to support; otherwise return the kernel-like
-  error. We are not granting host privileges, just preserving the
-  guest illusion that it is root inside the rootfs.
-- `getgroups` / `setgroups` → report a minimal root-compatible group
-  set and accept no-op root-compatible updates.
+Identity is a tracked process-wide struct (`identity.c`:
+`tawc_identity` — r/e/s/fs uid+gid plus a 32-entry supplementary-group
+shadow), initialised to root (all 0, groups `{0}`), guarded by a
+seqlock (the signal-shadow pattern: fixed-size state + atomic sequence
+counter; multi-writer safe via CAS-claim). It exists so daemons that
+drop privileges and *verify the drop* (OpenSSH `permanently_set_uid`)
+behave: after a drop, restoring old ids EPERMs and the getters report
+the target user. The privilege predicate everywhere is virtual
+`euid == 0` — fake root has all caps, everyone else none.
+
+- `getuid`, `geteuid`, `getgid`, `getegid`, `getresuid`, `getresgid`,
+  `getgroups` → report tracked values. `getgroups` is trapped so the
+  kernel doesn't leak the app's Android gids (3003/9997/…) into `id`.
+- `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`,
+  `setresgid`, `setfsuid`, `setfsgid`, `setgroups` → Linux semantics
+  applied to the virtual state (including the setreuid saved-id update
+  rule and setfsuid's return-previous-never-error contract).
+  `setgroups` beyond the 32-entry shadow returns kernel-plausible
+  `-ENOMEM`. There is no `seteuid` syscall; libc routes via setres*id.
+- `fork` inherits identity for free (address-space copy); `execve`
+  ferries it through exec_state (v4, `has_identity` + embedded
+  struct), restored in `--exec-child` after supervisor init.
 - `stat`, `lstat`, `fstat`, `fstatat`, `newfstatat`, `statx` →
   after the host syscall succeeds, copy the result through a local
   struct, rewrite uid/gid fields to 0 for rootfs-owned paths/fds, and
   copy the decorated result back to the guest via `copy_to_guest`.
-  Host errors pass through unchanged.
-- `chown`, `lchown`, `fchown`, `fchownat` → translate paths/fds and
-  return success for rootfs-owned files when the requested ownership
-  is root-compatible. Do not issue a real host `chown`; app uid cannot
-  do it and the on-disk rootfs intentionally remains app-owned.
+  Host errors pass through unchanged. Decoration is NOT
+  identity-aware (a dropped process still sees root-owned files and
+  can still open anything the app uid can) — same divergence proot
+  has; enforcement is a non-goal.
+- `/proc/self/status` is NOT synthesized: its `Uid:`/`Gid:`/`Groups:`
+  lines show the real app ids, diverging from the getters. Known
+  divergence; nothing we target parses it for identity.
+- `chown`, `lchown`, `fchown`, `fchownat` → translate paths/fds and,
+  when virtual euid == 0, validate existence then return success
+  without a real host `chown` (app uid cannot chown; the on-disk
+  rootfs intentionally remains app-owned). When dropped, forward the
+  real host syscall so genuine permission errors surface.
 - `chmod`, `fchmodat` → translate and ATTEMPT the host chmod (modes
   matter inside the rootfs and normally apply for real — the app uid
-  owns the files), but swallow a host `EPERM`/`EACCES` into success:
-  root doesn't get permission errors from chmod. Concrete consumer:
-  sshd's `pty_setowner()` chmod on `/dev/pts/N`, which Android
-  SELinux denies and sshd treats as fatal for every TTY login.
-  Non-permission errors pass through. Matches proot `fake_id0`.
-- `capget`/`capset` and related privilege probes: start with the
-  minimal behavior needed by Arch/pacman tests. If a probe fails a
-  real workload, add a targeted fake-root response rather than trying
-  to model Linux capabilities wholesale.
+  owns the files), but when virtual euid == 0 swallow a host
+  `EPERM`/`EACCES` into success: root doesn't get permission errors
+  from chmod. Concrete consumer: sshd's `pty_setowner()` chmod on
+  `/dev/pts/N`, which Android SELinux denies and sshd treats as fatal
+  for every TTY login. Non-permission errors pass through; dropped
+  processes get the real result. fd-based `fchmod` stays untrapped
+  (kernel resolves the fd itself; revisit if a workload fatals on it
+  the way sshd did on fchmodat).
+- A consequence of identity-blind decoration worth knowing: after a
+  drop, files the guest itself creates still stat as uid 0, so
+  `test -O` / ownership checks in dropped sessions misreport.
+- Out of scope: no privilege *enforcement* (identity is
+  cosmetic-consistent only), no setuid-bit honoring on exec (a
+  dropped process cannot re-elevate via `su`/`sudo`, same as proot),
+  no capget/capset modeling beyond the euid predicate, no per-user
+  NSS awareness (ids are numbers). `chroot` and `mknod` stay
+  un-gated (the kernel would demand CAP_SYS_CHROOT/CAP_MKNOD): a
+  dropped guest can still virtually chroot / attempt mknod. sshd's
+  privsep chroot happens *before* its drop so gating isn't needed;
+  revisit if a workload depends on the denial.
+- Known bounded failures (same stance as the chroot globals /
+  signal shadow): a vfork child calling set*id before exec corrupts
+  the parent's view; a set*id from a guest signal handler that
+  interrupted another set*id on the same thread would self-deadlock
+  on the writer claim; an identity *reader* from such a handler —
+  get*id, or any handler consulting `tawcroot_identity_euid()`
+  (chmod/chown privilege gates) — spins on the odd seqlock forever;
+  fork while another thread is mid-set*id leaves the child's seqlock
+  odd. All require a guest signal or fork landing inside a set*id's
+  few-dozen-instruction write window; no known workload does any of
+  these.
 
 **Runtime control surface (protect tawcroot's own invariants):**
 
@@ -1215,8 +1257,8 @@ of those need translation. The TRAP set should be strictly:
 
 - The path-bearing list above.
 - `getcwd` (because we have to reverse-translate).
-- Fake-root identity/metadata syscalls (`getuid`, `stat`, `chown`,
-  etc.) needed to match proot `-0`.
+- Virtual-identity/metadata syscalls (`getuid`, `set*id`, `stat`,
+  `chown`, etc.) — the stateful analogue of proot `-0`/`fake_id0`.
 - Runtime-control syscalls needed to preserve tawcroot's invariants
   (`close*`/`dup*`/`fcntl` for internal fd protection,
   `rt_sigaction`/`rt_sigprocmask` for `SIGSYS`, and
@@ -1869,7 +1911,7 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── filter.h        # seccomp filter install API
 │   ├── filter_build.h  # pure cBPF program builder
 │   ├── handler.h       # SIGSYS handler install + observation
-│   ├── identity.h      # fake-root uid/gid registration
+│   ├── identity.h      # virtual identity struct + registration
 │   ├── io.h            # libc-free print helpers + tawc_str_* builders
 │   ├── loader_elf.h    # phdr parsing, image bounds, interp pointer
 │   ├── loader_exec.h   # --exec-child entry + shebang resolution
@@ -1902,7 +1944,7 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── filter.c        # install BPF program (seccomp + stub address)
 │   ├── filter_build.c  # build BPF program — pure
 │   ├── handler.c       # sigsys_handler dispatch, ucontext glue
-│   ├── identity.c      # fake-root uid/gid handlers
+│   ├── identity.c      # stateful virtual identity handlers
 │   ├── io.c            # io.h print impl (via tawc_write)
 │   ├── strings.c       # pure libc-free str/mem helpers + bounded builders —
 │   │                   #   also linked into the cleat test runner under hosted

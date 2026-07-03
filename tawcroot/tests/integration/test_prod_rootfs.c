@@ -47,6 +47,12 @@
 #ifndef TAWCROOT_STATIC_EXECVE_EXIT42_BIN
 # error "TAWCROOT_STATIC_EXECVE_EXIT42_BIN must be defined"
 #endif
+#ifndef TAWCROOT_STATIC_DROP_IDS_EXECVE_BIN
+# error "TAWCROOT_STATIC_DROP_IDS_EXECVE_BIN must be defined"
+#endif
+#ifndef TAWCROOT_STATIC_CHECK_IDS_EXIT42_BIN
+# error "TAWCROOT_STATIC_CHECK_IDS_EXIT42_BIN must be defined"
+#endif
 #ifndef TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN
 # error "TAWCROOT_STATIC_OPEN_RDONLY_ARGV1_BIN must be defined"
 #endif
@@ -81,6 +87,12 @@ static bool build_rootfs(void)
 
 	snprintf(p, sizeof p, "%s/bin/static_execve_exit42", FAKE_ROOTFS);
 	if (!rh_copy_file(TAWCROOT_STATIC_EXECVE_EXIT42_BIN, p, 0755)) return false;
+
+	snprintf(p, sizeof p, "%s/bin/static_drop_ids_execve", FAKE_ROOTFS);
+	if (!rh_copy_file(TAWCROOT_STATIC_DROP_IDS_EXECVE_BIN, p, 0755)) return false;
+
+	snprintf(p, sizeof p, "%s/bin/static_check_ids_exit42", FAKE_ROOTFS);
+	if (!rh_copy_file(TAWCROOT_STATIC_CHECK_IDS_EXIT42_BIN, p, 0755)) return false;
 
 	snprintf(p, sizeof p, "%s/etc/probe", FAKE_ROOTFS);
 	if (!rh_write_text(p, "from-rootfs\n")) return false;
@@ -224,6 +236,26 @@ test(prod_rootfs_guest_does_execve)
 
 	const char *args[] = {
 		"-r", FAKE_ROOTFS, "--", "/bin/static_execve_exit42", NULL
+	};
+	test_int_eq(run_with(args), 42);
+
+	rh_rmrf(FAKE_ROOTFS);
+}
+
+/* Virtual identity survives execve: the fixture drops to uid/gid 994
+ * with groups {994} (sshd's preauth shape), asserts the drop is
+ * irreversible (setuid(0) EPERMs), then execve's
+ * /bin/static_check_ids_exit42 which asserts the getters — including
+ * getgroups — still report 994 in the post-exec image. Exit-code key:
+ * 91..95 = drop-side failure, 43..47 = post-exec getter regression,
+ * 42 = pass. */
+test(prod_rootfs_identity_survives_execve)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+
+	const char *args[] = {
+		"-r", FAKE_ROOTFS, "--", "/bin/static_drop_ids_execve", NULL
 	};
 	test_int_eq(run_with(args), 42);
 

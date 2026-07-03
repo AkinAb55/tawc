@@ -141,6 +141,10 @@ long tawcroot_exec_state_write(void *buf, size_t buf_cap,
 			                              ex->shm_name[i]);
 			h->shm_fd[i] = (uint32_t)ex->shm_fd[i];
 		}
+		if (ex->identity) {
+			h->has_identity = 1;
+			h->identity     = *ex->identity;
+		}
 	}
 
 	h->string_bytes = off;
@@ -229,6 +233,12 @@ long tawcroot_exec_state_read(const void *buf, size_t buf_size,
 	for (uint32_t i = 0; i < h->n_shm; i++) {
 		out->shm_name[i] = strings + h->shm_name_off[i];
 		out->shm_fd[i]   = (int)h->shm_fd[i];
+	}
+	out->has_identity = h->has_identity ? 1 : 0;
+	if (h->has_identity) {
+		if (h->identity.ngroups > TAWC_IDENTITY_NGROUPS)
+			return TAWC_EINVAL;
+		out->identity = h->identity;
 	}
 	return 0;
 }

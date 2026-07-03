@@ -8,6 +8,7 @@
 #include "errno_neg.h"
 #include "exec_handler.h"
 #include "exec_state.h"
+#include "identity.h"
 #include "io.h"
 #include "loader_elf.h"
 #include "loader_exec.h"
@@ -150,7 +151,14 @@ long tawcroot_exec_handler_prepare(const char *path, int argc,
 	const char *shm_name_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
 	int         shm_fd_arr[TAWCROOT_EXEC_STATE_MAX_SHM];
 	tawcroot_exec_state_extras extras = { 0 };
-	tawcroot_exec_state_extras *extras_p = NULL;
+
+	/* Virtual identity survives execve (fork inherits it for free;
+	 * exec must ferry it — a dropped sshd session exec'ing the user's
+	 * shell must not come back as fake root). Carried in both rootfs
+	 * and legacy --exec-via-handler modes. */
+	tawc_identity ident_snap;
+	tawcroot_identity_get(&ident_snap);
+	extras.identity = &ident_snap;
 
 	if (tawcroot_rootfs_fd >= 0 && tawcroot_rootfs_host_path_len > 0) {
 		extras.rootfs_host = tawcroot_rootfs_host_path;
@@ -216,12 +224,11 @@ long tawcroot_exec_handler_prepare(const char *path, int argc,
 		extras.n_shm    = (uint32_t)shm_n;
 		extras.shm_name = shm_name_arr;
 		extras.shm_fd   = shm_fd_arr;
-		extras_p = &extras;
 	}
 
 	static uint8_t state_buf[EXEC_STATE_BUF_SIZE];
 	long w = tawcroot_exec_state_write(state_buf, sizeof state_buf,
-	                                   path, argc, argv, envp, extras_p);
+	                                   path, argc, argv, envp, &extras);
 	if (w < 0) { tawc_close((int)mfd); return w; }
 
 	long bytes = 0;

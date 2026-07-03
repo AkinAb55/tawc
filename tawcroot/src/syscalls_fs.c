@@ -37,6 +37,7 @@
 #include "dispatch.h"
 #include "errno_neg.h"
 #include "fdtab.h"
+#include "identity.h"
 #include "io.h"
 #include "path.h"
 #include "path_scratch.h"
@@ -807,7 +808,10 @@ DECLARE_AT_PASS(mknodat,    TAWC_SYS_mknodat,    4, TAWCROOT_PATH_PARENT_CREATE)
  * setattr on app ptys), which is fatal() to every TTY login. Same
  * contract as the fchownat/fchown fakes, and what proot's fake_id0
  * does; non-permission errors (ENOENT, ENOTDIR, EROFS) pass through —
- * the translate step already keeps missing paths honest. */
+ * the translate step already keeps missing paths honest.
+ *
+ * The swallow is gated on virtual euid == 0: a guest that genuinely
+ * dropped privileges should see real permission errors. */
 static long handle_fchmodat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
@@ -821,7 +825,9 @@ static long handle_fchmodat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (e) return e;
 	const char *p = t.is_root ? "." : t.path;
 	long rv = TAWC_RAW(TAWC_SYS_fchmodat, t.fd, (long)p, args->c, 0, 0, 0);
-	if (rv == TAWC_EPERM || rv == TAWC_EACCES) return 0;
+	if ((rv == TAWC_EPERM || rv == TAWC_EACCES) &&
+	    tawcroot_identity_euid() == 0)
+		return 0;
 	return rv;
 }
 
@@ -909,14 +915,17 @@ static long handle_utimensat(const tawcroot_syscall_args *args,
  * (Android untrusted_app uid can't chown; the on-disk file stays
  * app-owned and the guest sees what it expected — proot `-0`). The
  * existence probe is what keeps us honest: `chown("/nope", ...)` must
- * ENOENT like the kernel, not fake-succeed. Mirrors the validation
- * handle_chown_legacy already does. */
+ * ENOENT like the kernel, not fake-succeed.
+ *
+ * The fake is gated on virtual euid == 0: a genuinely-dropped guest
+ * gets the host's real chown result (normally EPERM) instead. */
 static long handle_fchownat(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	int dirfd = (int)args->a;
 	const char *gpath = (const char *)(uintptr_t)args->b;
 	int flags = (int)args->e;
+	int priv = tawcroot_identity_euid() == 0;
 
 	/* AT_EMPTY_PATH (with NULL or empty path) operates on dirfd
 	 * directly — validate the fd. */
@@ -925,6 +934,10 @@ static long handle_fchownat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		if (empty < 0) return empty;
 		if (empty) {
 			if (tawcroot_fd_is_reserved(dirfd)) return TAWC_EBADF;
+			if (!priv)
+				return TAWC_RAW(TAWC_SYS_fchownat, dirfd,
+						(long)"", args->c, args->d,
+						flags, 0);
 			struct stat probe;
 			long rv = TAWC_RAW(TAWC_SYS_fstatat, dirfd, (long)"",
 					   (long)&probe, AT_EMPTY_PATH, 0, 0);
@@ -943,6 +956,9 @@ static long handle_fchownat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	if (e) return e;
 	const char *p = t.is_root ? "" : t.path;
 	int sflags = (flags & AT_SYMLINK_NOFOLLOW) | (t.is_root ? AT_EMPTY_PATH : 0);
+	if (!priv)
+		return TAWC_RAW(TAWC_SYS_fchownat, t.fd, (long)p,
+				args->c, args->d, sflags, 0);
 	struct stat probe;
 	long rv = TAWC_RAW(TAWC_SYS_fstatat, t.fd, (long)p,
 			   (long)&probe, sflags, 0, 0);
@@ -952,12 +968,16 @@ static long handle_fchownat(const tawcroot_syscall_args *args, ucontext_t *uc)
 /* fd-only fchown, used by GNU tar when dpkg-deb extracts package
  * control files. Same fake-root contract as fchownat, but validate the
  * fd first: fchown(-1)/fchown(closed) must EBADF like the kernel, and
- * a reserved fd answers EBADF per the fdtab.h contract. */
+ * a reserved fd answers EBADF per the fdtab.h contract. Unprivileged
+ * (virtual euid != 0) forwards the real syscall. */
 static long handle_fchown(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	int fd = (int)args->a;
 	if (tawcroot_fd_is_reserved(fd)) return TAWC_EBADF;
+	if (tawcroot_identity_euid() != 0)
+		return TAWC_RAW(TAWC_SYS_fchown, fd, args->b, args->c,
+				0, 0, 0);
 	long r = tawc_fcntl(fd, F_GETFD, 0);
 	if (r < 0) return r;  /* -EBADF for a bad/closed fd */
 	return 0;
@@ -1310,21 +1330,15 @@ static long handle_rmdir(const tawcroot_syscall_args *args, ucontext_t *uc)
 { return via_at(handle_unlinkat, args, uc,
 		AT_FDCWD, args->a, AT_REMOVEDIR, 0, 0); }
 
+/* Legacy chown/lchown route through handle_fchownat: same translation,
+ * existence probe, and euid-gated fake. args->nr is preserved by
+ * via_at, so one handler serves both (lchown adds NOFOLLOW). */
 static long handle_chown_legacy(const tawcroot_syscall_args *args,
 				ucontext_t *uc)
 {
-	(void)uc;
-	/* Validate the path pointer even though we ignore the value, so
-	 * a guest with a wild pointer sees -EFAULT instead of fake
-	 * success — matches the contract every other path-bearing
-	 * handler exposes. */
-	const char *path = (const char *)(uintptr_t)args->a;
-	TAWCROOT_PATH_SCRATCH_AUTO(scratch);
-	char *path_buf = scratch->buf[0];
-	long n = tawc_copy_string_from_guest(
-		path_buf, TAWCROOT_PATH_SCRATCH_SIZE, path);
-	if (n < 0) return n;
-	return 0;  /* fake-root no-op, like fchownat */
+	int flags = args->nr == TAWC_SYS_lchown ? AT_SYMLINK_NOFOLLOW : 0;
+	return via_at(handle_fchownat, args, uc,
+		      AT_FDCWD, args->a, args->b, args->c, flags);
 }
 
 /* Legacy x86_64 link(oldpath, newpath): linkat with flags=0 (source is
