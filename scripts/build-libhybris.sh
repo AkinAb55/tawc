@@ -58,7 +58,7 @@ command -v "$CXX_BIN" >/dev/null || {
 # Host tools libhybris's autotools driver invokes during the build,
 # plus patchelf for renaming the libhybris GLESv2 soname when building
 # the GL shims.
-for tool in autoreconf libtool wayland-scanner pkg-config make patchelf; do
+for tool in autoreconf libtool wayland-scanner pkg-config make patchelf file; do
     command -v "$tool" >/dev/null || {
         echo "ERROR: '$tool' not on PATH. See notes/building.md." >&2
         exit 1
@@ -93,6 +93,23 @@ if [ "$CLEAN" = "1" ]; then
     rm -rf "$OUT_DIR"
 fi
 mkdir -p "$OUT_DIR" "$PREFIX" "$PC_DIR" "$STUB_DIR"
+
+# ── Logged build steps ──
+# Run a noisy command, showing only a short tail on success but the full
+# log on failure. Piping straight to `tail` (the old approach) could drop
+# the actual error — e.g. a linker "cannot find .../crtbeginS.o" pushed
+# out of view by trailing deprecation warnings.
+BUILD_LOG="$OUT_DIR/build.log"
+run_logged() {
+    if "$@" >"$BUILD_LOG" 2>&1; then
+        tail -n 5 "$BUILD_LOG"
+    else
+        echo "ERROR: command failed: $*" >&2
+        echo "       full log ($BUILD_LOG) follows:" >&2
+        cat "$BUILD_LOG" >&2
+        exit 1
+    fi
+}
 
 # ── Stub .so files ──
 # libhybris's plugins DT_NEEDED-link to wayland-client/server/egl and
@@ -197,9 +214,9 @@ export PKG_CONFIG_LIBDIR="$PC_DIR"
 export CPPFLAGS="-idirafter $HOST_WAYLAND_INCLUDE"
 
 # ── autogen.sh (regen configure if needed) ──
-if [ ! -x "$LIBHYBRIS_DIR/hybris/configure" ] || [ "$CLEAN" = "1" ]; then
+if [ ! -x "$BUILD_DIR/configure" ] || [ "$CLEAN" = "1" ]; then
     echo "==> autogen.sh (NOCONFIGURE=1)"
-    ( cd "$LIBHYBRIS_DIR/hybris" && NOCONFIGURE=1 ./autogen.sh ) 2>&1 | tail -5
+    run_logged env -C "$BUILD_DIR" NOCONFIGURE=1 ./autogen.sh
 fi
 
 # ── configure ──
@@ -222,37 +239,47 @@ fi
 # overrides anymore. (LD_LIBRARY_PATH is still needed for the
 # by-name `dlopen("libEGL.so")` first-level lookup since we don't
 # ship --enable-glvnd; see notes/wsi-layer.md.)
-# Detect prefix drift: the build dir is in-tree (`deps/libhybris/hybris/`),
-# so a previous build with a different `--prefix` leaves a Makefile that
-# survives the host-side build/ wipe. If the recorded prefix doesn't
-# match the one we're about to bake, force a reconfigure — otherwise
-# `make install` lands binaries at the old path and the verify step
-# below trips with all libs "missing".
+CONFIGURE_ARGS=(
+    --host="$HOST_TRIPLE"
+    --prefix=/usr/lib/hybris
+    --libdir=/usr/lib/hybris
+    --with-android-headers="$ANDROID_HEADERS_DIR"
+    --enable-arch=arm64
+    --enable-wayland
+    --enable-x11
+    --disable-wayland_serverside_buffers
+    --enable-adreno-quirks
+    --enable-mali-quirks
+    --enable-property-cache
+    --with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64
+)
+
+# The build tree is in-tree (`deps/libhybris/hybris/`), so leftover
+# configure state survives a host-side build/ wipe and can be stale in
+# ways that break the build or misplace artefacts:
+#   - changed configure args (e.g. an old --prefix makes `make install`
+#     land binaries at the old path, tripping the verify step below with
+#     all libs "missing");
+#   - a host cross-gcc upgrade (libtool bakes absolute paths to the old
+#     gcc's CRT objects, e.g. `.../aarch64-linux-gnu/15.2.0/crtbeginS.o`,
+#     so every link fails with "cannot find crtbeginS.o").
+# So stamp a fingerprint of both after each configure, and reconfigure
+# from scratch whenever the recorded one doesn't match.
+FINGERPRINT="crt=$("$CC_BIN" -print-file-name=crtbeginS.o) args=${CONFIGURE_ARGS[*]}"
+STAMP="$BUILD_DIR/.tawc-configure-stamp"
 NEED_CONFIGURE=0
-if [ ! -f "$BUILD_DIR/Makefile" ] || [ "$CLEAN" = "1" ]; then
+if [ "$CLEAN" = "1" ] || [ ! -f "$BUILD_DIR/Makefile" ]; then
     NEED_CONFIGURE=1
-elif ! grep -qE '^prefix = /usr/lib/hybris$' "$BUILD_DIR/Makefile"; then
-    echo "==> stale Makefile (wrong prefix) — distclean + reconfigure"
+elif [ "$(cat "$STAMP" 2>/dev/null)" != "$FINGERPRINT" ]; then
+    echo "==> stale build tree (configure args or cross-gcc changed) — distclean + reconfigure"
     ( cd "$BUILD_DIR" && make distclean ) >/dev/null 2>&1 || true
     NEED_CONFIGURE=1
 fi
 if [ "$NEED_CONFIGURE" = "1" ]; then
     echo "==> configure (host=$HOST_TRIPLE prefix=/usr/lib/hybris)"
-    ( cd "$BUILD_DIR" && \
-      ./configure \
-        --host="$HOST_TRIPLE" \
-        --prefix=/usr/lib/hybris \
-        --libdir=/usr/lib/hybris \
-        --with-android-headers="$ANDROID_HEADERS_DIR" \
-        --enable-arch=arm64 \
-        --enable-wayland \
-        --enable-x11 \
-        --disable-wayland_serverside_buffers \
-        --enable-adreno-quirks \
-        --enable-mali-quirks \
-        --enable-property-cache \
-        --with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64 \
-      ) 2>&1 | tail -20
+    rm -f "$STAMP"
+    run_logged env -C "$BUILD_DIR" ./configure "${CONFIGURE_ARGS[@]}"
+    printf '%s\n' "$FINGERPRINT" >"$STAMP"
 fi
 
 # ── Build & install ──
@@ -264,31 +291,24 @@ fi
 # Android 6/7/8) that we don't need — at runtime, libhybris loads only
 # the `q` plugin on Android 10+. Skipping them avoids unrelated build
 # failures in code we'd never run.
-COMMON_TOPLEVEL=( "make -C common SUBDIRS=. libhybris-common.la" )
-COMMON_INSTALL=( "make -C common install-libLTLIBRARIES" )
+#
+# Install failures must propagate (no `|| true` swallowing), otherwise
+# the verify step below trips on the missing artefacts and hides the
+# underlying error.
 DIRS="include properties libsync platforms hardware ui gralloc egl glesv1 glesv2 hwc2 vulkan utils"
+JOBS="$(nproc)"
 
-echo "==> make"
+echo "==> make + install (DESTDIR=$PREFIX)"
 echo "    -- common (top-level + q linker only)"
-make -C "$BUILD_DIR/common" -j"$(nproc)" SUBDIRS=. libhybris-common.la 2>&1 | tail -5
-make -C "$BUILD_DIR/common/q" -j"$(nproc)" 2>&1 | tail -5
+run_logged make -C "$BUILD_DIR/common" -j"$JOBS" SUBDIRS=. libhybris-common.la
+run_logged make -C "$BUILD_DIR/common" install-libLTLIBRARIES DESTDIR="$PREFIX"
+run_logged make -C "$BUILD_DIR/common/q" -j"$JOBS"
+run_logged make -C "$BUILD_DIR/common/q" install DESTDIR="$PREFIX"
 for dir in $DIRS; do
-    if [ -d "$BUILD_DIR/$dir" ] && [ -f "$BUILD_DIR/$dir/Makefile" ]; then
+    if [ -f "$BUILD_DIR/$dir/Makefile" ]; then
         echo "    -- $dir"
-        make -C "$BUILD_DIR/$dir" -j"$(nproc)" 2>&1 | tail -5
-    fi
-done
-
-echo "==> install (DESTDIR=$PREFIX)"
-# We only install the dirs we actually built above (common top-level +
-# the q linker plugin + DIRS). No `|| true` swallowing — real install
-# failures must propagate, otherwise the verify step below trips on the
-# missing artefacts and hides the underlying error.
-make -C "$BUILD_DIR/common" install-libLTLIBRARIES DESTDIR="$PREFIX" 2>&1 | tail -3
-make -C "$BUILD_DIR/common/q" install DESTDIR="$PREFIX" 2>&1 | tail -3
-for dir in $DIRS; do
-    if [ -d "$BUILD_DIR/$dir" ] && [ -f "$BUILD_DIR/$dir/Makefile" ]; then
-        make -C "$BUILD_DIR/$dir" install DESTDIR="$PREFIX" 2>&1 | tail -3
+        run_logged make -C "$BUILD_DIR/$dir" -j"$JOBS"
+        run_logged make -C "$BUILD_DIR/$dir" install DESTDIR="$PREFIX"
     fi
 done
 

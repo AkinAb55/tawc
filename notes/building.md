@@ -48,6 +48,7 @@ and launch as documented in AGENTS.md's Common Commands.
 | Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool`                          |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
 | `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |
+| `file` (libhybris build verify step) | `file`                 | `file`                                               |
 | nginx (dev-time mirror cache, optional) | `nginx`                       | `nginx`                                              |
 
 JDK 26 is **not** supported for running this Gradle build — Gradle 8.12's
