@@ -101,7 +101,8 @@ ARG mirrorProxy=http://127.0.0.1:8080/proxy/
 
 The install action also takes `--arg externalBinds=<json>` — a JSON
 `ExternalBind` array (omitted = none; there is no default bind set).
-See notes/external-binds.md.
+See notes/external-binds.md. And `--arg ando=true|false` (default
+false) sets the initial per-distro ando enablement — see notes/ando.md.
 
 **RUNINSIDE form** — run a command inside an installed chroot. The
 broker reads the install's recorded method from `metadata.json` and
@@ -335,6 +336,8 @@ before any client connection arrives.
 | `get-output-scale` | SettingsActions | Print the current output scale. |
 | `set-gtk3-broken-menus-workaround` (`enabled`) | SettingsActions | Save and push the live GTK3 broken menus workaround toggle. In test mode this only mutates the in-memory store. |
 | `get-gtk3-broken-menus-workaround` | SettingsActions | Print the current GTK3 broken menus workaround setting. |
+| `set-ando` (`installId`, `enabled`) | SettingsActions | Set the per-distro ando (notes/ando.md) test override for `installId` and reconcile the broker (`AndoBrokers.refresh`): enable brings the listener up; disable tears it down and SIGKILLs in-flight ando children. In-memory only (never a metadata write); discarded on process death and cleared by `test-init`. Prints `true`/`false`. |
+| `get-ando` (`installId`) | SettingsActions | Print the effective ando state for `installId` (override if set, else metadata). |
 
 **Rule for input actions: every driver goes through `TawcInputConnection`.**
 There is intentionally no broker action that calls `NativeBridge.native*`

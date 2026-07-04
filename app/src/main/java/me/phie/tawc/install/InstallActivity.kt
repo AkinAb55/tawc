@@ -79,6 +79,10 @@ class InstallActivity : AppCompatActivity() {
     private var useCacheProxy: Boolean? = null
     private lateinit var cacheProxyCheckbox: CheckBox
 
+    /** ando (notes/ando.md) toggle. Off by default, shown for all
+     *  methods; persisted across rotations. */
+    private var andoEnabled: Boolean = false
+
     private lateinit var formScroll: ScrollView
     private lateinit var formSection: LinearLayout
     private lateinit var methodGroup: RadioGroup
@@ -109,6 +113,7 @@ class InstallActivity : AppCompatActivity() {
             me.phie.tawc.BuildConfig.DEBUG -> true
             else -> false
         }
+        andoEnabled = savedInstanceState?.getBoolean(KEY_ANDO) == true
         pendingBinds.clear()
         savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
             pendingBinds.addAll(
@@ -147,6 +152,7 @@ class InstallActivity : AppCompatActivity() {
         selectedMethod?.let { outState.putString(KEY_METHOD, it) }
         selectedDistro?.let { outState.putString(KEY_DISTRO, it) }
         useCacheProxy?.let { outState.putBoolean(KEY_USE_PROXY, it) }
+        outState.putBoolean(KEY_ANDO, andoEnabled)
         outState.putString(KEY_BINDS, ExternalBind.toJsonArray(pendingBinds).toString())
     }
 
@@ -196,6 +202,10 @@ class InstallActivity : AppCompatActivity() {
                 verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
             )
         }
+
+        // ando toggle (notes/ando.md) — shown for all methods and build
+        // types, default off. Opt-in, fail-closed. Above the binds row.
+        s.addView(buildAndoRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
         // External-storage binds row: count + Manage button. Hidden
         // when the build doesn't ship MANAGE_EXTERNAL_STORAGE, and for
@@ -406,6 +416,15 @@ class InstallActivity : AppCompatActivity() {
     }
 
     /**
+     * ando toggle ([buildAndoToggleRow], notes/ando.md). Off by
+     * default; drives [andoEnabled], passed to the service by
+     * [beginInstall]. Shown for every method and build type — unlike
+     * binds, ando applies to all install methods.
+     */
+    private fun buildAndoRow(): LinearLayout =
+        buildAndoToggleRow(this, andoEnabled) { _, checked -> andoEnabled = checked }
+
+    /**
      * Dev-only "Use cache proxy" checkbox. Drives [useCacheProxy],
      * which gates whether [beginInstall] passes a `mirrorProxy` URL to
      * the service. See `notes/cache-proxy.md`.
@@ -510,7 +529,7 @@ class InstallActivity : AppCompatActivity() {
 
         val launch = {
             InstallationService.startInstall(
-                this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl, bindsJson,
+                this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl, bindsJson, andoEnabled,
             )
             startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
             finish()
@@ -545,5 +564,6 @@ class InstallActivity : AppCompatActivity() {
         private const val KEY_LABEL_TEXT = "tawc.install.labelText"
         private const val KEY_USE_PROXY = "tawc.install.useCacheProxy"
         private const val KEY_BINDS = "tawc.install.externalBinds"
+        private const val KEY_ANDO = "tawc.install.ando"
     }
 }

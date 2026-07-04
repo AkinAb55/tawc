@@ -60,6 +60,13 @@ internal object InstallActions {
             // JSON [ExternalBind] array; omit for the default set, pass
             // `[]` for none. See notes/external-binds.md.
             val externalBinds = args["externalBinds"]
+            // ando (notes/ando.md): opt-in, default false when absent.
+            // A present-but-malformed value is rejected loudly (like
+            // set-ando) rather than silently coerced to false.
+            val ando = args["ando"]?.let {
+                it.toBooleanStrictOrNull()
+                    ?: return ctx.fail("install: invalid boolean for ando '$it'")
+            } ?: false
 
             val opId = "install:$id"
             tryOpenLogScreen(ctx.appContext, opId)
@@ -67,10 +74,11 @@ internal object InstallActions {
             ctx.out("[action] install id=$id method=${method ?: "(default)"} " +
                 "distro=${distro ?: "(default)"} label=${label ?: "(default)"}" +
                 (mirrorProxy?.let { " mirrorProxy=$it" } ?: "") +
-                (externalBinds?.let { " externalBinds=$it" } ?: ""))
+                (externalBinds?.let { " externalBinds=$it" } ?: "") +
+                " ando=$ando")
 
             InstallationService.startInstall(
-                ctx.appContext, id, method, distro, label, mirrorProxy, externalBinds,
+                ctx.appContext, id, method, distro, label, mirrorProxy, externalBinds, ando,
             )
             return mirrorOperation(opId, ctx)
         }

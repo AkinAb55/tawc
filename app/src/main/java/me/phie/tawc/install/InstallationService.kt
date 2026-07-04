@@ -201,6 +201,7 @@ class InstallationService : Service() {
                 intent.getStringExtra(EXTRA_LABEL),
                 intent.getStringExtra(EXTRA_MIRROR_PROXY),
                 intent.getStringExtra(EXTRA_EXTERNAL_BINDS),
+                intent.getBooleanExtra(EXTRA_ANDO, false),
             )
             ACTION_UNINSTALL -> startUninstall(rawId)
             else -> {
@@ -248,6 +249,7 @@ class InstallationService : Service() {
         label: String? = null,
         mirrorProxyUrl: String? = null,
         externalBindsJson: String? = null,
+        andoEnabled: Boolean = false,
     ) {
         if (!Installation.isValidId(id)) {
             rejectInstall(id, getString(R.string.install_reject_invalid_id))
@@ -403,7 +405,7 @@ class InstallationService : Service() {
         val job = scope.launch {
             val installer = Installer(
                 applicationContext, store, BootstrapCache(applicationContext),
-                distro, method, id, label, mirrorProxy, externalBinds,
+                distro, method, id, label, mirrorProxy, externalBinds, andoEnabled,
             )
             try {
                 // runInterruptible maps coroutine cancellation onto a
@@ -872,6 +874,8 @@ class InstallationService : Service() {
         const val EXTRA_MIRROR_PROXY = "mirrorProxy"
         /** JSON array of [ExternalBind]s; absent = default set, "[]" = none. */
         const val EXTRA_EXTERNAL_BINDS = "externalBinds"
+        /** Whether ando (notes/ando.md) is enabled for this install. */
+        const val EXTRA_ANDO = "ando"
 
         fun startInstall(
             context: Context,
@@ -881,6 +885,7 @@ class InstallationService : Service() {
             label: String? = null,
             mirrorProxyUrl: String? = null,
             externalBindsJson: String? = null,
+            andoEnabled: Boolean = false,
         ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
@@ -890,6 +895,7 @@ class InstallationService : Service() {
             if (label != null) i.putExtra(EXTRA_LABEL, label)
             if (mirrorProxyUrl != null) i.putExtra(EXTRA_MIRROR_PROXY, mirrorProxyUrl)
             if (externalBindsJson != null) i.putExtra(EXTRA_EXTERNAL_BINDS, externalBindsJson)
+            if (andoEnabled) i.putExtra(EXTRA_ANDO, true)
             context.startForegroundService(i)
         }
 

@@ -23,6 +23,55 @@ class InstallationStore(context: Context) {
     fun rootfsDir(id: String): File = File(installationDir(id), "rootfs")
     fun metadataFile(id: String): File = File(installationDir(id), "metadata.json")
 
+    /**
+     * Per-distro ando broker dir — sibling of `rootfs/`, so uninstall
+     * removes it, and (crucially) OUTSIDE the wholesale-bound share dir
+     * so no other distro's guest can enumerate it. Holds the listening
+     * socket [andoSocket]; bound into the guest at
+     * [TawcrootMethod.GUEST_ANDO_DIR] only when ando is enabled.
+     * See notes/ando.md.
+     */
+    fun andoDir(id: String): File = File(installationDir(id), "ando")
+    fun andoSocket(id: String): File = File(andoDir(id), "ando.sock")
+
+    /**
+     * The install id owning [rootfs] (`<distros>/<id>/rootfs`), or null
+     * if [rootfs] isn't a known install's rootfs dir. Lets spawn paths
+     * derive per-distro settings from the rootfs alone without threading
+     * [Installation] through their call chains (same trick
+     * [TawcrootMethod.externalBindsFor] uses).
+     */
+    fun idForRootfs(rootfs: String): String? {
+        val id = File(rootfs).absoluteFile.parentFile?.name ?: return null
+        return if (rootfsDir(id).absolutePath == File(rootfs).absolutePath) id else null
+    }
+
+    /**
+     * Whether [id] may use ando, honoring the test-mode override
+     * ([setAndoOverride]) over the persisted [Installation.andoEnabled].
+     * Read per-spawn (bind emission) and by [me.phie.tawc.AndoBrokers].
+     * Default `false`: fail-closed, opt-in.
+     */
+    fun andoEnabled(id: String): Boolean =
+        andoOverrides[id] ?: (load(id)?.andoEnabled ?: false)
+
+    /** As [andoEnabled], but for an already-loaded record — skips the
+     *  metadata re-read when the caller already holds the [Installation]. */
+    fun andoEnabled(inst: Installation): Boolean =
+        andoOverrides[inst.id] ?: inst.andoEnabled
+
+    /**
+     * The host ando dir for the install owning [rootfs] when ando is
+     * enabled for it, else null. Creates the dir (so a bind src / broker
+     * bind can open it) and honors the test override. Single resolution
+     * point for the tawcroot/proot/chroot bind builders. See notes/ando.md.
+     */
+    fun andoHostDir(rootfs: String): String? {
+        val id = idForRootfs(rootfs) ?: return null
+        if (!andoEnabled(id)) return null
+        return andoDir(id).apply { mkdirs() }.absolutePath
+    }
+
     /** Discover installations on disk by scanning [baseDir]. */
     fun list(): List<Installation> {
         val dir = baseDir
@@ -137,5 +186,31 @@ class InstallationStore(context: Context) {
         }
         val kb = output.trim().toLongOrNull() ?: return -1L
         return kb * 1024L
+    }
+
+    companion object {
+        // Test-only in-memory per-id ando override (notes/ando.md).
+        // Mirrors Settings.enterTestMode: the `set-ando` broker action
+        // writes here so integration tests can flip ando without a
+        // durable metadata write; [andoEnabled] and
+        // [me.phie.tawc.AndoBrokers] read through it, and app-process
+        // death discards it. Empty (no override) in production.
+        private val andoOverrides = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+        /** Test hook: force [andoEnabled] for [id] regardless of metadata. */
+        fun setAndoOverride(id: String, enabled: Boolean) {
+            andoOverrides[id] = enabled
+        }
+
+        /** Drop [id]'s override (uninstall path — a stale override must
+         *  not resurrect ando on a later reinstall of the same id). */
+        fun clearAndoOverride(id: String) {
+            andoOverrides.remove(id)
+        }
+
+        /** Test hook: drop all ando overrides, restoring metadata-backed state. */
+        fun clearAndoOverrides() {
+            andoOverrides.clear()
+        }
     }
 }

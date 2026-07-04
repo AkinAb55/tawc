@@ -10,6 +10,7 @@ import android.view.inputmethod.CorrectionInfo
 import androidx.core.net.toUri
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import me.phie.tawc.AndoBrokers
 import me.phie.tawc.Settings
 import me.phie.tawc.compositor.ClipboardBridge
 import me.phie.tawc.compositor.CompositorActivity
@@ -605,6 +606,11 @@ internal object InputActions {
             if (!installId.isNullOrBlank()) {
                 killedRootfs = cleanupRootfs(ctx, installId)
             }
+            // Drop any per-distro ando override a prior test set and
+            // reconcile the broker back to metadata-backed defaults, so
+            // ando listeners don't leak across tests. notes/ando.md.
+            InstallationStore.clearAndoOverrides()
+            AndoBrokers.refresh(ctx.appContext)
             ctx.out("closed=$closed")
             ctx.out("rootfs_killed=$killedRootfs")
             return 0

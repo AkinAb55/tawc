@@ -5,7 +5,7 @@ use std::sync::{OnceLock, mpsc};
 use std::time::Duration;
 
 use jni::JNIEnv;
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{jboolean, jint, jlong, jobject};
 use jni::JavaVM;
 use log::info;
@@ -228,27 +228,51 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     });
 }
 
-/// Start the ando broker listener thread (see ando.rs / notes/ando.md).
-/// Called once from `TawcApplication`'s startup thread — all build
-/// types, independent of compositor startup, so the broker is alive
-/// whenever the app process is. `socket_path` is the host-side
-/// filesystem socket path (`AppPaths.andoSocket`, exposed to guests at
-/// `/usr/share/tawc/ando.sock` via the share bind).
+/// Reconcile the per-distro ando broker listeners to exactly the
+/// enabled set (see ando.rs / notes/ando.md). `ids[i]` is an install id
+/// and `paths[i]` its host-side socket path
+/// (`<appData>/distros/<id>/ando/ando.sock`); the two arrays are
+/// parallel. Called from `AndoBrokers.refresh` at startup and on every
+/// ando install/uninstall/toggle. Idempotent.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartAndoBroker(
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeSyncAndoBrokers(
     mut env: JNIEnv,
     _class: JClass,
-    socket_path: JString,
+    ids: JObjectArray,
+    paths: JObjectArray,
 ) {
     init_native_logging();
-    let socket_path: String = match env.get_string(&socket_path) {
-        Ok(s) => s.into(),
+    let ids = match jstring_array(&mut env, &ids) {
+        Ok(v) => v,
         Err(e) => {
-            log::error!("nativeStartAndoBroker: bad socket path string: {}", e);
+            log::error!("nativeSyncAndoBrokers: bad ids array: {}", e);
             return;
         }
     };
-    ando::start(socket_path);
+    let paths = match jstring_array(&mut env, &paths) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("nativeSyncAndoBrokers: bad paths array: {}", e);
+            return;
+        }
+    };
+    if ids.len() != paths.len() {
+        log::error!("nativeSyncAndoBrokers: length mismatch {} != {}", ids.len(), paths.len());
+        return;
+    }
+    ando::sync(ids, paths);
+}
+
+/// Read a Java `String[]` into a `Vec<String>`.
+fn jstring_array(env: &mut JNIEnv, arr: &JObjectArray) -> Result<Vec<String>, jni::errors::Error> {
+    let len = env.get_array_length(arr)?;
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let obj = env.get_object_array_element(arr, i)?;
+        let s: String = env.get_string(&JString::from(obj))?.into();
+        out.push(s);
+    }
+    Ok(out)
 }
 
 /// Stop the compositor thread. Called from `CompositorService.onDestroy`.

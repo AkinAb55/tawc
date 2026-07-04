@@ -126,13 +126,13 @@ object NativeBridge {
     /** Stop the Rust compositor thread. Called when the Service is destroyed. */
     external fun nativeStopCompositor()
 
-    /** Start the ando broker thread (run Android commands from rootfs
-     *  guests — see notes/ando.md). Called once from
-     *  [me.phie.tawc.TawcApplication]'s startup thread; independent of
-     *  compositor startup. `socketPath` is
-     *  [me.phie.tawc.AppPaths.andoSocket] (guest view
-     *  `/usr/share/tawc/ando.sock`). */
-    external fun nativeStartAndoBroker(socketPath: String)
+    /** Reconcile the per-distro ando broker listeners to exactly the
+     *  enabled set (run Android commands from rootfs guests — see
+     *  notes/ando.md). `ids[i]` is an install id and `paths[i]` its
+     *  host-side socket path; the arrays are parallel. Driven by
+     *  [me.phie.tawc.AndoBrokers.refresh] at startup and on every ando
+     *  install/uninstall/toggle. Idempotent. */
+    external fun nativeSyncAndoBrokers(ids: Array<String>, paths: Array<String>)
 
     // --- Per-Activity surface lifecycle: called from CompositorActivity ---
 

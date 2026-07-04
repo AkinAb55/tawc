@@ -2,7 +2,6 @@ package me.phie.tawc
 
 import android.app.Application
 import android.util.Log
-import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.dev.ExecBroker
 import me.phie.tawc.install.BootstrapCache
 import me.phie.tawc.install.InstallationStore
@@ -40,16 +39,18 @@ class TawcApplication : Application() {
         OperationsNotificationCenter.start(this)
         thread(name = "tawc-startup", isDaemon = true) {
             // Production ando broker (run Android commands from rootfs
-            // guests; notes/ando.md). All build types; alive whenever
-            // the app process is. On this thread because touching
+            // guests; notes/ando.md). Per-distro: one listener per
+            // ando-enabled install. All build types; alive whenever the
+            // app process is. On this thread because touching
             // NativeBridge triggers its `System.loadLibrary` of the
             // large compositor .so, which shouldn't block onCreate.
-            // The share dir may not exist yet on a fresh install — the
-            // broker binds into it.
             try {
                 val appPaths = AppPaths.from(this)
                 appPaths.shareDir.mkdirs()
-                NativeBridge.nativeStartAndoBroker(appPaths.andoSocket.absolutePath)
+                // Unlink the single shared ando socket older versions
+                // bound here (before ando went per-distro).
+                appPaths.legacyAndoSocket.delete()
+                AndoBrokers.refresh(this)
             } catch (t: Throwable) {
                 Log.w(TAG, "ando broker start failed", t)
             }

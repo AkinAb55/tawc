@@ -6,6 +6,13 @@
 //! an ART `ProcessBuilder` child (the guest session itself) — standing
 //! regression cover for "nothing else in the app process steals the
 //! ando broker's waitpid status".
+//!
+//! ando is a per-distro capability, default **off**. These tests flip
+//! it with the in-memory test override (`set-ando`, see
+//! [adb::set_ando]) rather than a durable metadata write: every test
+//! that expects ando to *work* calls [enable_ando] first, and the
+//! disabled-path tests call [disable_ando]. The override is discarded
+//! on app-process death and by `test-init`, so nothing durable leaks.
 
 use tawc_integration::adb;
 
@@ -20,16 +27,50 @@ fn run(cmd: &str) -> (i32, String, String) {
     )
 }
 
+/// Enable ando for the standing install and wait for the broker to
+/// reconcile. The take-effect-on-next-spawn contract is satisfied
+/// automatically: the subsequent `run(...)` is a fresh rootfs spawn, so
+/// it carries the per-distro ando bind.
+fn enable_ando() {
+    adb::set_ando(true).expect("set-ando true");
+}
+
+/// Disable ando for the standing install. Immediate: the listener is
+/// closed, its socket unlinked, and in-flight ando children SIGKILLed.
+fn disable_ando() {
+    adb::set_ando(false).expect("set-ando false");
+}
+
 /// Count Android-side processes whose command line matches `pattern`
 /// (a grep regex; use a [b]racketed first char so the grep itself
-/// doesn't match).
+/// doesn't match). `-o PID,ARGS` is required: the emulator's default
+/// `ps -A` prints only the COMM (`sleep`), so a pattern carrying args
+/// (`sleep 991`) would never match.
 fn android_proc_count(pattern: &str) -> usize {
-    let out = adb::shell(&format!("ps -A | grep '{pattern}' | wc -l")).expect("adb shell ps");
+    let out = adb::shell(&format!("ps -A -o PID,ARGS 2>/dev/null | grep '{pattern}' | wc -l"))
+        .expect("adb shell ps");
     String::from_utf8_lossy(&out.stdout).trim().parse().expect("ps count")
+}
+
+/// Poll until the Android-side process matching `pattern` is present
+/// (or absent), panicking if the state isn't reached within `secs`.
+fn wait_for_proc(pattern: &str, present: bool, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if (android_proc_count(pattern) > 0) == present {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {pattern:?} present={present} not reached within {secs}s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 #[test]
 fn test_ando_runs_android_command_on_guest_stdout() {
+    enable_ando();
     let (rc, out, err) = run("ando /system/bin/getprop ro.product.cpu.abi");
     assert_eq!(rc, 0, "stderr: {err}");
     assert!(
@@ -40,6 +81,7 @@ fn test_ando_runs_android_command_on_guest_stdout() {
 
 #[test]
 fn test_ando_path_search_and_exit_code() {
+    enable_ando();
     // `sh` is bare (PATH search hits /system/bin) and the exit code
     // must come back verbatim through broker + client.
     let (rc, _, err) = run("ando sh -c 'exit 7'");
@@ -48,6 +90,7 @@ fn test_ando_path_search_and_exit_code() {
 
 #[test]
 fn test_ando_command_not_found() {
+    enable_ando();
     let (rc, _, err) = run("ando no-such-command-xyz");
     assert_eq!(rc, 127);
     assert!(err.contains("not found"), "stderr: {err:?}");
@@ -55,6 +98,7 @@ fn test_ando_command_not_found() {
 
 #[test]
 fn test_ando_env_hygiene_and_extras() {
+    enable_ando();
     // Nothing from the guest env (libhybris LD_* baggage) may leak…
     let (rc, out, _) = run(r#"ando sh -c 'echo "[${LD_PRELOAD}${LD_LIBRARY_PATH}]"'"#);
     assert_eq!(rc, 0);
@@ -70,6 +114,7 @@ fn test_ando_env_hygiene_and_extras() {
 
 #[test]
 fn test_ando_identity_is_app_uid_not_fake_root() {
+    enable_ando();
     let (rc, out, _) = run("echo guest=$(id -u) android=$(ando id -u)");
     assert_eq!(rc, 0);
     let android_uid: u32 = out
@@ -82,6 +127,7 @@ fn test_ando_identity_is_app_uid_not_fake_root() {
 
 #[test]
 fn test_ando_signal_forwarding() {
+    enable_ando();
     // TERM the in-rootfs client: its handler forwards SIG 15, the
     // broker kills the Android-side process group, sleep dies by
     // signal, and the client exits with the broker's 128+15.
@@ -93,6 +139,7 @@ fn test_ando_signal_forwarding() {
 
 #[test]
 fn test_ando_client_death_reaps_android_child() {
+    enable_ando();
     // SIGKILL the client (no chance to forward): the broker sees
     // socket EOF before child exit and SIGKILLs the child's group.
     let (rc, out, _) = run("ando sleep 988 & p=$!; sleep 1; kill -KILL $p; wait $p; echo rc=$?");
@@ -100,21 +147,12 @@ fn test_ando_client_death_reaps_android_child() {
     assert_eq!(out, "rc=137");
     // The broker reaps the orphan asynchronously after the socket EOF —
     // poll instead of sleeping a fixed grace.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        if android_proc_count("[s]leep 988") == 0 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "orphaned Android-side sleep survived 3s after client SIGKILL"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    wait_for_proc("[s]leep 988", false, 3);
 }
 
 #[test]
 fn test_ando_cwd_travels_as_fd() {
+    enable_ando();
     // The child starts in the host directory the guest cwd resolves
     // to — pwd reports the untranslated host path.
     let (rc, out, _) = run("cd /root && ando sh -c pwd");
@@ -140,6 +178,7 @@ fn test_ando_cwd_travels_as_fd() {
 
 #[test]
 fn test_ando_option_parsing_stops_at_command() {
+    enable_ando();
     // Everything after the first non-option belongs to the command:
     // sh gets -e and -c (if ando consumed -e, "-c" fails K=V → 125).
     let (rc, out, err) = run("ando sh -e -c 'echo boundary-ok'");
@@ -154,6 +193,7 @@ fn test_ando_option_parsing_stops_at_command() {
 
 #[test]
 fn test_ando_preserve_env_forwards_and_blocklists() {
+    enable_ando();
     // -E forwards an arbitrary guest var…
     let (rc, out, err) = run("TAWC_E_VAR=fwd ando -E sh -c 'echo $TAWC_E_VAR'");
     assert_eq!(rc, 0, "stderr: {err}");
@@ -176,6 +216,7 @@ fn test_ando_preserve_env_forwards_and_blocklists() {
 
 #[test]
 fn test_ando_preserve_env_list() {
+    enable_ando();
     // =LIST forwards exactly the named vars; unset names are skipped.
     let (rc, out, err) = run(
         "TA=1 TB=2 TC=3 ando --preserve-env=TA,TB,TUNSET sh -c 'echo \"[$TA][$TB][$TC]\"'",
@@ -198,6 +239,7 @@ fn test_ando_preserve_env_list() {
 
 #[test]
 fn test_ando_env_precedence_e_beats_preserve() {
+    enable_ando();
     // -e extras are sent last, so they win over -E-forwarded values
     // (broker applies ENV lines last-wins) regardless of flag order.
     let (rc, out, err) =
@@ -208,6 +250,7 @@ fn test_ando_env_precedence_e_beats_preserve() {
 
 #[test]
 fn test_ando_chdir() {
+    enable_ando();
     // -D replaces the caller's cwd before the cwd-fd open; same host
     // path resolution as the cwd test above.
     let (rc, out, err) = run("ando -D /root sh -c pwd");
@@ -225,6 +268,7 @@ fn test_ando_chdir() {
 
 #[test]
 fn test_ando_shell_flag() {
+    enable_ando();
     // -s with args runs /system/bin/sh -c with the sudo-style join.
     let (rc, _, err) = run("ando -s exit 9");
     assert_eq!(rc, 9, "stderr: {err}");
@@ -240,6 +284,7 @@ fn test_ando_shell_flag() {
 
 #[test]
 fn test_ando_su_argv_construction() {
+    enable_ando();
     // TAWC_ANDO_SU (test hook) swaps su for echo so an unrooted run
     // can assert the exact argv the -u/-r rewrite constructs.
     let su = "TAWC_ANDO_SU=/system/bin/echo";
@@ -265,6 +310,8 @@ fn test_ando_su_argv_construction() {
 
 #[test]
 fn test_ando_flag_errors_and_help() {
+    // Usage errors (125) and -h (0) are handled entirely client-side
+    // before any connect, so they need no broker — no enable_ando().
     for bad in [
         "ando -Z true",   // unknown option
         "ando -D",        // missing arg
@@ -284,14 +331,123 @@ fn test_ando_flag_errors_and_help() {
 }
 
 #[test]
-fn test_ando_broker_absent_and_socket_override() {
-    // TAWC_ANDO_SOCKET overrides the socket path (test hook): a bogus
-    // path gives one clear error line and exit 127.
-    let (rc, _, err) = run("TAWC_ANDO_SOCKET=/usr/share/tawc/no-such-ando.sock ando true");
-    assert_eq!(rc, 127);
-    assert!(err.contains("broker not running"), "stderr: {err:?}");
-    // Empty override falls through to the built-in share-dir path.
+fn test_ando_socket_override_and_default_path() {
+    enable_ando();
+    // Empty override falls through to the built-in per-distro path,
+    // which is live because ando is enabled.
     let (rc, out, _) = run("TAWC_ANDO_SOCKET= ando echo default-path-ok");
     assert_eq!(rc, 0);
     assert_eq!(out, "default-path-ok");
+    // A bogus path has no node → ENOENT → the client prints the
+    // ando-disabled instructions and exits 127.
+    let (rc, _, err) = run("TAWC_ANDO_SOCKET=/run/no-such-ando.sock ando true");
+    assert_eq!(rc, 127);
+    assert!(err.contains("ando is disabled"), "stderr: {err:?}");
+}
+
+#[test]
+fn test_ando_node_present_but_dead_reports_broker_not_running() {
+    // The non-ENOENT connect-failure branch: a node that exists but
+    // refuses (here /dev/null — connect(2) to a non-socket inode gives
+    // ECONNREFUSED) means an *enabled* distro whose broker/app died,
+    // so the client must keep the "is the tawc app alive?" diagnosis,
+    // not send the user to a toggle that is already on. Client-side
+    // only — no broker state needed.
+    let (rc, _, err) = run("TAWC_ANDO_SOCKET=/dev/null ando true");
+    assert_eq!(rc, 127, "stderr: {err:?}");
+    assert!(err.contains("broker not running"), "stderr: {err:?}");
+    assert!(!err.contains("ando is disabled"), "stderr: {err:?}");
+}
+
+#[test]
+fn test_ando_disabled_prints_enable_instructions() {
+    disable_ando();
+    // No per-distro bind → the default socket path doesn't resolve to
+    // any node → client prints the multi-line enable instructions, 127.
+    let (rc, _, err) = run("ando true");
+    assert_eq!(rc, 127, "stderr: {err:?}");
+    assert!(err.contains("ando is disabled for this distro"), "stderr: {err:?}");
+    assert!(err.contains("Enable it in the tawc app"), "stderr: {err:?}");
+}
+
+#[test]
+fn test_ando_disabled_direct_socket_is_dead() {
+    disable_ando();
+    // The guest ando dir/socket is unreachable when disabled: there is
+    // no bind, so the path resolves inside the rootfs where nothing
+    // created it.
+    let (rc, out, _) = run("test -e /run/tawc-ando/ando.sock; echo $?");
+    assert_eq!(rc, 0);
+    assert_eq!(out, "1", "ando socket node reachable while disabled");
+    // Even naming the exact default path directly, a raw connect fails.
+    let (rc, _, err) =
+        run("TAWC_ANDO_SOCKET=/run/tawc-ando/ando.sock ando true");
+    assert_eq!(rc, 127, "stderr: {err:?}");
+    assert!(err.contains("ando is disabled"), "stderr: {err:?}");
+}
+
+#[test]
+fn test_ando_disable_kills_in_flight_child() {
+    enable_ando();
+    // Launch an ando child that outlives this rootfs session: `setsid` +
+    // full fd detach reparents the client away from the session tree, so
+    // the RUNINSIDE teardown's descendant-kill can't reach it. The
+    // client stays connected to the broker, keeping the Android-side
+    // sleep alive.
+    let (rc, _, err) =
+        run("setsid ando sleep 991 </dev/null >/dev/null 2>&1 & sleep 1; echo launched");
+    assert_eq!(rc, 0, "stderr: {err}");
+    wait_for_proc("[s]leep 991", true, 5);
+
+    // Confirm it genuinely survived session teardown — if the client had
+    // died with the session, disconnect-kill (not disable) would have
+    // already reaped the sleep, making a later "gone" a false pass.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(
+        android_proc_count("[s]leep 991"),
+        1,
+        "ando child died with the session, before the disable under test"
+    );
+
+    // Disable: stop_listener SIGKILLs the in-flight child's pgid even
+    // though the (detached) client is still connected.
+    disable_ando();
+    wait_for_proc("[s]leep 991", false, 5);
+}
+
+#[test]
+fn test_ando_reenable_next_spawn_works() {
+    // Disabled first…
+    disable_ando();
+    let (rc, _, _) = run("ando true");
+    assert_eq!(rc, 127);
+    // …then enabling makes the very next spawn work (bind + listener).
+    enable_ando();
+    let (rc, out, err) = run("ando echo reenabled-ok");
+    assert_eq!(rc, 0, "stderr: {err}");
+    assert_eq!(out, "reenabled-ok");
+}
+
+#[test]
+fn test_ando_legacy_shared_path_gone_even_when_enabled() {
+    enable_ando();
+    // The pre-per-distro shared socket path (/usr/share/tawc/ando.sock,
+    // a file directly under the share dir) is never bound now — the
+    // per-distro socket lives at its own /run/tawc-ando path. So it
+    // fails even while ando is enabled and the real socket works.
+    let (rc, _, err) = run("TAWC_ANDO_SOCKET=/usr/share/tawc/ando.sock ando true");
+    assert_eq!(rc, 127, "stderr: {err:?}");
+    assert!(err.contains("ando is disabled"), "stderr: {err:?}");
+    // Sanity: the real per-distro path still works in the same session.
+    let (rc, out, _) = run("ando echo real-path-ok");
+    assert_eq!(rc, 0);
+    assert_eq!(out, "real-path-ok");
+}
+
+#[test]
+fn test_ando_get_reflects_override() {
+    enable_ando();
+    assert!(adb::get_ando().expect("get-ando"));
+    disable_ando();
+    assert!(!adb::get_ando().expect("get-ando"));
 }

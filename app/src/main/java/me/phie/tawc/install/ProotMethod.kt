@@ -27,6 +27,7 @@ import java.io.File
 class ProotMethod(context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
     private val tawcShare: String = appPaths.shareDir.absolutePath
+    private val store = InstallationStore(context)
 
     /** Absolute path to the vendored proot binary on disk. */
     val prootBin: String =
@@ -159,6 +160,15 @@ class ProotMethod(context: Context) : InstallationMethod {
         File(tawcShare).mkdirs()
         File("$tawcShare/xtmp/.X11-unix").mkdirs()
 
+        // Per-distro ando socket dir (notes/ando.md), only when enabled
+        // (andoHostDir is null otherwise and also creates the host end,
+        // satisfying proot's `-b` source-must-exist check). Materialise
+        // the guest bind point too.
+        val andoHostDir = store.andoHostDir(rootfs)
+        if (andoHostDir != null) {
+            File(rootfs, TawcrootMethod.GUEST_ANDO_DIR.removePrefix("/")).mkdirs()
+        }
+
         // We invoke proot through `/system/bin/sh -c …` rather than as
         // direct ProcessBuilder argv. Direct exec of the proot binary
         // from app context produces a silent exit-255 (process forks,
@@ -173,7 +183,7 @@ class ProotMethod(context: Context) : InstallationMethod {
         // shell-layer quoting — sh -c "<script>" $0 $1 makes $1 = the
         // user command verbatim.
         val invokeArgv =
-            prootArgv(rootfs) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: Settings.graphicsBackend)
+            prootArgv(rootfs, andoHostDir) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: Settings.graphicsBackend)
         val invokeShell = invokeArgv.joinToString(" ") { Sh.quote(it) }
         val script = if (command != null) {
             "exec /system/bin/setsid $invokeShell /bin/bash -lc \"\$1\""
@@ -232,9 +242,11 @@ class ProotMethod(context: Context) : InstallationMethod {
     /**
      * The standard proot argv that every in-rootfs invocation prefixes.
      * Doesn't include the user command — that's appended by
-     * [startInside] separately.
+     * [startInside] separately. [andoHostDir] is
+     * [InstallationStore.andoHostDir]: non-null only when ando is
+     * enabled for the install owning [rootfs], read per-spawn.
      */
-    private fun prootArgv(rootfs: String): List<String> = buildList {
+    private fun prootArgv(rootfs: String, andoHostDir: String?): List<String> = buildList {
         add(prootBin)
         addAll(listOf("-r", rootfs))
         addAll(listOf("-0", "-w", "/"))
@@ -267,6 +279,10 @@ class ProotMethod(context: Context) : InstallationMethod {
         // "/usr/share/tawc"). RootfsEnv sets WAYLAND_DISPLAY to the
         // in-rootfs path; no /tmp/wayland-0 symlink needed.
         addAll(listOf("-b", "$tawcShare:${TawcrootMethod.GUEST_TAWC_SHARE_DIR}"))
+        // Per-distro ando socket dir at its own guest path (GUEST_ANDO_DIR,
+        // not under the shared /usr/share/tawc bind). Only when ando is
+        // enabled; a disabled guest has no such bind.
+        andoHostDir?.let { addAll(listOf("-b", "$it:${TawcrootMethod.GUEST_ANDO_DIR}")) }
         // Surface Xwayland's listening socket at the canonical X11
         // path. Asymmetric bind, no in-rootfs symlink. Pre-created in
         // [startInside] so proot accepts the source. libxcb hardcodes

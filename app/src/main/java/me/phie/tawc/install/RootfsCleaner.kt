@@ -51,8 +51,9 @@ import java.io.InterruptedIOException
  *   5. **Delete, two passes.** `find -xdev -depth -delete` over the
  *      rootfs subtree (never `rm -rf`: toybox `rm` has no
  *      `--one-file-system`, and `-xdev` is a free extra fence even if
- *      step 4 is the guard), then explicit `metadata.json.tmp` →
- *      `metadata.json` → `rmdir` so a cancel mid-wipe can never strand
+ *      step 4 is the guard), then explicit ando dir →
+ *      `metadata.json.tmp` → `metadata.json` → `rmdir` so a cancel
+ *      mid-wipe can never strand
  *      the slot without `metadata.json` — the home screen still lists
  *      the slot and a second uninstall picks up cleanly because pass 1
  *      is idempotent. Root-owned trees (chroot) delete via `su`
@@ -140,8 +141,9 @@ object RootfsCleaner {
             )
         }
 
-        // Pass 2: explicit ordering — any half-written
-        // `metadata.json.tmp` first, then `metadata.json`, then
+        // Pass 2: explicit ordering — the ando broker dir (socket +
+        // dir, present iff ando was ever enabled; notes/ando.md), any
+        // half-written `metadata.json.tmp`, then `metadata.json`, then
         // `rmdir`. `find -depth` leaves readdir-order between siblings
         // undefined, which means a cancel between two arbitrary
         // unlinks could orphan the slot (installDir present,
@@ -149,9 +151,11 @@ object RootfsCleaner {
         // order makes metadata.json the second-to-last visible
         // artefact, with only the empty dir remaining and `rmdir`
         // finishing the job near-atomically.
-        log("rm: container at $installPath (metadata.json, rmdir)")
+        log("rm: container at $installPath (ando, metadata.json, rmdir)")
         deletePass(
             script = buildString {
+                appendLine("rm -f ${Sh.quote("$installPath/ando/ando.sock")}")
+                appendLine("[ ! -d ${Sh.quote("$installPath/ando")} ] || rmdir ${Sh.quote("$installPath/ando")}")
                 appendLine("rm -f ${Sh.quote("$installPath/metadata.json.tmp")}")
                 appendLine("rm -f ${Sh.quote("$installPath/metadata.json")}")
                 appendLine("rmdir ${Sh.quote(installPath)}")

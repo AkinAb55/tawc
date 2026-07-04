@@ -3,19 +3,28 @@
 //! the caller's own fds via SCM_RIGHTS). Guest client: `tawcroot/ando/`.
 //! Protocol, security model, and design rationale: notes/ando.md.
 //!
-//! A standalone thread, deliberately not part of the compositor event
-//! loop — alive whenever the app process is. Implemented in Rust
-//! rather than Kotlin because the data path is unix-syscall-shaped
-//! (peercred, SCM_RIGHTS, setpgid/fchdir, waitid, kill), which
-//! Kotlin's LocalSocket handles poorly.
+//! ando is a per-distro capability, gated by [Installation.andoEnabled].
+//! There is exactly one listener per ando-enabled install, each on that
+//! install's own socket (`<appData>/distros/<id>/ando/ando.sock`); the
+//! socket a connection arrives on *is* the distro identity. [sync]
+//! reconciles the live listener set against the enabled set the Kotlin
+//! side passes at startup and on every toggle/install/uninstall.
+//!
+//! Standalone threads, deliberately not part of the compositor event
+//! loop — alive whenever the app process is. Implemented in Rust rather
+//! than Kotlin because the data path is unix-syscall-shaped (peercred,
+//! SCM_RIGHTS, setpgid/fchdir, waitid, kill), which Kotlin's
+//! LocalSocket handles poorly.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 
 /// PATH given to children when the app process env carries none.
 const FALLBACK_PATH: &str =
@@ -24,64 +33,201 @@ const FALLBACK_PATH: &str =
 const MAX_LINE: usize = 65536;
 const MAX_HEADER_LINES: usize = 4096;
 
-static STARTED: AtomicBool = AtomicBool::new(false);
+/// Shared set of in-flight child pgids for one listener. Populated by
+/// each connection after it spawns its child (child leads its own group,
+/// so pgid == pid) and drained when the child is reaped. Disabling the
+/// distro SIGKILLs every pgid still in here — disable is immediate, not
+/// "drains eventually".
+type ChildPgids = Arc<Mutex<HashSet<libc::pid_t>>>;
 
-/// Spawn the broker listener thread. Idempotent per process.
-///
-/// `socket_path` is host-side (`<appData>/share/ando.sock`); being
-/// per-app-data-dir makes it naturally multi-user-safe, and the share
-/// bind gives every rootfs the fixed guest view
-/// `/usr/share/tawc/ando.sock` — no name computation anywhere.
-pub fn start(socket_path: String) {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return;
+/// A running per-distro listener plus the handles needed to stop it.
+struct Listener {
+    path: String,
+    /// eventfd the accept loop also polls; a write wakes it to exit.
+    stop: OwnedFd,
+    /// Set true by [stop_listener] before it tears the listener down.
+    /// A connection thread checks it right before (and again while
+    /// registering) its spawn, so a stalled connection can't run an
+    /// Android command after disable; the accept thread checks it to
+    /// tell a deliberate stop from an error exit that must self-heal.
+    stopping: Arc<AtomicBool>,
+    children: ChildPgids,
+    join: JoinHandle<()>,
+}
+
+fn listeners() -> &'static Mutex<HashMap<String, Listener>> {
+    static LISTENERS: OnceLock<Mutex<HashMap<String, Listener>>> = OnceLock::new();
+    LISTENERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Reconcile the live listener set to exactly the (id, path) pairs
+/// given. Starts listeners that are missing, stops ones no longer
+/// present (or whose path changed). Idempotent; called from Kotlin's
+/// `AndoBrokers.refresh` at startup and on every ando state change.
+/// `ids` and `paths` are parallel and equal-length (JNI enforces).
+pub fn sync(ids: Vec<String>, paths: Vec<String>) {
+    let desired: HashMap<String, String> = ids.into_iter().zip(paths).collect();
+    let mut live = listeners().lock().unwrap();
+
+    // Stop listeners that are gone, whose socket path moved, or whose
+    // accept thread died abnormally (e.g. a poll error) — removing a
+    // dead entry lets the start pass below rebind a still-desired id
+    // instead of it sitting dead forever. Death is detected by the
+    // finished join handle; the accept thread never touches this map
+    // itself, so there is no lock-order inversion with the join in
+    // stop_listener.
+    let stale: Vec<String> = live
+        .iter()
+        .filter(|(id, l)| l.join.is_finished() || desired.get(*id) != Some(&l.path))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in stale {
+        if let Some(l) = live.remove(&id) {
+            stop_listener(l);
+        }
     }
-    let res = std::thread::Builder::new()
-        .name("ando-listen".into())
-        .spawn(move || run(socket_path));
-    if let Err(e) = res {
-        log::error!("ando: failed to spawn listener thread: {}", e);
-        STARTED.store(false, Ordering::SeqCst);
+
+    // Start listeners that are newly enabled.
+    for (id, path) in desired {
+        if live.contains_key(&id) {
+            continue;
+        }
+        match start_listener(id.clone(), path.clone()) {
+            Ok(l) => {
+                live.insert(id, l);
+            }
+            Err(e) => log::error!("ando: start listener id={} path={}: {}", id, path, e),
+        }
     }
 }
 
-fn run(socket_path: String) {
-    // Clear the stale node from a previous app process — bind refuses
-    // to reuse it. Nothing else can own this path (app-private dir).
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = match UnixListener::bind(&socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!("ando: bind {}: {}", socket_path, e);
-            return;
-        }
-    };
-    log::info!("ando: listening on {}", socket_path);
-    for conn in listener.incoming() {
-        let stream = match conn {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("ando: accept: {}", e);
+fn start_listener(id: String, path: String) -> io::Result<Listener> {
+    // The per-distro ando dir is app-private; create it and clear any
+    // stale node from a previous app process (bind refuses to reuse it).
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path)?;
+    listener.set_nonblocking(true)?;
+
+    // eventfd doubles as the stop signal: the accept loop polls it, a
+    // write from stop_listener wakes it. A dup shares the same counter,
+    // so the loop's read side sees the writer's increment.
+    let efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if efd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stop_loop = unsafe { OwnedFd::from_raw_fd(efd) };
+    let stop_handle = stop_loop.try_clone()?;
+
+    let children: ChildPgids = Arc::new(Mutex::new(HashSet::new()));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let children_loop = children.clone();
+    let stopping_loop = stopping.clone();
+    let path_loop = path.clone();
+    let join = std::thread::Builder::new()
+        .name("ando-listen".into())
+        .spawn(move || accept_loop(listener, stop_loop, stopping_loop, children_loop, path_loop))?;
+
+    log::info!("ando: listening on {} (id {})", path, id);
+    Ok(Listener { path, stop: stop_handle, stopping, children, join })
+}
+
+/// Close a listener: wake+join the accept thread (no new connections),
+/// unlink the socket node, then SIGKILL every in-flight child pgid.
+fn stop_listener(l: Listener) {
+    // Set `stopping` FIRST, before waking/joining the accept thread:
+    // a connection racing its own spawn will see it and not run the
+    // Android command, and the accept thread will treat its wakeup as
+    // a deliberate stop (not an error to self-heal — self-heal would
+    // deadlock, since `sync` holds the listeners lock while calling us).
+    l.stopping.store(true, Ordering::SeqCst);
+    let one: u64 = 1;
+    unsafe {
+        libc::write(l.stop.as_raw_fd(), &one as *const u64 as *const libc::c_void, 8);
+    }
+    let _ = l.join.join();
+    let _ = std::fs::remove_file(&l.path);
+    // SIGKILL registered child pgids under the children lock.
+    // Connection threads deregister a pid (under this lock) strictly
+    // before reaping it, so a pgid found here is always still a
+    // live/zombie group, never a recycled one.
+    let set = l.children.lock().unwrap();
+    for &pgid in set.iter() {
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    drop(set);
+    log::info!("ando: stopped listener {}", l.path);
+}
+
+fn accept_loop(
+    listener: UnixListener,
+    stop: OwnedFd,
+    stopping: Arc<AtomicBool>,
+    children: ChildPgids,
+    path: String,
+) {
+    loop {
+        let mut fds = [
+            libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-        };
-        // Per-connection thread; body wrapped in catch_unwind so a
-        // parsing bug kills the connection, not the app (the panic
-        // hook in lib.rs exempts ando-* threads from its abort).
-        let res = std::thread::Builder::new().name("ando-conn".into()).spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handle_connection(stream)
-            }));
-            match r {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::warn!("ando: connection: {}", e),
-                Err(_) => log::warn!("ando: connection handler panicked"),
+            log::warn!("ando: poll {}: {}", path, e);
+            break;
+        }
+        if fds[1].revents != 0 {
+            break; // stop requested
+        }
+        // POLLERR/POLLHUP/POLLNVAL on the listener fd would spin the
+        // loop forever (they aren't cleared by accept, and POLLIN stays
+        // unset) — treat them as fatal and exit; the next sync sees the
+        // finished thread (is_finished) and rebinds.
+        if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            log::warn!("ando: listener {} error revents {:#x}", path, fds[0].revents);
+            break;
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            let stream = match listener.accept() {
+                Ok((s, _)) => s,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => {
+                    log::warn!("ando: accept {}: {}", path, e);
+                    continue;
+                }
+            };
+            // Per-connection thread; body wrapped in catch_unwind so a
+            // parsing bug kills the connection, not the app (the panic
+            // hook in lib.rs exempts ando-* threads from its abort).
+            let children = children.clone();
+            let stopping = stopping.clone();
+            let res = std::thread::Builder::new().name("ando-conn".into()).spawn(move || {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_connection(stream, &stopping, &children)
+                }));
+                match r {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::warn!("ando: connection: {}", e),
+                    Err(_) => log::warn!("ando: connection handler panicked"),
+                }
+            });
+            if let Err(e) = res {
+                log::warn!("ando: failed to spawn connection thread: {}", e);
             }
-        });
-        if let Err(e) = res {
-            log::warn!("ando: failed to spawn connection thread: {}", e);
         }
     }
+    // Loop exit drops the listener, closing its fd. A deliberate stop
+    // has stop_listener do the map/socket/child cleanup. An abnormal
+    // exit (poll/listener error) leaves a finished join handle that the
+    // next `sync` detects (is_finished) and rebinds — the accept thread
+    // deliberately does NOT touch the listeners map itself, to avoid a
+    // lock-order inversion with stop_listener's join under that lock.
 }
 
 struct Request {
@@ -93,7 +239,11 @@ fn proto_err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-fn handle_connection(stream: UnixStream) -> io::Result<()> {
+fn handle_connection(
+    stream: UnixStream,
+    stopping: &Arc<AtomicBool>,
+    children: &ChildPgids,
+) -> io::Result<()> {
     let uid = peer_uid(&stream)?;
     let my_uid = unsafe { libc::getuid() };
     if uid != my_uid {
@@ -138,6 +288,18 @@ fn handle_connection(stream: UnixStream) -> io::Result<()> {
             Ok(())
         });
     }
+    // Fail closed if the listener is being torn down: a connection that
+    // stalled through a disable must not launch its Android command.
+    // Re-checked under the children lock at registration below to catch
+    // a disable that lands during the spawn itself.
+    if stopping.load(Ordering::SeqCst) {
+        let msg = "ando: disabled for this distro\n";
+        let _ = unsafe {
+            libc::write(stderr_copy.as_raw_fd(), msg.as_ptr() as *const libc::c_void, msg.len())
+        };
+        let _ = writeln!(reader.get_mut(), "EXIT 127");
+        return Ok(());
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -165,6 +327,22 @@ fn handle_connection(stream: UnixStream) -> io::Result<()> {
     // Parent half of the setpgid race: harmless EACCES once the child
     // has exec'd (it already did its own setpgid by then).
     unsafe { libc::setpgid(pid, pid) };
+    // Register the child's pgid so a disable (stop_listener) can SIGKILL
+    // it. pgid == pid (the child leads its own group). Removed at the
+    // final reap below. Re-check `stopping` under the same lock the
+    // killer holds: if the disable landed after the spawn, kill our own
+    // child now rather than registering it into a set nobody will sweep.
+    {
+        let mut set = children.lock().unwrap();
+        if stopping.load(Ordering::SeqCst) {
+            drop(set);
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let _ = child.wait();
+            let _ = writeln!(reader.get_mut(), "EXIT 137");
+            return Ok(());
+        }
+        set.insert(pid);
+    }
 
     // Waiter observes the exit WITHOUT reaping (WNOWAIT), so the
     // pid/pgid stays reserved by the zombie until the final reap below
@@ -208,6 +386,15 @@ fn handle_connection(stream: UnixStream) -> io::Result<()> {
         // the backstop for double-fork escapees.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
     }
+    // Deregister first, reap second. A pid leaves the set strictly
+    // before its zombie is reaped, so stop_listener (which kills
+    // registered pgids under the same lock) can never signal a
+    // recycled pid. The reap itself runs unlocked: a child stuck in
+    // D state then wedges only this thread, not every stop_listener /
+    // sync caller queued behind the children lock. Disable stays
+    // airtight — by here the child has already exited or been
+    // SIGKILLed, so nothing new runs after a stop.
+    children.lock().unwrap().remove(&pid);
     let _ = child.wait();
     Ok(())
 }

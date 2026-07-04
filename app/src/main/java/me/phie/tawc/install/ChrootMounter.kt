@@ -40,7 +40,7 @@ object ChrootMounter {
      * `ROOTFS`, `MOUNTS`, `is_mounted`, and `mount_if_needed` defined for
      * the rest of the script to use.
      */
-    fun mountScript(rootfs: String, tawcShare: String): String {
+    fun mountScript(rootfs: String, tawcShare: String, andoHostDir: String? = null): String {
         val emulator = isEmulator
         val guestShare = TawcrootMethod.GUEST_TAWC_SHARE_DIR
 
@@ -142,6 +142,23 @@ object ChrootMounter {
             mount_if_needed "$tawcShare/xtmp/.X11-unix" "${'$'}ROOTFS/tmp/.X11-unix"
             """.trimIndent()
         )
+        if (andoHostDir != null) {
+            val guestAndo = TawcrootMethod.GUEST_ANDO_DIR
+            sb.appendLine(
+                """
+                # Per-distro ando socket dir (notes/ando.md), only when
+                # ando is enabled for this install. A dedicated mount
+                # point OUTSIDE the shared /usr/share/tawc bind (so a
+                # disabled distro has no fall-through into the shared
+                # dir, and this mkdir doesn't pollute it). The host end
+                # already exists, app-owned (andoHostDir mkdirs it —
+                # root creating it here would leave a root-owned dir in
+                # app data); only the guest mount point needs making.
+                mkdir -p "${'$'}ROOTFS$guestAndo"
+                mount_if_needed "$andoHostDir" "${'$'}ROOTFS$guestAndo"
+                """.trimIndent()
+            )
+        }
         return sb.toString()
     }
 

@@ -35,11 +35,19 @@ extern char **environ;
 
 // Path override, mainly for tests; normal use never needs it.
 #define SOCKET_ENV "TAWC_ANDO_SOCKET"
-// The broker's socket as seen from inside every rootfs: the share-dir
-// bind (like the wayland/kumquat sockets). tawcroot/proot translate
-// the connect path through the bind; chroot resolves it natively. Keep
-// the basename in sync with AppPaths.andoSocket (Kotlin).
-#define SOCKET_DEFAULT "/usr/share/tawc/ando.sock"
+// The broker's socket as seen from inside the rootfs. ando is
+// per-distro: when enabled, the app binds distros/<id>/ando/ into the
+// guest at /run/tawc-ando/, so this resolves to that distro's own
+// socket. The dir is deliberately NOT under the shared /usr/share/tawc
+// bind — a disabled distro must have no path that falls through into
+// the guest-writable shared dir (where a co-tenant distro could plant
+// a fake socket). When ando is disabled there is no such bind, so the
+// path resolves inside the rootfs (no node) and connect(2) gives
+// ENOENT and we print the enable instructions. tawcroot/proot
+// translate the connect path through the bind; chroot resolves it via
+// a real bind mount. Keep in sync with TawcrootMethod.GUEST_ANDO_DIR
+// (Kotlin). See notes/ando.md.
+#define SOCKET_DEFAULT "/run/tawc-ando/ando.sock"
 
 // argv[0] override for the -u/-r su rewrite (test hook, like
 // SOCKET_ENV): lets unrooted tests assert the constructed argv.
@@ -223,8 +231,25 @@ static int connect_broker(void) {
         return -1;
     }
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "ando: broker not running at %s (%s) — is the tawc app alive?\n",
-                name, strerror(errno));
+        int err = errno;
+        // ENOENT means the socket node doesn't exist: there is no
+        // per-distro ando bind, so ando is disabled for this distro.
+        // Point the user at the toggle. The "new terminal" note matters
+        // because enabling only takes effect on the next rootfs spawn.
+        // ECONNREFUSED (node present, nobody listening) is a different
+        // failure — an enabled distro whose broker/app died — so keep
+        // the old "is the tawc app alive?" diagnosis for it and every
+        // other errno. See notes/ando.md.
+        if (err == ENOENT) {
+            fprintf(stderr,
+                "ando: cannot reach the ando broker — ando is disabled for this distro.\n"
+                "ando allows running Android commands outside the Linux environment.\n"
+                "Enable it in the tawc app (distro settings), then open a new\n"
+                "terminal/session.\n");
+        } else {
+            fprintf(stderr, "ando: broker not running at %s (%s) — is the tawc app alive?\n",
+                    name, strerror(err));
+        }
         close(fd);
         return -1;
     }

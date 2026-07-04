@@ -19,6 +19,7 @@ import java.io.File
  */
 class ChrootMethod(context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
+    private val store = InstallationStore(context)
 
     override val key: String = KEY
     override val displayName: String = "chroot (root)"
@@ -53,9 +54,12 @@ class ChrootMethod(context: Context) : InstallationMethod {
         // the script exits. (See [Su.run]'s docstring for context.)
         val proc = ProcessBuilder(listOf("su", "-c", "exec unshare -m -- /system/bin/sh"))
             .start()
+        // Per-distro ando socket dir (notes/ando.md), bind-mounted only
+        // when ando is enabled; test-mode override honored.
+        val andoHostDir = store.andoHostDir(rootfs)
         val script = buildString {
             appendLine("set -eu")
-            appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath))
+            appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath, andoHostDir))
             // Quote rootfs and (if present) the user command into the
             // script. Both go through Sh.quote so paths with quotes
             // can't break out. The in-rootfs bash starts under

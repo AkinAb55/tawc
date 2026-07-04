@@ -23,11 +23,10 @@ data class AppPaths(
     val waylandSocket: File get() = File(shareDir, "wayland-0")
     val kumquatSocket: File get() = File(shareDir, "kumquat-gpu-0")
 
-    /** ando broker socket (notes/ando.md). Guests see it at
-     *  `/usr/share/tawc/ando.sock` via the share bind — keep the
-     *  basename in sync with the client default in
-     *  `tawcroot/ando/src/ando.c`. */
-    val andoSocket: File get() = File(shareDir, "ando.sock")
+    /** Legacy single shared ando socket node (pre per-distro ando,
+     *  notes/ando.md). No longer bound; app startup unlinks any stale
+     *  node left by an older version. */
+    val legacyAndoSocket: File get() = File(shareDir, "ando.sock")
 
     companion object {
         fun from(context: Context): AppPaths {

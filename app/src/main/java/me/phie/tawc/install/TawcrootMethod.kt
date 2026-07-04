@@ -100,10 +100,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      */
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
         val externalBinds = externalBindsFor(rootfs)
+        val andoHostDir = store.andoHostDir(rootfs)
         val tmpdir = prepareSpawn(rootfs, externalBinds)
         val argv = buildList {
             add("/system/bin/setsid")
-            addAll(rootfsArgv(rootfs, graphics, externalBinds))
+            addAll(rootfsArgv(rootfs, graphics, externalBinds, andoHostDir))
             add("/bin/bash")
             if (command != null) {
                 add("-lc"); add(command)
@@ -143,9 +144,10 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     fun ptyShellExec(rootfs: String, graphics: GraphicsBackend? = null): PtyExec {
         val externalBinds = externalBindsFor(rootfs)
+        val andoHostDir = store.andoHostDir(rootfs)
         val tmpdir = prepareSpawn(rootfs, externalBinds)
         val argv = buildList {
-            addAll(rootfsArgv(rootfs, graphics, externalBinds))
+            addAll(rootfsArgv(rootfs, graphics, externalBinds, andoHostDir))
             add("TERM=xterm-256color")
             add("COLORTERM=truecolor")
             add("/bin/bash")
@@ -201,10 +203,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         rootfs: String,
         graphics: GraphicsBackend?,
         externalBinds: List<ExternalBind>,
+        andoHostDir: String?,
     ): List<String> = buildList {
         add(tawcrootBin)
         addAll(listOf("-r", rootfs))
-        for ((src, dst) in bindSpecs(externalBinds)) addAll(listOf("-b", "$src:$dst"))
+        for ((src, dst) in bindSpecs(externalBinds, andoHostDir)) addAll(listOf("-b", "$src:$dst"))
         add("--")
         addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
     }
@@ -226,8 +229,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * uninstall time.
      */
     private fun externalBindsFor(rootfs: String): List<ExternalBind> {
-        val id = File(rootfs).absoluteFile.parentFile?.name ?: return emptyList()
-        if (store.rootfsDir(id).absolutePath != File(rootfs).absolutePath) return emptyList()
+        val id = store.idForRootfs(rootfs) ?: return emptyList()
         val binds = store.load(id)?.externalBinds ?: emptyList()
         for (bind in binds) {
             bind.validationError()?.let {
@@ -301,12 +303,22 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * User-configured external binds (shared storage etc., see
      * [ExternalBind]) ride after every built-in bind so they can't
      * shadow the system/share set. */
-    private fun bindSpecs(externalBinds: List<ExternalBind>): List<Pair<String, String>> = buildList {
+    private fun bindSpecs(
+        externalBinds: List<ExternalBind>,
+        andoHostDir: String?,
+    ): List<Pair<String, String>> = buildList {
         add("/dev" to "/dev")
         add("/proc" to "/proc")
         add("/sys" to "/sys")
         for (dir in LIBHYBRIS_BIND_DIRS) add(dir to dir)
         add(tawcShare to GUEST_TAWC_SHARE_DIR)
+        // Per-distro ando socket dir ([InstallationStore.andoHostDir],
+        // non-null only when ando is enabled, read fresh per spawn) at
+        // its own guest path ([GUEST_ANDO_DIR]), deliberately NOT under
+        // the shared /usr/share/tawc bind — a disabled guest must have
+        // no path that falls through into the guest-writable shared
+        // dir, or that reaches any ando socket.
+        andoHostDir?.let { add(it to GUEST_ANDO_DIR) }
         add("$tawcShare/xtmp/.X11-unix" to "/tmp/.X11-unix")
         for (bind in externalBinds) add(bind.hostPath to bind.guestPath)
     }
@@ -317,6 +329,17 @@ class TawcrootMethod(context: Context) : InstallationMethod {
          *  of truth — also referenced by [RootfsEnv] (WAYLAND_DISPLAY)
          *  and the chroot/proot install methods. */
         const val GUEST_TAWC_SHARE_DIR = "/usr/share/tawc"
+
+        /** In-rootfs dir the per-distro ando socket is exposed at (only
+         *  when ando is enabled). Deliberately NOT under
+         *  [GUEST_TAWC_SHARE_DIR]: the shared dir is bound into every
+         *  rootfs and is guest-writable, so a socket path falling
+         *  through it could be hijacked by a co-tenant distro. Its own
+         *  top-level bind has no such fall-through. The client's
+         *  `SOCKET_DEFAULT` (tawcroot/ando/src/ando.c) is
+         *  `$GUEST_ANDO_DIR/ando.sock`. Single source of truth — also
+         *  used by the proot/chroot bind builders. See notes/ando.md. */
+        const val GUEST_ANDO_DIR = "/run/tawc-ando"
 
         /** Same set as ProotMethod (kept in sync deliberately —
          * libhybris dlopen targets bionic GPU libraries via these). */

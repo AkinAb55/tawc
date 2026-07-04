@@ -717,6 +717,37 @@ pub fn get_gtk3_broken_menus_workaround() -> io::Result<bool> {
     }
 }
 
+/// Set the per-distro ando enable state for the standing install via the
+/// test-mode `set-ando` override (notes/ando.md). Reconciles the broker
+/// synchronously: enable brings the listener up (the next rootfs spawn
+/// gets the bind); disable tears it down and SIGKILLs in-flight ando
+/// children. In-memory only — discarded on app-process death and cleared
+/// by `test-init`.
+pub fn set_ando(enabled: bool) -> io::Result<Output> {
+    let id = crate::install_id();
+    let enabled = if enabled { "true" } else { "false" };
+    broker_action("set-ando", &[("installId", &id), ("enabled", enabled)])
+}
+
+/// Read the effective ando enable state for the standing install
+/// (override if set, else metadata).
+pub fn get_ando() -> io::Result<bool> {
+    let id = crate::install_id();
+    let output = broker_action("get-ando", &[("installId", &id)])?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "get-ando failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(io::Error::other(format!("parse ando setting: stdout={other:?}"))),
+    }
+}
+
 // Common Android keycodes (used with [ic_send_key_event]).
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_FORWARD_DEL: u32 = 112; // Delete (forward delete)

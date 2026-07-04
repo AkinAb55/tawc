@@ -123,6 +123,38 @@ fn slot_exists() -> bool {
 }
 
 #[test]
+fn test_wipe_removes_ando_broker_dir() {
+    // Regression: enabling ando materialises `<slot>/ando/` (dir +
+    // socket node, notes/ando.md) as a sibling of rootfs/. Pass 2's
+    // explicit delete list must cover it, or the final `rmdir` fails
+    // ENOTEMPTY and the slot is stuck FAILED forever. App-uid only —
+    // no root needed.
+    let d = slot_dir();
+    // Pre-clean leftovers from an aborted previous run.
+    host_sh(&format!("chmod -R u+rwX {d} 2>/dev/null; true"));
+    action("uninstall", &[("id", TEST_ID)]);
+    assert!(!slot_exists(), "pre-clean failed to remove the test slot");
+
+    fabricate_slot();
+    host_sh_ok(&format!("mkdir -p {d}/ando && touch {d}/ando/ando.sock"));
+    let out = action("uninstall", &[("id", TEST_ID)]);
+    assert!(
+        out.status.success(),
+        "uninstall of a slot with an ando dir failed:\n{}",
+        combined(&out)
+    );
+    assert!(!slot_exists(), "uninstall left the slot behind");
+
+    // Close the op log screen the uninstall action opened.
+    let out = exec_broker::run_capture(Invocation {
+        foreground_app: false,
+        request: Request::Action { name: "test-init".to_string(), args: vec![] },
+    })
+    .expect("broker test-init");
+    assert!(out.status.success(), "test-init failed:\n{}", combined(&out));
+}
+
+#[test]
 fn test_wipe_gate_and_su_retry() {
     require_root();
     let d = slot_dir();

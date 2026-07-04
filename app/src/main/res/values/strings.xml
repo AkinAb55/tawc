@@ -106,6 +106,12 @@
     <string name="distro_info_row_size">Size:</string>
     <string name="distro_info_row_external_binds">Storage binds:</string>
     <string name="distro_info_manage_binds">Manage binds</string>
+
+    <!-- ando toggle (notes/ando.md): shared across the install form and
+         distro settings. -->
+    <string name="ando_toggle_label">Enable ando</string>
+    <string name="ando_toggle_description">ando lets programs inside this distro run Android commands outside the Linux environment.</string>
+    <string name="ando_toggle_enable_failed">Couldn\'t change the ando setting; the distro must be ready.</string>
     <string name="distro_info_unknown">unknown</string>
     <string name="distro_info_size_unavailable">not available</string>
     <string name="distro_info_computing">computing&#8230;</string>

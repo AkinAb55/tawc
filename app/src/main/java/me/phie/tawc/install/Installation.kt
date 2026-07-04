@@ -64,6 +64,15 @@ data class Installation(
      * non-tawcroot installs.
      */
     val externalBinds: List<ExternalBind> = emptyList(),
+    /**
+     * Whether this install may use ando (notes/ando.md) — run Android
+     * commands outside the Linux environment. Default `false`: opt-in,
+     * fail-closed. Absent in legacy metadata parses as `false`, so
+     * existing installs lose ando on upgrade until the user re-enables
+     * it. Gates both the broker listener for this distro and the
+     * per-distro ando bind emitted into the spawn's bind table.
+     */
+    val andoEnabled: Boolean = false,
 ) {
     fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
@@ -89,6 +98,7 @@ data class Installation(
         if (externalBinds.isNotEmpty()) {
             put("externalBinds", ExternalBind.toJsonArray(externalBinds))
         }
+        if (andoEnabled) put("andoEnabled", true)
     }.toString(2)
 
     /**
@@ -187,6 +197,7 @@ data class Installation(
                 externalBinds = if (obj.has("externalBinds"))
                     ExternalBind.fromJsonArray(obj.getJSONArray("externalBinds"))
                 else emptyList(),
+                andoEnabled = obj.optBoolean("andoEnabled", false),
             )
         }
 

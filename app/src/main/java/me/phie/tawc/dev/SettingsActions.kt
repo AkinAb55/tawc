@@ -1,8 +1,10 @@
 package me.phie.tawc.dev
 
+import me.phie.tawc.AndoBrokers
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
 import me.phie.tawc.compositor.NativeBridge
+import me.phie.tawc.install.InstallationStore
 
 /**
  * Broker actions that read/write entries in [Settings]. Registered
@@ -23,6 +25,15 @@ import me.phie.tawc.compositor.NativeBridge
  * | `get-xwayland` | — | prints true/false |
  * | `set-gtk3-broken-menus-workaround` | `enabled` ∈ true|false | save current setting and push live workaround toggle |
  * | `get-gtk3-broken-menus-workaround` | — | prints true/false |
+ * | `set-ando` | `installId`, `enabled` ∈ true|false | set the test-mode ando override for the install and reconcile the broker |
+ * | `get-ando` | `installId` | prints true/false (override or metadata) |
+ *
+ * `set-ando`/`get-ando` are per-distro (notes/ando.md), so unlike the
+ * others they don't touch [Settings]: `set-ando` writes an in-memory
+ * override in [InstallationStore] (mirroring `Settings.enterTestMode` —
+ * no durable metadata write, discarded on process death) and reconciles
+ * the native listeners via [AndoBrokers.refresh]. Integration tests use
+ * them to flip ando per test without a real install.
  */
 internal object SettingsActions {
 
@@ -35,6 +46,8 @@ internal object SettingsActions {
         ActionRegistry.register("get-xwayland", GetXwaylandAction)
         ActionRegistry.register("set-gtk3-broken-menus-workaround", SetGtk3BrokenMenusWorkaroundAction)
         ActionRegistry.register("get-gtk3-broken-menus-workaround", GetGtk3BrokenMenusWorkaroundAction)
+        ActionRegistry.register("set-ando", SetAndoAction)
+        ActionRegistry.register("get-ando", GetAndoAction)
     }
 
     private object SetGraphicsBackendAction : BrokerAction {
@@ -115,6 +128,33 @@ internal object SettingsActions {
     private object GetGtk3BrokenMenusWorkaroundAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             ctx.out(Settings.gtk3BrokenMenusWorkaround.toString())
+            return 0
+        }
+    }
+
+    private object SetAndoAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val id = args["installId"]
+                ?: return ctx.fail("set-ando: --arg installId=<id> required")
+            val raw = args["enabled"] ?: args["value"]
+                ?: return ctx.fail("set-ando: --arg enabled=true|false required")
+            val enabled = raw.toBooleanStrictOrNull()
+                ?: return ctx.fail("set-ando: invalid boolean '$raw'")
+            InstallationStore.setAndoOverride(id, enabled)
+            // Bring the per-distro listener up/down now (enable) or tear
+            // it down + kill in-flight children (disable). Next rootfs
+            // spawn picks up the matching bind.
+            AndoBrokers.refresh(ctx.appContext)
+            ctx.out(enabled.toString())
+            return 0
+        }
+    }
+
+    private object GetAndoAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val id = args["installId"]
+                ?: return ctx.fail("get-ando: --arg installId=<id> required")
+            ctx.out(InstallationStore(ctx.appContext).andoEnabled(id).toString())
             return 0
         }
     }

@@ -1,6 +1,7 @@
 package me.phie.tawc.install
 
 import android.content.Context
+import me.phie.tawc.AndoBrokers
 import me.phie.tawc.R
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.util.AppOwnership
@@ -74,6 +75,13 @@ class Installer(
      * — defaults or an explicit caller-provided list.
      */
     private val externalBinds: List<ExternalBind> = emptyList(),
+    /**
+     * Whether ando (notes/ando.md) is enabled for this install. Persisted
+     * into the initial metadata so the broker listener + per-distro bind
+     * are live for the install's own in-rootfs steps (first boot
+     * included). Default false — opt-in, fail-closed.
+     */
+    private val andoEnabled: Boolean = false,
 ) {
     /** Throws on failure. Reports progress + log lines via the callbacks. */
     fun install(
@@ -137,8 +145,13 @@ class Installer(
                 installedAtAppVersionCode = appVersionCode,
                 label = label,
                 externalBinds = externalBinds,
+                andoEnabled = andoEnabled,
             )
         )
+        // Bring the ando broker listener up (or down) to match the
+        // freshly-written metadata, so the install's own in-rootfs
+        // steps can use ando when enabled. See notes/ando.md.
+        AndoBrokers.refresh(context)
 
         // Funnel the bootstrap fetch through the dev-time mirror cache
         // when set. The proxy URL is only what the wire request goes to;
@@ -312,6 +325,13 @@ class Installer(
         progress(InstallProgress(InstallStage.UNMOUNTING, context.getString(R.string.install_progress_unmounting_chroot)))
         progress(InstallProgress(InstallStage.DELETING, context.getString(R.string.install_progress_deleting_rootfs)))
         RootfsCleaner.wipe(store, id, log)
+
+        // The wipe removed the ando dir; drop this install's broker
+        // listener and any test-mode override now that its metadata is
+        // gone, so neither survives into a reinstall of the same id.
+        // See notes/ando.md.
+        InstallationStore.clearAndoOverride(id)
+        AndoBrokers.refresh(context)
 
         progress(InstallProgress(InstallStage.DONE, context.getString(R.string.install_progress_deleted)))
     }
