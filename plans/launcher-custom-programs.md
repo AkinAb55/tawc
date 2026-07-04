@@ -4,13 +4,13 @@ Make the launcher usable for the user's own programs, including CLI
 scripts. Three parts: route `Terminal=true` entries into tawc's native
 terminal, scan the user-writable `.desktop` dirs, and add a minimal
 in-app `.desktop` editor for personal entries.
-**Depends on [launcher-entry-management.md](launcher-entry-management.md)**
-(action menu, overflow menu, `entry.path`, `EntryLauncher`,
-`launcher-list` broker action).
+Builds on the launcher entry-management foundation (action menu,
+overflow menu, `entry.path`, `EntryLauncher`, `launcher-list` broker
+action — done, see notes/launcher.md).
 
 ## A. `Terminal=true` → native terminal
 
-Today `LauncherActivity.launchEntry` ignores `entry.terminal` and runs
+Today `EntryLauncher.launch` ignores `entry.terminal` and runs
 everything headless with stdio to `/dev/null` — a terminal program runs
 invisibly or dies. New behavior in `EntryLauncher`:
 

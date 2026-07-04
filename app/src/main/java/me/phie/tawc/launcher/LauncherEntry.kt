@@ -23,6 +23,12 @@ data class LauncherEntry(
      * the row renders without an icon.
      */
     val iconPath: String,
+    /**
+     * Absolute host path of the `.desktop` file this entry was parsed
+     * from. Distinguishes managed (user-editable) entries from distro
+     * ones; empty only for malformed scanner output.
+     */
+    val path: String = "",
 ) {
     companion object {
         fun parseList(json: String?): List<LauncherEntry> {
@@ -40,6 +46,7 @@ data class LauncherEntry(
                                 exec = o.optString("exec"),
                                 terminal = o.optBoolean("terminal", false),
                                 iconPath = o.optString("iconPath"),
+                                path = o.optString("path"),
                             )
                         )
                     }

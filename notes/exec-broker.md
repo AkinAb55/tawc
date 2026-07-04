@@ -300,9 +300,11 @@ enough.
 `TawcApplication.onCreate` also calls
 `me.phie.tawc.install.InstallActions.registerAll()` (install /
 uninstall), `me.phie.tawc.dev.InputActions.registerAll()` (the test
-input handlers below), and `me.phie.tawc.dev.SettingsActions.registerAll()`
-(the settings get/set actions below) to populate `ActionRegistry`
-before any client connection arrives.
+input handlers below), `me.phie.tawc.dev.SettingsActions.registerAll()`
+(the settings get/set actions below), and
+`me.phie.tawc.launcher.LauncherActions.registerAll()` (launcher list /
+hide state) to populate `ActionRegistry` before any client connection
+arrives.
 
 ## Registered actions
 
@@ -338,6 +340,8 @@ before any client connection arrives.
 | `get-gtk3-broken-menus-workaround` | SettingsActions | Print the current GTK3 broken menus workaround setting. |
 | `set-ando` (`installId`, `enabled`) | SettingsActions | Set the per-distro ando (notes/ando.md) test override for `installId` and reconcile the broker (`AndoBrokers.refresh`): enable brings the listener up; disable tears it down and SIGKILLs in-flight ando children. In-memory only (never a metadata write); discarded on process death and cleared by `test-init`. Prints `true`/`false`. |
 | `get-ando` (`installId`) | SettingsActions | Print the effective ando state for `installId` (override if set, else metadata). |
+| `launcher-list` (`installId`, optional `showHidden`) | LauncherActions | Print the launcher entry list as a JSON array (`{id, name, exec, terminal, path, hidden}` per element). Mirrors what `LauncherActivity` renders: hidden entries are filtered out unless `showHidden=true` (notes/launcher.md). |
+| `set-entry-hidden` (`installId`, `entryId`, `hidden`) | LauncherActions | Persist launcher hide/unhide for a desktop-entry id through the same locked `Installation.hiddenDesktopIds` metadata write the launcher UI uses. Durable — tests must unhide in cleanup. Prints the resulting hidden-id list. |
 
 **Rule for input actions: every driver goes through `TawcInputConnection`.**
 There is intentionally no broker action that calls `NativeBridge.native*`

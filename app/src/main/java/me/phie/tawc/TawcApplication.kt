@@ -94,6 +94,7 @@ class TawcApplication : Application() {
             me.phie.tawc.install.InstallActions.registerAll()
             me.phie.tawc.dev.InputActions.registerAll()
             me.phie.tawc.dev.SettingsActions.registerAll()
+            me.phie.tawc.launcher.LauncherActions.registerAll()
         }
     }
 

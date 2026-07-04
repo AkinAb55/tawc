@@ -65,6 +65,14 @@ data class Installation(
      */
     val externalBinds: List<ExternalBind> = emptyList(),
     /**
+     * Desktop-entry ids ([me.phie.tawc.launcher.LauncherEntry.id],
+     * filename minus `.desktop`) the user hid from the launcher list.
+     * Filtering happens Kotlin-side (see notes/launcher.md); the Rust
+     * scanner never sees hide state. Stale ids (app removed from the
+     * distro) are harmless — they never match — so nothing prunes them.
+     */
+    val hiddenDesktopIds: List<String> = emptyList(),
+    /**
      * Whether this install may use ando (notes/ando.md) — run Android
      * commands outside the Linux environment. Default `false`: opt-in,
      * fail-closed. Absent in legacy metadata parses as `false`, so
@@ -98,8 +106,25 @@ data class Installation(
         if (externalBinds.isNotEmpty()) {
             put("externalBinds", ExternalBind.toJsonArray(externalBinds))
         }
+        if (hiddenDesktopIds.isNotEmpty()) {
+            put("hiddenDesktopIds", JSONArray(hiddenDesktopIds))
+        }
         if (andoEnabled) put("andoEnabled", true)
     }.toString(2)
+
+    /**
+     * Copy with [entryId] added to / removed from [hiddenDesktopIds].
+     * Idempotent both ways; the single mutation shape shared by the
+     * launcher UI and the `set-entry-hidden` broker action (always
+     * applied through [InstallationStore.update]).
+     */
+    fun withEntryHidden(entryId: String, hidden: Boolean): Installation = copy(
+        hiddenDesktopIds = if (hidden) {
+            if (entryId in hiddenDesktopIds) hiddenDesktopIds else hiddenDesktopIds + entryId
+        } else {
+            hiddenDesktopIds - entryId
+        }
+    )
 
     /**
      * Lifecycle of one installation slot. See `notes/installation.md`
@@ -196,6 +221,13 @@ data class Installation(
                 else emptyList(),
                 externalBinds = if (obj.has("externalBinds"))
                     ExternalBind.fromJsonArray(obj.getJSONArray("externalBinds"))
+                else emptyList(),
+                hiddenDesktopIds = if (obj.has("hiddenDesktopIds"))
+                    obj.getJSONArray("hiddenDesktopIds").let { arr ->
+                        buildList(arr.length()) {
+                            for (i in 0 until arr.length()) add(arr.getString(i))
+                        }
+                    }
                 else emptyList(),
                 andoEnabled = obj.optBoolean("andoEnabled", false),
             )

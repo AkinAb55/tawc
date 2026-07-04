@@ -14,8 +14,10 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -28,10 +30,10 @@ import kotlinx.coroutines.withContext
 import me.phie.tawc.R
 import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.Installation
-import me.phie.tawc.install.InstallationMethod
 import me.phie.tawc.install.InstallationStore
-import me.phie.tawc.install.UserRootfsSession
+import me.phie.tawc.ui.tawcButtonSizePx
 import me.phie.tawc.ui.tawcCard
+import me.phie.tawc.ui.tonalIconButton
 import me.phie.tawc.ui.verticalLp
 import kotlin.math.max
 import kotlin.math.min
@@ -43,27 +45,38 @@ import kotlin.math.min
  * + dispatches launches.
  *
  * UX is intentionally minimal: one search field, one scrolling list,
- * Enter launches the top match, tap launches that row. Pinning,
- * frecency, window-list integration are deferred (see notes/launcher.md
+ * Enter launches the top match, tap launches that row. Long-press opens
+ * a per-entry action menu (Hide/Unhide today; dependent plans append
+ * items via [entryActionsFor]). The ⋮ overflow beside the search field
+ * holds the transient "Show hidden" toggle. Pinning, frecency,
+ * window-list integration are deferred (see notes/launcher.md
  * "Future UX").
  *
- * Launches are fire-and-forget on the process-scoped [LAUNCH_SCOPE]
- * (Dispatchers.IO). [UserRootfsSession] starts the compositor lazily,
- * then blocks until the launched program exits, so the coroutine pins
- * one IO thread for the program's lifetime. Closing this Activity does
- * NOT kill the program: the scope outlives the Activity via JVM lifetime.
+ * Launches are fire-and-forget via [EntryLauncher], whose process-wide
+ * scope outlives this Activity — closing the launcher does NOT kill the
+ * program.
+ *
+ * Hidden entries ([Installation.hiddenDesktopIds]) are filtered here in
+ * Kotlin, not in the Rust scanner — hide state is per-install app
+ * metadata, and the scanner is shared with window icon/title resolution
+ * which must keep seeing hidden apps (notes/launcher.md).
  */
 class LauncherActivity : AppCompatActivity() {
 
     private val store by lazy { InstallationStore(this) }
 
     private lateinit var searchField: EditText
+    private lateinit var menuButton: View
     private lateinit var listColumn: LinearLayout
     private lateinit var emptyView: TextView
 
     /** Full app list (loaded once). Filtered subset is rebuilt on every keystroke. */
     private var allEntries: List<LauncherEntry> = emptyList()
     private var filteredEntries: List<LauncherEntry> = emptyList()
+
+    /** Render hidden entries (dimmed, in sort position). Transient
+     *  per-Activity state, deliberately not persisted. */
+    private var showHidden = false
 
     /** UI scope for loading + search filtering. Cancelled on destroy. */
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -117,8 +130,23 @@ class LauncherActivity : AppCompatActivity() {
                 if (isEnter) { launchTop(); true } else false
             }
         }
+        menuButton = tonalIconButton(
+            R.drawable.ic_more_vert,
+            getString(R.string.launcher_menu_description),
+        ) { showOverflowMenu() }
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        searchRow.addView(searchField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        searchRow.addView(
+            menuButton,
+            LinearLayout.LayoutParams(tawcButtonSizePx(), tawcButtonSizePx()).also {
+                it.marginStart = pad / 2
+            },
+        )
         content.addView(
-            searchField,
+            searchRow,
             verticalLp(MATCH_PARENT, WRAP_CONTENT),
         )
 
@@ -228,21 +256,34 @@ class LauncherActivity : AppCompatActivity() {
         }
     }
 
+    /** Ids the user hid, from the current metadata record. */
+    private fun hiddenIds(): Set<String> =
+        installation?.hiddenDesktopIds?.toSet() ?: emptySet()
+
+    /** Hidden entries that actually exist in this rootfs (stale ids don't count). */
+    private fun hiddenCount(): Int {
+        val hidden = hiddenIds()
+        return allEntries.count { it.id in hidden }
+    }
+
     /**
-     * Re-filter [allEntries] against the search field. Substring match,
-     * case-insensitive, against name + id + comment. Order: prefix
-     * matches on name first (so typing "fire" surfaces Firefox above
-     * "WireFire"), then any other substring match, all already pre-sorted
-     * by name from the Rust scanner.
+     * Re-filter [allEntries] against hide state + the search field.
+     * Hidden entries are dropped unless [showHidden]. Query is a
+     * substring match, case-insensitive, against name + id + comment.
+     * Order: prefix matches on name first (so typing "fire" surfaces
+     * Firefox above "WireFire"), then any other substring match, all
+     * already pre-sorted by name from the Rust scanner.
      */
     private fun applyFilter() {
+        val hidden = hiddenIds()
+        val visible = if (showHidden) allEntries else allEntries.filter { it.id !in hidden }
         val q = searchField.text.toString().trim().lowercase()
         filteredEntries = if (q.isEmpty()) {
-            allEntries
+            visible
         } else {
             val prefix = ArrayList<LauncherEntry>()
             val other = ArrayList<LauncherEntry>()
-            for (e in allEntries) {
+            for (e in visible) {
                 val n = e.name.lowercase()
                 if (n.startsWith(q)) prefix.add(e)
                 else if (n.contains(q) || e.id.lowercase().contains(q) ||
@@ -256,23 +297,98 @@ class LauncherActivity : AppCompatActivity() {
     private fun renderList() {
         listColumn.removeAllViews()
         if (filteredEntries.isEmpty() && allEntries.isNotEmpty()) {
-            emptyView.text = getString(R.string.launcher_no_matches)
+            val q = searchField.text.toString().trim()
+            emptyView.text = if (q.isEmpty()) {
+                // Every entry is hidden (show-hidden off): keep the
+                // no-apps message but say why the list is empty.
+                getString(R.string.launcher_no_launchable_apps) + "\n" +
+                    getString(R.string.launcher_hidden_count_hint, hiddenCount())
+            } else {
+                getString(R.string.launcher_no_matches)
+            }
             emptyView.visibility = View.VISIBLE
             return
         }
         emptyView.visibility = if (allEntries.isEmpty()) View.VISIBLE else View.GONE
+        val hidden = hiddenIds()
         val pad = (12 * resources.displayMetrics.density).toInt()
         val rowMargin = (6 * resources.displayMetrics.density).toInt()
         for (entry in filteredEntries) {
-            listColumn.addView(buildRow(entry, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = rowMargin))
+            val row = buildRow(entry, pad, dimmed = entry.id in hidden)
+            listColumn.addView(row, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = rowMargin))
         }
     }
 
-    private fun buildRow(entry: LauncherEntry, pad: Int): View {
+    private fun showOverflowMenu() {
+        PopupMenu(this, menuButton).apply {
+            menu.add(getString(R.string.launcher_menu_show_hidden, hiddenCount())).apply {
+                isCheckable = true
+                isChecked = showHidden
+                setOnMenuItemClickListener {
+                    showHidden = !showHidden
+                    applyFilter()
+                    true
+                }
+            }
+            show()
+        }
+    }
+
+    /**
+     * One long-press menu item. Assembled per entry by [entryActionsFor]
+     * so dependent features (Add to home screen, Edit) can append items
+     * conditionally; disabled actions are not shown.
+     */
+    private data class EntryAction(
+        val label: CharSequence,
+        val enabled: Boolean = true,
+        val run: () -> Unit,
+    )
+
+    private fun entryActionsFor(entry: LauncherEntry): List<EntryAction> {
+        val hidden = entry.id in hiddenIds()
+        return listOf(
+            if (hidden) {
+                EntryAction(getString(R.string.launcher_action_unhide)) { setEntryHidden(entry, false) }
+            } else {
+                EntryAction(getString(R.string.launcher_action_hide)) { setEntryHidden(entry, true) }
+            },
+        )
+    }
+
+    private fun showEntryMenu(entry: LauncherEntry) {
+        val actions = entryActionsFor(entry).filter { it.enabled }
+        if (actions.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle(entry.name.ifEmpty { entry.id })
+            .setItems(actions.map { it.label }.toTypedArray()) { _, which ->
+                actions[which].run()
+            }
+            .show()
+    }
+
+    /**
+     * Persist hide/unhide through the locked read-modify-write.
+     * [InstallationStore.update] returns the record it wrote, which
+     * becomes the new [installation] so the filter sees the fresh set;
+     * null (lost race against uninstall) just leaves the list as-is —
+     * the whole slot is going away.
+     */
+    private fun setEntryHidden(entry: LauncherEntry, hidden: Boolean) {
+        val inst = installation ?: return
+        store.update(inst.id) { it.withEntryHidden(entry.id, hidden) }
+            ?.let { installation = it }
+        applyFilter()
+    }
+
+    private fun buildRow(entry: LauncherEntry, pad: Int, dimmed: Boolean = false): View {
         val card = tawcCard().apply {
             isClickable = true
             isFocusable = true
+            isLongClickable = true
+            if (dimmed) alpha = 0.5f
             setOnClickListener { launchEntry(entry) }
+            setOnLongClickListener { showEntryMenu(entry); true }
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -320,68 +436,25 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     /**
-     * Fire-and-forget launch via [UserRootfsSession]. We finish the
-     * Activity right away; [LAUNCH_SCOPE] is process-scoped so the
-     * coroutine keeps running.
-     *
-     * Stdio is redirected to /dev/null so a chatty program can't fill
-     * the pipe back to the JVM (which we never read).
-     *
-     * No `setsid -f` detach: under proot's `--kill-on-exit` the
-     * detached child gets SIGKILLed when the launcher bash exits, so
-     * the app dies before it ever opens a Wayland window. Letting
-     * runInside block for the program's whole lifetime is the
-     * correct behaviour anyway — the program needs the JVM alive for
-     * the compositor's Wayland socket, so there's nothing to gain
-     * from detaching.
-     *
-     * Spawn failures (compositor start, Wayland socket wait, the
-     * fail-closed bind IOException from startInside) surface via
-     * [LaunchErrorActivity] started from the application context —
-     * this Activity is already finished by the time they arrive. A
-     * nonzero exit of the program itself returns normally and is
-     * intentionally not surfaced.
+     * Fire-and-forget launch via [EntryLauncher]; failures surface from
+     * there ([LaunchErrorActivity]). We finish the Activity right away —
+     * the launch scope is process-wide so the coroutine keeps running.
      */
     private fun launchEntry(entry: LauncherEntry) {
         if (launched) return
         val inst = installation ?: return
-        val method = InstallationMethod.forKey(this, inst.method) ?: return
         launched = true
-        val rootfs = store.rootfsDir(inst.id).absolutePath
-        val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
-        val app = applicationContext
-        LAUNCH_SCOPE.launch {
-            runCatching { UserRootfsSession.runInside(app, method, rootfs, cmd) }
-                .onFailure { e ->
-                    android.util.Log.w(TAG, "launch ${entry.id}: $e")
-                    val title = app.getString(
-                        R.string.launcher_launch_failed_title,
-                        entry.name.ifEmpty { entry.id },
-                    )
-                    LaunchErrorActivity.start(app, title, e.message ?: e.javaClass.simpleName)
-                }
-        }
+        EntryLauncher.launch(applicationContext, inst, entry)
         finish()
     }
 
     companion object {
         const val EXTRA_ID = "id"
-        private const val TAG = "tawc-launcher"
 
         /** Square icon edge in dp. ~48 is the standard list-row icon size
          *  per Material guidelines; bumped to 56 here because chroot apps
          *  rarely have icon sets that look crisp at the smaller size and
          *  the extra display surface helps with brand recognition. */
         private const val ICON_SIZE_DP = 56f
-
-        /**
-         * Process-wide scope for fire-and-forget launches. Outlives
-         * individual [LauncherActivity] instances so closing the
-         * launcher doesn't tear down the program the user just
-         * started. [SupervisorJob] keeps one failed launch from
-         * cancelling sibling launches.
-         */
-        private val LAUNCH_SCOPE =
-            CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }

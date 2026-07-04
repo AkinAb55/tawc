@@ -72,6 +72,10 @@ pub struct Entry {
     /// via `BitmapFactory.decodeFile`; the rootfs is app-uid-owned for
     /// proot/tawcroot installs so direct read works.
     pub icon_path: String,
+    /// Absolute host path of the parsed `.desktop` file. Lets Kotlin
+    /// decide whether an entry is user-editable (managed dir) without
+    /// re-deriving the scan layout.
+    pub path: String,
 }
 
 /// Scan [rootfs] for launchable apps. Returns entries sorted by name
@@ -126,6 +130,7 @@ fn scan_entries(rootfs: &Path, launchable_only: bool) -> Vec<Entry> {
             exec,
             terminal: de.terminal(),
             icon_path,
+            path: de.path.to_string_lossy().into_owned(),
         });
     }
 
@@ -212,7 +217,7 @@ fn normalize_desktop_id(value: &str) -> String {
 }
 
 /// JSON-encode the scan result for the JNI boundary. Each element is an
-/// object: `{id, name, comment, exec, terminal, iconPath}`. Always
+/// object: `{id, name, comment, exec, terminal, iconPath, path}`. Always
 /// returns a valid JSON array (empty `[]` if the rootfs has no apps).
 pub fn scan_json(rootfs: &Path) -> String {
     let entries = scan(rootfs);
@@ -226,6 +231,7 @@ pub fn scan_json(rootfs: &Path) -> String {
                 "exec": e.exec,
                 "terminal": e.terminal,
                 "iconPath": e.icon_path,
+                "path": e.path,
             })
         })
         .collect();

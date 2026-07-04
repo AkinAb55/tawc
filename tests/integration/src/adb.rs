@@ -748,6 +748,31 @@ pub fn get_ando() -> io::Result<bool> {
     }
 }
 
+/// Print the launcher entry list for the standing install via the debug
+/// `launcher-list` broker action. Returns the raw JSON array string —
+/// the crate has no JSON dep, so callers assert on substrings/objects.
+/// `show_hidden = true` mirrors the UI's "Show hidden" toggle: hidden
+/// entries are included with `"hidden":true` instead of filtered out.
+pub fn launcher_list(show_hidden: bool) -> io::Result<String> {
+    let id = crate::install_id();
+    let show = if show_hidden { "true" } else { "false" };
+    let output = broker_action("launcher-list", &[("installId", &id), ("showHidden", show)])?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Persist launcher hide/unhide for `entry_id` on the standing install
+/// via the `set-entry-hidden` broker action — the same locked metadata
+/// write the launcher UI performs. Durable across app restarts, so
+/// tests must unhide in cleanup.
+pub fn set_entry_hidden(entry_id: &str, hidden: bool) -> io::Result<Output> {
+    let id = crate::install_id();
+    let hidden = if hidden { "true" } else { "false" };
+    broker_action(
+        "set-entry-hidden",
+        &[("installId", &id), ("entryId", entry_id), ("hidden", hidden)],
+    )
+}
+
 // Common Android keycodes (used with [ic_send_key_event]).
 pub const KEYCODE_DEL: u32 = 67; // Backspace
 pub const KEYCODE_FORWARD_DEL: u32 = 112; // Delete (forward delete)

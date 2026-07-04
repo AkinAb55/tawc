@@ -16,22 +16,66 @@ and lets the user search + launch. Reached from the home screen card's
    crate, filters non-Application / NoDisplay / Hidden / Exec-less
    entries, resolves `Icon=` to an on-device PNG path, sorts by
    localised name, de-dups by id.
-4. **LauncherEntry.parseList** turns the JSON into Kotlin records.
-5. **LauncherActivity** renders rows (icon ImageView + name + comment).
-   `IconLoader` async-decodes PNGs with `BitmapFactory.inSampleSize`
-   keeping memory bounded.
-6. Tap or Enter → `UserRootfsSession.runInside(rootfs, "<exec>
-   </dev/null >/dev/null 2>&1")` on the process-wide `LAUNCH_SCOPE`
-   (Dispatchers.IO). `UserRootfsSession` starts `CompositorService`
-   lazily and waits for the Wayland socket before spawning the Linux
-   process. Activity `finish()`es immediately; the coroutine keeps
-   blocking in `runInside` for the program's lifetime, which pins one
-   IO thread per running app. We can't `setsid -f` detach: proot's
+4. **LauncherEntry.parseList** turns the JSON into Kotlin records
+   (`id, name, comment, exec, terminal, iconPath, path` — `path` is the
+   absolute host path of the `.desktop` source file, kept so the UI can
+   distinguish user-editable entries from distro-owned ones).
+5. **LauncherActivity** filters hidden entries + the search query, then
+   renders rows (icon ImageView + name + comment). `IconLoader`
+   async-decodes PNGs with `BitmapFactory.inSampleSize` keeping memory
+   bounded.
+6. Tap or Enter → `EntryLauncher.launch(appContext, inst, entry)`, the
+   shared dispatch point for every launch surface. It runs
+   `UserRootfsSession.runInside(rootfs, "<exec> </dev/null >/dev/null
+   2>&1")` on its process-wide `LAUNCH_SCOPE` (Dispatchers.IO).
+   `UserRootfsSession` starts `CompositorService` lazily and waits for
+   the Wayland socket before spawning the Linux process. The Activity
+   `finish()`es immediately; the coroutine keeps blocking in
+   `runInside` for the program's lifetime, which pins one IO thread
+   per running app. We can't `setsid -f` detach: proot's
    `--kill-on-exit` (kept on for pacman cleanup) SIGKILLs any
    backgrounded child when the launcher bash exits, so the app would
    die before it ever opened a Wayland window. Blocking for the
    program's lifetime is correct anyway — the program needs the JVM
-   alive for the compositor's Wayland socket.
+   alive for the compositor's Wayland socket. Spawn failures surface
+   via `LaunchErrorActivity` from the application context.
+
+## Hide / unhide + per-entry menu
+
+Long-press on a row opens an action-list dialog (plain
+`AlertDialog.setItems`, no Menu resources) built from a per-entry
+`List<EntryAction>` (label + enabled + handler) in
+`LauncherActivity.entryActionsFor` — append there to grow the menu.
+Today's items: **Hide** on visible entries, **Unhide** on hidden ones.
+
+Hidden state lives in `Installation.hiddenDesktopIds` (ids =
+`LauncherEntry.id`, filename minus `.desktop`), written only through
+`InstallationStore.update` via `Installation.withEntryHidden`. The
+field is additive with a safe default — no `schemaVersion` bump — and
+serialized only when non-empty. Uninstall wipes `metadata.json`, so
+hide state resets with the install; stale ids never match and are not
+pruned.
+
+Filtering is **Kotlin-side** (`LauncherActivity.applyFilter`), not in
+`launcher.rs::scan_entries`:
+
+- Hide state is per-install app metadata; the scanner takes only a
+  rootfs path and shouldn't grow a metadata side-channel.
+- `resolve_metadata_for_app_id` shares `scan_entries` for window
+  icons/titles — a hidden app that is *running* must still resolve.
+
+The ⋮ tonal icon button beside the search field opens a `PopupMenu`
+with a checkable **"Show hidden (N)"** item (N counts hidden ids that
+match actual entries). Transient per-Activity state, not persisted.
+With it on, hidden entries render dimmed (alpha 0.5) in their normal
+sort position and launch normally on tap. If every entry is hidden,
+the empty-list message appends a "(N hidden)" hint.
+
+Debug broker actions (notes/exec-broker.md): `launcher-list` returns
+the post-filter list as JSON (optionally including hidden entries with
+`showHidden=true`); `set-entry-hidden` performs the same metadata
+write as the UI. Integration coverage: `launcher::` tests in
+`tests/integration/tests/launcher.rs`.
 
 ## Icon resolution
 

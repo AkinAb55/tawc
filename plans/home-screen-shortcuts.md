@@ -1,8 +1,8 @@
 # Home-screen shortcuts — pin launcher entries to the Android launcher
 
 Let the user put individual Linux programs on the Android home screen.
-**Depends on [launcher-entry-management.md](launcher-entry-management.md)**
-(per-entry action menu + `EntryLauncher`). Independent of
+Builds on the launcher entry-management foundation (per-entry action
+menu + `EntryLauncher` — done, see notes/launcher.md). Independent of
 [launcher-custom-programs.md](launcher-custom-programs.md), but both
 route through `EntryLauncher`, so terminal-entry handling composes
 automatically whichever lands first.
