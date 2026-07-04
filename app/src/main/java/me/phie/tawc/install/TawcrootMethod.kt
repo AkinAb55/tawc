@@ -142,7 +142,16 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      */
     data class PtyExec(val argv: List<String>, val hostEnv: List<String>, val cwd: String)
 
-    fun ptyShellExec(rootfs: String, graphics: GraphicsBackend? = null): PtyExec {
+    /**
+     * [command] == null runs an interactive login shell (`-l`); else the
+     * shell runs `-lc <command>` — still a login shell so profile env
+     * fires, matching [startInside].
+     */
+    fun ptyShellExec(
+        rootfs: String,
+        graphics: GraphicsBackend? = null,
+        command: String? = null,
+    ): PtyExec {
         val externalBinds = externalBindsFor(rootfs)
         val andoHostDir = store.andoHostDir(rootfs)
         val tmpdir = prepareSpawn(rootfs, externalBinds)
@@ -151,7 +160,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             add("TERM=xterm-256color")
             add("COLORTERM=truecolor")
             add("/bin/bash")
-            add("-l")
+            if (command != null) {
+                add("-lc"); add(command)
+            } else {
+                add("-l")
+            }
         }
         return PtyExec(argv, listOf("TMPDIR=$tmpdir"), tmpdir)
     }

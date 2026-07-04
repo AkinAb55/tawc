@@ -167,6 +167,14 @@
             android:theme="@style/Theme.Tawc.Launcher"
             android:windowSoftInputMode="stateVisible|adjustResize" />
 
+        <!-- Personal .desktop editor for the managed dir
+             (root/.local/share/applications). Launched for result by
+             LauncherActivity; RESULT_OK triggers a rescan. -->
+        <activity
+            android:name=".launcher.DesktopFileEditorActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".install.InstallationService"
             android:exported="false"

@@ -10,11 +10,15 @@ use tawc_integration::helpers::assert_broker_ok;
 
 const ENTRY_ID: &str = "tawc-hide-test";
 
-fn desktop_path() -> String {
+fn rootfs() -> String {
     format!(
-        "/data/data/me.phie.tawc/distros/{}/rootfs/usr/share/applications/{ENTRY_ID}.desktop",
+        "/data/data/me.phie.tawc/distros/{}/rootfs",
         tawc_integration::install_id()
     )
+}
+
+fn desktop_path() -> String {
+    format!("{}/usr/share/applications/{ENTRY_ID}.desktop", rootfs())
 }
 
 /// Best-effort cleanup on both success and panic: unhide the id (the
@@ -104,5 +108,110 @@ fn test_hidden_entry_filtering() {
     assert!(
         entry_object(&list, ENTRY_ID).is_some(),
         "unhidden entry missing from launcher-list: {list}"
+    );
+}
+
+// ---- scan directories + precedence ------------------------------------
+
+const USER_ID: &str = "tawc-scan-user";
+const LOCAL_ID: &str = "tawc-scan-local";
+const DUP_ID: &str = "tawc-scan-dup";
+
+/// Remove every fixture `test_scan_dirs_precedence_and_terminal` plants,
+/// on success and panic alike.
+struct ScanCleanup;
+
+impl Drop for ScanCleanup {
+    fn drop(&mut self) {
+        let r = rootfs();
+        let rm = format!(
+            "rm -f '{r}/root/.local/share/applications/{USER_ID}.desktop' \
+                   '{r}/usr/local/share/applications/{LOCAL_ID}.desktop' \
+                   '{r}/root/.local/share/applications/{DUP_ID}.desktop' \
+                   '{r}/usr/share/applications/{DUP_ID}.desktop'"
+        );
+        let _ = adb::rootfs_host_exec(&["/system/bin/sh", "-c", &rm]);
+    }
+}
+
+/// Plant a minimal `.desktop` at `<rootfs>/<subdir>/<id>.desktop`.
+fn plant_desktop(subdir: &str, id: &str, name: &str, exec: &str, terminal: bool) {
+    let path = format!("{}/{subdir}/{id}.desktop", rootfs());
+    let term = if terminal { " 'Terminal=true'" } else { "" };
+    let plant = format!(
+        "mkdir -p \"$(dirname '{path}')\" && printf '%s\\n' \
+         '[Desktop Entry]' 'Type=Application' 'Name={name}' 'Exec={exec}'{term} \
+         > '{path}'"
+    );
+    assert_broker_ok(
+        adb::rootfs_host_exec(&["/system/bin/sh", "-c", &plant]).expect("plant .desktop"),
+        "plant .desktop",
+    );
+}
+
+/// The scanner walks the user-writable dirs and gives them precedence:
+/// entries in `/root/.local/share/applications` (the guest's XDG
+/// per-user dir) and `/usr/local/share/applications` both appear,
+/// `Terminal=true` is reported, and a duplicated id resolves to the
+/// user copy — its name/exec shadow the `/usr/share` one
+/// (notes/launcher.md "Scan directories").
+#[test]
+fn test_scan_dirs_precedence_and_terminal() {
+    tawc_integration::helpers::test_init();
+    let _cleanup = ScanCleanup;
+
+    plant_desktop(
+        "root/.local/share/applications",
+        USER_ID,
+        "Tawc Scan User",
+        "tawc-scan-user-exec",
+        true,
+    );
+    plant_desktop(
+        "usr/local/share/applications",
+        LOCAL_ID,
+        "Tawc Scan Local",
+        "tawc-scan-local-exec",
+        false,
+    );
+    plant_desktop(
+        "root/.local/share/applications",
+        DUP_ID,
+        "Tawc Scan Dup User",
+        "tawc-scan-dup-user-exec",
+        false,
+    );
+    plant_desktop(
+        "usr/share/applications",
+        DUP_ID,
+        "Tawc Scan Dup Packaged",
+        "tawc-scan-dup-packaged-exec",
+        false,
+    );
+
+    let list = adb::launcher_list(false).expect("launcher-list");
+
+    let user = entry_object(&list, USER_ID)
+        .unwrap_or_else(|| panic!("per-user dir entry missing from launcher-list: {list}"));
+    assert!(
+        user.contains("\"terminal\":true"),
+        "Terminal=true not reported: {user}"
+    );
+    // org.json escapes `/` as `\/` in launcher-list output.
+    assert!(
+        user.contains("\\/root\\/.local\\/share\\/applications\\/"),
+        "per-user entry path not in the managed dir: {user}"
+    );
+
+    assert!(
+        entry_object(&list, LOCAL_ID).is_some(),
+        "/usr/local entry missing from launcher-list: {list}"
+    );
+
+    let dup = entry_object(&list, DUP_ID)
+        .unwrap_or_else(|| panic!("duplicated-id entry missing from launcher-list: {list}"));
+    assert!(
+        dup.contains("tawc-scan-dup-user-exec") && dup.contains("Tawc Scan Dup User"),
+        "duplicated id did not resolve to the per-user copy: {dup}"
     );
 }

@@ -1,6 +1,7 @@
 package me.phie.tawc.launcher
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
 import android.text.Editable
@@ -93,6 +94,13 @@ class LauncherActivity : AppCompatActivity() {
      *  a key event and as the IME editor action (~10ms apart), and finish()
      *  isn't instant, so without this guard one press launches twice. */
     private var launched = false
+
+    /** Editor round-trip: RESULT_OK means the rootfs changed — rescan. */
+    private val editEntry = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) loadApps()
+    }
     private var popupWidthPx = 0
     private var popupHeightPx = 0
 
@@ -330,8 +338,33 @@ class LauncherActivity : AppCompatActivity() {
                     true
                 }
             }
+            if (canEditEntries()) {
+                menu.add(getString(R.string.launcher_menu_add_entry)).setOnMenuItemClickListener {
+                    openEditor(null)
+                    true
+                }
+            }
             show()
         }
+    }
+
+    /**
+     * Editor writes are plain app-uid file I/O into the rootfs — works
+     * for tawcroot/proot but not chroot's root-owned rootfs
+     * (notes/launcher.md "Access model"), so chroot installs get no
+     * New/Edit entry points, consistent with the terminal gating.
+     */
+    private fun canEditEntries(): Boolean {
+        val inst = installation ?: return false
+        return inst.method != Installation.METHOD_CHROOT
+    }
+
+    private fun openEditor(entryPath: String?) {
+        val inst = installation ?: return
+        val i = Intent(this, DesktopFileEditorActivity::class.java)
+            .putExtra(DesktopFileEditorActivity.EXTRA_ID, inst.id)
+        if (entryPath != null) i.putExtra(DesktopFileEditorActivity.EXTRA_PATH, entryPath)
+        editEntry.launch(i)
     }
 
     /**
@@ -347,12 +380,19 @@ class LauncherActivity : AppCompatActivity() {
 
     private fun entryActionsFor(entry: LauncherEntry): List<EntryAction> {
         val hidden = entry.id in hiddenIds()
-        return listOf(
+        return listOfNotNull(
             if (hidden) {
                 EntryAction(getString(R.string.launcher_action_unhide)) { setEntryHidden(entry, false) }
             } else {
                 EntryAction(getString(R.string.launcher_action_hide)) { setEntryHidden(entry, true) }
             },
+            // Only entries in the managed dir are editable — everything
+            // else is package-owned (see DesktopEntryFile).
+            EntryAction(getString(R.string.launcher_action_edit)) { openEditor(entry.path) }
+                .takeIf {
+                    canEditEntries() &&
+                        DesktopEntryFile.isManaged(entry.path, store.rootfsDir(installationId))
+                },
         )
     }
 

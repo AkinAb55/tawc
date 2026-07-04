@@ -26,10 +26,15 @@ use freedesktop_desktop_entry::{DesktopEntry, Iter};
 use serde_json::json;
 
 /// Directories under a rootfs that may contain `.desktop` files. Mirrors
-/// `$XDG_DATA_DIRS` for a standard glibc install plus flatpak's exports.
+/// `$XDG_DATA_HOME` + `$XDG_DATA_DIRS` for a standard glibc install
+/// (the guest runs as fake root, so `$HOME` is `/root`) plus flatpak's
+/// exports. Order is de-dup priority: earlier dirs win for a duplicated
+/// id, so a user's `.desktop` in `/root/.local` shadows the packaged
+/// copy — required for "hide the packaged entry behind my edited copy".
 const APPS_SUBDIRS: &[&str] = &[
-    "usr/share/applications",
+    "root/.local/share/applications",
     "usr/local/share/applications",
+    "usr/share/applications",
     "var/lib/flatpak/exports/share/applications",
     "var/lib/snapd/desktop/applications",
 ];
@@ -134,20 +139,17 @@ fn scan_entries(rootfs: &Path, launchable_only: bool) -> Vec<Entry> {
         });
     }
 
-    // Stable de-dup: keep first occurrence of each id (Iter walks the
-    // dirs in the declared order, but we want per-user wins — so we
-    // would actually need the user-side first. APPS_SUBDIRS lists
-    // /usr/share first today; that's wrong for de-dup, but in practice
-    // chroot installs don't have ~/.local/share/applications populated,
-    // so this is academic. Revisit if/when we expose per-user dirs.).
+    // De-dup by id in walk order *before* sorting: Iter walks the dirs
+    // in APPS_SUBDIRS order, which is user-first, so the first
+    // occurrence is the highest-priority copy.
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert(e.id.clone()));
     entries.sort_by(|a, b| {
         a.name
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.id.cmp(&b.id))
     });
-    let mut seen = std::collections::HashSet::new();
-    entries.retain(|e| seen.insert(e.id.clone()));
     entries
 }
 

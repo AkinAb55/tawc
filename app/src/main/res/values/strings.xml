@@ -131,6 +131,20 @@
     <string name="launcher_menu_show_hidden">Show hidden (%1$d)</string>
     <string name="launcher_action_hide">Hide</string>
     <string name="launcher_action_unhide">Unhide</string>
+    <string name="launcher_action_edit">Edit</string>
+    <string name="launcher_menu_add_entry">Add entry&#8230;</string>
+    <string name="editor_title_new">Add entry</string>
+    <string name="editor_title_edit">Edit program</string>
+    <string name="editor_field_name">Name</string>
+    <string name="editor_field_exec">Command</string>
+    <string name="editor_field_icon">Icon (name or path)</string>
+    <string name="editor_field_terminal">Run in terminal</string>
+    <string name="editor_save">Save</string>
+    <string name="editor_delete">Delete</string>
+    <string name="editor_delete_confirm">Delete \'%1$s\'?</string>
+    <string name="editor_foreign_warning">This file has settings the editor doesn\'t handle. Saving rewrites the file and drops them.</string>
+    <string name="editor_save_failed">Saving failed: %1$s</string>
+    <string name="editor_delete_failed">Delete failed.</string>
     <string name="launcher_launch_failed_title">Launching %1$s failed</string>
 
     <string name="operation_not_in_flight">No operation in flight for \'%1$s\'.</string>

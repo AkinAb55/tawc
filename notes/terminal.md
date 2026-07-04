@@ -65,6 +65,26 @@ tawcroot-only: chroot spawns via `su` (no pty fd to hand over) and
 proot is dev-only, so the button is gated on
 `Installation.method == tawcroot` + state READY.
 
+## Command sessions (launcher `Terminal=true` entries)
+
+`EntryLauncher` routes `Terminal=true` launcher entries on tawcroot
+installs here: `EXTRA_COMMAND` (the entry's Exec line) + `EXTRA_LABEL`
+(the entry name) on the same per-distro document URI.
+`ptyShellExec(command=…)` swaps `-l` for `-lc <command>` — still a
+login shell so profile env fires, matching `startInside`. The command
+gets a hold-open trailer (`; __c=$?; printf '\n[exited %d — press any
+key]\n' "$__c"; read -rsn1`) so a short script's output doesn't vanish
+with the tab: the session is still alive during `read`, so a keypress
+ends the shell and the normal tab-removal flow runs — no
+session-lifecycle changes. `onCreate` consumes the extras
+(`removeExtra`) so recreation doesn't respawn the command; a repeat
+launch while the task is alive lands in `onNewIntent`
+(`intoExisting`) and opens a new tab running the command. The tab is
+labelled with the entry name via `TerminalSession.mSessionName` until
+an OSC title arrives. proot/chroot entries keep the headless launch
+plus a logcat warn (debug-only methods). Verified on-device
+2026-07-04.
+
 ## Session model
 
 `TerminalSessions` is a process-wide registry of installation id → an

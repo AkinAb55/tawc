@@ -10,12 +10,17 @@ and lets the user search + launch. Reached from the home screen card's
    <installation id>`.
 2. **LauncherActivity.loadApps()** → `NativeBridge.nativeLauncherScan(rootfs)`
    on `Dispatchers.IO`. Returns a JSON string.
-3. **launcher.rs** walks `usr/share/applications` +
-   `usr/local/share/applications` + flatpak/snap exports under the
-   rootfs, parses each `.desktop` via the `freedesktop-desktop-entry`
-   crate, filters non-Application / NoDisplay / Hidden / Exec-less
-   entries, resolves `Icon=` to an on-device PNG path, sorts by
-   localised name, de-dups by id.
+3. **launcher.rs** walks `APPS_SUBDIRS` under the rootfs —
+   `root/.local/share/applications` (the guest's XDG per-user dir;
+   fake root, so `$HOME` is `/root`), `usr/local/share/applications`,
+   `usr/share/applications`, flatpak/snap exports — parses each
+   `.desktop` via the `freedesktop-desktop-entry` crate, filters
+   non-Application / NoDisplay / Hidden / Exec-less entries, resolves
+   `Icon=` to an on-device PNG path. De-dup by id happens in walk
+   order *before* the name sort, and `APPS_SUBDIRS` is ordered
+   user-first, so a user's copy of an id shadows the packaged one
+   ("hide the packaged entry behind my edited copy" works). Then
+   sorted by localised name.
 4. **LauncherEntry.parseList** turns the JSON into Kotlin records
    (`id, name, comment, exec, terminal, iconPath, path` — `path` is the
    absolute host path of the `.desktop` source file, kept so the UI can
@@ -25,7 +30,11 @@ and lets the user search + launch. Reached from the home screen card's
    async-decodes PNGs with `BitmapFactory.inSampleSize` keeping memory
    bounded.
 6. Tap or Enter → `EntryLauncher.launch(appContext, inst, entry)`, the
-   shared dispatch point for every launch surface. It runs
+   shared dispatch point for every launch surface. `Terminal=true`
+   entries on tawcroot installs open `TerminalActivity` as a command
+   tab instead (see notes/terminal.md "Command sessions"); proot/chroot
+   terminal entries fall through to the headless path with a logcat
+   warn. Everything else runs
    `UserRootfsSession.runInside(rootfs, "<exec> </dev/null >/dev/null
    2>&1")` on its process-wide `LAUNCH_SCOPE` (Dispatchers.IO).
    `UserRootfsSession` starts `CompositorService` lazily and waits for
@@ -46,7 +55,8 @@ Long-press on a row opens an action-list dialog (plain
 `AlertDialog.setItems`, no Menu resources) built from a per-entry
 `List<EntryAction>` (label + enabled + handler) in
 `LauncherActivity.entryActionsFor` — append there to grow the menu.
-Today's items: **Hide** on visible entries, **Unhide** on hidden ones.
+Today's items: **Hide** on visible entries, **Unhide** on hidden ones,
+**Edit** on managed-dir entries (see "Managed dir + .desktop editor").
 
 Hidden state lives in `Installation.hiddenDesktopIds` (ids =
 `LauncherEntry.id`, filename minus `.desktop`), written only through
@@ -66,7 +76,9 @@ Filtering is **Kotlin-side** (`LauncherActivity.applyFilter`), not in
 
 The ⋮ tonal icon button beside the search field opens a `PopupMenu`
 with a checkable **"Show hidden (N)"** item (N counts hidden ids that
-match actual entries). Transient per-Activity state, not persisted.
+match actual entries) and — on editable methods — **"Add entry…"**
+(the editor). Show-hidden is transient per-Activity state, not
+persisted.
 With it on, hidden entries render dimmed (alpha 0.5) in their normal
 sort position and launch normally on tap. If every entry is hidden,
 the empty-list message appends a "(N hidden)" hint.
@@ -76,6 +88,51 @@ the post-filter list as JSON (optionally including hidden entries with
 `showHidden=true`); `set-entry-hidden` performs the same metadata
 write as the UI. Integration coverage: `launcher::` tests in
 `tests/integration/tests/launcher.rs`.
+
+## Managed dir + .desktop editor
+
+`/root/.local/share/applications/` is the **managed dir** — the
+package-manager boundary. `DesktopFileEditorActivity` (launched for
+result from the launcher's "Add entry…" overflow item and per-entry
+"Edit" action) creates files only there, and only files there get the
+Edit action; `/usr/local` stays read-only to the app (technically not
+package-managed either, but `make install`-style entries there are
+exactly the complex foreign files the editor shouldn't touch).
+
+- Editable check is Kotlin-side: `DesktopEntryFile.isManaged` prefixes
+  `entry.path` against the managed dir. Both sides are canonicalized —
+  Kotlin's `context.dataDir` is `/data/user/0/<pkg>` while the Rust
+  scanner canonicalizes its walk roots to `/data/data/<pkg>`, so a
+  naive prefix check never matches.
+- Method gate: writes are plain app-uid file I/O, fine for
+  tawcroot/proot but not chroot's root-owned rootfs (see "Access
+  model") — chroot installs get no New/Edit entry points, consistent
+  with the terminal gating.
+- Editor scope (`DesktopEntryFile`): Name + Exec (required), Icon
+  (freeform `Icon=` value, resolved by `resolve_icon` on next scan),
+  Terminal checkbox (checked by default for new entries — hand-made
+  entries are usually CLI scripts). `Comment=` has no form field but is
+  read and written back, so editing preserves an existing description.
+  Saving
+  writes the file wholesale (`Type=Application` + those keys); values
+  lose embedded newlines, nothing else. Explicit non-goals: locale
+  keys, actions, `%f` field codes, multiple groups — personal
+  launchers, not production `.desktop` files.
+- New file: `slugifyLabel`-style slug of Name + `.desktop`, `-2`/`-3`
+  suffix on collision. Editing keeps the filename — it's the entry id,
+  which pins and hidden-state reference. Delete is a toolbar trash
+  action (confirmed), shown only when editing.
+- Foreign files in the managed dir (unknown keys/groups): known keys
+  load, and a notice warns that saving rewrites the file and drops the
+  rest — a warning, not silent data loss.
+- After save/delete the launcher rescans (`RESULT_OK` →
+  `loadApps()`).
+
+Serializer/parse/slug logic is JVM-unit-tested
+(`DesktopEntryFileTest`); scan-dir + precedence + terminal-flag
+behavior is integration-tested through `launcher-list`
+(`tests/integration/tests/launcher.rs`). Editor flows verified
+on-device 2026-07-04.
 
 ## Icon resolution
 
