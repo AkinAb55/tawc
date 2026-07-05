@@ -4,8 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -19,10 +18,12 @@ import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.widget.doAfterTextChanged
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,7 +31,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.phie.tawc.R
-import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.ui.tawcButtonSizePx
@@ -43,7 +43,7 @@ import kotlin.math.min
 /**
  * App launcher: type-to-filter list of installed `.desktop` apps for one
  * distro. The Rust compositor library does the actual scanning
- * ([NativeBridge.nativeLauncherScan]); Kotlin here just renders + filters
+ * ([LauncherEntry.scan]); Kotlin here just renders + filters
  * + dispatches launches.
  *
  * UX is intentionally minimal: one search field, one scrolling list,
@@ -98,7 +98,7 @@ class LauncherActivity : AppCompatActivity() {
 
     /** Editor round-trip: RESULT_OK means the rootfs changed — rescan. */
     private val editEntry = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) loadApps()
     }
@@ -127,11 +127,7 @@ class LauncherActivity : AppCompatActivity() {
             // `apropos` / a desktop run dialog.
             isFocusableInTouchMode = true
             requestFocus()
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(s: Editable?) = applyFilter()
-            })
+            doAfterTextChanged { applyFilter() }
             setOnEditorActionListener { _, actionId, event ->
                 val isEnter = actionId == EditorInfo.IME_ACTION_GO ||
                     actionId == EditorInfo.IME_ACTION_DONE ||
@@ -145,7 +141,7 @@ class LauncherActivity : AppCompatActivity() {
         ) { showOverflowMenu() }
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
         }
         searchRow.addView(searchField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         searchRow.addView(
@@ -254,10 +250,7 @@ class LauncherActivity : AppCompatActivity() {
         }
         val rootfs = store.rootfsDir(inst.id).absolutePath
         uiScope.launch {
-            val json = withContext(Dispatchers.IO) {
-                runCatching { NativeBridge.nativeLauncherScan(rootfs) }.getOrNull()
-            }
-            allEntries = LauncherEntry.parseList(json)
+            allEntries = withContext(Dispatchers.IO) { LauncherEntry.scan(rootfs) }
             applyFilter()
             if (allEntries.isEmpty()) {
                 emptyView.text = getString(R.string.launcher_no_launchable_apps)
@@ -275,31 +268,12 @@ class LauncherActivity : AppCompatActivity() {
         return allEntries.count { it.id in hidden }
     }
 
-    /**
-     * Re-filter [allEntries] against hide state + the search field.
-     * Hidden entries are dropped unless [showHidden]. Query is a
-     * substring match, case-insensitive, against name + id + comment.
-     * Order: prefix matches on name first (so typing "fire" surfaces
-     * Firefox above "WireFire"), then any other substring match, all
-     * already pre-sorted by name from the Rust scanner.
-     */
+    /** Re-filter [allEntries] against hide state + the search field
+     *  ([LauncherEntry.filter]) and re-render. */
     private fun applyFilter() {
-        val hidden = hiddenIds()
-        val visible = if (showHidden) allEntries else allEntries.filter { it.id !in hidden }
-        val q = searchField.text.toString().trim().lowercase()
-        filteredEntries = if (q.isEmpty()) {
-            visible
-        } else {
-            val prefix = ArrayList<LauncherEntry>()
-            val other = ArrayList<LauncherEntry>()
-            for (e in visible) {
-                val n = e.name.lowercase()
-                if (n.startsWith(q)) prefix.add(e)
-                else if (n.contains(q) || e.id.lowercase().contains(q) ||
-                    e.comment.lowercase().contains(q)) other.add(e)
-            }
-            prefix + other
-        }
+        filteredEntries = LauncherEntry.filter(
+            allEntries, hiddenIds(), showHidden, searchField.text.toString(),
+        )
         renderList()
     }
 
@@ -454,7 +428,7 @@ class LauncherActivity : AppCompatActivity() {
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(pad, pad, pad, pad)
         }
 

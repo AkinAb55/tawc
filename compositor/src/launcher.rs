@@ -63,7 +63,9 @@ const KNOWN_ICON_EXTS: &[&str] = &["png", "svg", "xpm", "jpg", "jpeg"];
 
 /// One launchable application, ready to ship to Kotlin.
 pub struct Entry {
-    /// Filename minus `.desktop` — stable id used by `find_app_by_id`.
+    /// Filename minus `.desktop` — the stable id Kotlin hide-state and
+    /// shortcut pins reference; `resolve_metadata_for_app_id` matches
+    /// window app_ids against it.
     pub id: String,
     pub name: String,
     pub comment: String,
@@ -83,14 +85,12 @@ pub struct Entry {
     pub path: String,
 }
 
-/// Scan [rootfs] for launchable apps. Returns entries sorted by name
+/// Scan [rootfs] for `.desktop` apps. Returns entries sorted by name
 /// (case-insensitive), de-duplicated by id — the per-user dir wins over
 /// `/usr/share` if both ship the same id, matching desktop-environment
-/// convention.
-fn scan(rootfs: &Path) -> Vec<Entry> {
-    scan_entries(rootfs, true)
-}
-
+/// convention. `launchable_only` additionally drops `NoDisplay` entries
+/// (the launcher list); metadata resolution keeps them — a *running*
+/// NoDisplay app still needs its icon/title resolved.
 fn scan_entries(rootfs: &Path, launchable_only: bool) -> Vec<Entry> {
     let dirs: Vec<PathBuf> = APPS_SUBDIRS
         .iter()
@@ -105,10 +105,7 @@ fn scan_entries(rootfs: &Path, launchable_only: bool) -> Vec<Entry> {
             Ok(de) => de,
             Err(_) => continue,
         };
-        if launchable_only && !is_launchable(&de) {
-            continue;
-        }
-        if !launchable_only && !is_metadata_candidate(&de) {
+        if !is_relevant(&de, launchable_only) {
             continue;
         }
         let exec = match de.exec() {
@@ -222,7 +219,7 @@ fn normalize_desktop_id(value: &str) -> String {
 /// object: `{id, name, comment, exec, terminal, iconPath, path}`. Always
 /// returns a valid JSON array (empty `[]` if the rootfs has no apps).
 pub fn scan_json(rootfs: &Path) -> String {
-    let entries = scan(rootfs);
+    let entries = scan_entries(rootfs, true);
     let arr: Vec<_> = entries
         .iter()
         .map(|e| {
@@ -240,12 +237,10 @@ pub fn scan_json(rootfs: &Path) -> String {
     serde_json::Value::Array(arr).to_string()
 }
 
-fn is_launchable(de: &DesktopEntry) -> bool {
-    de.type_() == Some("Application") && !de.no_display() && !de.hidden()
-}
-
-fn is_metadata_candidate(de: &DesktopEntry) -> bool {
-    de.type_() == Some("Application") && !de.hidden()
+/// `Type=Application` and not `Hidden`; `launchable_only` (see
+/// `scan_entries`) also requires not `NoDisplay`.
+fn is_relevant(de: &DesktopEntry, launchable_only: bool) -> bool {
+    de.type_() == Some("Application") && !de.hidden() && (!launchable_only || !de.no_display())
 }
 
 /// Find an absolute on-device path for [icon] inside [rootfs], or None.
@@ -304,10 +299,10 @@ fn is_png_file(p: &Path) -> bool {
 /// `Icon=org.gnome.Files` keeps the dotted appid intact (no stripping —
 /// `Files` isn't a known extension); `Icon=firefox.png` becomes `firefox`.
 fn strip_known_ext(name: &str) -> &str {
+    let lower = name.to_ascii_lowercase();
     for ext in KNOWN_ICON_EXTS {
-        let suffix = format!(".{}", ext);
-        if name.to_ascii_lowercase().ends_with(&suffix) {
-            return &name[..name.len() - suffix.len()];
+        if let Some(stem) = lower.strip_suffix(ext).and_then(|s| s.strip_suffix('.')) {
+            return &name[..stem.len()];
         }
     }
     name

@@ -1,6 +1,5 @@
 package me.phie.tawc.launcher
 
-import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.dev.ActionContext
 import me.phie.tawc.dev.ActionRegistry
 import me.phie.tawc.dev.BrokerAction
@@ -44,11 +43,9 @@ internal object LauncherActions {
             val inst = store.load(id)
                 ?: return ctx.fail("launcher-list: no installation '$id'")
             val rootfs = store.rootfsDir(id).absolutePath
-            val json = runCatching { NativeBridge.nativeLauncherScan(rootfs) }
-                .getOrElse { e -> return ctx.fail("launcher-list: scan failed: $e") }
             val hidden = inst.hiddenDesktopIds.toSet()
             val out = JSONArray()
-            for (e in LauncherEntry.parseList(json)) {
+            for (e in LauncherEntry.scan(rootfs)) {
                 val isHidden = e.id in hidden
                 if (isHidden && !showHidden) continue
                 out.put(JSONObject().apply {

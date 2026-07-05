@@ -7,7 +7,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.phie.tawc.R
-import me.phie.tawc.compositor.NativeBridge
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationStore
 
@@ -46,9 +45,7 @@ class ShortcutLaunchActivity : AppCompatActivity() {
         val rootfs = store.rootfsDir(inst.id).absolutePath
         lifecycleScope.launch {
             val entry = withContext(Dispatchers.IO) {
-                runCatching { NativeBridge.nativeLauncherScan(rootfs) }.getOrNull()
-                    .let { LauncherEntry.parseList(it) }
-                    .firstOrNull { it.id == desktopId }
+                LauncherEntry.scan(rootfs).firstOrNull { it.id == desktopId }
             }
             if (entry == null) {
                 fail(label, getString(R.string.shortcut_entry_gone))

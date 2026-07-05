@@ -3,6 +3,7 @@ package me.phie.tawc.launcher
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -74,17 +75,14 @@ object EntryLauncher {
                 )
                 return
             }
-            android.util.Log.w(
-                TAG,
-                "terminal entry ${entry.id}: native terminal is tawcroot-only, running headless",
-            )
+            Log.w(TAG, "terminal entry ${entry.id}: native terminal is tawcroot-only, running headless")
         }
         val rootfs = InstallationStore(appContext).rootfsDir(inst.id).absolutePath
         val cmd = "${entry.exec} </dev/null >/dev/null 2>&1"
         LAUNCH_SCOPE.launch {
             runCatching { UserRootfsSession.runInside(appContext, method, rootfs, cmd) }
                 .onFailure { e ->
-                    android.util.Log.w(TAG, "launch ${entry.id}: $e")
+                    Log.w(TAG, "launch ${entry.id}: $e")
                     val title = appContext.getString(
                         R.string.launcher_launch_failed_title,
                         entry.name.ifEmpty { entry.id },

@@ -8,8 +8,11 @@ and lets the user search + launch. Reached from the home screen card's
 
 1. **MainActivity** card → `LauncherActivity` Intent with `EXTRA_ID =
    <installation id>`.
-2. **LauncherActivity.loadApps()** → `NativeBridge.nativeLauncherScan(rootfs)`
-   on `Dispatchers.IO`. Returns a JSON string.
+2. **LauncherActivity.loadApps()** → `LauncherEntry.scan(rootfs)` on
+   `Dispatchers.IO` — the shared wrapper around
+   `NativeBridge.nativeLauncherScan` + JSON parse that every scan
+   consumer (launcher list, shortcut trampoline, `launcher-list`
+   broker action) goes through. Native failure = empty list.
 3. **launcher.rs** walks `APPS_SUBDIRS` under the rootfs —
    `root/.local/share/applications` (the guest's XDG per-user dir;
    fake root, so `$HOME` is `/root`), `usr/local/share/applications`,
@@ -67,8 +70,9 @@ serialized only when non-empty. Uninstall wipes `metadata.json`, so
 hide state resets with the install; stale ids never match and are not
 pruned.
 
-Filtering is **Kotlin-side** (`LauncherActivity.applyFilter`), not in
-`launcher.rs::scan_entries`:
+Filtering is **Kotlin-side** (`LauncherEntry.filter`, a pure
+unit-tested function driven from `LauncherActivity.applyFilter`), not
+in `launcher.rs::scan_entries`:
 
 - Hide state is per-install app metadata; the scanner takes only a
   rootfs path and shouldn't grow a metadata side-channel.

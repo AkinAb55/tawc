@@ -1,8 +1,7 @@
 package me.phie.tawc.launcher
 
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
+import android.view.MenuItem
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.CheckBox
@@ -13,6 +12,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.content.res.AppCompatResources
+import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 import me.phie.tawc.R
 import me.phie.tawc.install.InstallationStore
@@ -121,11 +122,11 @@ class DesktopFileEditorActivity : AppCompatActivity() {
             // Tinted manually — MaterialToolbar doesn't tint menu-item
             // icons, and the vector's own fill is white.
             scaffold.toolbar.menu.add(getString(R.string.editor_delete)).apply {
-                icon = androidx.appcompat.content.res.AppCompatResources
+                icon = AppCompatResources
                     .getDrawable(this@DesktopFileEditorActivity, R.drawable.ic_delete)
                     ?.mutate()
                     ?.apply { setTint(getColor(R.color.tawc_danger)) }
-                setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+                setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
                 setOnMenuItemClickListener { confirmDelete(); true }
             }
         }
@@ -147,11 +148,7 @@ class DesktopFileEditorActivity : AppCompatActivity() {
         val field = EditText(this).apply {
             setText(value)
             isSingleLine = true
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun afterTextChanged(s: Editable?) = revalidate()
-            })
+            doAfterTextChanged { revalidate() }
         }
         form.addView(field, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
         return field

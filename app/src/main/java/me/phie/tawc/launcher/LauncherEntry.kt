@@ -1,10 +1,11 @@
 package me.phie.tawc.launcher
 
+import me.phie.tawc.compositor.NativeBridge
 import org.json.JSONArray
 
 /**
  * One launchable Linux application discovered inside a chroot rootfs.
- * Mirrors the JSON shape returned by `NativeBridge.nativeLauncherScan` —
+ * Mirrors the JSON shape returned by [NativeBridge.nativeLauncherScan] —
  * the Rust scanner is the source of truth for what counts as launchable
  * (Type=Application, not NoDisplay/Hidden, has Exec).
  */
@@ -31,6 +32,44 @@ data class LauncherEntry(
     val path: String = "",
 ) {
     companion object {
+        /**
+         * Scan [rootfs] with the Rust scanner and parse the result — the
+         * one entry point every consumer (launcher list, shortcut
+         * trampoline, debug broker) goes through. A native failure yields
+         * an empty list, same as "no apps". Blocking file I/O; call on
+         * [kotlinx.coroutines.Dispatchers.IO] from UI code.
+         */
+        fun scan(rootfs: String): List<LauncherEntry> =
+            parseList(runCatching { NativeBridge.nativeLauncherScan(rootfs) }.getOrNull())
+
+        /**
+         * Hidden-state + search filtering, the pure core of the launcher's
+         * list state. Entries with an id in [hiddenIds] are dropped unless
+         * [showHidden]. [query] is a case-insensitive substring match
+         * against name + id + comment; name-prefix matches sort first (so
+         * typing "fire" surfaces Firefox above "WireFire"), everything
+         * else keeps the scanner's name order.
+         */
+        fun filter(
+            entries: List<LauncherEntry>,
+            hiddenIds: Set<String>,
+            showHidden: Boolean,
+            query: String,
+        ): List<LauncherEntry> {
+            val visible = if (showHidden) entries else entries.filter { it.id !in hiddenIds }
+            val q = query.trim().lowercase()
+            if (q.isEmpty()) return visible
+            val prefix = ArrayList<LauncherEntry>()
+            val other = ArrayList<LauncherEntry>()
+            for (e in visible) {
+                val n = e.name.lowercase()
+                if (n.startsWith(q)) prefix.add(e)
+                else if (n.contains(q) || e.id.lowercase().contains(q) ||
+                    e.comment.lowercase().contains(q)) other.add(e)
+            }
+            return prefix + other
+        }
+
         fun parseList(json: String?): List<LauncherEntry> {
             if (json.isNullOrBlank()) return emptyList()
             return runCatching {

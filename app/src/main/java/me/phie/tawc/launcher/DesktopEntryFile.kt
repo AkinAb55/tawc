@@ -44,10 +44,6 @@ internal object DesktopEntryFile {
         val terminal: Boolean = false,
     )
 
-    /** Keys [serialize] writes (and [parse] recognises) in the
-     *  `[Desktop Entry]` group. */
-    private val KNOWN_KEYS = setOf("Type", "Name", "Exec", "Comment", "Icon", "Terminal")
-
     fun serialize(draft: Draft): String = buildString {
         appendLine("[Desktop Entry]")
         appendLine("Type=Application")
@@ -64,8 +60,8 @@ internal object DesktopEntryFile {
     data class Parsed(
         val draft: Draft,
         /**
-         * The file carries content [serialize] would drop: keys outside
-         * [KNOWN_KEYS] (including locale-qualified `Name[xx]`), groups
+         * The file carries content [serialize] would drop: keys it
+         * doesn't write (including locale-qualified `Name[xx]`), groups
          * other than `[Desktop Entry]`, or a non-Application `Type`.
          * Blank lines and `#` comments don't count as foreign even
          * though a save drops them too.
@@ -97,10 +93,6 @@ internal object DesktopEntryFile {
             }
             val key = line.substring(0, eq).trim()
             val value = line.substring(eq + 1).trim()
-            if (key !in KNOWN_KEYS) {
-                foreign = true
-                continue
-            }
             when (key) {
                 "Type" -> if (value != "Application") foreign = true
                 "Name" -> name = value
@@ -108,6 +100,7 @@ internal object DesktopEntryFile {
                 "Comment" -> comment = value
                 "Icon" -> icon = value
                 "Terminal" -> terminal = value.equals("true", ignoreCase = true)
+                else -> foreign = true
             }
         }
         return Parsed(Draft(name, exec, comment, icon, terminal), foreign)

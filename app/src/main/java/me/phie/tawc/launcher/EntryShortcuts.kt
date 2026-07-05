@@ -106,22 +106,34 @@ object EntryShortcuts {
     private fun pinBitmap(iconPath: String): Bitmap? {
         if (iconPath.isEmpty()) return null
         val src = IconLoader.decode(iconPath, PIN_BITMAP_PX * 2 / 3) ?: return null
-        val fit = pinIconFit(PIN_BITMAP_PX, src.width, src.height) ?: return null
-        val out = Bitmap.createBitmap(PIN_BITMAP_PX, PIN_BITMAP_PX, Bitmap.Config.ARGB_8888)
-        out.eraseColor(PIN_BACKGROUND)
-        Canvas(out).drawBitmap(src, null, Rect(fit[0], fit[1], fit[2], fit[3]), Paint(Paint.FILTER_BITMAP_FLAG))
-        return out
+        return pinCanvas(PIN_BACKGROUND, src.width, src.height) { canvas, fit ->
+            canvas.drawBitmap(src, null, fit, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
     }
 
     /** A drawable resource rendered like a decoded entry icon: centered
      *  in the adaptive-bitmap safe zone on [background]. */
     private fun drawablePinBitmap(context: Context, resId: Int, background: Int): Bitmap? {
         val d = ContextCompat.getDrawable(context, resId) ?: return null
-        val fit = pinIconFit(PIN_BITMAP_PX, d.intrinsicWidth, d.intrinsicHeight) ?: return null
+        return pinCanvas(background, d.intrinsicWidth, d.intrinsicHeight) { canvas, fit ->
+            d.bounds = fit
+            d.draw(canvas)
+        }
+    }
+
+    /** [PIN_BITMAP_PX]² adaptive bitmap on [background] with [draw]
+     *  targeting the safe-zone fit rect ([pinIconFit]); null for
+     *  degenerate source sizes. */
+    private fun pinCanvas(
+        background: Int,
+        srcW: Int,
+        srcH: Int,
+        draw: (Canvas, Rect) -> Unit,
+    ): Bitmap? {
+        val fit = pinIconFit(PIN_BITMAP_PX, srcW, srcH) ?: return null
         val out = Bitmap.createBitmap(PIN_BITMAP_PX, PIN_BITMAP_PX, Bitmap.Config.ARGB_8888)
         out.eraseColor(background)
-        d.setBounds(fit[0], fit[1], fit[2], fit[3])
-        d.draw(Canvas(out))
+        draw(Canvas(out), Rect(fit[0], fit[1], fit[2], fit[3]))
         return out
     }
 
@@ -131,7 +143,8 @@ object EntryShortcuts {
      * scaled to 2/3 of the canvas — launchers mask adaptive icons to
      * roughly the middle two-thirds ("safe zone"), so anything bigger
      * risks clipping. Null for degenerate sizes (caller falls back to
-     * the app icon).
+     * the app icon). IntArray rather than [Rect] so JVM unit tests can
+     * exercise it without Android framework stubs.
      */
     internal fun pinIconFit(canvasPx: Int, srcW: Int, srcH: Int): IntArray? {
         if (canvasPx <= 0 || srcW <= 0 || srcH <= 0) return null
