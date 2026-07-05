@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
+import androidx.core.content.ContextCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -68,7 +69,7 @@ object EntryShortcuts {
             .putExtra(ShortcutLaunchActivity.EXTRA_LABEL, label)
         val info = ShortcutInfoCompat.Builder(context, shortcutId(inst.id, entry.id))
             .setShortLabel(label)
-            .setIcon(pinIcon(context, entry.iconPath))
+            .setIcon(pinIcon(context, entry))
             .setIntent(intent)
             .build()
         val pinned = ShortcutManagerCompat
@@ -83,10 +84,16 @@ object EntryShortcuts {
         }
     }
 
-    private fun pinIcon(context: Context, iconPath: String): IconCompat {
-        val bmp = pinBitmap(iconPath)
-        // No usable entry icon → the tawc app icon, so the pin is still
-        // recognizable.
+    private fun pinIcon(context: Context, entry: LauncherEntry): IconCompat {
+        // No usable entry icon → same fallbacks as the launcher list:
+        // ">_" badge for terminal entries, the tawc app icon otherwise.
+        // Black backdrop so the badge's own black square extends over the
+        // whole adaptive bitmap — launcher masks show a margin around the
+        // safe zone, and the neutral grey reads as stripes there.
+        val bmp = pinBitmap(entry.iconPath)
+            ?: if (entry.terminal) {
+                drawablePinBitmap(context, R.drawable.ic_terminal_fallback, 0xFF000000.toInt())
+            } else null
         return if (bmp != null) IconCompat.createWithAdaptiveBitmap(bmp)
         else IconCompat.createWithResource(context, R.mipmap.ic_launcher)
     }
@@ -103,6 +110,18 @@ object EntryShortcuts {
         val out = Bitmap.createBitmap(PIN_BITMAP_PX, PIN_BITMAP_PX, Bitmap.Config.ARGB_8888)
         out.eraseColor(PIN_BACKGROUND)
         Canvas(out).drawBitmap(src, null, Rect(fit[0], fit[1], fit[2], fit[3]), Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    /** A drawable resource rendered like a decoded entry icon: centered
+     *  in the adaptive-bitmap safe zone on [background]. */
+    private fun drawablePinBitmap(context: Context, resId: Int, background: Int): Bitmap? {
+        val d = ContextCompat.getDrawable(context, resId) ?: return null
+        val fit = pinIconFit(PIN_BITMAP_PX, d.intrinsicWidth, d.intrinsicHeight) ?: return null
+        val out = Bitmap.createBitmap(PIN_BITMAP_PX, PIN_BITMAP_PX, Bitmap.Config.ARGB_8888)
+        out.eraseColor(background)
+        d.setBounds(fit[0], fit[1], fit[2], fit[3])
+        d.draw(Canvas(out))
         return out
     }
 

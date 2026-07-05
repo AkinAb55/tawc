@@ -32,9 +32,13 @@ class IconLoader(
 ) {
     private val cache = HashMap<String, Bitmap>()
 
-    fun load(path: String, target: ImageView) {
+    /**
+     * [fallbackRes] is shown when [path] is empty or fails to decode,
+     * so entries never render with a blank icon slot.
+     */
+    fun load(path: String, target: ImageView, fallbackRes: Int = 0) {
         if (path.isEmpty()) {
-            target.setImageDrawable(null)
+            applyFallback(target, fallbackRes)
             target.tag = null
             return
         }
@@ -47,10 +51,19 @@ class IconLoader(
         target.tag = path
         scope.launch {
             val bmp = withContext(Dispatchers.IO) { decode(path, sizePx) }
-            if (bmp == null || target.tag != path) return@launch
+            if (target.tag != path) return@launch
+            if (bmp == null) {
+                applyFallback(target, fallbackRes)
+                return@launch
+            }
             cache[path] = bmp
             target.setImageBitmap(bmp)
         }
+    }
+
+    private fun applyFallback(target: ImageView, fallbackRes: Int) {
+        if (fallbackRes != 0) target.setImageResource(fallbackRes)
+        else target.setImageDrawable(null)
     }
 
     companion object {

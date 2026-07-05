@@ -466,7 +466,11 @@ class LauncherActivity : AppCompatActivity() {
             // null.
             adjustViewBounds = false
         }
-        iconLoader.load(entry.iconPath, icon)
+        iconLoader.load(
+            entry.iconPath,
+            icon,
+            if (entry.terminal) R.drawable.ic_terminal_fallback else R.drawable.ic_tawc_logo,
+        )
         row.addView(
             icon,
             LinearLayout.LayoutParams(iconSizePx, iconSizePx).also {
