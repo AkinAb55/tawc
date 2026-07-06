@@ -22,7 +22,10 @@ if [ -z "${ANDROID_SERIAL:-}" ]; then
 fi
 
 _probe='for d in '"$_distros"'/*/metadata.json; do test -f "$d" && basename "$(dirname "$d")"; done; true'
-_ids=$(adb shell "run-as $_pkg /system/bin/sh -c '$_probe'" 2>/dev/null \
+# </dev/null: adb shell pumps the caller's stdin to the remote command,
+# silently draining data piped into the sourcing script (broke
+# `rootfs-run.sh 'cat > f' < file` — stdin arrived empty in-rootfs).
+_ids=$(adb shell "run-as $_pkg /system/bin/sh -c '$_probe'" </dev/null 2>/dev/null \
        | tr -d '\r' \
        | awk 'NF' \
        | sort -u)

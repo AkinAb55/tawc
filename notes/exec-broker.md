@@ -444,6 +444,25 @@ It:
 The TCP port is bound to `127.0.0.1` only and lives just long enough
 for the one connection.
 
+### Stdio gotchas
+
+- Wrapper scripts in front of the helper must not run stdin-pumping
+  commands. `adb shell <cmd>` forwards the *host* script's stdin to the
+  remote command and drains whatever is piped/redirected in — the
+  install-id probe in `scripts/lib/tawc-install-id.sh` did exactly this
+  and made `rootfs-run.sh 'cat > f' < file` arrive empty in-rootfs.
+  Guard such calls with `</dev/null` (host `adb devices`/`adb forward`
+  don't read stdin; Rust `Command::output()` nulls stdin already).
+- Signal deaths propagate faithfully end to end: a SIGSEGV'd guest
+  comes back as `128+signum` (139), including crashes deep in
+  libhybris/driver code under tawcroot (verified on the OnePlus 9
+  against a hybris `eglCreateWindowSurface` fault). If a "crash"
+  reports exit 0, suspect the command line, e.g. host-side `$?`
+  expansion in double quotes or a trailing pipeline element.
+- A crashing guest discards its buffered stdout (glibc block-buffers
+  on pipes; SIGSEGV never flushes). Nothing broker-side can recover
+  that — run crashy programs under `stdbuf -o0 -e0` when debugging.
+
 ### Connect modes: suite port vs CLI
 
 The host side has two connect modes, decided by `TAWC_EXEC_BROKER_PORT`:
