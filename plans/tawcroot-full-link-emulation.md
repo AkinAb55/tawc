@@ -34,7 +34,7 @@ A hardlinked file's data lives in a **link object** stored *outside the
 guest tree*. Every guest name for it is a symlink whose target is an
 **opaque token**, not a path. tawcroot intercepts every consumer of those
 symlinks (resolution, readlink, NOFOLLOW stats/opens/attrs), so the guest
-sees N regular-file names sharing one inode. A per-store **flock**
+sees N regular-file names sharing one inode. A per-store **file lock**
 serializes mutations; a single-slot **intent file** makes every
 multi-syscall mutation crash-recoverable, self-healing, with no
 full-tree sweep anywhere.
@@ -47,7 +47,8 @@ distros/<id>/
   metadata.json    (existing, installer-owned)
   tawcroot/        tawcroot-owned emulation state
     version        store format version (ASCII integer; see below)
-    lock           mutation lock (flock; created once, never deleted)
+    lock           mutation lock (fcntl record lock; created once,
+                   never deleted)
     intent         single-slot crash journal (+ intent.new rename twin)
     link/<token>   link objects (hardlink cluster data)
     link/<token>.cnt  refcount sidecars (the only count store)
@@ -94,7 +95,9 @@ existing object.
 ## Store versioning
 
 `tawcroot/version` (ASCII integer) is written when the store is first
-created and read once at session start, alongside the intent check.
+created, read at session start alongside the intent check, and
+re-read at every lock acquisition (see the lock section — sessions can
+be outlived by their guests, so once-per-session is a TOCTOU).
 It guards not forward migration (new code can always be taught old
 formats) but **old code mutating a newer store** — an APK downgrade or
 an imported `distros/<id>/` — blind to invariants it doesn't know
@@ -107,9 +110,15 @@ binaries never look.
 - version < supported → migrate under the store lock; bump the file
   last, so a killed migration re-runs (same recheck-then-act
   discipline as intent recovery).
-- version > supported → disable store *mutations* only: link fallback
-  degrades to raw EPERM, unknown emulated names surface as dangling
-  symlinks. Degraded guest behavior, zero corruption, legible in logs.
+- version > supported → disable store *mutations* only — all of them,
+  including resolver-side writes (O_CREAT through a dangling token),
+  not just the link fallback, or old code writes blind into the newer
+  store, exactly what this gate exists to prevent. Token *detection*
+  stays on: with detection off, the literal `tawcroot:link:<tok>`
+  target would be path-resolved as a relative guest path (O_CREAT
+  would create a file literally so named) instead of surfacing as the
+  promised dangling symlink. Link fallback degrades to raw EPERM.
+  Degraded guest behavior, zero corruption, legible in logs.
 
 One number for the whole store — subsystems are cold and migrations
 rare. Formats living outside the store are versioned in-band instead:
@@ -177,9 +186,13 @@ Consequences:
   stale one — host-copied distros can bake stale `.cnt` files against
   renumbered inodes (the NOREPLACE token retry covers the object
   side).
-- Missing sidecar (e.g. a partial host-side copy): report `st_nlink` 2
-  and never delete the object — degraded but data-safe. A count that
-  cannot be maintained degrades the same way.
+- Sidecar updates are a single fixed-width pwrite — atomic against
+  SIGKILL and against lock-free readers. Required because intent-free
+  CLOBBER can die mid-update with nothing to repair it.
+- Missing, empty, or unparseable sidecar (partial host-side copy, torn
+  state): treated identically — report `st_nlink` 2 and never delete
+  the object; degraded but data-safe. A count that cannot be
+  maintained degrades the same way.
 - Count reads cost open+read+close on the sidecar — paid only on stats
   of emulated names, cold.
 
@@ -187,21 +200,44 @@ Consequences:
 
 tawcroot handlers run in-process per guest thread (no proot-style tracer
 serialization), and refcount read-modify-write races across processes
-can undercount → premature object deletion → data loss. So: one
-`flock(LOCK_EX)` on `tawcroot/lock` around every structural mutation.
+can undercount → premature object deletion → data loss. So: a
+**traditional POSIX record lock** — `fcntl(F_SETLKW)`, whole-file, on
+an O_CLOEXEC fd to `tawcroot/lock` — plus an **in-process mutex**,
+around every structural mutation.
 
 Why this exact shape:
-- **flock, because the threat model is SIGKILL** (LMK, force-stop) —
-  the kernel releases the lock when the holder dies. Shared-memory
-  futexes wedge forever; create/delete sentinel files wedge on a stale
-  sentinel.
+- **Kernel-released on process death** (the threat model is SIGKILL —
+  LMK, force-stop). Shared-memory futexes wedge forever; create/delete
+  sentinel files wedge on a stale sentinel.
+- **Not flock, and not OFD locks: fork and exec escape them.** Both
+  attach ownership to the open file description, which fork duplicates
+  and exec preserves — tawcroot traps no fork/clone variant (`clone3`
+  is forced ENOSYS, `syscalls_control.c:312`; plain `clone` passes the
+  filter untouched), so there is no child-side fixup point. A sibling
+  guest thread that forks while a handler holds the lock creates a
+  child whose inherited description keeps the lock alive after the
+  holder is SIGKILLed — a store-wide wedge with an unrecoverable
+  intent; a sibling thread that *execs* kills the holder thread while
+  the process and description survive, same wedge. Traditional POSIX
+  locks are owned per-process (children inherit the fd but never the
+  lock), and O_CLOEXEC makes exec close our fd, which *releases* the
+  process's record locks — so both escapes degrade to "crashed
+  holder", exactly what the intent slot recovers. The classic fcntl
+  footgun (closing any fd to the file drops the locks) is moot: the
+  guest can never address the lock file, so tawcroot controls every fd
+  to it.
+- **The in-process mutex** covers what fcntl locks don't: threads of
+  one process share lock ownership. A plain futex mutex is fine here —
+  SIGKILL takes the whole process, so thread-vs-thread exclusion needs
+  no crash robustness.
 - **Not on the object's own inode** — the guest sees that inode as the
-  linked file and may legitimately flock it; flock excludes across fds
-  even within one process, so the emulation would self-deadlock against
-  the guest's own lock. The lock file is an inode the guest can never
-  address. Each acquisition opens its own fd — flock attaches to the
-  open file description, so threads sharing one fd would not exclude
-  each other.
+  linked file and may legitimately take its own locks on it; a
+  dedicated lock file is an inode the guest can never address.
+- **Version check rides the lock**: re-read `tawcroot/version` at
+  every acquisition (one small read, cold), not just session start — a
+  guest that outlives its session (exec-broker descendants are
+  reparented to init, `notes/exec-broker.md`) must drop to degraded
+  mode the moment a newer APK migrates the store under it.
 - **Coarse (per store), because mutations are cold** (dpkg/pacman
   bursts, git gc — never hot loops), critical sections are bounded
   handler code that never returns to guest code while holding, and a
@@ -231,11 +267,14 @@ its own, at most one pending intent can ever exist — so the "journal" is
 one small file, not a log. Protocol per mutation (CLOBBER opts out of
 the record — see its row):
 
-1. `flock(LOCK_EX)`.
+1. Acquire the store lock (in-process mutex, then `fcntl(F_SETLKW)` on
+   a fresh O_CLOEXEC fd); re-check `version`.
 2. Read `intent`; non-empty → a holder died mid-operation → run
    recovery, clear the slot.
-3. Write own intent (op, token, rootfs-absolute name paths — recovery
-   at session start has no guest cwd/chroot context — and
+3. Write own intent (op, token, **host-real name paths** — guest-view
+   paths depend on per-session bind tables and chroot state that
+   session-start recovery cannot assume; the intent is store-internal
+   and never guest-visible, so host paths are safe — and
    **count-before**, authoritative for the *count* because the lock
    excludes concurrent mutations) via `intent.new` + rename, so the
    slot is never torn.
@@ -289,9 +328,14 @@ re-run; any guest-tree entry it does touch is verified to be the
   undercount, data loss. Object absent → roll back: delete staged
   entries, and delete the published dst symlink at its recorded path
   only if it verifies as the matching token symlink (moved →
-  content-safe strand; the object never existed). The brief window
-  where dst dangles reads as ENOENT through our own handlers —
-  consistent with "not linked yet".
+  content-safe strand; the object never existed). Live-path failure of
+  the object rename (ENOENT — lock-free unlinks/renames of src can
+  race the handler) aborts the same way under the lock: delete staged
+  entries, verified-match-delete the published dst, remove the
+  sidecar, clear, return ENOENT (dst was briefly visible, then gone —
+  an unserializable race, accepted below). The brief window where dst
+  dangles reads as ENOENT through our own handlers — consistent with
+  "not linked yet".
 - CLOBBER (rename onto an emulated name) — writes **no intent**. It
   cannot be store-keyed without breaking rename's atomic-replace
   guarantee to observers, and under conservative recovery ("never
@@ -302,6 +346,15 @@ re-run; any guest-tree entry it does touch is verified to be the
   sidecar. Crash windows degrade to a +1 overcount or a count-0
   orphan object — rare, safe direction, strictly no worse than the
   with-intent variant.
+
+`work/` discipline: tokens are inode numbers and the kernel recycles
+them after object deletion, so residue from a previous era of a token
+(parked strands) can collide with fresh staging. Every op role uses a
+distinct suffix (`.add`, `.del`, `.dst`, `.src`), and every stage/park
+first unlinks any existing `work/` entry for its token+role, under the
+lock — a strand is already-accounted leak, safe to drop — so the
+recovery discriminators ("staged present?") can never read another
+era's residue as their own.
 
 Single-syscall mutations (RENAME_EXCHANGE of name symlinks, O_TMPFILE
 publish rename) are atomic in the kernel and need no intent.
@@ -340,14 +393,22 @@ readlink-probes every component and just learns one new target form).
   class (`lnk_file`), so the host linkat might *succeed* and hardlink
   the token symlink itself — a phantom referrer the count never learns
   about, and wrong semantics even in isolation. Emulated source →
-  `ADD` (no chains). Source that is an open link object
+  `ADD` (no chains); with AT_SYMLINK_FOLLOW, resolve the source first,
+  then NEW/ADD on what it lands on. Source that is an open link object
   (`/proc/self/fd/N` resolving into `link/`, or AT_EMPTY_PATH whose
   inode matches an object — the lookup must verify the candidate's
   `st_ino`, since suffixed tokens break the ino↔token bijection after
-  a host-side copy) → `ADD`. Otherwise host linkat first; on
-  EACCES/EPERM emulate. Directory sources still pass the kernel's
-  EPERM through. Source with no name (O_TMPFILE fd, not one of our
-  `tmp/` objects) → deliberate EXDEV (see O_TMPFILE).
+  a host-side copy) → `ADD`. **Invariant, the mandatory backstop for
+  every spelling including st_ino-lookup misses:** any source that
+  resolves under the store is store-aware — `link/` → `ADD` with the
+  token taken from the *path* (which works for suffixed tokens),
+  `tmp/` → publish — and NEW must never rename a store-resident
+  source: falling through to NEW would rename the object itself out of
+  `link/`, permanently dangling every other name of the cluster.
+  Otherwise host linkat first; on EACCES/EPERM emulate. Directory
+  sources still pass the kernel's EPERM through. Source with no name
+  (O_TMPFILE fd, not one of our `tmp/` objects) → deliberate EXDEV
+  (see O_TMPFILE).
 - `unlinkat` — leaf emulated → `DEL`.
 - `renameat2` — old and new resolving to the *same* token → POSIX
   no-op: return 0, both names remain (the kernel does this check by
@@ -360,7 +421,13 @@ readlink-probes every component and just learns one new target form).
   landing in the store (result base fd == link-dir fd) → same nlink fix.
 - `openat` `O_NOFOLLOW` (incl. `O_PATH`) — leaf emulated → open the
   object instead of ELOOP. O_CREAT|O_EXCL on an emulated name gets
-  EEXIST naturally.
+  EEXIST naturally. Plain O_CREAT through a *dangling* token (object
+  missing: host-copy loss, crashed-NEW window, degraded mode) must NOT
+  follow into the store — the kernel would happily create at a
+  dangling symlink's target, i.e. a fresh uncounted object in `link/`
+  (`syscalls_fs.c:114` documents the FOLLOW-on-O_CREAT behavior);
+  return ENOENT instead, matching "not linked yet". Resolver-side
+  store writes don't exist, in any mode.
 - `readlinkat` — EINVAL / forward-if-symlink-object (above).
 - `utimensat`/`fchownat` with NOFOLLOW — apply to the object.
   (`fchmodat` has no NOFOLLOW flag at the syscall level; `fchmodat2`
@@ -375,10 +442,15 @@ readlink-probes every component and just learns one new target form).
   f` via fts FTS_NOSTAT, fd, ripgrep) never stat — gap 1 would
   survive stat interception. Rewrite DT_LNK → DT_UNKNOWN for
   rootfs-view directories (in-buffer byte flip in the already-trapped
-  handler, zero extra syscalls; the per-call dirfd readlink probe
-  already exists), forcing type-curious callers to stat into the
-  fixed-up handlers. `d_ino` stays the name symlink's inode — accepted
-  deviation.
+  handler; zero extra syscalls — the per-call dirfd readlink probe
+  already runs unconditionally since the rootfs fd is always reserved,
+  but its buffer is capped at 32 bytes for proc-classification and
+  must grow to classify rootfs-view dirs, plus one prefix compare).
+  This forces type-curious callers to stat into the fixed-up handlers;
+  note it degrades *every* symlink's d_type, so walkers lstat more on
+  symlink-heavy trees (/usr/lib, /etc/alternatives) — measure in the
+  stage-5 perf spot-check. `d_ino` stays the name symlink's inode —
+  accepted deviation.
 
 ## O_TMPFILE
 
@@ -425,6 +497,16 @@ per-fs in-tree `/.tawcroot` stash, which drags the full hiding apparatus
 back for that mount only, so don't build it speculatively. Guest
 `chroot(2)`: immune via opaque tokens + init-captured store fds (above).
 
+**Constraint: bind sources are distro-exclusive.** Tokens name objects
+in *this distro's* store, so a host dir bound into two distros would
+dangle distro A's token symlinks in distro B's sessions, and deleting
+distro A (install management) would destroy object data still
+referenced from the shared dir — the `distros/<id>/`-is-the-unit
+invariant silently assumes emulated names live only under this
+distro's rootfs and binds. Bind config is app-side and de-facto
+per-distro today; declare it, and let install-management deletion rely
+on it.
+
 ## Legacy v1 artifacts
 
 Existing rootfses contain v1 fallback symlinks (guest-absolute path
@@ -445,26 +527,30 @@ on top of them treat them as plain symlink sources.
   cleanup via a high-fd close-trap dup is a documented refinement, not
   initial scope).
 - One-syscall old-name-missing window during first-link.
-- Transiently high `st_nlink` after a crash, until healed. A crashed
-  CLOBBER leaves a permanent +1 count (leak, safe direction); a crashed
-  NEW whose staged publish can no longer land (parent vanished, path
-  reoccupied) parks the entry — a marooned nameless object or one stale
-  strand, leak-only by construction (roll-forward consumes staged
-  entries; it never recreates names by path).
+- Crash windows leave counts high; some heal at the next recovery,
+  others are permanent +1 leaks (crashed CLOBBER, the pre-staging
+  ADD/DEL ambiguity windows). A crashed NEW whose staged publish can no
+  longer land (parent vanished, path reoccupied) parks the entry — a
+  marooned nameless object or one stale strand, leak-only by
+  construction (roll-forward consumes staged entries; it never
+  recreates names by path).
+- A NEW aborted by a racing lock-free unlink/rename of its source
+  briefly exposed the destination name, then removed it —
+  unserializable race, no stable state lost.
 - Power loss (not process death) can leak one object permanently.
 - Anonymous-source linkat without a `tmp/` object: EXDEV. Likewise
   AT_EMPTY_PATH re-link of an already-published tmpfile fd (the
   `/proc/self/fd/N` spelling works).
 - fd-path introspection of emulated hardlinks leaks store paths:
-  `readlink(/proc/self/fd/N)`, `/proc/self/maps`, `/proc/self/exe`
-  reverse-translate only rootfs/bind prefixes (`proc_rewrite.c:57`),
-  and the store is a sibling of `rootfs/`, so they return raw host
-  paths the guest can't resolve — the documented Bun-realpath class
-  (`syscalls_fs.c:636`). Directories are never emulated, which
-  excludes the common realpath-of-dir flow; the exposure is fd
-  introspection of hardlinked files, mapped hardlinked libraries, and
-  hardlinked binaries as `/proc/self/exe` (git's hardlinked
-  `git-core/` layout is the likely first tripwire). No sound reverse
+  `readlink(/proc/self/fd/N)` and `/proc/self/maps` reverse-translate
+  only rootfs/bind prefixes (`proc_rewrite.c:57`), and the store is a
+  sibling of `rootfs/`, so they return raw host paths the guest can't
+  resolve — the documented Bun-realpath class (`syscalls_fs.c:636`).
+  (`/proc/self/exe` is NOT affected: exec loads the binary into a
+  memfd and execveats that, so exe never shows a store path.)
+  Directories are never emulated, which excludes the common
+  realpath-of-dir flow; the exposure is fd introspection of opened
+  hardlinked files and mapped hardlinked libraries. No sound reverse
   map exists without token→name tracking, which the store deliberately
   omits; escalation if a real workload breaks: a best-effort
   primary-name hint on the object.
@@ -499,15 +585,15 @@ on top of them treat them as plain symlink sources.
   must be rebuilt from disk — the daemon is just a cache with a
   lifecycle, an availability dependency, and fakeroot/pseudo's
   db-corruption fragility). Serialization, the only other thing it
-  offers, is one flock.
+  offers, is one file lock.
 
 ## Staging
 
 1. **Spike (½ day):** whether SELinux denies hardlinking *symlinks*
    (`lnk_file` is a separate class from the documented `file` denial);
    whether the session model guarantees guest-process teardown (tmp/
-   sweep precondition); confirm flock and O_TMPFILE-passthrough
-   assumptions on device.
+   sweep precondition); confirm fcntl record-lock and
+   O_TMPFILE-passthrough assumptions on device.
 2. **Core:** `tawcroot/` layout + store fds at init, version file +
    refuse-if-newer check, lock, intent slot + `work/`-staged mutation
    protocol + store-keyed recovery, opaque-token detection in the
@@ -516,11 +602,18 @@ on top of them treat them as plain symlink sources.
    /fstatat/statx, symlinkat forgery guard, DT_LNK → DT_UNKNOWN dirent
    rewrite. Hosted tests: fault-injection fidelity matrix (publish,
    backup, farm, any-order unlink, st_ino/st_nlink, rename-over,
-   d_type walk) plus a **kill-matrix harness** — run every mutation,
-   kill after syscall k for every k, run recovery, assert invariants —
-   including kill-then-guest-rename interleavings (published names and
-   parent dirs) for the store-keyed discriminators — in particular the
-   fully-published-NEW crash followed by a rename of either name. Closes gaps 1–3 and 6–8; the bulk of the value.
+   d_type walk, forgery-guard rejection, version-gate downgrade →
+   degraded mode, RENAME_EXCHANGE emulated↔plain and emulated↔emulated
+   — EXCHANGE is unused anywhere in tawcroot today) plus a
+   **kill-matrix harness** — run every mutation, kill after syscall k
+   for every k, run recovery, assert invariants — including
+   kill-then-guest-rename interleavings (published names and parent
+   dirs) for the store-keyed discriminators — in particular the
+   fully-published-NEW crash followed by a rename of either name.
+   Closes gaps 1–3, 7, 8; gap 6's rename-over *semantics* are correct
+   here (plain symlink replacement — the old name keeps the old
+   bytes), its count maintenance lands with CLOBBER in stage 3. The
+   bulk of the value.
 3. **Edge surface:** O_NOFOLLOW/O_PATH opens, readlink semantics,
    NOFOLLOW utimens/chown, CLOBBER + RENAME_EXCHANGE,
    hardlink-of-symlink, linkat from an open link-object fd
