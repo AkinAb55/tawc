@@ -50,6 +50,7 @@ distros/<id>/
     lock           mutation lock (flock; created once, never deleted)
     intent         single-slot crash journal (+ intent.new rename twin)
     link/<token>   link objects (hardlink cluster data)
+    link/<token>.cnt  refcount sidecars (the only count store)
     work/<token>   transient staged/parked name symlinks (see intent)
     tmp/<ino>      linkable O_TMPFILE files awaiting publish
 ```
@@ -153,32 +154,34 @@ FOLLOW hop lands on a symlink object.
 
 ## Refcounts
 
-Preferred: xattr `user.tawc.nlink` on the link object — atomic with the
-file, survives moves. **Spike required:** verify `untrusted_app` may set
-`user.*` xattrs on `app_data_file` (ext4 and f2fs, supported Android
-versions) — the existing xattr-handler comment (`syscalls_fs.c`)
-expects EOPNOTSUPP on app-private storage, so expect the sidecar to
-win. Independently, the kernel rejects `user.*` xattrs on non-regular
-files (EPERM on symlinks, FIFOs, device nodes) and
-hardlink-of-a-symlink is in scope, so sidecars `link/<token>.cnt` are
-required at minimum for non-regular objects, and may simply be the only
-count store.
+Sidecar-only: the count for `link/<token>` lives in `link/<token>.cnt`
+in the store, mutated only under the lock. An xattr count
+(`user.tawc.nlink` on the object) was considered and dropped: sidecars
+are mandatory anyway (the kernel rejects `user.*` xattrs on
+non-regular files — EPERM on symlinks, FIFOs, device nodes — and
+hardlink-of-a-symlink is in scope), the codebase already expects
+xattrs to EOPNOTSUPP on app-private storage (`syscalls_fs.c`
+xattr-handler comment), and the xattr path's only payoff over the
+mandatory sidecar was ~2 saved syscalls on cold reads. One store, one
+code path.
 
-Rules:
-- First link always **sets** the count, never trusts a pre-existing
-  value — xattr-copying tools (`cp --preserve=xattr`, `tar --xattrs`)
-  can plant stale `user.tawc.*` values on ordinary files.
-- Guest xattr surface: filter `user.tawc.*` from `listxattr`/`getxattr`;
-  reject guest `setxattr`/`removexattr` on it (path handlers exist).
-  Also trap the fd-based `f*xattr` family (deliberately untrapped
-  today, `syscalls_fs.c:1532`) to filter/deny the same namespace: an
-  fd opened through an emulated name IS the object, so
-  `cp --preserve=xattr` via `fsetxattr` could otherwise read a live
-  count or overwrite it (undercount → premature delete). Cold, cheap.
-- Missing count (e.g. a distro copied host-side without xattr/sidecar
-  preservation): report `st_nlink` 2 and never delete the object —
-  degraded but data-safe.
-- A count that cannot be maintained degrades the same way.
+Consequences:
+- No emulation state lives in xattrs → the guest xattr surface needs
+  *nothing*: no `user.tawc.*` filtering, no trapping of the fd-based
+  `f*xattr` family (deliberately untrapped today,
+  `syscalls_fs.c:1532`), and no way for xattr-copying tools
+  (`cp --preserve=xattr`, rsync `-X`) to read or corrupt a count. Any
+  future subsystem that does store state in `user.*` xattrs must add
+  that filtering (path and `f*xattr` variants) with it.
+- First link always creates/overwrites the sidecar, never trusts a
+  stale one — host-copied distros can bake stale `.cnt` files against
+  renumbered inodes (the NOREPLACE token retry covers the object
+  side).
+- Missing sidecar (e.g. a partial host-side copy): report `st_nlink` 2
+  and never delete the object — degraded but data-safe. A count that
+  cannot be maintained degrades the same way.
+- Count reads cost open+read+close on the sidecar — paid only on stats
+  of emulated names, cold.
 
 ## Concurrency: the store lock
 
@@ -225,7 +228,8 @@ long), never a deficit (object deleted while referenced).
 **Single-slot intent file.** Because the lock admits one mutation at a
 time, and every lock holder repairs any leftover intent before writing
 its own, at most one pending intent can ever exist — so the "journal" is
-one small file, not a log. Protocol per mutation:
+one small file, not a log. Protocol per mutation (CLOBBER opts out of
+the record — see its row):
 
 1. `flock(LOCK_EX)`.
 2. Read `intent`; non-empty → a holder died mid-operation → run
@@ -288,11 +292,16 @@ re-run; any guest-tree entry it does touch is verified to be the
   content-safe strand; the object never existed). The brief window
   where dst dangles reads as ENOENT through our own handlers —
   consistent with "not linked yet".
-- `CLOBBER tok dst n` (rename onto an emulated name) — cannot be
-  store-keyed without breaking rename's atomic-replace guarantee to
-  observers, so recovery is conservative: never decrement (count := n),
-  clear. A crashed CLOBBER leaves a +1 overcount — rare, safe
-  direction. The live path decrements normally after the rename.
+- CLOBBER (rename onto an emulated name) — writes **no intent**. It
+  cannot be store-keyed without breaking rename's atomic-replace
+  guarantee to observers, and under conservative recovery ("never
+  decrement") an intent record is actively harmful: restoring
+  count-before after the holder's decrement already landed would
+  re-increment a correct count. So: take the lock (recovering others'
+  pending intents as always), rename, decrement, at 0 unlink object +
+  sidecar. Crash windows degrade to a +1 overcount or a count-0
+  orphan object — rare, safe direction, strictly no worse than the
+  with-intent variant.
 
 Single-syscall mutations (RENAME_EXCHANGE of name symlinks, O_TMPFILE
 publish rename) are atomic in the kernel and need no intent.
@@ -359,7 +368,8 @@ readlink-probes every component and just learns one new target form).
   policy, `syscalls_fs.c:679` — Android's own seccomp traps it — and
   libc's fallback emulation lands on our fixed stat handlers.)
 - `symlinkat` — forgery guard (above).
-- `f*xattr` — trap to hide/deny `user.tawc.*` (see Refcounts).
+- xattr syscalls (path and fd variants) — **untouched**; sidecar-only
+  counts mean no emulation state is xattr-addressable (see Refcounts).
 - `getdents64` — nothing hidden lives in-tree, but `d_type` for
   emulated names says DT_LNK, and type-trusting walkers (`find -type
   f` via fts FTS_NOSTAT, fd, ripgrep) never stat — gap 1 would
@@ -425,9 +435,10 @@ on top of them treat them as plain symlink sources.
 ## Accepted deviations
 
 - `fstat(fd)` / `statx(fd, "", AT_EMPTY_PATH)` report the object's real
-  `st_nlink` (1). Fixing it costs an fgetxattr on essentially every
-  regular-file fstat (hot); no known consumer compares fd-nlink to
-  path-nlink. Revisit only on evidence.
+  `st_nlink` (1). Fixing it would need an fd→count lookup on
+  essentially every regular-file fstat (hot — and counts are sidecars,
+  so there is no fd-addressable store at all); no known consumer
+  compares fd-nlink to path-nlink. Revisit only on evidence.
 - Non-O_EXCL O_TMPFILE: fstat nlink 1 (not 0); `/proc/self/fd` readlink
   shows a live `tmp/` path (no " (deleted)"); churn-heavy never-linking
   users accumulate invisible temps until session end (best-effort eager
@@ -492,21 +503,17 @@ on top of them treat them as plain symlink sources.
 
 ## Staging
 
-1. **Spike (1 day):** `user.*` xattr writability under `untrusted_app`
-   on app data (ext4 + f2fs), including on symlinks/FIFOs (expected
-   EPERM — kernel restricts `user.*` to regular files and dirs);
-   whether SELinux denies hardlinking *symlinks* (`lnk_file` is a
-   separate class from the documented `file` denial); whether the
-   session model guarantees guest-process teardown (tmp/ sweep
-   precondition); confirm flock and O_TMPFILE-passthrough assumptions
-   on device. Decide count store.
+1. **Spike (½ day):** whether SELinux denies hardlinking *symlinks*
+   (`lnk_file` is a separate class from the documented `file` denial);
+   whether the session model guarantees guest-process teardown (tmp/
+   sweep precondition); confirm flock and O_TMPFILE-passthrough
+   assumptions on device.
 2. **Core:** `tawcroot/` layout + store fds at init, version file +
    refuse-if-newer check, lock, intent slot + `work/`-staged mutation
    protocol + store-keyed recovery, opaque-token detection in the
    resolver, linkat (emulated-source detection before the host
    attempt) /unlinkat/renameat2 (incl. same-token no-op)
-   /fstatat/statx, symlinkat forgery guard, `user.tawc.*` filtering on
-   both path and `f*xattr` surfaces, DT_LNK → DT_UNKNOWN dirent
+   /fstatat/statx, symlinkat forgery guard, DT_LNK → DT_UNKNOWN dirent
    rewrite. Hosted tests: fault-injection fidelity matrix (publish,
    backup, farm, any-order unlink, st_ino/st_nlink, rename-over,
    d_type walk) plus a **kill-matrix harness** — run every mutation,
