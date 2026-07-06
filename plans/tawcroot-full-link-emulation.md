@@ -1,9 +1,5 @@
 # tawcroot: Full Hardlink Emulation (link2symlink v2)
 
-**Status:** design only, not implemented. The current partial fallback
-(below) is believed sufficient for every workload we ship; implement
-this only when a real workload hits one of the listed gaps.
-
 ## Current state
 
 Android `untrusted_app` SELinux denies `link` on `app_data_file` (see
