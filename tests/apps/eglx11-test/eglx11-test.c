@@ -126,6 +126,7 @@ int main(void)
     int want_readback = 0;
     int want_vbo = 0;
     int want_mvp = 0;
+    int sleep_ms = 0;
     int win_w0 = WIN_W;
     int win_h0 = WIN_H;
     {
@@ -151,6 +152,9 @@ int main(void)
         if (v) want_vbo = atoi(v);
         const char *m = getenv("TAWC_EGLX11_MVP");
         if (m) want_mvp = atoi(m);
+        const char *s = getenv("TAWC_EGLX11_SLEEP_MS");
+        if (s) sleep_ms = atoi(s);
+        if (sleep_ms < 0) sleep_ms = 0;
     }
 
     /* X11 setup */
@@ -346,6 +350,10 @@ int main(void)
             XEvent ev;
             XNextEvent(xdpy, &ev);
         }
+        /* TAWC_EGLX11_SLEEP_MS paces the loop (TAWC-DRI has no frame
+         * pacing of its own; unthrottled clients free-run). */
+        if (sleep_ms > 0)
+            usleep((useconds_t)sleep_ms * 1000);
     }
 
     fprintf(stderr, "eglx11-test: rendered %d frames\n", frames);

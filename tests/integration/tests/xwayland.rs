@@ -441,7 +441,42 @@ fn test_tawc_dri_ahb_present_animated_loop() {
         FRAMES, bin
     );
     let before = compositor::query_state(TIMEOUT).expect("query compositor state before TAWC-DRI loop");
+
+    // Sample the wlegl destroy counter WHILE the client runs: buffer
+    // releases must be served frame by frame. Sampling only after the
+    // run could false-pass — when the client exits its window is torn
+    // down, and a fully-stalled release path would drop every leaked
+    // wl_buffer at teardown, advancing the counter just the same. A
+    // sample counts only while the create counter shows the client
+    // still mid-run (strictly before the last present, hence before
+    // any teardown drops).
+    let sampler_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let destroys_mid_run = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sampler = {
+        let done = sampler_done.clone();
+        let seen = destroys_mid_run.clone();
+        let create_base = before.wlegl_create_buffer_total;
+        let destroy_base = before.wlegl_buffer_destroy_total;
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(state) = compositor::query_state_once() {
+                    let presents =
+                        state.wlegl_create_buffer_total.saturating_sub(create_base);
+                    if presents < FRAMES as u64 {
+                        let delta = state
+                            .wlegl_buffer_destroy_total
+                            .saturating_sub(destroy_base);
+                        seen.fetch_max(delta, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+
     let output = adb::rootfs_run_with(BACKEND, &cmd).expect("run tawc-dri-test loop");
+    sampler_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    sampler.join().expect("destroy-counter sampler thread panicked");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -488,6 +523,21 @@ fn test_tawc_dri_ahb_present_animated_loop() {
          frames. Some imports were dropped or never reached the compositor — \
          most likely the X server is silently failing AHardwareBuffer_createFromHandle \
          under sustained load. before={before:?} after={after:?}",
+    );
+    // Buffer releases must be served back through the pipe: the compositor
+    // releases each replaced wl_buffer, Xwayland's release listener destroys
+    // the per-present trio (and forwards TAWCDRIBufferRelease to v0.3
+    // clients), and the destroy shows up here. A stalled release path means
+    // the X server leaks one AHB per frame and v0.3 clients starve in
+    // dequeueBuffer backpressure. Asserted on the mid-run samples (see the
+    // sampler above) so exit-time teardown drops can't fake a pass.
+    let destroy_count = destroys_mid_run.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        destroy_count >= (FRAMES / 2) as u64,
+        "only {destroy_count} wlegl buffer destroys observed mid-run for \
+         {FRAMES} presented frames — the compositor is not releasing (or \
+         Xwayland is not destroying) TAWC-DRI wl_buffers frame-by-frame. \
+         before={before:?} after={after:?}",
     );
     assert_compositor_clean();
 }
@@ -584,33 +634,129 @@ fn test_eglx11_renders_via_ahb() {
 fn test_es2gears_x11_renders_via_ahb() {
     tawc_integration::helpers::test_init();
 
-    // 4s gives es2gears time to hit hundreds of swap cycles even on a
-    // slow device. The release-listener fix bounds the live AHB
-    // working set to the compositor's queue depth (~3) regardless of
-    // total frame count, so longer runs would only dilute signal.
-    let cmd = "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 timeout 4 es2gears_x11 \
-               > /dev/null 2>&1; true";
     let before = compositor::query_state(TIMEOUT).expect("query compositor state before es2gears_x11");
-    let output = adb::rootfs_run_with(BACKEND, cmd).expect("run es2gears_x11");
+    // Run es2gears until the assertions are satisfied rather than for a
+    // fixed wall-clock window: a cold start (Xwayland spawn + GLES
+    // driver init + host binding) can eat several seconds before the
+    // first full-size buffer ships, so a fixed-duration run races it.
+    let mut app = RootfsProcess::spawn_with(
+        BACKEND,
+        "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 es2gears_x11 > /dev/null 2>&1",
+    )
+    .expect("spawn es2gears_x11");
+
+    // Two conditions prove the pipe:
+    //   - >=100 AHB imports: the plugin isn't falling back to SHM and
+    //     the X server isn't dropping presents.
+    //   - last AHB dims == host logical size: es2gears creates a
+    //     300x300 window and the compositor resizes it after mapping;
+    //     TAWC-DRI v0.3 ConfigureNotify (SelectInput + XGE special
+    //     events) must walk that resize down into libhybris's buffer
+    //     pool. Pixel-blind, but catches exactly the regression class
+    //     where every X11 GL window composited solid black for ~2
+    //     months (buffers stuck at creation size).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let state = compositor::query_state(TIMEOUT).expect("query compositor state");
+        let create_count = state
+            .wlegl_create_buffer_total
+            .saturating_sub(before.wlegl_create_buffer_total);
+        if create_count >= 100
+            && state.last_wlegl_width == state.output_logical_w as u32
+            && state.last_wlegl_height == state.output_logical_h as u32
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "es2gears_x11 pipe never got healthy: {create_count} AHB \
+             imports (want >=100; low means SHM fallback or dropped \
+             presents), last AHB {}x{} vs host logical {}x{} (mismatch \
+             means the TAWC-DRI ConfigureNotify event channel is \
+             broken). before={before:?} state={state:?}",
+            state.last_wlegl_width,
+            state.last_wlegl_height,
+            state.output_logical_w,
+            state.output_logical_h,
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    app.stop()
+        .expect("es2gears_x11 crashed or failed to stop cleanly");
+    assert_compositor_clean();
+}
+
+/// Pixel-level check that an X11 GL client's rendering actually reaches
+/// the screen. The counter-based tests above stayed green for ~2 months
+/// while every X11 GL window composited solid black (see the TAWC-DRI
+/// v0.3 section of notes/xwayland.md) — they prove AHBs flow, not
+/// that the content is visible. Here eglx11-test draws a pure-blue
+/// triangle covering the window centre; after the compositor resizes
+/// the window to the host's logical size, the centre of the screen
+/// must be blue. The compositor's lime AHB edge tint lives at the
+/// window borders and never reaches the centre, so it can't fake a
+/// pass.
+#[test]
+#[cfg_attr(
+    tawc_skip_libhybris_on_target,
+    ignore = "xwayland skipped on x86 device"
+)]
+fn test_eglx11_triangle_pixels_on_screen() {
+    tawc_integration::helpers::test_init();
+
+    let bin = rootfs::ensure_eglx11_test().expect("build eglx11-test");
+    // Keep swapping (paced to ~60fps) for the whole test rather than a
+    // short burst + hold: the compositor's post-map resize can land
+    // after an unpaced burst finishes, and a client that has stopped
+    // dequeuing can never pick it up. The frame budget outlives any
+    // plausible deadline; the test stops the client explicitly.
+    let cmd = format!(
+        "DISPLAY=:0 HYBRIS_EGLPLATFORM=x11 TAWC_EGLX11_TRIANGLE=1 \
+         TAWC_EGLX11_FRAMES=100000 TAWC_EGLX11_SLEEP_MS=16 {}",
+        bin
+    );
+    let mut app = RootfsProcess::spawn_with(BACKEND, &cmd).expect("spawn eglx11-test");
+
+    // Wait until the buffer pool has followed the compositor's resize —
+    // only then is the on-screen window full-size with the triangle
+    // centred on the output.
+    // rendered_toplevels only counts Wayland toplevels, so gate on the
+    // X11 surface being host-bound plus the buffer dims having followed
+    // the resize.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let state = loop {
+        let state = compositor::query_state(TIMEOUT).expect("query compositor state");
+        if state.last_wlegl_width == state.output_logical_w as u32
+            && state.last_wlegl_height == state.output_logical_h as u32
+            && state.x11_surfaces_with_host > 0
+        {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "eglx11-test buffers never reached the host logical size \
+             (TAWC-DRI ConfigureNotify chain broken?): {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    // One more beat so the full-size frame is actually composited.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let shot = adb::screencap_raw().expect("raw screencap");
+    let x = ((state.output_physical_w / 2).max(0)) as u32;
+    let y = ((state.output_physical_h / 2).max(0)) as u32;
+    let [r, g, b, _a] = shot
+        .pixel_rgba(x, y)
+        .unwrap_or_else(|| panic!("screencap missing centre pixel at {x},{y}"));
     assert!(
-        output.status.success(),
-        "es2gears_x11 wrapper exited non-zero ({:?}). The wrapper ends \
-         with `; true` so timeout's 124 doesn't fail the assertion — \
-         non-zero here means the chroot couldn't even spawn the binary \
-         (missing mesa-demos? run `scripts/run-integration-tests.sh` without --no-build).",
-        output.status.code()
+        b > 170 && r < 100 && g < 120,
+        "screen centre should show eglx11-test's pure-blue triangle, got \
+         R{r} G{g} B{b}. Black means the client rendered outside its \
+         buffers (the resize-follow bug); magenta means SHM fallback; \
+         lime means only the compositor's AHB edge tint is visible."
     );
 
-    let after = compositor::query_state(TIMEOUT).expect("query compositor state after es2gears_x11");
-    let create_count = after
-        .wlegl_create_buffer_total
-        .saturating_sub(before.wlegl_create_buffer_total);
-    assert!(
-        create_count >= 100,
-        "compositor only imported {create_count} AHBs from es2gears_x11. \
-         Expected >=100 — either the libhybris EGL plugin fell back to a \
-         non-AHB path for the GLES driver's chosen config, or the X server \
-         is dropping presents. before={before:?} after={after:?}",
-    );
+    app.stop().expect("eglx11-test crashed or failed to stop cleanly");
     assert_compositor_clean();
 }

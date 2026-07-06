@@ -326,8 +326,9 @@ Durable facts from the spike, useful to any GL-on-GLES front-end:
   `libc.so` linker script has absolute host paths).
 - Debugging hazards hit during the spike:
   [issues/rootfs-crash-exit-code-masked.md](../issues/rootfs-crash-exit-code-masked.md),
-  [issues/x11-presented-windows-black.md](../issues/x11-presented-windows-black.md),
-  [issues/broker-stdin-file-redirect-empty.md](../issues/broker-stdin-file-redirect-empty.md).
+  [issues/broker-stdin-file-redirect-empty.md](../issues/broker-stdin-file-redirect-empty.md),
+  and the since-fixed X11 black-window regression (TAWC-DRI v0.3
+  ConfigureNotify, see [notes/xwayland.md](xwayland.md)).
 
 ## Termux:X11 Comparison
 

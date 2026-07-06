@@ -127,10 +127,10 @@ renderer-string assertions plus AHB-import-counter tests per front-end.
   hack-flag zoo.
 - **Maintenance:** unlike gl4es/zink there is no upstream; this is a
   permanent in-tree component until zink-capable hardware retires it.
-- **Visual verification currently blocked** by the X11 black-window
-  regression
-  ([issues/x11-presented-windows-black.md](../issues/x11-presented-windows-black.md))
-  — fix that first or stage 2+ can't be eyeballed.
+- ~~Visual verification currently blocked by the X11 black-window
+  regression~~ — fixed 2026-07-06 by the TAWC-DRI v0.3 event channel
+  (see [notes/xwayland.md](../notes/xwayland.md)); stage 2+ can be
+  eyeballed now.
 
 ## Open questions
 

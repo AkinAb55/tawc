@@ -100,6 +100,11 @@ pub enum BufferOrigin {
 
 static WLEGL_CREATE_BUFFER_TOTAL: AtomicU64 = AtomicU64::new(0);
 static WLEGL_IMPORT_TEXTURE_TOTAL: AtomicU64 = AtomicU64::new(0);
+// wl_buffer destroys observed for wlegl-backed buffers. In the TAWC-DRI
+// pipe Xwayland only destroys a shipped wl_buffer after receiving our
+// wl_buffer.release, so this advancing under an X11 GL client proves
+// releases are being served end-to-end.
+static WLEGL_BUFFER_DESTROY_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_WLEGL_WIDTH: AtomicU32 = AtomicU32::new(0);
 static LAST_WLEGL_HEIGHT: AtomicU32 = AtomicU32::new(0);
 static LAST_WLEGL_FORMAT: AtomicU32 = AtomicU32::new(0);
@@ -107,6 +112,7 @@ static LAST_WLEGL_FORMAT: AtomicU32 = AtomicU32::new(0);
 pub struct WleglDebugCounters {
     pub create_buffer_total: u64,
     pub import_texture_total: u64,
+    pub buffer_destroy_total: u64,
     pub last_width: u32,
     pub last_height: u32,
     pub last_format: u32,
@@ -116,6 +122,7 @@ pub fn debug_counters() -> WleglDebugCounters {
     WleglDebugCounters {
         create_buffer_total: WLEGL_CREATE_BUFFER_TOTAL.load(Ordering::Relaxed),
         import_texture_total: WLEGL_IMPORT_TEXTURE_TOTAL.load(Ordering::Relaxed),
+        buffer_destroy_total: WLEGL_BUFFER_DESTROY_TOTAL.load(Ordering::Relaxed),
         last_width: LAST_WLEGL_WIDTH.load(Ordering::Relaxed),
         last_height: LAST_WLEGL_HEIGHT.load(Ordering::Relaxed),
         last_format: LAST_WLEGL_FORMAT.load(Ordering::Relaxed),
@@ -232,6 +239,7 @@ impl ExternalBuffer for WleglBufferData {
 
 impl Drop for WleglBufferData {
     fn drop(&mut self) {
+        WLEGL_BUFFER_DESTROY_TOTAL.fetch_add(1, Ordering::Relaxed);
         if !self.ahb.is_null() {
             unsafe { tawc_wlegl_buffer_release(self.ahb) };
             self.ahb = ptr::null_mut();

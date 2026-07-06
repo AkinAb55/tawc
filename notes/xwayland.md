@@ -99,10 +99,12 @@ of the box.
   AHB's `native_handle_t` (numFds + numInts inline + fds out-of-band
   via `xcb_send_request_with_fds`) over the existing X11 connection
   using a hand-rolled TAWCDRIPresentBuffer wire definition that
-  matches the server-side `Xext/tawcdriproto.h`. Three-buffer
-  round-robin pool with no server→client release feedback (TAWC-DRI
-  doesn't carry one today; the round-robin gives the compositor
-  enough breathing room before slot-N is reused).
+  matches the server-side `Xext/tawcdriproto.h`. Three-buffer pool;
+  buffer lifecycle is event-driven since v0.3 (see the TAWC-DRI v0.3
+  entry below) — each buffer stays busy from `queueBuffer` until its
+  `TAWCDRIBufferRelease` arrives, with a 500ms sanity-timeout fallback
+  to the old free-immediately round-robin against a wedged server or a
+  pre-0.3 one.
   Wired through `--enable-x11` in `hybris/configure.ac`,
   `EGL_PLATFORM_X11_KHR` dispatch in `hybris/egl/egl.c` (under
   `#ifdef WANT_X11`, parallel to the existing `WANT_WAYLAND`
@@ -168,28 +170,95 @@ of the box.
 
   **Wine-game shakedown remains future work** — left for when a
   specific Wine workload becomes interesting.
-- **Resize regression diagnosed, open (2026-07-06).** Between the
-  step-5 verification and July, the compositor gained fullscreen
-  sizing of X11 toplevels (`configure_x11_toplevel_for_host` resizes
-  every non-override-redirect toplevel to its host activity's logical
-  size, e.g. 540×1085). Clients follow the ConfigureNotify and reset
-  their GL viewport, but libhybris's `X11NativeWindow` keeps its
-  creation-time buffer size — X11 has no client-driven
-  `wl_egl_window_resize` equivalent, and a library sharing the app's
-  connection can't select StructureNotify without feeding
-  ConfigureNotify into the client's own event queue — so es2gears_x11
-  renders a 540×1085 viewport into 300×300 AHBs: a correctly-mapped
-  solid-black window (only the clear color lands in the buffer).
-  Full diagnosis in
-  [issues/x11-presented-windows-black.md](../issues/x11-presented-windows-black.md);
-  fix is [plans/tawc-dri-event-channel.md](../plans/tawc-dri-event-channel.md)
-  (TAWC-DRI XGE events, which also replace the release-less 3-buffer
-  round-robin). `tests/apps/eglx11-test` grew
-  `TAWC_EGLX11_{TRIANGLE,DEPTH,VBO,MVP,READBACK,W,H}` env modes during
-  the bisection. Note the AHB pipe tests
-  (`test_es2gears_x11_renders_via_ahb`, `test_eglx11_renders_via_ahb`)
-  are pixel-blind — they pass throughout this regression; see
-  [issues/xwayland-gl-tests-pixel-blind.md](../issues/xwayland-gl-tests-pixel-blind.md).
+- **TAWC-DRI v0.3 — server→client event channel (2026-07-06).** Fixed
+  the resize regression where every X11 GL client that outlived the
+  compositor's initial window resize composited solid black: the
+  compositor resizes each non-override-redirect X11 toplevel to its
+  host activity's logical size (`configure_x11_toplevel_for_host`,
+  e.g. 300×300 → 540×1085), clients follow core ConfigureNotify and
+  reset their GL viewport, but libhybris's `X11NativeWindow` kept
+  creation-time buffer dimensions — rendering a 540×1085 viewport into
+  300×300 AHBs leaves only the clear color in the buffer. X11 has no
+  client-driven `wl_egl_window_resize` equivalent, and a library
+  sharing the app's connection can't select StructureNotify without
+  feeding ConfigureNotify into the client's own event queue.
+
+  The sanctioned mechanism for library-private events is X Generic
+  Events routed to a libxcb *special event queue* — how Present events
+  reach Mesa's DRI3 loader. TAWC-DRI v0.3 adds:
+  - `TAWCDRISelectInput(eid, window, event_mask)` — `eid` is a
+    client-allocated XID, the libxcb special-queue routing key (libxcb
+    matches XGE events on `(extension major opcode, eid at bytes
+    12-15)`, so our events use Present's field layout). Selecting
+    ConfigureNotify immediately delivers one event with the window's
+    current size, closing the race where the resize lands between
+    window creation and registration.
+  - `TAWCDRIConfigureNotify { eid, window, width, height }` — emitted
+    from a ConfigNotify screen hook in `Xext/tawc-dri.c` whenever a
+    window's size actually changes. **Wrap-dance gotcha:** Xwayland's
+    `xwl_config_notify` reinstalls itself outermost on every call, so
+    a statically-installed wrapper is silently dropped from the chain
+    after the first ConfigureWindow; the hook must unwrap→call→rewrap
+    per call, exactly like Present's hooks.
+  - `TAWCDRIBufferRelease { eid, window, serial }` — PresentBuffer
+    gained a client-chosen `serial` (u32, appended to the request).
+    The server accepts both the 40-byte v0.3 shape and the 36-byte
+    v0.2 shape (discriminated by total length, unambiguous once
+    numInts is known; v0.2 presents get serial 0), so stale pre-0.3
+    clients keep working. The per-present trio in `xwayland-tawc.c`
+    remembers `{window XID, presenting client's clientAsMask, serial}`
+    and the existing `wl_buffer.release` listener forwards the release
+    to that client's selection only — serials are per-client, so a
+    second client selecting on the same window must not receive them
+    (matching by XID/mask value, so destroyed windows or clients
+    simply don't match).
+  - Server-side cleanup is resource-driven like Present's event
+    contexts: the eid is a client resource (disconnect frees it) and a
+    marker resource under the window's XID frees that window's
+    selections on destroy.
+  - Client side (`x11_window.cpp`): `xcb_generate_id` +
+    `xcb_register_for_special_xge` + SelectInput at window creation;
+    `dequeueBuffer` drains `xcb_poll_for_special_event` — Configure
+    Notify updates `m_width/m_height` (the existing dimension-mismatch
+    check reallocates lazily and `presentBuffer` sends per-buffer
+    dims, so the downstream pipe follows automatically); BufferRelease
+    clears the matching serial's `busy` flag. Buffers stay busy from a
+    successful `queueBuffer` until release (a failed present frees the
+    slot immediately — no release will ever come for it) — real
+    backpressure via a sliced poll(2) loop on the xcb fd (50ms slices,
+    re-draining libxcb's special queue each slice: another app thread
+    can read the socket and queue our event while the fd shows no
+    data) with a 500ms sanity timeout that force-frees only
+    *presented* buffers (`serial != 0`; driver-held buffers must not
+    be handed out twice) and invalidates their serials so a late
+    release can't free a re-acquired buffer. All v0.3 behaviour is
+    gated on `TAWCDRIQueryVersion` minor ≥ 3 (`x11ws_eglInitialized`
+    now sends QueryVersion); against a pre-0.3 server (or a failed
+    probe) the plugin sends the 36-byte v0.2 PresentBuffer and keeps
+    the free-at-queue lifecycle — and since the v0.3 server also
+    accepts that shape, degradation is graceful in both directions.
+  - Note on logging: libhybris `HYBRIS_*` log macros compile out
+    entirely unless the fork is built with `DEBUG`; don't expect the
+    plugin's error paths to print anywhere in production builds.
+
+  Verified on OnePlus 9: es2gears_x11 shows rotating gears filling the
+  resized window (screencap), buffers follow to 540×1085
+  (`last_wlegl_width/height`), releases flow (16k+ per short run).
+  Regression nets: `xwayland::test_es2gears_x11_renders_via_ahb` now
+  asserts the last AHB dims equal the host logical size,
+  `xwayland::test_eglx11_triangle_pixels_on_screen` does a pixel-level
+  screencap assertion (blue triangle at screen centre), and
+  `xwayland::test_tawc_dri_ahb_present_animated_loop` asserts the
+  compositor's `wlegl_buffer_destroy_total` counter advances (releases
+  served end-to-end). `tests/apps/eglx11-test` carries
+  `TAWC_EGLX11_{TRIANGLE,DEPTH,VBO,MVP,READBACK,W,H}` env modes from
+  the original bisection.
+
+  Frame pacing is still unsolved (unrelated to this channel): releases
+  arrive as fast as the compositor processes commits, so an unthrottled
+  client free-runs at 2000+ fps instead of being clamped to display
+  refresh; a vsync/frame-callback equivalent would be a future
+  TAWC-DRI extension.
 - **Phase 3 — probably skip.** Server-side EGL acceleration
   (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
   that nobody runs on a phone.
@@ -1066,3 +1135,21 @@ The parked glibc-built Xwayland approach lives in [xwayland-glibc-alternative.md
   `issues/xwayland-no-idle-stop-after-midpresent-client-kill.md`) with
   `03-terminate-rearm-on-disconnect-mode.patch`. See "Idle
   termination" above.
+- **2026-07-06** — TAWC-DRI v0.3: server→client XGE event channel
+  (SelectInput + ConfigureNotify + BufferRelease). Fixes the X11
+  black-window resize regression (was
+  `issues/x11-presented-windows-black.md`) and replaces the
+  release-less 3-buffer round-robin with an event-driven buffer
+  lifecycle. Debug detour worth remembering: the events initially
+  never arrived because Xwayland's `xwl_config_notify` reinstalls
+  itself outermost on every ConfigureWindow, silently dropping any
+  statically-wrapped ConfigNotify hook after the first call — screen
+  hook wrappers in this tree must unwrap→call→rewrap per call like
+  Present does. Also grew the pixel-level regression net
+  `xwayland::test_eglx11_triangle_pixels_on_screen` (was
+  `issues/xwayland-gl-tests-pixel-blind.md`) and the
+  `wlegl_buffer_destroy_total` released-buffers counter. Full design
+  in "TAWC-DRI v0.3 — server→client event channel" above. Server
+  patch consolidated into `02-tawc-step3-ahb-present.patch`; libhybris
+  side folded into the fork's x11-platform commit, tag
+  `tawc-6-Jul-2026-0`.

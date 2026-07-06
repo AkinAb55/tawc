@@ -16,10 +16,10 @@ index bb90e195d..311485b2c 100644
      include_directories: inc,
 diff --git a/Xext/tawc-dri.c b/Xext/tawc-dri.c
 new file mode 100644
-index 000000000..2e364b946
+index 000000000..4eb624925
 --- /dev/null
 +++ b/Xext/tawc-dri.c
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,581 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -33,6 +33,13 @@ index 000000000..2e364b946
 + * AHardwareBuffer via AHardwareBuffer_createFromHandle, ships it
 + * through android_wlegl, and attaches the resulting wl_buffer to the
 + * target X11 window's wl_surface.
++ *
++ * v0.3 adds a server→client event channel (SelectInput + XGE generic
++ * events routed to libxcb special event queues, modelled on the
++ * Present extension): ConfigureNotify so the libhybris X11 platform's
++ * buffer pool follows compositor-driven window resizes, and
++ * BufferRelease so clients get real buffer-lifecycle feedback instead
++ * of a freshness heuristic.
 + *
 + * See notes/xwayland.md.
 + */
@@ -51,10 +58,12 @@ index 000000000..2e364b946
 +#include "misc.h"
 +#include "os.h"
 +#include "dixstruct.h"
++#include "resource.h"
 +#include "extnsionst.h"
 +#include "extinit.h"
 +#include "windowstr.h"
 +#include "scrnintstr.h"
++#include "Xext/geext.h"
 +
 +#include "Xext/tawcdriproto.h"
 +
@@ -66,7 +75,181 @@ index 000000000..2e364b946
 +                                          int *fds, int num_fds,
 +                                          const int32_t *ints, int num_ints,
 +                                          int width, int height, int stride,
-+                                          int format, uint64_t usage);
++                                          int format, uint64_t usage,
++                                          uint32_t client_mask,
++                                          uint32_t serial);
++
++/* ── Event selections ──
++ *
++ * One record per SelectInput, on a single global list (the population
++ * is a handful of GL clients, not worth per-window privates). Cleanup
++ * is resource-driven, like Present's event contexts:
++ *   - the eid is AddResource'd under the requesting client, so client
++ *     disconnect frees the record;
++ *   - a marker resource under the window's XID frees every record for
++ *     that window when the window is destroyed.
++ */
++typedef struct tawc_dri_event {
++    struct tawc_dri_event *next;
++    ClientPtr client;
++    WindowPtr window;
++    XID eid;
++    CARD32 mask;
++} tawc_dri_event_rec;
++
++static tawc_dri_event_rec *tawc_dri_event_list;
++static RESTYPE tawc_dri_event_type;  /* eid resources */
++static RESTYPE tawc_dri_window_type; /* per-window cleanup marker */
++static int tawc_dri_request;         /* major opcode, for XGE events */
++
++static int
++tawc_dri_free_event(void *data, XID id)
++{
++    tawc_dri_event_rec *event = data;
++    tawc_dri_event_rec **prev, *cur;
++
++    for (prev = &tawc_dri_event_list; (cur = *prev); prev = &cur->next) {
++        if (cur == event) {
++            *prev = event->next;
++            break;
++        }
++    }
++    free(event);
++    return Success;
++}
++
++static int
++tawc_dri_free_window(void *data, XID id)
++{
++    WindowPtr window = data;
++    tawc_dri_event_rec *event, *next;
++
++    for (event = tawc_dri_event_list; event; event = next) {
++        next = event->next;
++        if (event->window == window)
++            FreeResource(event->eid, RT_NONE);
++    }
++    return Success;
++}
++
++static void
++tawc_dri_send_configure_notify_to(tawc_dri_event_rec *event,
++                                  int width, int height)
++{
++    xTAWCDRIConfigureNotify cn = {
++        .type = GenericEvent,
++        .extension = tawc_dri_request,
++        .length = 0,
++        .evtype = TAWCDRIEventConfigureNotify,
++        .eid = event->eid,
++        .window = event->window->drawable.id,
++        .width = width,
++        .height = height,
++    };
++    WriteEventsToClient(event->client, 1, (xEvent *) &cn);
++}
++
++/* ConfigNotify screen hook: dix calls this from ConfigureWindow before
++ * the new geometry is applied, so drawable.width/height still hold the
++ * old size — comparing tells us whether the size actually changes
++ * (position-only moves shouldn't wake GL clients). A size check at
++ * PresentBuffer time would not be enough on its own: a low-fps client
++ * would render a full wrong-sized frame before hearing about it. */
++static ConfigNotifyProcPtr tawc_dri_wrapped_config_notify[MAXSCREENS];
++
++static int
++tawc_dri_config_notify(WindowPtr window,
++                       int x, int y, int w, int h, int bw,
++                       WindowPtr sibling)
++{
++    ScreenPtr screen = window->drawable.pScreen;
++    int ret = Success;
++
++    /* unwrap → call → rewrap, like Present's hooks. Xwayland's own
++     * xwl_config_notify reinstalls itself outermost on every call, so
++     * a wrapper that doesn't rewrap gets silently dropped from the
++     * chain after the first ConfigureWindow. */
++    screen->ConfigNotify = tawc_dri_wrapped_config_notify[screen->myNum];
++    if (screen->ConfigNotify)
++        ret = screen->ConfigNotify(window, x, y, w, h, bw, sibling);
++    tawc_dri_wrapped_config_notify[screen->myNum] = screen->ConfigNotify;
++    screen->ConfigNotify = tawc_dri_config_notify;
++
++    /* Emit only after the wrapped chain accepted the configure — a
++     * failure there aborts the resize, and a client that already
++     * reallocated to the phantom size would render wrong-sized buffers
++     * (the exact black-window class this event exists to fix). The
++     * drawable still holds the old size here (dix applies the new
++     * geometry after ConfigNotify returns), so the change check works. */
++    if (ret == Success &&
++        (w != window->drawable.width || h != window->drawable.height)) {
++        tawc_dri_event_rec *event;
++
++        for (event = tawc_dri_event_list; event; event = event->next) {
++            if (event->window == window &&
++                (event->mask & TAWCDRIConfigureNotifyMask))
++                tawc_dri_send_configure_notify_to(event, w, h);
++        }
++    }
++    return ret;
++}
++
++/* Compositor released a wl_buffer created by a v0.3 PresentBuffer.
++ * Called from hw/xwayland/xwayland-tawc.c's wl_buffer.release
++ * listener. Serials are per-presenting-client, so the release goes
++ * only to that client's selection — matched by clientAsMask + window
++ * XID rather than pointers: if the client or window is gone, its
++ * selections were freed with it and nothing is sent; recycled
++ * identities at worst deliver a stale serial the client ignores. */
++void
++tawc_dri_send_buffer_release(uint32_t window_id, uint32_t client_mask,
++                             uint32_t serial)
++{
++    tawc_dri_event_rec *event;
++
++    for (event = tawc_dri_event_list; event; event = event->next) {
++        if (event->window->drawable.id == window_id &&
++            (uint32_t)event->client->clientAsMask == client_mask &&
++            (event->mask & TAWCDRIBufferReleaseMask)) {
++            xTAWCDRIBufferRelease br = {
++                .type = GenericEvent,
++                .extension = tawc_dri_request,
++                .length = 0,
++                .evtype = TAWCDRIEventBufferRelease,
++                .eid = event->eid,
++                .window = window_id,
++                .serial = serial,
++            };
++            WriteEventsToClient(event->client, 1, (xEvent *) &br);
++        }
++    }
++}
++
++static void _X_COLD
++tawc_dri_event_swap(xGenericEvent *from, xGenericEvent *to)
++{
++    *to = *from;
++    swaps(&to->sequenceNumber);
++    swapl(&to->length);
++    swaps(&to->evtype);
++    switch (from->evtype) {
++    case TAWCDRIEventConfigureNotify: {
++        xTAWCDRIConfigureNotify *cn = (xTAWCDRIConfigureNotify *) to;
++        swapl(&cn->eid);
++        swapl(&cn->window);
++        swapl(&cn->width);
++        swapl(&cn->height);
++        break;
++    }
++    case TAWCDRIEventBufferRelease: {
++        xTAWCDRIBufferRelease *br = (xTAWCDRIBufferRelease *) to;
++        swapl(&br->eid);
++        swapl(&br->window);
++        swapl(&br->serial);
++        break;
++    }
++    }
++}
 +
 +static int
 +ProcTAWCDRIQueryVersion(ClientPtr client)
@@ -103,12 +286,15 @@ index 000000000..2e364b946
 +    int rc;
 +    uint64_t usage;
 +    int num_fds, num_ints;
++    size_t total, ints_sz, ints_offset;
++    uint32_t serial;
 +
-+    /* Wire layout: header + numInts u32s. length is in 4-byte words. */
-+    REQUEST_AT_LEAST_SIZE(xTAWCDRIPresentBufferReq);
-+    if ((size_t)stuff->length * 4 <
-+            sizeof(xTAWCDRIPresentBufferReq) +
-+            (size_t)stuff->numInts * sizeof(int32_t))
++    /* Wire layout: fixed header + numInts u32s; length is in 4-byte
++     * words. Two header shapes exist: v0.3 (40 bytes, trailing serial)
++     * and v0.2 (36 bytes, no serial). numFds/numInts sit inside the
++     * common 36-byte prefix, so the total length discriminates the
++     * shapes exactly (they differ by one word). */
++    if (client->req_len < (sz_xTAWCDRIPresentBufferReqV02 >> 2))
 +        return BadLength;
 +
 +    num_fds  = stuff->numFds;
@@ -121,6 +307,19 @@ index 000000000..2e364b946
 +        client->errorValue = num_fds;
 +        return BadValue;
 +    }
++
++    total   = (size_t)stuff->length * 4;
++    ints_sz = (size_t)num_ints * sizeof(int32_t);
++    if (total == sz_xTAWCDRIPresentBufferReq + ints_sz) {
++        ints_offset = sz_xTAWCDRIPresentBufferReq;
++        serial = stuff->serial;
++    }
++    else if (total == sz_xTAWCDRIPresentBufferReqV02 + ints_sz) {
++        ints_offset = sz_xTAWCDRIPresentBufferReqV02;
++        serial = 0;
++    }
++    else
++        return BadLength;
 +
 +    /* DIX requires every dispatch that pulls fds to declare the count up
 +     * front; otherwise libxtrans drops the SCM_RIGHTS-attached fds and
@@ -141,8 +340,7 @@ index 000000000..2e364b946
 +     * cross-endian is paranoia rather than a real path. */
 +    if (num_ints > 0) {
 +        const int32_t *raw =
-+            (const int32_t *)((const char *)stuff +
-+                              sizeof(xTAWCDRIPresentBufferReq));
++            (const int32_t *)((const char *)stuff + ints_offset);
 +        ints_buf = malloc(num_ints * sizeof(int32_t));
 +        if (!ints_buf)
 +            return BadAlloc;
@@ -182,12 +380,106 @@ index 000000000..2e364b946
 +                                        (int)stuff->height,
 +                                        (int)stuff->stride,
 +                                        (int)stuff->format,
-+                                        usage);
++                                        usage,
++                                        (uint32_t)client->clientAsMask,
++                                        serial);
 +    /* xwl_tawc_present_native_handle owns + closes the fds on both
 +     * success (handed to the AHB) and failure (closed during cleanup). */
 +    free(fds);
 +    free(ints_buf);
 +    return rc;
++}
++
++static int
++ProcTAWCDRISelectInput(ClientPtr client)
++{
++    REQUEST(xTAWCDRISelectInputReq);
++    WindowPtr window;
++    tawc_dri_event_rec *event;
++    int rc;
++
++    REQUEST_SIZE_MATCH(xTAWCDRISelectInputReq);
++
++    if (stuff->eventMask & ~TAWCDRIAllEventMasks) {
++        client->errorValue = stuff->eventMask;
++        return BadValue;
++    }
++
++    rc = dixLookupWindow(&window, stuff->window, client, DixGetAttrAccess);
++    if (rc != Success)
++        return rc;
++
++    /* Modifying an existing selection? (Same shape as Present.) */
++    rc = dixLookupResourceByType((void **) &event, stuff->eid,
++                                 tawc_dri_event_type, client,
++                                 DixWriteAccess);
++    if (rc == Success) {
++        if (event->window != window || event->client != client)
++            return BadMatch;
++        if (stuff->eventMask) {
++            event->mask = stuff->eventMask;
++            if (stuff->eventMask & TAWCDRIConfigureNotifyMask)
++                tawc_dri_send_configure_notify_to(event,
++                                                  window->drawable.width,
++                                                  window->drawable.height);
++        }
++        else
++            FreeResource(stuff->eid, RT_NONE);
++        return Success;
++    }
++    if (rc != BadValue)
++        return rc;
++
++    if (stuff->eventMask == 0)
++        return Success;
++
++    LEGAL_NEW_RESOURCE(stuff->eid, client);
++
++    event = calloc(1, sizeof(*event));
++    if (!event)
++        return BadAlloc;
++    event->client = client;
++    event->window = window;
++    event->eid = stuff->eid;
++    event->mask = stuff->eventMask;
++    event->next = tawc_dri_event_list;
++    tawc_dri_event_list = event;
++
++    if (!AddResource(event->eid, tawc_dri_event_type, (void *) event))
++        return BadAlloc;
++
++    /* First selection on this window: attach the cleanup marker so
++     * window destruction frees the selections. The marker shares the
++     * window's XID; dix frees every resource under that XID when the
++     * window dies. */
++    {
++        void *marker;
++        rc = dixLookupResourceByType(&marker, window->drawable.id,
++                                     tawc_dri_window_type, serverClient,
++                                     DixReadAccess);
++        if (rc != Success &&
++            !AddResource(window->drawable.id, tawc_dri_window_type,
++                         (void *) window)) {
++            /* A failed AddResource already ran tawc_dri_free_window,
++             * which freed `event` via its eid resource — use the
++             * request's copy of the XID (a second FreeResource on an
++             * already-freed XID is a harmless no-op). */
++            FreeResource(stuff->eid, RT_NONE);
++            return BadAlloc;
++        }
++    }
++
++    /* Deliver the window's current size right away: a WM resize that
++     * landed between window creation and this SelectInput would
++     * otherwise be missed forever (this exact race is how eglx11-test
++     * accidentally survived the black-window bug while es2gears_x11
++     * didn't). */
++    if (stuff->eventMask & TAWCDRIConfigureNotifyMask)
++        tawc_dri_send_configure_notify_to(event,
++                                          window->drawable.width,
++                                          window->drawable.height);
++
++    return Success;
 +}
 +
 +static int
@@ -199,6 +491,8 @@ index 000000000..2e364b946
 +        return ProcTAWCDRIQueryVersion(client);
 +    case X_TAWCDRIPresentBuffer:
 +        return ProcTAWCDRIPresentBuffer(client);
++    case X_TAWCDRISelectInput:
++        return ProcTAWCDRISelectInput(client);
 +    default:
 +        return BadRequest;
 +    }
@@ -220,7 +514,8 @@ index 000000000..2e364b946
 +{
 +    REQUEST(xTAWCDRIPresentBufferReq);
 +    swaps(&stuff->length);
-+    REQUEST_AT_LEAST_SIZE(xTAWCDRIPresentBufferReq);
++    if (client->req_len < (sz_xTAWCDRIPresentBufferReqV02 >> 2))
++        return BadLength;
 +    swapl(&stuff->window);
 +    swaps(&stuff->numFds);
 +    swaps(&stuff->numInts);
@@ -230,10 +525,27 @@ index 000000000..2e364b946
 +    swapl(&stuff->format);
 +    swapl(&stuff->usageLo);
 +    swapl(&stuff->usageHi);
-+    /* The inline int payload is swapped lazily inside
-+     * ProcTAWCDRIPresentBuffer so a non-swapped server doesn't pay
-+     * for it. */
++    /* Only the v0.3 shape has the trailing serial; for a v0.2 request
++     * that word is the first inline int, which the lazy per-int swap
++     * inside ProcTAWCDRIPresentBuffer handles (double-swapping it here
++     * would corrupt it). */
++    if ((size_t)stuff->length * 4 >=
++            sz_xTAWCDRIPresentBufferReq +
++            (size_t)stuff->numInts * sizeof(int32_t))
++        swapl(&stuff->serial);
 +    return ProcTAWCDRIPresentBuffer(client);
++}
++
++static int _X_COLD
++SProcTAWCDRISelectInput(ClientPtr client)
++{
++    REQUEST(xTAWCDRISelectInputReq);
++    swaps(&stuff->length);
++    REQUEST_SIZE_MATCH(xTAWCDRISelectInputReq);
++    swapl(&stuff->eid);
++    swapl(&stuff->window);
++    swapl(&stuff->eventMask);
++    return ProcTAWCDRISelectInput(client);
 +}
 +
 +static int _X_COLD
@@ -245,6 +557,8 @@ index 000000000..2e364b946
 +        return SProcTAWCDRIQueryVersion(client);
 +    case X_TAWCDRIPresentBuffer:
 +        return SProcTAWCDRIPresentBuffer(client);
++    case X_TAWCDRISelectInput:
++        return SProcTAWCDRISelectInput(client);
 +    default:
 +        return BadRequest;
 +    }
@@ -253,20 +567,46 @@ index 000000000..2e364b946
 +void
 +tawc_dri_extension_init(void)
 +{
-+    AddExtension(TAWCDRI_NAME,
-+                 TAWCDRINumberEvents,
-+                 TAWCDRINumberErrors,
-+                 ProcTAWCDRIDispatch,
-+                 SProcTAWCDRIDispatch,
-+                 NULL,
-+                 StandardMinorOpcode);
++    ExtensionEntry *extEntry;
++    int i;
++
++    /* Per-generation state: resources were freed by the reset, but the
++     * statics survive. */
++    tawc_dri_event_list = NULL;
++
++    tawc_dri_event_type =
++        CreateNewResourceType(tawc_dri_free_event, "TAWCDRIEvent");
++    tawc_dri_window_type =
++        CreateNewResourceType(tawc_dri_free_window, "TAWCDRIWindow");
++    if (!tawc_dri_event_type || !tawc_dri_window_type)
++        FatalError("TAWC-DRI: failed to create resource types\n");
++
++    extEntry = AddExtension(TAWCDRI_NAME,
++                            TAWCDRINumberEvents,
++                            TAWCDRINumberErrors,
++                            ProcTAWCDRIDispatch,
++                            SProcTAWCDRIDispatch,
++                            NULL,
++                            StandardMinorOpcode);
++    if (!extEntry)
++        FatalError("TAWC-DRI: AddExtension failed\n");
++    tawc_dri_request = extEntry->base;
++    GERegisterExtension(tawc_dri_request, tawc_dri_event_swap);
++
++    /* Extensions initialize after InitOutput, so the screens exist and
++     * we can hook ConfigNotify to hear about window resizes. */
++    for (i = 0; i < screenInfo.numScreens; i++) {
++        ScreenPtr screen = screenInfo.screens[i];
++        tawc_dri_wrapped_config_notify[i] = screen->ConfigNotify;
++        screen->ConfigNotify = tawc_dri_config_notify;
++    }
 +}
 diff --git a/Xext/tawcdriproto.h b/Xext/tawcdriproto.h
 new file mode 100644
-index 000000000..49bf6e8d1
+index 000000000..2e9917b13
 --- /dev/null
 +++ b/Xext/tawcdriproto.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,155 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -292,13 +632,23 @@ index 000000000..49bf6e8d1
 +
 +#define TAWCDRI_NAME "TAWC-DRI"
 +#define TAWCDRI_MAJOR 0
-+#define TAWCDRI_MINOR 2
++#define TAWCDRI_MINOR 3
 +
 +#define X_TAWCDRIQueryVersion  0
 +#define X_TAWCDRIPresentBuffer 1
++#define X_TAWCDRISelectInput   2
 +
++/* XGE generic events (response_type 35), not core events. */
 +#define TAWCDRINumberErrors 0
 +#define TAWCDRINumberEvents 0
++
++#define TAWCDRIEventConfigureNotify 0
++#define TAWCDRIEventBufferRelease   1
++
++#define TAWCDRIConfigureNotifyMask (1 << 0)
++#define TAWCDRIBufferReleaseMask   (1 << 1)
++#define TAWCDRIAllEventMasks \
++    (TAWCDRIConfigureNotifyMask | TAWCDRIBufferReleaseMask)
 +
 +typedef struct {
 +    CARD8  reqType;
@@ -333,7 +683,11 @@ index 000000000..49bf6e8d1
 + *
 + * The buffer is bound to `window`'s X11 toplevel and committed on its
 + * wl_surface; the request is void (no reply, errors arrive
-+ * asynchronously). */
++ * asynchronously).
++ *
++ * v0.3: `serial` is a client-chosen cookie echoed back in the
++ * TAWCDRIBufferRelease event when the compositor releases the
++ * wl_buffer this present created. */
 +typedef struct {
 +    CARD8  reqType;
 +    CARD8  tawcReqType;
@@ -347,8 +701,65 @@ index 000000000..49bf6e8d1
 +    CARD32 format B32;
 +    CARD32 usageLo B32;
 +    CARD32 usageHi B32;
++    CARD32 serial B32;
 +} xTAWCDRIPresentBufferReq;
-+#define sz_xTAWCDRIPresentBufferReq 36
++#define sz_xTAWCDRIPresentBufferReq 40
++/* The v0.2 request is the same struct without the trailing serial.
++ * The server accepts both shapes (discriminated by total request
++ * length, which is unambiguous once numInts is known) so pre-0.3
++ * clients keep working against a v0.3 server. */
++#define sz_xTAWCDRIPresentBufferReqV02 36
++
++/* v0.3: select TAWC-DRI events on `window`. `eid` is a client-allocated
++ * XID (xcb_generate_id) used as the routing key for libxcb's special
++ * event queues — same role as the Present extension's event id. An
++ * eventMask of 0 deletes the selection. Selecting ConfigureNotify
++ * immediately emits one event carrying the window's current size, so
++ * a resize that landed before the selection is never missed. */
++typedef struct {
++    CARD8  reqType;
++    CARD8  tawcReqType;
++    CARD16 length B16;
++    CARD32 eid B32;
++    CARD32 window B32;
++    CARD32 eventMask B32;
++} xTAWCDRISelectInputReq;
++#define sz_xTAWCDRISelectInputReq 16
++
++/* Events are XGE generic events. Field layout deliberately matches the
++ * Present extension's events — evtype at bytes 8-9, eid at bytes 12-15 —
++ * because libxcb's special-event matching (xcb_in.c, xcb_ge_special_event_t)
++ * reads the routing eid at that fixed offset. */
++
++typedef struct {
++    CARD8  type;                /* GenericEvent */
++    CARD8  extension;           /* TAWC-DRI major opcode */
++    CARD16 sequenceNumber B16;
++    CARD32 length B32;          /* 0 — no payload past 32 bytes */
++    CARD16 evtype B16;          /* TAWCDRIEventConfigureNotify */
++    CARD16 pad1 B16;
++    CARD32 eid B32;
++    CARD32 window B32;
++    CARD32 width B32;
++    CARD32 height B32;
++    CARD32 pad2 B32;
++} xTAWCDRIConfigureNotify;
++#define sz_xTAWCDRIConfigureNotify 32
++
++typedef struct {
++    CARD8  type;                /* GenericEvent */
++    CARD8  extension;           /* TAWC-DRI major opcode */
++    CARD16 sequenceNumber B16;
++    CARD32 length B32;          /* 0 */
++    CARD16 evtype B16;          /* TAWCDRIEventBufferRelease */
++    CARD16 pad1 B16;
++    CARD32 eid B32;
++    CARD32 window B32;
++    CARD32 serial B32;          /* echoed from PresentBuffer */
++    CARD32 pad2 B32;
++    CARD32 pad3 B32;
++} xTAWCDRIBufferRelease;
++#define sz_xTAWCDRIBufferRelease 32
 +
 +#endif /* _TAWCDRIPROTO_H_ */
 diff --git a/hw/xwayland/android_wlegl.xml b/hw/xwayland/android_wlegl.xml
@@ -772,10 +1183,10 @@ index 000000000..763f23827
 +#endif /* XWAYLAND_TAWC_LIBNATIVEWINDOW_H */
 diff --git a/hw/xwayland/xwayland-tawc.c b/hw/xwayland/xwayland-tawc.c
 new file mode 100644
-index 000000000..efb462eb0
+index 000000000..19970579e
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.c
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,303 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -918,17 +1329,29 @@ index 000000000..efb462eb0
 +    return NULL;
 +}
 +
++/* Implemented in Xext/tawc-dri.c (same binary; see the matching
++ * extern note there). Forwards the release to the presenting client's
++ * TAWCDRIBufferRelease selection on the window, if any. */
++extern void tawc_dri_send_buffer_release(uint32_t window_id,
++                                         uint32_t client_mask,
++                                         uint32_t serial);
++
 +/* Compositor signals it's done with one of our shipped wl_buffers.
 + * Free the corresponding xwl_tawc_buffer, which destroys the wl_buffer
 + * and releases the AHB (which in turn closes the dup'd fds). Without
 + * this, every present leaks an FD per fd-in-the-handle and the
 + * compositor process trips RLIMIT_NOFILE within seconds of any
-+ * sustained-frame client (es2gears_x11, glmark2-es2, …). */
++ * sustained-frame client (es2gears_x11, glmark2-es2, …). Also the
++ * v0.3 BufferRelease source: the presenting client learns its AHB is
++ * reusable here, giving real backpressure instead of the old 3-slot
++ * round-robin freshness heuristic. */
 +static void
 +buffer_release(void *data, struct wl_buffer *buffer)
 +{
 +    struct xwl_tawc_buffer *buf = data;
 +    (void) buffer;
++    tawc_dri_send_buffer_release(buf->window_id, buf->client_mask,
++                                 buf->serial);
 +    xwl_tawc_buffer_destroy(buf);
 +}
 +
@@ -958,7 +1381,9 @@ index 000000000..efb462eb0
 +                               int *fds, int num_fds,
 +                               const int32_t *ints, int num_ints,
 +                               int width, int height, int stride,
-+                               int format, uint64_t usage)
++                               int format, uint64_t usage,
++                               uint32_t client_mask,
++                               uint32_t serial)
 +{
 +    struct xwl_screen *xwl_screen;
 +    struct xwl_window *xwl_window;
@@ -1032,6 +1457,9 @@ index 000000000..efb462eb0
 +    buf->stride = stride;
 +    buf->format = format;
 +    buf->usage  = usage;
++    buf->window_id   = (uint32_t)window->drawable.id;
++    buf->client_mask = client_mask;
++    buf->serial      = serial;
 +
 +    wlbuf = xwl_tawc_buffer_get_wl_buffer(xwl_screen, buf);
 +    if (!wlbuf) {
@@ -1064,10 +1492,10 @@ index 000000000..efb462eb0
 +}
 diff --git a/hw/xwayland/xwayland-tawc.h b/hw/xwayland/xwayland-tawc.h
 new file mode 100644
-index 000000000..6342e5950
+index 000000000..5f38b6852
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,87 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -1106,6 +1534,13 @@ index 000000000..6342e5950
 +    int stride;     /* In pixels, as reported by AHardwareBuffer_describe. */
 +    int format;     /* Android pixel format (AHARDWAREBUFFER_FORMAT_*). */
 +    uint64_t usage; /* AHB usage flags. */
++    /* For TAWCDRIBufferRelease routing: the presenting window's XID and
++     * the presenting client's clientAsMask (serials are per-client, so
++     * the release must not be broadcast to other selectors on the same
++     * window), plus the client-chosen serial echoed back. */
++    uint32_t window_id;
++    uint32_t client_mask;
++    uint32_t serial;
 +};
 +
 +/* Tear down: destroys the wl_buffer (if any), releases the AHB, frees
@@ -1132,13 +1567,20 @@ index 000000000..6342e5950
 + * AHardwareBuffer_createFromHandle's REGISTER mode owns them on success
 + * via the AHB; on failure we close ourselves).
 + *
++ * `serial` is the client-chosen PresentBuffer cookie (v0.3); it is
++ * echoed back in a TAWCDRIBufferRelease event to the presenting client
++ * (identified by `client_mask` = clientAsMask) when the compositor
++ * releases the wl_buffer, if that client selected for release events.
++ *
 + * Returns 0 on success, X protocol error code (BadValue / BadMatch /
 + * BadAlloc) on failure. */
 +int xwl_tawc_present_native_handle(WindowPtr window,
 +                                   int *fds, int num_fds,
 +                                   const int32_t *ints, int num_ints,
 +                                   int width, int height, int stride,
-+                                   int format, uint64_t usage);
++                                   int format, uint64_t usage,
++                                   uint32_t client_mask,
++                                   uint32_t serial);
 +
 +#endif /* XWAYLAND_TAWC_H */
 diff --git a/include/extinit.h b/include/extinit.h

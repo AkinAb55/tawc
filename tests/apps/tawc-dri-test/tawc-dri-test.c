@@ -142,8 +142,11 @@ typedef struct {
     uint32_t pad1[5];
 } tawc_query_version_reply;
 
-/* Mirrors xTAWCDRIPresentBufferReq. xcb fills major_opcode +
- * minor_opcode for us. */
+/* Mirrors xTAWCDRIPresentBufferReq (v0.3). xcb fills major_opcode +
+ * minor_opcode for us. `serial` is echoed in TAWCDRIBufferRelease for
+ * clients that SelectInput; we don't, so 0 is fine. Against a pre-0.3
+ * server the trailing serial is dropped (36-byte v0.2 shape) — see
+ * server_v03 in main(). */
 typedef struct __attribute__((packed)) {
     uint8_t  major_opcode;
     uint8_t  minor_opcode;
@@ -157,7 +160,11 @@ typedef struct __attribute__((packed)) {
     uint32_t format;
     uint32_t usage_lo;
     uint32_t usage_hi;
+    uint32_t serial;
 } tawc_present_buffer_req;
+
+/* Set from the QueryVersion reply before any buffer is prepared. */
+static int server_v03;
 
 /* One AHB-backed buffer ready to ship: AHB + cached
  * native_handle pointer (owned by the AHB) + a precomputed
@@ -205,7 +212,9 @@ prepare_buffer(xcb_window_t win, struct buffer_state *out)
     out->num_fds  = out->nh->numFds;
     out->num_ints = out->nh->numInts;
 
-    size_t hdr_sz  = sizeof(tawc_present_buffer_req);
+    size_t hdr_sz  = server_v03
+        ? sizeof(tawc_present_buffer_req)
+        : sizeof(tawc_present_buffer_req) - sizeof(uint32_t);
     size_t ints_sz = (size_t)out->num_ints * sizeof(int32_t);
     out->combined_sz = hdr_sz + ints_sz;
     out->combined_req = malloc(out->combined_sz);
@@ -356,7 +365,7 @@ int main(void)
 
     /* QueryVersion. */
     tawc_query_version_req qv = {
-        .length = 3, .major_version = 0, .minor_version = 2,
+        .length = 3, .major_version = 0, .minor_version = 3,
     };
     struct iovec qv_vec[3];
     qv_vec[2].iov_base = &qv;
@@ -382,6 +391,7 @@ int main(void)
     fprintf(stderr,
             "tawc-dri-test: TAWC-DRI version %u.%u\n",
             qvr->major_version, qvr->minor_version);
+    server_v03 = qvr->major_version == 0 && qvr->minor_version >= 3;
     free(qv_reply);
 
     /* Create + map an X window. */

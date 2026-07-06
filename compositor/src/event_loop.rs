@@ -611,7 +611,7 @@ pub fn run(
                 .collect::<Vec<_>>()
                 .join(",");
             let payload = format!(
-                "clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} xwayland_running={} xwayland_pids={} x11_surfaces={} x11_surfaces_with_host={} wlegl_create_buffer_total={} wlegl_import_texture_total={} last_wlegl_width={} last_wlegl_height={} last_wlegl_format={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
+                "clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} xwayland_running={} xwayland_pids={} x11_surfaces={} x11_surfaces_with_host={} wlegl_create_buffer_total={} wlegl_import_texture_total={} wlegl_buffer_destroy_total={} last_wlegl_width={} last_wlegl_height={} last_wlegl_format={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} output_advertised={}",
                 clients,
                 toplevel_count(data),
                 surfaces_wlegl,
@@ -626,6 +626,7 @@ pub fn run(
                 x11_surfaces_with_host,
                 wlegl.create_buffer_total,
                 wlegl.import_texture_total,
+                wlegl.buffer_destroy_total,
                 wlegl.last_width,
                 wlegl.last_height,
                 wlegl.last_format,

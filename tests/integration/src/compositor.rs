@@ -26,6 +26,11 @@ pub struct CompositorState {
     pub x11_surfaces_with_host: u32,
     pub wlegl_create_buffer_total: u64,
     pub wlegl_import_texture_total: u64,
+    /// wl_buffer destroys for wlegl-backed buffers. Xwayland destroys a
+    /// TAWC-DRI wl_buffer only after receiving the compositor's release,
+    /// so this advancing during an X11 GL run proves buffer releases are
+    /// served end-to-end.
+    pub wlegl_buffer_destroy_total: u64,
     pub last_wlegl_width: u32,
     pub last_wlegl_height: u32,
     pub last_wlegl_format: u32,
@@ -102,6 +107,7 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
     let mut x11_surfaces_with_host = None;
     let mut wlegl_create_buffer_total = None;
     let mut wlegl_import_texture_total = None;
+    let mut wlegl_buffer_destroy_total = None;
     let mut last_wlegl_width = None;
     let mut last_wlegl_height = None;
     let mut last_wlegl_format = None;
@@ -134,6 +140,7 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
                 "x11_surfaces_with_host" => x11_surfaces_with_host = Some(val.parse().ok()?),
                 "wlegl_create_buffer_total" => wlegl_create_buffer_total = Some(val.parse().ok()?),
                 "wlegl_import_texture_total" => wlegl_import_texture_total = Some(val.parse().ok()?),
+                "wlegl_buffer_destroy_total" => wlegl_buffer_destroy_total = Some(val.parse().ok()?),
                 "last_wlegl_width" => last_wlegl_width = Some(val.parse().ok()?),
                 "last_wlegl_height" => last_wlegl_height = Some(val.parse().ok()?),
                 "last_wlegl_format" => last_wlegl_format = Some(val.parse().ok()?),
@@ -161,6 +168,7 @@ fn parse_compositor_state_payload(payload: &str) -> Option<CompositorState> {
         x11_surfaces_with_host: x11_surfaces_with_host.unwrap_or_default(),
         wlegl_create_buffer_total: wlegl_create_buffer_total.unwrap_or_default(),
         wlegl_import_texture_total: wlegl_import_texture_total.unwrap_or_default(),
+        wlegl_buffer_destroy_total: wlegl_buffer_destroy_total.unwrap_or_default(),
         last_wlegl_width: last_wlegl_width.unwrap_or_default(),
         last_wlegl_height: last_wlegl_height.unwrap_or_default(),
         last_wlegl_format: last_wlegl_format.unwrap_or_default(),
