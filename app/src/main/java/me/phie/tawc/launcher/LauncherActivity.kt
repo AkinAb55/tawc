@@ -343,13 +343,11 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     /**
-     * One long-press menu item. Assembled per entry by [entryActionsFor]
-     * so dependent features (Add to home screen, Edit) can append items
-     * conditionally; disabled actions are not shown.
+     * One long-press menu item. Assembled per entry by [entryActionsFor];
+     * conditional items are dropped there (`takeIf`/`listOfNotNull`).
      */
     private data class EntryAction(
         val label: CharSequence,
-        val enabled: Boolean = true,
         val run: () -> Unit,
     )
 
@@ -373,7 +371,7 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun showEntryMenu(entry: LauncherEntry) {
-        val actions = entryActionsFor(entry).filter { it.enabled }
+        val actions = entryActionsFor(entry)
         if (actions.isEmpty()) return
         AlertDialog.Builder(this)
             .setTitle(entry.name.ifEmpty { entry.id })

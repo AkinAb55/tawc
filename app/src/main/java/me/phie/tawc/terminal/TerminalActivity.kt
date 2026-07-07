@@ -175,8 +175,14 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
         setContentView(root)
 
         // A launcher entry with Terminal=true arrives as EXTRA_COMMAND
-        // (EntryLauncher). Consumed so recreation doesn't respawn it.
-        val command = consumeCommandExtras(intent)
+        // (EntryLauncher). Consumed so same-process recreation doesn't
+        // respawn it — but removeExtra can't reach the system's stored
+        // copy of the task's base intent, which is redelivered pristine
+        // when the user reopens the task from recents after process
+        // death. savedInstanceState survives process death, so its
+        // presence means "restore, don't re-run the command".
+        val command =
+            if (savedInstanceState != null) null else consumeCommandExtras(intent)
         var commandTabIndex = -1
         if (command != null) {
             val s = spawnSession(command.exec, command.label)
