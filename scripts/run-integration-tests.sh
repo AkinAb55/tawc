@@ -391,6 +391,14 @@ case "$DEVICE_ABI" in
         EXTRA_RUSTFLAGS+=(--cfg tawc_skip_libhybris_on_target)
         ;;
 esac
+# Root-requiring tests need Magisk-flavor `su -c` (the app's Su.kt is
+# Magisk-only, and AOSP /system/xbin/su rejects -c). The rootless AVD's
+# userdebug su only takes `su [WHO [CMD...]]`, so probe the exact form
+# the tests use.
+if [ "$(adb shell "su -c 'id -u'" 2>/dev/null | tr -d '\r\n')" != "0" ]; then
+    echo "=== Marking root-requiring tests ignored (no Magisk-style su on target) ==="
+    EXTRA_RUSTFLAGS+=(--cfg tawc_skip_root_on_target)
+fi
 if [ "${#EXTRA_RUSTFLAGS[@]}" -gt 0 ]; then
     export RUSTFLAGS="${RUSTFLAGS:-} ${EXTRA_RUSTFLAGS[*]}"
 fi

@@ -334,7 +334,11 @@ Two AVDs are supported:
   bug (issues/emulator-shm-black-shader-translator.md), not SELinux —
   verified 2026-07-06 that `setenforce 0` makes no difference for
   tawcroot. (Despite the name, the google_apis image is userdebug and
-  ships AOSP `/system/xbin/su`, so `su 0 <cmd>` does work there.)
+  ships AOSP `/system/xbin/su`, so `su 0 <cmd>` does work there — but
+  it rejects Magisk-style `su -c`, and app uids can't invoke it at
+  all, so the app's Su.kt ladder is dead on this AVD.
+  `run-integration-tests.sh` probes `su -c 'id -u'` and marks
+  root-requiring tests ignored via `--cfg tawc_skip_root_on_target`.)
 
 To create the rootless AVD (one-time):
 

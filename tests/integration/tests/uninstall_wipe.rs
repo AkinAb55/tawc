@@ -7,9 +7,13 @@
 //!
 //! Slots are fabricated (mkdir + metadata.json via the broker, as the
 //! app uid) rather than installed — uninstall only needs metadata, and
-//! a full install would cost minutes per case. Needs a rooted target
-//! (emulator): the gate test mounts/unmounts via `su -mm`, the
-//! droppings test plants root-owned files.
+//! a full install would cost minutes per case. The gate/su-retry test
+//! needs a Magisk-rooted target: the gate half mounts/unmounts via
+//! `su -mm`, the droppings half plants root-owned files, and the su
+//! ladder under test (Su.kt) is itself Magisk-only. On other targets
+//! the runner marks it ignored (`tawc_skip_root_on_target`); AOSP
+//! `/system/xbin/su` (rootless-AVD userdebug) rejects `-c` and can't
+//! be invoked from an app uid anyway.
 
 use std::process::Output;
 
@@ -85,12 +89,15 @@ fn su_mm(script: &str) -> Output {
     adb::shell(&format!("su -mm -c '{script}'")).expect("adb shell su -mm")
 }
 
+/// Backstop for direct `cargo test` runs that bypass the runner's
+/// `tawc_skip_root_on_target` probe.
 fn require_root() {
     let out = su("id -u");
     let uid = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && uid.trim() == "0",
-        "this test needs a rooted target (su unavailable): {}",
+        "this test needs Magisk-style su (run against the tawc-rooted AVD, \
+         or let scripts/run-integration-tests.sh mark it ignored): {}",
         combined(&out)
     );
 }
@@ -155,6 +162,10 @@ fn test_wipe_removes_ando_broker_dir() {
 }
 
 #[test]
+#[cfg_attr(
+    tawc_skip_root_on_target,
+    ignore = "needs Magisk-style su on target"
+)]
 fn test_wipe_gate_and_su_retry() {
     require_root();
     let d = slot_dir();
