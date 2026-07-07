@@ -259,9 +259,9 @@ of the box.
   client free-runs at 2000+ fps instead of being clamped to display
   refresh; a vsync/frame-callback equivalent would be a future
   TAWC-DRI extension.
-- **Phase 3 — probably skip.** Server-side EGL acceleration
+- **Phase 3 — dropped (2026-07-06).** Server-side EGL acceleration
   (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
-  that nobody runs on a phone.
+  that nobody runs on a phone. Residue in the Phase 3 section below.
 
 ## Why bionic
 
@@ -292,10 +292,10 @@ call once we worked through Phase 2 carefully:
   reverted on 2026-04-29 once the Phase 2 design clarified what the
   server actually has to do.
 
-The parked [glibc alternative](../plans/xwayland-glibc-alternative.md)
-preserves the V4 toolchain-swap, seccomp binary patches, and packaging
-so we don't have to re-derive any of it if a future workload ever needs
-a glibc X server inside the APK.
+The glibc alternative (V4 toolchain-swap, seccomp binary patches,
+packaging) was written up in `plans/xwayland-glibc-alternative.md`,
+since dropped — recover it from git history if a future workload ever
+needs a glibc X server inside the APK.
 
 ## Architecture: bionic-build Xwayland into the APK
 
@@ -608,9 +608,29 @@ What can land in parallel without blocking:
   (returns NULL until step 2 fills it in) lands in step 1 so the
   Xwayland binary keeps building through the whole sequence.
 
-### Phase 3 (probably never). Server-side GL acceleration.
+### Phase 3 (dropped 2026-07-06). Server-side GL acceleration.
 
-Parked future work lives in [xwayland-server-side-gl.md](../plans/xwayland-server-side-gl.md).
+The parked plan for this was deleted. It would only accelerate
+server-rendered pixmaps (RENDER glyphs, cursors, Cairo-over-X); the
+beneficiaries — xterm, old GIMP paths, Wine GDI drawing — are small,
+shrinking, and handled fine by pixman at phone window sizes. Revisit
+only if a real workload shows a *measured* bottleneck there. Residue
+so we don't re-derive it:
+
+- No GBM, `/dev/dri`, dmabuf, or `zwp_linux_dmabuf_v1` — same
+  AHB-everywhere rule as the rest of this file.
+- The old plan said to load libhybris into the server and use
+  `EGL_PLATFORM_WAYLAND_KHR`; that advice is stale, written for a
+  glibc server. The shipping Xwayland is bionic, so it can use the
+  system `libEGL.so` directly (surfaceless/pbuffer context, FBOs
+  backed by AHB EGLImages via `eglGetNativeClientBufferANDROID`) —
+  no libhybris in the server, which we already know breaks its
+  `libnativewindow` loading.
+- Ship the rendered AHBs through the existing `xwayland-tawc.c`
+  helpers. Touch points: `xwayland-tawc.c`, a vtable path in
+  `xwayland-glamor.c`, and reviving the pixmap router
+  (`xwl_tawc_pixmap_get_wl_buffer` is a NULL stub) since the
+  direct-attach path bypasses server-side drawing entirely.
 
 ### What this lets us delete from the plan
 
@@ -929,11 +949,11 @@ server CPU-rendered. xclock-with-software-Render appearing magenta
 is *correct and informative* — it's the signal that a code path
 hasn't been GPU-accelerated yet.
 
-**Phase 1 = transport + plumbing. Phase 2 = client GL. Phase 3 = optional server-side GL acceleration that we may never bother with.** See "Buffer transport architecture" above for the file-by-file shape; the parked Phase 3 plan lives in [xwayland-server-side-gl.md](../plans/xwayland-server-side-gl.md).
+**Phase 1 = transport + plumbing. Phase 2 = client GL. Phase 3 = server-side GL acceleration, dropped.** See "Buffer transport architecture" above for the file-by-file shape and the Phase 3 section for the dropped plan's residue.
 
 ## Glibc alternative
 
-The parked glibc-built Xwayland approach lives in [xwayland-glibc-alternative.md](../plans/xwayland-glibc-alternative.md).
+The parked glibc-built Xwayland approach was dropped; see "Why bionic" above.
 
 ## Alternatives considered and rejected
 
