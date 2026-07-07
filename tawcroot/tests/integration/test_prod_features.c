@@ -174,6 +174,75 @@ test(prod_unix_bind_translates_sun_path)
 #endif
 }
 
+/* Over-budget sun_path: with a deep install prefix (production:
+ * /data/data/me.phie.tawc/distros/<id>/rootfs) the host-absolute
+ * rendering overflows sun_path's 108 bytes, so bind must fall back to
+ * the /proc/self/fd spellings (tiers 2/3 in syscalls_socket.c). The
+ * fixture also getsocknames the bound socket and compares against the
+ * guest path, so this exercises the reverse translation of the /proc
+ * spellings under production seccomp + SIGSYS. Rootfs lives under a
+ * deliberately >107-byte tmpdir. */
+test(prod_unix_bind_over_budget_sun_path)
+{
+#if defined(__ANDROID__)
+	printf("    skipping (host-only: Android shell SELinux denies"
+	       " filesystem AF_UNIX socket creation under test rootfs)\n");
+	return;
+#else
+	char root[PATH_MAX];
+	int n = snprintf(root, sizeof root, "%s/tawcroot-test-rootfs-afunix-",
+	                 TAWCROOT_TEST_TMPDIR);
+	test_true(n > 0 && (size_t)n + 91 < sizeof root);
+	memset(root + n, 'p', 90);
+	root[n + 90] = '\0';
+	test_true(strlen(root) > 107);
+
+	char p[PATH_MAX];
+	rh_rmrf(root);
+	snprintf(p, sizeof p, "%s/bin", root);
+	test_true(rh_mkdir_p(p, 0755));
+	snprintf(p, sizeof p, "%s/run", root);
+	test_true(rh_mkdir_p(p, 0755));
+	snprintf(p, sizeof p, "%s/bin/static_unix_bind_argv1", root);
+	test_true(rh_copy_file(TAWCROOT_STATIC_UNIX_BIND_ARGV1_BIN, p, 0755));
+
+	/* Tier 2: short guest suffix. */
+	const char *guest_short = "/run/test-agent.sock";
+	const char *args_short[] = {
+		"-r", root, "--",
+		"/bin/static_unix_bind_argv1", guest_short, NULL
+	};
+	test_int_eq(run_with(args_short), 42);
+	snprintf(p, sizeof p, "%s%s", root, guest_short);
+	struct stat st = {0};
+	test_int_eq(stat(p, &st), 0);
+	test_true(S_ISSOCK(st.st_mode));
+
+	/* Tier 3: the suffix itself overflows the tier-2 spelling. */
+	char deep[80];
+	memset(deep, 'x', 70);
+	deep[70] = '\0';
+	snprintf(p, sizeof p, "%s/run/%s", root, deep);
+	test_true(rh_mkdir_p(p, 0755));
+	char guest_deep[128];
+	n = snprintf(guest_deep, sizeof guest_deep, "/run/%s/", deep);
+	test_true(n > 0);
+	memset(guest_deep + n, 'y', 29);
+	guest_deep[n + 29] = '\0';    /* guest len 105, suffix 104 */
+	const char *args_deep[] = {
+		"-r", root, "--",
+		"/bin/static_unix_bind_argv1", guest_deep, NULL
+	};
+	test_int_eq(run_with(args_deep), 42);
+	snprintf(p, sizeof p, "%s%s", root, guest_deep);
+	memset(&st, 0, sizeof st);
+	test_int_eq(stat(p, &st), 0);
+	test_true(S_ISSOCK(st.st_mode));
+
+	rh_rmrf(root);
+#endif
+}
+
 test(prod_proc_self_fd_hides_reserved)
 {
 	rh_rmrf(FAKE_ROOTFS);

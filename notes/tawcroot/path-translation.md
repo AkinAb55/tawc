@@ -397,6 +397,32 @@ the target user. The privilege predicate everywhere is virtual
   host-path source address gets forward-translated again on the
   way back out through `sendto`).
 
+  `sun_path` is 108 bytes including NUL, and the production install
+  prefix (~45+ bytes, longer with a long distro id) is spent on every
+  translated path, so forward rendering is tiered: (1) host-absolute
+  `<prefix>/<suffix>` — preferred because one device combo returned
+  `ENOENT` for AF_UNIX bind/connect via `/proc/self/fd/N/...` in app
+  context (the pacman-key fix); (2) on overflow,
+  `/proc/self/fd/<base_fd>/<suffix>` (long-lived rootfs/bind fd, no
+  churn); (3) when the suffix itself is long,
+  `/proc/self/fd/<parent_fd>/<leaf>` with an O_PATH fd of the leaf's
+  parent. The kernel stores bind's sockaddr bytes verbatim and echoes
+  them from getsockname/getpeername/accept, so `bind` *reserves* its
+  tier-3 parent fd and records it in a small dedup-by-(dev,ino) table
+  (`sock_parents`, 16 entries); reverse translation expands
+  `/proc/self/fd/<n>/...` through the recorded fd (readlink) or the
+  rootfs/bind host prefix before the usual longest-prefix walk.
+  connect/sendto/sendmsg close their tier-3 fd right after the call —
+  their string is never echoed back. Degradations: table
+  full/reserve failure → bind still works but its getsockname shows
+  the raw /proc spelling; reserved fds are CLOEXEC, so after an
+  execve a stale spelling is passed through untouched (empty table)
+  rather than resolved through a reused fd number. If the app-context
+  `/proc` bind/connect quirk resurfaces, over-budget paths fail there
+  (ENOENT instead of the old ENAMETOOLONG) — everything under-budget
+  stays on tier 1; revisit with supervisor-assisted bind if a real
+  workload hits it.
+
 - `socket` (`syscalls_socket.c`): `AF_NETLINK` + `NETLINK_AUDIT`
   returns `-EPROTONOSUPPORT` — what a kernel without `CONFIG_AUDIT`
   says (netlink family present, protocol unregistered). Android

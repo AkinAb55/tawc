@@ -16,6 +16,7 @@
 #include "linkstore.h"
 #include "path.h"
 #include "shm.h"
+#include "syscalls_socket.h"
 #include "usercopy.h"
 
 #ifndef TAWCROOT_TEST_TMPDIR
@@ -125,6 +126,9 @@ void th_view_teardown_impl(TestCtx *test_ctx, th_view *v)
 	tawcroot_rootfs_host_path_len = 0;
 	tawcroot_set_guest_exe_path(NULL);
 	tawcroot_shm_reset();
+	/* Tier-3 socket parent fds were closed by the reserved loop
+	 * above; drop the table entries that pointed at them. */
+	tawcroot_socket_reset();
 	/* Forget any linkstore state (fds were closed by the reserved
 	 * loop above). Tests that opened a store also rm -rf their store
 	 * dir themselves. */
