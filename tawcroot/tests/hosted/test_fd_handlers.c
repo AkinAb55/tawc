@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -295,7 +296,7 @@ test(hosted_legacy_getdents_hides_reserved_fds_and_repacks)
 
 /* --- legacy fd/poll-family → modern-sibling redirects ------------------ */
 /* Each legacy NR is RET_TRAPped by the real emulator filter
- * (issues/tawcroot-x86_64-legacy-trapset-audit.md); the handler routes
+ * (empirical audit: notes/tawcroot/status.md); the handler routes
  * it to the flags-taking modern syscall. th_sys drives the handler,
  * which issues the modern call against the real host kernel — so a
  * sane result (not -ENOSYS) proves the redirect. Every created fd is
@@ -308,6 +309,24 @@ test(hosted_legacy_select_routes_to_pselect6)
 	/* nfds=0 + zero timeout returns 0 immediately (no fds ready). */
 	struct { long tv_sec; long tv_usec; } tv = { 0, 0 };
 	test_int_eq(th_sys(TAWC_SYS_select, 0, 0, 0, 0, (long)&tv, 0), 0);
+	/* Kernel select semantics survive the pselect6 redirect: an
+	 * overflowing tv_usec is normalized into seconds (pselect6 alone
+	 * would EINVAL the raw nsec), negative fields are EINVAL. A ready
+	 * pipe keeps the normalized 1s timeout from actually elapsing. */
+	int pfds[2] = { -1, -1 };
+	test_int_eq(pipe(pfds), 0);
+	test_int_eq(write(pfds[1], "x", 1), 1);
+	fd_set rd;
+	FD_ZERO(&rd);
+	FD_SET(pfds[0], &rd);
+	tv.tv_sec = 0; tv.tv_usec = 1000000;  /* normalizes to 1s */
+	test_int_eq(th_sys(TAWC_SYS_select, pfds[0] + 1, (long)&rd, 0, 0,
+			   (long)&tv, 0), 1);
+	tv.tv_sec = 0; tv.tv_usec = -1;
+	test_int_eq(th_sys(TAWC_SYS_select, 0, 0, 0, 0, (long)&tv, 0),
+		    TAWC_EINVAL);
+	test_int_eq(close(pfds[0]), 0);
+	test_int_eq(close(pfds[1]), 0);
 	th_teardown(&v);
 }
 
@@ -348,10 +367,13 @@ test(hosted_legacy_epoll_create_routes_to_epoll_create1)
 {
 	th_view v;
 	th_setup(&v, "fd-epcreate");
-	/* Legacy size hint (1) is ignored by the modern call. */
+	/* Legacy size hint (1) is ignored by the modern call, but the
+	 * kernel's size <= 0 validation must survive the redirect. */
 	long fd = th_sys(TAWC_SYS_epoll_create, 1, 0, 0, 0, 0, 0);
 	test_true(fd >= 0);
 	test_int_eq(close((int)fd), 0);
+	test_int_eq(th_sys(TAWC_SYS_epoll_create, 0, 0, 0, 0, 0, 0),
+		    TAWC_EINVAL);
 	th_teardown(&v);
 }
 

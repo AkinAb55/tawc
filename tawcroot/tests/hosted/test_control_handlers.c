@@ -28,9 +28,9 @@ test(hosted_getpgrp_routes_to_getpgid)
 }
 
 /* Legacy time(2) → clock_gettime(CLOCK_REALTIME). Both RET_TRAPped by
- * the real emulator filter (issues/tawcroot-x86_64-legacy-trapset-
- * audit.md); clock_gettime is allowlisted. Return value and the *tloc
- * write-back must both match wall clock. */
+ * the real emulator filter (empirical audit: notes/tawcroot/status.md);
+ * clock_gettime is allowlisted. Return value and the *tloc write-back
+ * must both match wall clock. */
 test(hosted_legacy_time_routes_to_clock_gettime)
 {
 	th_view v;
@@ -63,8 +63,12 @@ test(hosted_legacy_alarm_routes_to_setitimer)
 
 	/* No prior timer → 0. Arm a large value so the disarm can't race. */
 	test_int_eq(th_sys(TAWC_SYS_alarm, 1000, 0, 0, 0, 0, 0), 0);
-	/* Disarm; the ~999.99s remainder rounds up to 1000. */
-	test_int_eq(th_sys(TAWC_SYS_alarm, 0, 0, 0, 0, 0, 0), 1000);
+	/* seconds is unsigned int in the kernel ABI: garbage in the high
+	 * register bits with a low half of 0 must disarm, not arm a
+	 * 2^32-second timer. The ~999.99s remainder rounds up to 1000. */
+	test_int_eq(th_sys(TAWC_SYS_alarm, 1L << 32, 0, 0, 0, 0, 0), 1000);
+	/* Confirm the disarm: no timer left. */
+	test_int_eq(th_sys(TAWC_SYS_alarm, 0, 0, 0, 0, 0, 0), 0);
 
 	sigaction(SIGALRM, &old_sa, NULL);
 	th_teardown(&v);

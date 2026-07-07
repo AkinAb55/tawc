@@ -277,7 +277,7 @@
 # define TAWC_SYS_epoll_wait      232
 # define TAWC_SYS_epoll_pwait     281
 /* Same legacy→modern redirect class, confirmed RET_TRAPped by the real
- * emulator filter (issues/tawcroot-x86_64-legacy-trapset-audit.md):
+ * emulator filter (empirical audit: notes/tawcroot/status.md):
  * Android allowlists only the flags-taking modern variant, so the
  * legacy NR traps and would -ENOSYS without a handler. Each routes to
  * its modern sibling with flags=0. aarch64 has no legacy NR in any

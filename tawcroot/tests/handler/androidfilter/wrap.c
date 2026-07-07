@@ -94,9 +94,9 @@
 # define WRAP_NR_ioctl         16
 /* Legacy lp64-x86_64 RET_TRAP set (Android allows these only for lp32).
  * This is a MODELED SUBSET, not the full list — the authoritative set
- * is the empirical prod-env audit (issues/tawcroot-x86_64-legacy-
- * trapset-audit.md), which also confirmed select/pipe/eventfd/signalfd/
- * epoll_create/inotify_init/time/alarm trap. Those aren't modeled here
+ * is the empirical prod-env audit (notes/tawcroot/status.md), which
+ * also confirmed select/pipe/eventfd/signalfd/epoll_create/
+ * inotify_init/time/alarm trap. Those aren't modeled here
  * (kept minimal to avoid perturbing existing synth-run guests); their
  * handlers are covered by hosted tests + the prod-env real-filter test. */
 # define WRAP_NR_access       21

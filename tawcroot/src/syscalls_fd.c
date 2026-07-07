@@ -29,7 +29,6 @@
 #include "raw_sys.h"
 #include "sysnr.h"
 #include "tawc_string.h"
-#include "usercopy.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
@@ -350,8 +349,8 @@ static long handle_getdents(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 
 /* The legacy fd/poll-family redirects. Each was confirmed RET_TRAPped
- * by the real emulator filter (issues/tawcroot-x86_64-legacy-trapset-
- * audit.md) — Android allowlists only the flags-taking modern variant.
+ * by the real emulator filter (empirical audit: notes/tawcroot/
+ * status.md) — Android allowlists only the flags-taking modern variant.
  * Untrapped they'd -ENOSYS. Same stub-reissue rule as handle_poll: a
  * raw legacy re-issue would re-trap and nest SIGSYS, so we issue the
  * MODERN sibling, which the filter allows. */
@@ -371,8 +370,12 @@ static long handle_select(const tawcroot_syscall_args *args, ucontext_t *uc)
 	struct { long tv_sec; long tv_usec; } tv;
 	long cr = tawc_copy_from_guest(&tv, sizeof tv, (const void *)args->e);
 	if (cr < 0) return cr;
+	/* Kernel select rejects negative fields but NORMALIZES an
+	 * overflowing tv_usec into seconds (pselect6 would EINVAL it). */
+	if (tv.tv_sec < 0 || tv.tv_usec < 0) return TAWC_EINVAL;
 	struct { long tv_sec; long tv_nsec; } ts = {
-		tv.tv_sec, tv.tv_usec * 1000L,
+		tv.tv_sec + tv.tv_usec / 1000000L,
+		(tv.tv_usec % 1000000L) * 1000L,
 	};
 	return TAWC_RAW(TAWC_SYS_pselect6, args->a, args->b, args->c,
 	                args->d, (long)&ts, 0);
@@ -400,9 +403,10 @@ static long handle_signalfd(const tawcroot_syscall_args *args, ucontext_t *uc)
 static long handle_epoll_create(const tawcroot_syscall_args *args,
                                 ucontext_t *uc)
 {
-	(void)args;
 	(void)uc;
-	/* Legacy `size` hint is meaningless to the modern call. */
+	/* Legacy `size` is only a hint, but the kernel still validates
+	 * it; the value itself is meaningless to the modern call. */
+	if ((int)args->a <= 0) return TAWC_EINVAL;
 	return TAWC_RAW(TAWC_SYS_epoll_create1, 0, 0, 0, 0, 0, 0);
 }
 
@@ -540,12 +544,12 @@ void tawcroot_fd_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_dup2,        handle_dup2);
 	tawcroot_dispatch_install(TAWC_SYS_poll,        handle_poll);
 	tawcroot_dispatch_install(TAWC_SYS_epoll_wait,  handle_epoll_wait);
-	tawcroot_dispatch_install(TAWC_SYS_getdents,    handle_getdents);
-	tawcroot_dispatch_install(TAWC_SYS_select,        handle_select);
-	tawcroot_dispatch_install(TAWC_SYS_pipe,          handle_pipe);
-	tawcroot_dispatch_install(TAWC_SYS_eventfd,       handle_eventfd);
-	tawcroot_dispatch_install(TAWC_SYS_signalfd,      handle_signalfd);
-	tawcroot_dispatch_install(TAWC_SYS_epoll_create,  handle_epoll_create);
-	tawcroot_dispatch_install(TAWC_SYS_inotify_init,  handle_inotify_init);
+	tawcroot_dispatch_install(TAWC_SYS_getdents,     handle_getdents);
+	tawcroot_dispatch_install(TAWC_SYS_select,       handle_select);
+	tawcroot_dispatch_install(TAWC_SYS_pipe,         handle_pipe);
+	tawcroot_dispatch_install(TAWC_SYS_eventfd,      handle_eventfd);
+	tawcroot_dispatch_install(TAWC_SYS_signalfd,     handle_signalfd);
+	tawcroot_dispatch_install(TAWC_SYS_epoll_create, handle_epoll_create);
+	tawcroot_dispatch_install(TAWC_SYS_inotify_init, handle_inotify_init);
 #endif
 }

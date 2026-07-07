@@ -6,8 +6,8 @@
  * untrusted_app, the zygote-installed filter). For a legacy NR the
  * kernel actually implements, the guest can only ever see -ENOSYS if
  * something TRAPPED the syscall and no handler serviced it — i.e. the
- * exact "trapped-but-unhandled" gap issues/tawcroot-x86_64-legacy-
- * trapset-audit.md is about. (tawcroot only ever traps NRs it also
+ * exact "trapped-but-unhandled" gap the legacy-trapset audit in
+ * notes/tawcroot/status.md is about. (tawcroot only ever traps NRs it also
  * handles, so an -ENOSYS here means: Android trapped it AND tawcroot
  * has no handler.)
  *

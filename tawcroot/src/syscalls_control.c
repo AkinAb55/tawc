@@ -274,8 +274,8 @@ static long handle_getpgrp(const tawcroot_syscall_args *args, ucontext_t *uc)
 }
 
 /* time(tloc) → clock_gettime(CLOCK_REALTIME). Legacy time(2) is
- * RET_TRAPped by the real emulator filter (issues/tawcroot-x86_64-
- * legacy-trapset-audit.md); clock_gettime is allowlisted. Return
+ * RET_TRAPped by the real emulator filter (empirical audit:
+ * notes/tawcroot/status.md); clock_gettime is allowlisted. Return
  * tv_sec, and mirror it into *tloc when non-NULL (via the guarded
  * copy — tloc is an untrusted guest pointer). */
 static long handle_time(const tawcroot_syscall_args *args, ucontext_t *uc)
@@ -303,8 +303,10 @@ static long handle_alarm(const tawcroot_syscall_args *args, ucontext_t *uc)
 {
 	(void)uc;
 	struct itv { long sec; long usec; };
+	/* seconds is unsigned int in the kernel ABI — only the low 32
+	 * register bits are meaningful. */
 	struct { struct itv interval; struct itv value; } nv = {
-		{ 0, 0 }, { (long)args->a, 0 },
+		{ 0, 0 }, { (long)(unsigned int)args->a, 0 },
 	}, ov;
 	long r = TAWC_RAW(TAWC_SYS_setitimer, 0 /*ITIMER_REAL*/,
 	                  (long)&nv, (long)&ov, 0, 0, 0);
