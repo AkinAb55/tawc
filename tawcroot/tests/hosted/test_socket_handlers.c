@@ -47,6 +47,40 @@ static void mk_sockaddr(struct sockaddr_un *sa, const char *path)
 	memcpy(sa->sun_path, path, strlen(path));
 }
 
+/* Like test(), but without the auto-registering constructor: the three
+ * successful-bind tests below are registered conditionally in the
+ * register_dynamic_tests block, so they don't run where the kernel
+ * refuses to create a socket file in the test tmpdir (see there). */
+#define socket_test(name) \
+	static void test_##name([[maybe_unused]] TestCtx *test_ctx, \
+				[[maybe_unused]] void const *_null_test_data)
+
+/* Can we create an AF_UNIX socket *file* in TAWCROOT_TEST_TMPDIR? On a
+ * real device's app context (app_data_file) yes, so production and the
+ * physical-device test path exercise the tiers for real. But Android's
+ * shell domain can't create a sock_file under shell_data_file, so the
+ * emulator device suite (adb shell, /data/local/tmp) gets EACCES on any
+ * successful bind — the same SELinux limitation that makes the
+ * FIFO/mknod checks host-only. Probe once and skip rather than fail. */
+static int socket_files_creatable(void)
+{
+	char dir[512];
+	snprintf(dir, sizeof dir, "%s/tawcroot-sockprobe-%d",
+		 TAWCROOT_TEST_TMPDIR, getpid());
+	mkdir(dir, 0755);
+	char sp[600];
+	snprintf(sp, sizeof sp, "%s/s", dir);
+
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	struct sockaddr_un sa;
+	mk_sockaddr(&sa, sp);
+	int ok = fd >= 0 && bind(fd, (struct sockaddr *)&sa, sizeof sa) == 0;
+	if (fd >= 0) close(fd);
+	unlink(sp);
+	rmdir(dir);
+	return ok;
+}
+
 /* bind through the handler; returns the raw handler rv. th_sys()
  * captures `test_ctx`, so helpers take it explicitly. */
 static long th_bind(TestCtx *test_ctx, int fd, const char *guest_path)
@@ -77,7 +111,7 @@ static long th_getsockname(TestCtx *test_ctx, int fd,
  * must succeed, create the socket inode at the translated host
  * location, and getsockname must reverse-translate the /proc spelling
  * back to the guest path. */
-test(hosted_unix_bind_over_budget_short_suffix)
+socket_test(hosted_unix_bind_over_budget_short_suffix)
 {
 	th_view v;
 	th_setup(&v, "sock-t2");
@@ -109,7 +143,7 @@ test(hosted_unix_bind_over_budget_short_suffix)
  * anchors a reserved parent-dir fd. Two binds in the same directory
  * must share one reserved fd (dedup by dev/ino), and getsockname of
  * both must reverse-translate. */
-test(hosted_unix_bind_over_budget_deep_suffix)
+socket_test(hosted_unix_bind_over_budget_deep_suffix)
 {
 	th_view v;
 	th_setup(&v, "sock-t3");
@@ -157,7 +191,7 @@ test(hosted_unix_bind_over_budget_deep_suffix)
 /* connect to an over-budget path: the parent fd is transient (no
  * reserved-fd growth), and getpeername on the client reverse-
  * translates the server's stored tier-3 bind spelling. */
-test(hosted_unix_connect_over_budget_transient_fd)
+socket_test(hosted_unix_connect_over_budget_transient_fd)
 {
 	th_view v;
 	th_setup(&v, "sock-conn");
@@ -216,4 +250,24 @@ test(hosted_unix_bind_leaf_too_long_enametoolong)
 
 	test_int_eq(close(fd), 0);
 	th_teardown(&v);
+}
+
+/* Register the successful-bind tests only where a socket file can
+ * actually be created in the test tmpdir (host, and app context on a
+ * real device). See socket_files_creatable() above. The
+ * enametoolong test never reaches a kernel bind, so it registers
+ * unconditionally via test() and runs everywhere. */
+register_dynamic_tests
+{
+	if (!socket_files_creatable()) return;
+	csview mod = test_module_from_file(__FILE__);
+	register_test(mod, c_sv("hosted_unix_bind_over_budget_short_suffix"),
+		      test_hosted_unix_bind_over_budget_short_suffix,
+		      nullptr, nullptr);
+	register_test(mod, c_sv("hosted_unix_bind_over_budget_deep_suffix"),
+		      test_hosted_unix_bind_over_budget_deep_suffix,
+		      nullptr, nullptr);
+	register_test(mod, c_sv("hosted_unix_connect_over_budget_transient_fd"),
+		      test_hosted_unix_connect_over_budget_transient_fd,
+		      nullptr, nullptr);
 }

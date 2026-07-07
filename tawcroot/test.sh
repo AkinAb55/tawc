@@ -175,7 +175,8 @@ done
 # directory so prior root-run leftovers under the old `tt` path do not matter.
 # The FIFO/mknod checks are host-only: Android shell SELinux denies mknod on
 # shell_data_file, and that one syscall is not worth making device tests need
-# root.
+# root. Same story for the successful-bind AF_UNIX socket tests (they create a
+# sock_file); test_socket_handlers.c probes and self-skips them on device.
 adb shell "rm -rf $TMPDIR_ON_DEVICE/tawcroot-test-rootfs-* && mkdir -p $TMPDIR_ON_DEVICE"
 
 # Forward PASSTHROUGH filters verbatim — the cross-compiled cleat
