@@ -1024,7 +1024,8 @@ which 5.4-kernel phones can't provide, and the pre-260
 
 tawcroot now synthesizes `STATX_MNT_ID` from `/proc/self/fdinfo`
 when the guest asks and the kernel can't deliver
-(`syscalls_fs.c::statx_fill_mnt_id`), so sid's v261 systemd tooling
+(`syscalls_fs.c::tawcroot_statx_fill_mnt_id`), so sid's v261 systemd
+tooling
 (`systemd-sysusers`, `systemd-tmpfiles`, anything `chase()`-based —
 these run from arbitrary package postinsts) works on old kernels.
 The standalone seeding stays anyway: systemd-less by design, and a

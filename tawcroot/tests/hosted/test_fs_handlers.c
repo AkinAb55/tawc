@@ -20,6 +20,7 @@
  * provide every O_ / AT_ / STATX_ constant these tests use. */
 #include "errno_neg.h"
 #include "path.h"
+#include "syscalls_fs.h"
 #include "sysnr.h"
 
 /* A pointer that is guaranteed unmapped (below the kernel's minimum
@@ -181,6 +182,112 @@ test(hosted_fstatat_decorates_uid_gid_zero)
 	test_int_eq(th_sys(TAWC_SYS_fstatat, AT_FDCWD, "/etc/probe",
 			   WILD_PTR, 0, 0, 0), TAWC_EFAULT);
 
+	th_teardown(&v);
+}
+
+#ifndef STATX_MNT_ID
+# define STATX_MNT_ID 0x00001000U
+#endif
+#ifndef STATX_MNT_ID_UNIQUE
+# define STATX_MNT_ID_UNIQUE 0x00004000U
+#endif
+
+test(hosted_statx_mnt_id_present)
+{
+	th_view v;
+	th_setup(&v, "fs-mntid");
+
+	/* systemd >=260 statx()es with STATX_MNT_ID and hard-fails with
+	 * EUNATCH when the result lacks it. Pre-5.8 kernels can't supply
+	 * it, so handle_statx synthesizes it from /proc/self/fdinfo. The
+	 * guest-visible contract on every kernel: asking for a mount id
+	 * yields one. (Value check: no real mount view hands a test
+	 * tmpdir mount id 0, and on old-kernel device runs — where this
+	 * test rides the emulation — a zero would mean the mask bit was
+	 * set without the value being written.) */
+	struct statx stx;
+	memset(&stx, 0, sizeof stx);
+	test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "/etc/probe", 0,
+			   STATX_BASIC_STATS | STATX_MNT_ID, &stx, 0), 0);
+	test_true(stx.stx_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE));
+	test_true(stx.stx_mnt_id != 0);
+
+	/* The AT_FDCWD + AT_EMPTY_PATH shape (statx of the cwd): fdinfo
+	 * has no entry for the sentinel, so the fill must pin the cwd
+	 * itself rather than build /proc/self/fdinfo/-100. */
+	memset(&stx, 0, sizeof stx);
+	test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "", AT_EMPTY_PATH,
+			   STATX_BASIC_STATS | STATX_MNT_ID, &stx, 0), 0);
+	test_true(stx.stx_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE));
+	test_true(stx.stx_mnt_id != 0);
+
+	th_teardown(&v);
+}
+
+test(hosted_shm_statx_mnt_id_present)
+{
+	th_view v;
+	th_setup(&v, "fs-shmmnt");
+
+	/* The /dev/shm intercept synthesizes both statx shapes (memfd
+	 * for entries, fully synthetic for the dir). systemd chase()s
+	 * into /dev/shm (tmpfiles aging), so both must report a mount
+	 * id, and the same one — the dir and its entries live on the
+	 * kernel's single internal shm_mnt. */
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/dev/shm/mntprobe",
+			 O_RDWR | O_CREAT, 0600, 0, 0);
+	test_true(fd >= 0);
+
+	struct statx dirx, namex;
+	memset(&dirx, 0, sizeof dirx);
+	memset(&namex, 0, sizeof namex);
+	test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "/dev/shm", 0,
+			   STATX_BASIC_STATS | STATX_MNT_ID, &dirx, 0), 0);
+	test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, "/dev/shm/mntprobe",
+			   0, STATX_BASIC_STATS | STATX_MNT_ID, &namex, 0),
+		    0);
+	test_true(dirx.stx_mask & STATX_MNT_ID);
+	test_true(namex.stx_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE));
+	/* No !=0 check here: shm_mnt is kernel-internal and its mount id
+	 * genuinely can be 0 (observed on the dev host). Equality is the
+	 * meaningful property. */
+	test_true(dirx.stx_mnt_id == namex.stx_mnt_id);
+
+	test_int_eq(close((int)fd), 0);
+	test_int_eq(th_sys(TAWC_SYS_unlinkat, AT_FDCWD,
+			   "/dev/shm/mntprobe", 0, 0, 0, 0), 0);
+	th_teardown(&v);
+}
+
+test(hosted_statx_mnt_id_fdinfo_parser_matches_kernel)
+{
+	th_view v;
+	th_setup(&v, "fs-mntid2");
+
+	/* Drive the fdinfo fallback directly (a >=5.8 host kernel
+	 * supplies STATX_MNT_ID natively, so the emulation never runs
+	 * through the handler there): hand the fill a zeroed statx so
+	 * its own mask guard can't short-circuit, then check the parsed
+	 * value against the kernel's — ground truth wherever the kernel
+	 * supports the bit, still a parse/shape check where it doesn't
+	 * (old-kernel device runs). */
+	int fd = open(v.root, O_PATH | O_CLOEXEC);
+	test_true(fd >= 0);
+
+	struct statx got;
+	memset(&got, 0, sizeof got);
+	tawcroot_statx_fill_mnt_id(fd, NULL, STATX_MNT_ID, &got);
+	test_true(got.stx_mask & STATX_MNT_ID);
+	test_true(got.stx_mnt_id != 0);
+
+	struct statx want;
+	memset(&want, 0, sizeof want);
+	if (syscall(TAWC_SYS_statx, fd, "", AT_EMPTY_PATH, STATX_MNT_ID,
+		    &want) == 0 &&
+	    (want.stx_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE)))
+		test_true(got.stx_mnt_id == want.stx_mnt_id);
+
+	test_int_eq(close(fd), 0);
 	th_teardown(&v);
 }
 

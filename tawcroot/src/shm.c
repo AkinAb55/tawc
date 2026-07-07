@@ -25,6 +25,7 @@
 #include "io.h"
 #include "raw_sys.h"
 #include "shm.h"
+#include "syscalls_fs.h"
 #include "sysnr.h"
 #include "tawc_string.h"
 #include "tawc_uapi.h"
@@ -293,7 +294,6 @@ void tawcroot_shm_stat_dir(struct stat *out)
 
 void tawcroot_shm_statx_dir(struct statx *out, unsigned int mask)
 {
-	(void)mask;
 	zero_statx(out);
 	out->stx_mode = (uint16_t)(S_IFDIR | 01777);
 	out->stx_nlink = 2;
@@ -304,6 +304,37 @@ void tawcroot_shm_statx_dir(struct statx *out, unsigned int mask)
 	 * the guest can observe. */
 	out->stx_mask = STATX_TYPE | STATX_MODE | STATX_NLINK |
 			STATX_UID | STATX_GID;
+	/* Mount id: the synthetic dir has no backing fd, but its
+	 * "contents" are memfds, and every memfd lives on the kernel's
+	 * one internal shm_mnt — so a throwaway probe memfd yields the
+	 * id the entries report, and one probe serves the process
+	 * lifetime. Without it, systemd chase()ing into /dev/shm
+	 * EUNATCHes at the dir step (see tawcroot_statx_fill_mnt_id).
+	 * The unsynchronized cache is benign: every racer computes and
+	 * stores the same value. */
+	if (mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE)) {
+		/* Two flags, not a 0-means-unprobed sentinel: shm_mnt is
+		 * kernel-internal and its id genuinely can be 0. Racing
+		 * probers all store identical values, so the unordered
+		 * writes are benign. */
+		static uint64_t shm_mnt_id_cache;
+		static int shm_mnt_id_known;
+		if (!shm_mnt_id_known) {
+			long pfd = tawc_memfd_create("tawcroot-mntid-probe",
+						     MFD_CLOEXEC);
+			if (pfd < 0) return;
+			struct statx px;
+			zero_statx(&px);
+			tawcroot_statx_fill_mnt_id((int)pfd, 0, STATX_MNT_ID,
+						   &px);
+			(void)tawc_close((int)pfd);
+			if (!(px.stx_mask & STATX_MNT_ID)) return;
+			shm_mnt_id_cache = px.stx_mnt_id;
+			shm_mnt_id_known = 1;
+		}
+		out->stx_mnt_id = shm_mnt_id_cache;
+		out->stx_mask |= STATX_MNT_ID;
+	}
 }
 
 long tawcroot_shm_stat_name(const char *name, struct stat *out)
@@ -343,6 +374,11 @@ long tawcroot_shm_statx_name(const char *name, struct statx *out,
 	out->stx_uid = 0;
 	out->stx_gid = 0;
 	out->stx_mask |= STATX_TYPE | STATX_MODE | STATX_UID | STATX_GID;
+	/* Pre-5.8 kernels return no STATX_MNT_ID for the memfd; systemd
+	 * chase()ing into /dev/shm EUNATCHes without one (see
+	 * tawcroot_statx_fill_mnt_id). Same shm_mnt id the dir
+	 * synthesizer reports. */
+	tawcroot_statx_fill_mnt_id(fd, NULL, mask, out);
 	return 0;
 }
 

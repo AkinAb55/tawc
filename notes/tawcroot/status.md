@@ -293,6 +293,28 @@ shadow CLOEXEC, unlink/rmdir/linkat errno shapes, `/proc/self/cwd`
 synthesis, cross-process exe substitution — were all fixed and are
 covered by unit/hosted/smoke tests.)
 
+- **`statx()` reports `STATX_MNT_ID` even on pre-5.8 kernels**
+  (deliberate *extra* fidelity, the inverse of the usual entry here).
+  When the guest requests `STATX_MNT_ID`/`STATX_MNT_ID_UNIQUE` and
+  the kernel returns neither, the handler O_PATH-opens the target and
+  parses `mnt_id:` from `/proc/self/fdinfo/<fd>` — the same number
+  statx would return (`tawcroot_statx_fill_mnt_id` in syscalls_fs.c;
+  AT_FDCWD targets pin the cwd, since fdinfo has no entry for the
+  sentinel). systemd ≥260 (kernel baseline 5.10) EUNATCHes without
+  the bit and dropped its own fdinfo fallback, which bricked Debian
+  sid installs on 5.4-kernel devices (see notes/installation.md
+  "Debian sid: keep full systemd out"). The shm statx synthesizers
+  fill it too — entries from their memfd, the synthetic `/dev/shm`
+  dir from a once-probed memfd (all memfds share the kernel's one
+  internal shm_mnt) — so a chase() into `/dev/shm` doesn't EUNATCH
+  either. The leaf re-open is O_NOFOLLOW always and guarded by a
+  dev/ino match against the caller's statx result, so a guest thread
+  racing a leaf swap can neither send the lookup through a symlink
+  the resolver never saw nor stitch another object's mount id onto
+  the result — the fill is skipped instead. Best-effort: any failure
+  leaves the kernel's answer untouched. Zero cost on ≥5.8 kernels.
+  `MNT_ID_UNIQUE` itself (kernel 6.8) is not synthesized — nothing
+  needs it and fdinfo has no unique id to parse.
 - **`execveat(AT_SYMLINK_NOFOLLOW)` → `-ENOSYS`.** Honest placeholder
   in syscalls_exec.c. Nothing we run uses the flag (`fexecve(3)` is
   AT_EMPTY_PATH), and -ENOSYS is safer than silently following the

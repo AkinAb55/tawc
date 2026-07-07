@@ -1299,14 +1299,117 @@ static long handle_symlinkat(const tawcroot_syscall_args *args,
  * AND mask=0 — semantically "uid not asked for", which is consistent
  * but doesn't reflect our fake-root view. (Review C11.) */
 #ifndef STATX_UID
-# define STATX_UID 0x00000080U
+# define STATX_UID 0x00000008U
 #endif
 #ifndef STATX_GID
-# define STATX_GID 0x00000100U
+# define STATX_GID 0x00000010U
 #endif
 #ifndef STATX_NLINK
 # define STATX_NLINK 0x00000004U
 #endif
+#ifndef STATX_INO
+# define STATX_INO 0x00000100U
+#endif
+#ifndef STATX_MNT_ID
+# define STATX_MNT_ID 0x00001000U
+#endif
+#ifndef STATX_MNT_ID_UNIQUE
+# define STATX_MNT_ID_UNIQUE 0x00004000U
+#endif
+/* STATX_MNT_ID emulation for pre-5.8 kernels.
+ *
+ * systemd >=260 (kernel baseline 5.10) statx()es with STATX_MNT_ID and
+ * hard-fails with EUNATCH when the result lacks it — the old
+ * /proc/self/fdinfo fallback was removed. Debian sid's systemd tools
+ * (machine-id-setup, tmpfiles, sysusers, anything chase()-based) are
+ * therefore dead on 5.4-kernel devices. Emulate what the kernel can't:
+ * parse `mnt_id:` from /proc/self/fdinfo of an fd on the statx target —
+ * the same number statx would have returned. Best-effort: on any
+ * failure the mask bit stays clear and the guest sees the kernel's
+ * answer unchanged. Only runs when the guest asked for a mount id and
+ * the kernel didn't deliver one, so 5.8+ kernels never take this path. */
+static void statx_mnt_id_from_fdinfo(int fd, struct statx *sx)
+{
+	char path[40];
+	size_t pos = 0;
+	if (tawc_str_append(path, sizeof path, &pos, "/proc/self/fdinfo/"))
+		return;
+	if (tawc_str_append_dec(path, sizeof path, &pos, fd))
+		return;
+	long ifd = TAWC_RAW(TAWC_SYS_openat, AT_FDCWD, (long)path,
+			    O_RDONLY | O_CLOEXEC, 0, 0, 0);
+	if (ifd < 0) return;
+	/* mnt_id sits in the kernel's fixed generic header (pos/flags/
+	 * mnt_id) ahead of any ->show_fdinfo extras; one short read
+	 * always covers it. */
+	char buf[256];
+	long n = TAWC_RAW(TAWC_SYS_read, ifd, (long)buf,
+			  (long)(sizeof buf - 1), 0, 0, 0);
+	TAWC_RAW(TAWC_SYS_close, ifd, 0, 0, 0, 0, 0);
+	if (n <= 0) return;
+	buf[n] = 0;
+	const char *p = buf;
+	while (*p) {
+		if (tawc_starts_with(p, "mnt_id:")) {
+			p += 7;
+			while (*p == ' ' || *p == '\t') p++;
+			if (*p < '0' || *p > '9') return;
+			sx->stx_mnt_id = (__u64)tawc_parse_long(p);
+			sx->stx_mask |= STATX_MNT_ID;
+			return;
+		}
+		while (*p && *p != '\n') p++;
+		if (*p) p++;
+	}
+}
+
+/* Fill stx_mnt_id for a statx result `sx` describing the target at
+ * (dirfd, path), when the guest requested a mount id and the kernel
+ * result lacks one. Empty/NULL `path` means the target is `dirfd`
+ * itself (AT_FDCWD pins the cwd — fdinfo has no entry for the
+ * sentinel). Exported for the shm statx synthesizers (shm.c), which
+ * fill from their memfds, and for the hosted parser test.
+ *
+ * The leaf open is O_NOFOLLOW unconditionally: under FOLLOW resolution
+ * the caller's path already has its leaf fully resolved by the
+ * translator (the kernel must never see an unclamped symlink —
+ * path_resolve.h), so a symlink here only appears if a guest thread
+ * swapped the leaf after the caller's statx; pinning it keeps the
+ * lookup on the correct mount instead of letting the kernel chase an
+ * absolute target across the host root. The dev/ino guard below
+ * closes the rest of that race: the fdinfo value is adopted only when
+ * the opened object is the one `sx` describes. */
+void tawcroot_statx_fill_mnt_id(int dirfd, const char *path,
+				unsigned int req_mask, struct statx *sx)
+{
+	if (!(req_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE))) return;
+	if (sx->stx_mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE)) return;
+	if (!path || !path[0]) {
+		if (dirfd != AT_FDCWD) {
+			statx_mnt_id_from_fdinfo(dirfd, sx);
+			return;
+		}
+		long cfd = TAWC_RAW(TAWC_SYS_openat, AT_FDCWD, (long)".",
+				    O_PATH | O_CLOEXEC, 0, 0, 0);
+		if (cfd < 0) return;
+		statx_mnt_id_from_fdinfo((int)cfd, sx);
+		TAWC_RAW(TAWC_SYS_close, cfd, 0, 0, 0, 0, 0);
+		return;
+	}
+	long fd = TAWC_RAW(TAWC_SYS_openat, dirfd, (long)path,
+			   O_PATH | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
+	if (fd < 0) return;
+	struct statx chk;
+	long crv = TAWC_RAW(TAWC_SYS_statx, (int)fd, (long)"",
+			    AT_EMPTY_PATH, STATX_INO, (long)&chk, 0);
+	if (crv == 0 &&
+	    chk.stx_ino == sx->stx_ino &&
+	    chk.stx_dev_major == sx->stx_dev_major &&
+	    chk.stx_dev_minor == sx->stx_dev_minor)
+		statx_mnt_id_from_fdinfo((int)fd, sx);
+	TAWC_RAW(TAWC_SYS_close, fd, 0, 0, 0, 0, 0);
+}
+
 /* statx flavour of finish_stat: zero uid/gid AND set the mask bits so
  * the guest sees the fields as populated (review C11). */
 static long finish_statx(long rv, struct statx *local,
@@ -1353,6 +1456,8 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 					local.stx_nlink = (unsigned int)c;
 					local.stx_mask |= STATX_NLINK;
 				}
+				tawcroot_statx_fill_mnt_id(dirfd, NULL,
+							   mask, &local);
 			}
 			return finish_statx(rv, &local, out);
 		}
@@ -1416,6 +1521,14 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 						tawcroot_link_count_for_stat(tok);
 					ox.stx_mask |= STATX_NLINK;
 					local = ox;
+					/* `local` now describes the store
+					 * object, so the mnt-id fill must
+					 * target it too — the generic
+					 * leaf fill below would fail its
+					 * dev/ino guard against it. */
+					tawcroot_statx_fill_mnt_id(
+						tawcroot_store_link_fd, tok,
+						mask, &local);
 				}
 			}
 		} else if (t.fd == tawcroot_store_link_fd && !t.is_root) {
@@ -1424,6 +1537,10 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 			local.stx_mask |= STATX_NLINK;
 		}
 	}
+	/* No-op when the kernel supplied a mount id or the emulated-
+	 * hardlink branch above already filled one. */
+	if (rv == 0)
+		tawcroot_statx_fill_mnt_id(t.fd, resolved, mask, &local);
 	return finish_statx(rv, &local, out);
 }
 
