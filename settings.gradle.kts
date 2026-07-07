@@ -24,13 +24,19 @@ include(":app")
 // They're wired in as included projects straight from the vendored
 // checkout, so the dep must exist at settings-evaluation time — clone/
 // verify it here instead of in a build task. Pin lives in deps/deps.list.
+// providers.exec (not ProcessBuilder) so the configuration cache works:
+// Gradle records the output as a configuration input and re-runs the
+// script even on cache-hit builds, keeping pin verification on every build.
 run {
-    val proc = ProcessBuilder("scripts/ensure-deps.sh", "termux-app")
-        .directory(rootDir)
-        .redirectErrorStream(true)
-        .start()
-    val output = proc.inputStream.readBytes().decodeToString()
-    check(proc.waitFor() == 0) { "scripts/ensure-deps.sh termux-app failed:\n$output" }
+    val ensure = providers.exec {
+        workingDir(rootDir)
+        commandLine("scripts/ensure-deps.sh", "termux-app")
+        isIgnoreExitValue = true
+    }
+    val output = ensure.standardOutput.asText.get() + ensure.standardError.asText.get()
+    check(ensure.result.get().exitValue == 0) {
+        "scripts/ensure-deps.sh termux-app failed:\n$output"
+    }
 }
 include(":terminal-emulator")
 project(":terminal-emulator").projectDir = file("deps/termux-app/terminal-emulator")

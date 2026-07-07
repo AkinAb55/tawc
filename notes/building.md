@@ -157,9 +157,13 @@ silently tolerated as long as HEAD matches the pin).
 On top of that, any `dep_ensure`/`dep_apply_patches` call first verifies
 *every* existing checkout against its pin (missing checkouts are skipped —
 they're cloned on demand), so a build that touches one dep fails on drift
-in any other. APK builds also run `scripts/ensure-deps.sh --verify-all`
-via the never-up-to-date `verifyDeps` Gradle task on `preBuild`, which
-catches drift even when every dep-consuming task is cached.
+in any other. Gradle builds also run `scripts/ensure-deps.sh --verify-all`
+via the never-up-to-date root `verifyDeps` task, wired to every module's
+`preBuild`, which catches drift even when every dep-consuming task is
+cached — including a termux-derived module built alone. The settings-eval
+`ensure-deps.sh termux-app` runs through `providers.exec`, so the
+configuration cache records its output as an input and re-verifies pins
+even on cache-hit builds.
 
 Dep-built artifacts also track checkout *content*: every dep-artifact
 Gradle task (`buildLibhybris`, `buildXwayland*`, …) declares
@@ -197,7 +201,10 @@ alone.
 
 Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — their
 version is baked into the URL inside the build script, so a version
-bump auto-fetches a fresh extract.
+bump auto-fetches a fresh extract. The extracts are never re-verified
+after that: hand edits or corruption in a `talloc-*`/`libmd` tree are
+invisible until the next version bump (accepted — delete the extract
+to force a clean re-fetch).
 
 ### Bumping a dep
 

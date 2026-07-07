@@ -326,18 +326,6 @@ val xkbForAbi = mapOf(
 val tawcRootForSmithay = rootProject.projectDir
 val smithayCargoToml = "$tawcRootForSmithay/deps/smithay/Cargo.toml"
 
-// Fail every build when any existing dep checkout drifted from its pin in
-// deps/deps.list. Never up-to-date: out-of-band drift (HEAD moved, manifest
-// unchanged) leaves no Gradle-visible input, so caching would mask it.
-val verifyDepsTask = tasks.register<Exec>("verifyDeps") {
-    workingDir = tawcRootForSmithay
-    commandLine("scripts/ensure-deps.sh", "--verify-all")
-    outputs.upToDateWhen { false }
-}
-tasks.named("preBuild") {
-    dependsOn(verifyDepsTask)
-}
-
 // Working-tree fingerprint (HEAD + tracked-edit hash) for the named deps,
 // via `ensure-deps.sh --tree-state`. Declared as an input property on every
 // task whose artifact embodies dep *sources*, so local edits — and their
