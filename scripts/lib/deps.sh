@@ -11,14 +11,21 @@
 #                         changed, then apply *.patch from <patch-dir>.
 #                         Optional sed expression transforms patch contents
 #                         before hashing/applying.
-#   dep_reset <name>   -- fetch + `git reset --hard <commit>`. Wipes any
-#                         per-dep `.tawc-patches-applied-*` sentinel so
-#                         the build's apply_patches stage re-runs. Used
-#                         exclusively by `scripts/update-deps.sh`.
+#   dep_reset <name>   -- fetch + `git reset --hard <commit>`; on an
+#                         actual pin move also `git clean -fdx` (stale
+#                         in-tree build dirs + untracked files). Wipes
+#                         any per-dep `.tawc-patches-applied-*` sentinel
+#                         so the build's apply_patches stage re-runs.
+#                         Used exclusively by `scripts/update-deps.sh`.
 #   deps_verify_all    -- error if any *existing* checkout's HEAD differs
 #                         from its pin. Missing checkouts are skipped
 #                         (cloned on demand by whichever build needs them).
 #   deps_all_names     -- echo every dep name, one per line, in manifest order.
+#   deps_tree_state <name|dest-prefix/>...
+#                      -- emit a working-tree fingerprint line per dep
+#                         (HEAD + tracked-edit hash). Read-only; used by
+#                         Gradle as an input property so dep-built
+#                         artifacts track checkout content.
 #
 # dep_ensure and dep_apply_patches run deps_verify_all first (once per
 # process), so any build that touches one dep fails on drift in any other.
@@ -190,6 +197,60 @@ deps_verify_all() {
     _dep_with_lock _deps_verify_all_inner
 }
 
+# One fingerprint line: "<name> <head> <diffhash>". <diffhash> is a
+# short sha1 of `git diff-index -p HEAD` (staged + unstaged edits to
+# tracked files) or "-" when clean; diff-index is plumbing, so user
+# diff config (external drivers, noprefix) can't skew the hash.
+# Untracked files are deliberately excluded: they survive `dep_reset`,
+# so they can't make an artifact stale the way discarded tracked edits
+# can, and including them would churn on in-tree build dirs.
+# A missing checkout reports "<pin> -" — identical to the fresh clone
+# dep_ensure produces, so absence alone never invalidates a build,
+# while deleting a *drifted* checkout stops matching the recorded
+# state and the artifact rebuilds from the pin.
+_dep_tree_state_one() {
+    _dep_lookup "$1" || return 1
+    if [ ! -d "$DEP_DEST/.git" ]; then
+        printf '%s %s -\n' "$DEP_NAME" "$DEP_COMMIT"
+        return 0
+    fi
+    local head hash
+    head="$(git -C "$DEP_DEST" rev-parse HEAD)" || return 1
+    # Refresh the stat cache so content-identical files aren't rehashed
+    # every call; harmless if a parallel git op holds the index lock.
+    git -C "$DEP_DEST" update-index -q --refresh >/dev/null 2>&1 || true
+    hash="$(git -C "$DEP_DEST" diff-index -p HEAD -- | sha1sum | cut -c1-12)"
+    [ "$hash" = "da39a3ee5e6b" ] && hash='-'  # sha1("") prefix == clean
+    printf '%s %s %s\n' "$DEP_NAME" "$head" "$hash"
+}
+
+# deps_tree_state <name|dest-prefix/>... -- fingerprint one line per
+# dep. An arg ending in "/" selects every dep whose manifest dest
+# starts with that prefix (e.g. "deps/xwayland-src/"), so callers don't
+# hardcode a list that drifts when a dep is added. Never clones,
+# verifies, or takes the lock.
+deps_tree_state() {
+    local arg name matched
+    for arg in "$@"; do
+        case "$arg" in
+            */)
+                matched=0
+                while IFS= read -r name; do
+                    matched=1
+                    _dep_tree_state_one "$name" || return 1
+                done < <(_deps_emit | awk -F'\t' -v p="$arg" 'index($5, p) == 1 { print $1 }')
+                if [ "$matched" -eq 0 ]; then
+                    echo "ERROR: no dep dest starts with '$arg'" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                _dep_tree_state_one "$arg" || return 1
+                ;;
+        esac
+    done
+}
+
 # Once-per-process front door for the dep_ensure/dep_apply_patches hook.
 # The flag must be set outside _dep_with_lock — its subshell can't export
 # back to us.
@@ -275,6 +336,13 @@ _dep_reset_inner() {
         echo "==> reset $DEP_NAME ${before:0:12} -> ${DEP_COMMIT:0:12}"
     fi
     git -C "$DEP_DEST" -c advice.detachedHead=false reset --quiet --hard "$DEP_COMMIT"
+    if [ "$before" != "$DEP_COMMIT" ]; then
+        # A pin move invalidates in-tree build dirs — configure-time
+        # decisions (feature probes, versions) bake in the old commit
+        # and survive `reset --hard`. Untracked WIP goes with them;
+        # update-deps.sh's header warns about that.
+        git -C "$DEP_DEST" clean -fdx --quiet
+    fi
     # Patch sentinels (`.tawc-patches-applied-<sha>`) live in the working
     # tree as untracked files, so `reset --hard` doesn't remove them.
     # Drop any so the build's apply_patches stage re-runs.

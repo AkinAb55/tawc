@@ -10,6 +10,9 @@
 #   scripts/ensure-deps.sh smithay rutabaga_gfx
 #   scripts/ensure-deps.sh --patches rutabaga_gfx deps/rutabaga-patches/rutabaga_gfx
 #   scripts/ensure-deps.sh --verify-all   # check every existing checkout, clone nothing
+#   scripts/ensure-deps.sh --tree-state <name|dest-prefix/>...
+#       # print a working-tree fingerprint per dep (read-only; Gradle
+#       # input property so dep artifacts track checkout content)
 #
 # Any dep_ensure also verifies every *existing* checkout against its pin
 # (see scripts/lib/deps.sh), so naming one dep still catches drift in all.
@@ -43,6 +46,15 @@ while [ "$#" -gt 0 ]; do
         --verify-all)
             deps_verify_all
             shift
+            ;;
+        --tree-state)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "ERROR: --tree-state requires at least one <name|dest-prefix/>" >&2
+                exit 2
+            fi
+            deps_tree_state "$@"
+            exit 0
             ;;
         -*)
             echo "ERROR: unknown option '$1'" >&2

@@ -338,6 +338,17 @@ tasks.named("preBuild") {
     dependsOn(verifyDepsTask)
 }
 
+// Working-tree fingerprint (HEAD + tracked-edit hash) for the named deps,
+// via `ensure-deps.sh --tree-state`. Declared as an input property on every
+// task whose artifact embodies dep *sources*, so local edits — and their
+// later discard by update-deps.sh — rebuild the artifact instead of letting
+// it ship stale. An arg ending in "/" selects every dep whose deps.list
+// dest lives under that prefix (no hardcoded list to drift).
+fun depTreeState(vararg deps: String): Provider<String> = providers.exec {
+    workingDir(rootDir)
+    commandLine(listOf("scripts/ensure-deps.sh", "--tree-state") + deps)
+}.standardOutput.asText
+
 // Ensure the smithay checkout exists before cargo runs. Cargo's
 // `[patch.crates-io] smithay = { path = "../deps/smithay" }` errors
 // up front if the dir is missing — so this has to come before the
@@ -393,6 +404,7 @@ tawcAbis.forEach { abi ->
         // built against the old commit. See AGENTS.md "Vendored deps".
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")
+        inputs.property("depTreeState", depTreeState("libxkbcommon"))
         outputs.file(xkbStaticLib)
     }
 
@@ -473,6 +485,7 @@ tawcAbis.forEach { abi ->
             // Pin bumps in deps/deps.list must invalidate the cache.
             inputs.file("$tawcRoot/deps/deps.list")
             inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            inputs.property("depTreeState", depTreeState("proot"))
             outputs.files(prootBin, prootLoader)
         }
         tasks.named("preBuild") {
@@ -499,6 +512,7 @@ tawcAbis.forEach { abi ->
         // Pin bumps in deps/deps.list must invalidate the cache (cleat).
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")
+        inputs.property("depTreeState", depTreeState("cleat"))
         outputs.file(tawcrootBin)
     }
     tasks.named("preBuild") {
@@ -550,6 +564,7 @@ tawcAbis.forEach { abi ->
             // Pin bumps in deps/deps.list (gfxstream) must invalidate.
             inputs.file("$tawcRoot/deps/deps.list")
             inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            inputs.property("depTreeState", depTreeState("gfxstream"))
             outputs.files(gfxstreamLib, libcppLib)
         }
 
@@ -611,6 +626,7 @@ if ("arm64-v8a" in tawcAbis) {
         inputs.file("$tawcRoot/scripts/build-libhybris.sh")
         inputs.file("$tawcRoot/deps/deps.list")
         inputs.file("$tawcRoot/scripts/lib/deps.sh")
+        inputs.property("depTreeState", depTreeState("libhybris", "android-headers"))
         outputs.dir(libhybrisInstallDir)
     }
 
@@ -690,6 +706,7 @@ tawcAbis.forEach { abi ->
             inputs.dir("$tawcRoot/deps/mesa-patches")
             inputs.file("$tawcRoot/deps/deps.list")
             inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            inputs.property("depTreeState", depTreeState("mesa", "wayland-protocols"))
             inputs.property("gfxstreamEnabled", gfxstreamEnabled)
             inputs.property("libhybrisZinkEnabled", libhybrisZinkEnabled)
             val out = mutableListOf<Any>()
@@ -800,6 +817,7 @@ if (xwaylandPackaged) {
             inputs.dir("$tawcRoot/deps/xwayland-patches")
             inputs.file("$tawcRoot/deps/deps.list")
             inputs.file("$tawcRoot/scripts/lib/deps.sh")
+            inputs.property("depTreeState", depTreeState("deps/xwayland-src/"))
             outputs.dir(xwaylandInstallDir)
         }
         xwaylandBuildTasks += buildXwaylandTask

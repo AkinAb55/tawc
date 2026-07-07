@@ -161,6 +161,26 @@ in any other. APK builds also run `scripts/ensure-deps.sh --verify-all`
 via the never-up-to-date `verifyDeps` Gradle task on `preBuild`, which
 catches drift even when every dep-consuming task is cached.
 
+Dep-built artifacts also track checkout *content*: every dep-artifact
+Gradle task (`buildLibhybris`, `buildXwayland*`, …) declares
+`scripts/ensure-deps.sh --tree-state <dep|dest-prefix/>...` — HEAD plus
+a hash of tracked-file edits per consumed dep — as an input property,
+so local edits in a dep tree, and their later discard by
+`update-deps.sh`, rebuild the artifact instead of letting it ship
+stale. A missing checkout fingerprints as "clean at pin" (what a fresh
+clone produces), so deleting a drifted checkout also triggers a
+rebuild. Untracked files are deliberately not fingerprinted — they
+survive `dep_reset`, so they can't be silently discarded; when
+iterating on one, run the build script directly. Expect one extra
+(script-incremental) task re-run after a build that itself rewrites
+tracked dep files (patch-set change, first autotools regen) — the
+fingerprint settles on the next build.
+
+`update-deps.sh` additionally `git clean -fdx`s a checkout when its pin
+actually moves, so stale in-tree configure state (and untracked WIP)
+doesn't leak across commits; a same-pin reset leaves untracked files
+alone.
+
 | Path                                  | Used by                                       |
 |---------------------------------------|-----------------------------------------------|
 | `./deps/libhybris/`                        | `scripts/build-libhybris.sh`              |

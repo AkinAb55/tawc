@@ -12,11 +12,13 @@
 #   scripts/update-deps.sh              # reset every dep to its pin
 #   scripts/update-deps.sh libhybris    # reset just one (or a few) by name
 #
-# `git reset --hard` discards uncommitted edits in the dep tree. The
-# build helper (`dep_ensure`) silently tolerates dirty trees as long as
-# HEAD matches the pin — so the only time you need this is when the pin
-# itself moved. If you have local work-in-progress in a dep, stash or
-# branch it first.
+# `git reset --hard` discards uncommitted edits in the dep tree, and an
+# actual pin move additionally runs `git clean -fdx` — untracked files
+# and in-tree build dirs are removed too (stale configure state must not
+# survive a commit change). The build helper (`dep_ensure`) silently
+# tolerates dirty trees as long as HEAD matches the pin — so the only
+# time you need this is when the pin itself moved. If you have local
+# work-in-progress in a dep, stash or branch it first.
 
 set -euo pipefail
 
