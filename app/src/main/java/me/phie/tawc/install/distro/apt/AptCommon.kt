@@ -36,11 +36,20 @@ internal object AptCommon {
     // every https client (git, curl, wget) fails until it's installed.
     // Pacman bases get it via pacman→curl→ca-certificates and void via
     // xbps's ca-certificates dependency, so only the apt family lists it.
+    // systemd-standalone-*: dbus-daemon (and many other packages) depend on
+    // `systemd | systemd-standalone-X | systemd-X`. Without a provider in the
+    // install set apt picks the first alternative — full systemd — whose
+    // postinst cannot run here: systemd ≥260 requires kernel ≥5.10 and hard-
+    // fails with EUNATCH when statx() lacks STATX_MNT_ID (kernel <5.8, e.g.
+    // 5.4 phone kernels). The rootfs is systemd-less by design anyway, so
+    // seed the standalone providers to steer the resolver away from it.
     val DEFAULT_BASE_PACKAGES: List<String> = listOf(
         "ca-certificates",
         "dbus-x11",
         "libwayland-client0",
         "libwayland-server0",
+        "systemd-standalone-sysusers",
+        "systemd-standalone-tmpfiles",
     )
 
     fun configure(

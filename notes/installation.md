@@ -1001,6 +1001,33 @@ rootfs." Two installs with the same `schemaVersion` can differ in
 code is what an `if (installedAtAppVersionCode < N)` check should
 key on.
 
+## Debian sid: keep full systemd out of the install set
+
+The apt-family base list seeds `systemd-standalone-sysusers` +
+`systemd-standalone-tmpfiles` (`AptCommon.DEFAULT_BASE_PACKAGES`).
+Without a provider in the same install transaction, apt satisfies
+dbus-daemon's `systemd | systemd-standalone-tmpfiles |
+systemd-tmpfiles` alternative with its first branch — full systemd —
+which drags in the tpm/libtss2 subtree and whose postinst
+(machine-id setup, `systemctl enable`) has no reason to run in our
+systemd-less rootfs. Historically it also could not run: systemd
+≥260 raised its kernel baseline to 5.10 and its path machinery
+(`chase()`/`xstatx_full`) hard-fails with EUNATCH ("Protocol driver
+not attached") when `statx()` doesn't return
+`STATX_MNT_ID`/`STATX_MNT_ID_UNIQUE` — bits that need kernel ≥5.8,
+which 5.4-kernel phones can't provide, and the pre-260
+`/proc/self/fdinfo` fallback was removed upstream. That broke the
+2026-07 sid install at `apt base-package install failed (exit=100)`.
+
+tawcroot now synthesizes `STATX_MNT_ID` from `/proc/self/fdinfo`
+when the guest asks and the kernel can't deliver
+(`syscalls_fs.c::statx_fill_mnt_id`), so sid's v261 systemd tooling
+(`systemd-sysusers`, `systemd-tmpfiles`, anything `chase()`-based —
+these run from arbitrary package postinsts) works on old kernels.
+The standalone seeding stays anyway: systemd-less by design, and a
+smaller install. Under plain chroot/proot on a pre-5.8 kernel the
+EUNATCH failures remain — nothing translates statx there.
+
 ## Known harmless install noise
 
 Errors that appear in pacman/install logs under tawcroot, are
