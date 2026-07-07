@@ -16,10 +16,10 @@ black-render fix. Options: teach the helpers both su flavors, or have
 `require_root` detect non-Magisk su and mark the test skipped instead
 of failed (the suite already has per-target ignore machinery).
 
-Same bug in `scripts/emulator.sh`: its `su -c "setenforce 0"` fails on
-AOSP su, so even where it runs, SELinux stays enforcing. Also, the
-script skips `setenforce` entirely on the rootless AVD, but the
-google_apis x86_64 image is userdebug with `/system/xbin/su`, so
-`su 0 setenforce 0` does work there (verified 2026-07-06 on
-emulator-5554). Relevant to the SHM-black diagnosis in
-`emulator-shm-black-shader-translator.md`.
+Same flavor assumption in `scripts/emulator.sh`: its
+`su -c "setenforce 0"` works on the Magisk-rooted AVD but would fail
+on AOSP su. And despite the name, the rootless google_apis x86_64
+image is userdebug with `/system/xbin/su`, so `su 0 <cmd>` does work
+there (verified 2026-07-06 on emulator-5554) — only Magisk-style
+`-c` syntax fails. (SELinux state turned out irrelevant to the
+SHM-black symptom; see `emulator-shm-black-shader-translator.md`.)

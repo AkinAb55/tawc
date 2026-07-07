@@ -329,8 +329,12 @@ Two AVDs are supported:
   and /dev/null setup).
 - `tawc-rootless` — stock AVD, no Magisk.
   Useful for testing the tawcroot/proot install methods on a non-rooted
-  image. Won't render SHM client surfaces (no `setenforce 0`), and the
-  chroot install method won't work.
+  image. The chroot install method won't work. SHM client surfaces
+  render black on it, but that is the emulator GLES translator shader
+  bug (issues/emulator-shm-black-shader-translator.md), not SELinux —
+  verified 2026-07-06 that `setenforce 0` makes no difference for
+  tawcroot. (Despite the name, the google_apis image is userdebug and
+  ships AOSP `/system/xbin/su`, so `su 0 <cmd>` does work there.)
 
 To create the rootless AVD (one-time):
 
@@ -462,6 +466,12 @@ so emulator-vs-device differences (skip libhybris-only mounts on
 emulator) just fall out of the runtime detection.
 
 ## SELinux on the emulator
+This section is **chroot-only**: tawcroot clients share the
+compositor's untrusted_app domain, and their SHM rendering is
+unaffected by SELinux state (verified 2026-07-06 — the tawcroot
+SHM-black symptom is the translator shader bug in
+issues/emulator-shm-black-shader-translator.md instead).
+
 On a real device, `ChrootMounter` uses `magiskpolicy --live` to install
 a `type_transition` so that memfds the chroot's clients create get the
 `appdomain_tmpfs` label and the compositor (running as `untrusted_app`)

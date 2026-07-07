@@ -74,33 +74,30 @@ applied to both the normal and debug variant sources in
 `DEBUG_FLAGS`). Applying it means a smithay fork commit on
 `tawc-patches` plus a `deps/deps.list` pin bump.
 
-## Conflicting parallel diagnosis: SELinux enforcing (unreconciled)
+## SELinux ruled out (resolved 2026-07-06)
 
-A parallel session (2026-07-06 22:10, on `tawc-rootless`/emulator-5554)
-diagnosed the same black-SHM symptom as SELinux enforcing: with
-`su 0 setenforce 0` and nothing else changed, the same tawcroot +
-`--graphics cpu` render-pattern run showed all four blocks correctly.
-That session's other findings:
+A parallel session had diagnosed the same black-SHM symptom as SELinux
+enforcing (claiming `su 0 setenforce 0` alone made the pattern render,
+matching the old SHM/SELinux prose in notes/emulator.md). A full matrix
+on `tawc-rootless`/emulator-5554, tawcroot, cpu backend, current HEAD,
+app force-stopped between cells, settled it:
 
-- `emulator.sh start` skips `setenforce` on the rootless AVD, but the
-  google_apis x86_64 image is userdebug and ships AOSP
-  `/system/xbin/su`, so root *is* available there
-  (`su 0 setenforce 0` works). Its `su -c "setenforce 0"` syntax also
-  fails on AOSP su (see `uninstall-wipe-su-flavor-emulator.md`).
-- No AVC denial was captured for the tawcroot path.
-- Proposed fixes: make `emulator.sh start` setenforce 0 on both AVD
-  flavors with AOSP-compatible su syntax and verify via `getenforce`;
-  and/or have the test harness fail fast on emulator targets when
-  `getenforce` reports Enforcing.
+| SELinux    | shader fix | render-pattern |
+| ---------- | ---------- | -------------- |
+| Enforcing  | no         | black          |
+| Permissive | no         | black          |
+| Enforcing  | yes        | renders (both `rendering::` pixel tests pass) |
 
-Both diagnoses claim verification, and they haven't been reconciled:
-if SELinux alone caused it, the shader fix shouldn't have made tests
-pass under enforcing; if the translator bug alone caused it,
-`setenforce 0` shouldn't have fixed the pattern. Possibly both gate the
-path (different SELinux state between the sessions' emulator runs), or
-SELinux state is the unknown trigger condition noted above. Next
-repro should record `getenforce` alongside any result before trusting
-either conclusion alone.
+So the translator shader bug is the sole cause here; SELinux state is
+irrelevant to the tawcroot SHM path (client and compositor share the
+untrusted_app domain — the memfd `type_transition` story in
+notes/emulator.md is chroot-only). The parallel session's
+"permissive fixed it" observation did not reproduce and its origin is
+unknown (possibly a different emulator boot/GPU config or a sampling
+error). Useful side-findings from that session — `emulator.sh`'s
+`su -c` setenforce syntax fails on AOSP su, and the rootless
+google_apis image does have root — live in
+`uninstall-wipe-su-flavor-emulator.md`.
 
 ## Known-failing tests on emulator until fixed
 
