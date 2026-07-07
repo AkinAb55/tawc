@@ -682,6 +682,33 @@ fn test_es2gears_x11_renders_via_ahb() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    // Frame pacing: with the pipe healthy, presents must tick at display
+    // cadence, not the client's free-run rate. Xwayland paces TAWC-DRI
+    // commits with wl_surface.frame callbacks (~60Hz frame timer);
+    // before that es2gears free-ran at ~2500 presents/sec. Allow wide
+    // margins (high-refresh panels, timer jitter) — the regression this
+    // guards is a ~40x blowout, not a few percent.
+    let pace_before = compositor::query_state(TIMEOUT)
+        .expect("query compositor state for pacing sample");
+    std::thread::sleep(Duration::from_secs(3));
+    let pace_after = compositor::query_state(TIMEOUT)
+        .expect("query compositor state after pacing sample");
+    let rate = pace_after
+        .wlegl_create_buffer_total
+        .saturating_sub(pace_before.wlegl_create_buffer_total) as f64
+        / 3.0;
+    assert!(
+        rate <= 200.0,
+        "es2gears_x11 presented {rate:.0} buffers/sec — frame pacing is \
+         broken (Xwayland is committing every present immediately instead \
+         of one per wl_surface.frame callback), the client is free-running."
+    );
+    assert!(
+        rate >= 20.0,
+        "es2gears_x11 presented only {rate:.0} buffers/sec after the pipe \
+         was healthy — presents (or BufferRelease backpressure) stalled."
+    );
+
     app.stop()
         .expect("es2gears_x11 crashed or failed to stop cleanly");
     assert_compositor_clean();

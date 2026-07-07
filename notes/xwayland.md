@@ -254,11 +254,27 @@ of the box.
   `TAWC_EGLX11_{TRIANGLE,DEPTH,VBO,MVP,READBACK,W,H}` env modes from
   the original bisection.
 
-  Frame pacing is still unsolved (unrelated to this channel): releases
-  arrive as fast as the compositor processes commits, so an unthrottled
-  client free-runs at 2000+ fps instead of being clamped to display
-  refresh; a vsync/frame-callback equivalent would be a future
-  TAWC-DRI extension.
+- **TAWC-DRI frame pacing (2026-07-06).** Server-side, no protocol
+  change (was `issues/tawc-dri-no-frame-pacing.md`): with commits sent
+  the instant each PresentBuffer arrived, releases tracked the client's
+  own present rate and es2gears_x11 free-ran at ~2500 fps. Now
+  `xwayland-tawc.c` paces commits with `wl_surface.frame`: the first
+  present on an idle surface commits immediately and requests a
+  callback; presents that arrive while one is outstanding queue FIFO on
+  the `xwl_window` (fields in `xwayland-window.h`, teardown hooked into
+  `xwl_window_dispose`), one committed per callback. The compositor's
+  ~16ms frame timer sends callbacks for visible windows, so releases
+  tick at display cadence and the v0.3 backpressure clamps v0.3 clients
+  for free; clients slower than the display never find a callback
+  outstanding and keep direct-commit latency. Hidden windows get no
+  frame callbacks: the queue caps at 8 and drops oldest *silently* (no
+  BufferRelease), so a hidden v0.3 client throttles on its own 500ms
+  force-free fallback instead of free-running (fds stay bounded either
+  way; queued trios are destroyed on drop/teardown, and teardown does
+  send the release so slots aren't stranded). Measured on OnePlus 9:
+  es2gears_x11 went from ~2500 to ~52 presents/sec, gears still animate
+  cleanly. Regression net: `xwayland::test_es2gears_x11_renders_via_ahb`
+  asserts the steady-state present rate is 20–200/sec.
 - **Phase 3 — dropped (2026-07-06).** Server-side EGL acceleration
   (GLAMOR-equivalent). Only matters for legacy XRender-heavy apps
   that nobody runs on a phone. Residue in the Phase 3 section below.
@@ -1173,3 +1189,11 @@ The parked glibc-built Xwayland approach was dropped; see "Why bionic" above.
   patch consolidated into `02-tawc-step3-ahb-present.patch`; libhybris
   side folded into the fork's x11-platform commit, tag
   `tawc-6-Jul-2026-0`.
+- **2026-07-06** — TAWC-DRI frame pacing (was
+  `issues/tawc-dri-no-frame-pacing.md`): Xwayland now defers TAWC-DRI
+  commits to `wl_surface.frame` callbacks instead of committing every
+  present immediately; releases tick at display cadence and the v0.3
+  backpressure clamps X11 GL clients from ~2500 to ~52 fps on the
+  OnePlus 9. Server-side only (no protocol or libhybris change), in
+  `02-tawc-step3-ahb-present.patch`. Design in "TAWC-DRI frame
+  pacing" above.

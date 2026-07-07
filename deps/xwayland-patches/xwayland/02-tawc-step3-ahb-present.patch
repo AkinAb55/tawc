@@ -1183,10 +1183,10 @@ index 000000000..763f23827
 +#endif /* XWAYLAND_TAWC_LIBNATIVEWINDOW_H */
 diff --git a/hw/xwayland/xwayland-tawc.c b/hw/xwayland/xwayland-tawc.c
 new file mode 100644
-index 000000000..19970579e
+index 000000000..c8cf0005b
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.c
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,410 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -1359,8 +1359,102 @@ index 000000000..19970579e
 +    .release = buffer_release,
 +};
 +
++/* ── Frame pacing ──
++ *
++ * Attaching + committing every present the moment it arrives lets an
++ * unthrottled GL client free-run (es2gears_x11 measured 2500+ fps):
++ * each commit makes the compositor release the replaced wl_buffer, so
++ * BufferRelease tracks the client's own present rate and the v0.3
++ * backpressure never engages. Instead, commits are paced by the
++ * compositor's wl_surface.frame callback (sent at display cadence for
++ * visible windows): the first present on an idle surface commits
++ * immediately and requests a callback; presents that arrive while one
++ * is outstanding queue FIFO on the xwl_window, one committed per
++ * callback. Releases then tick at display rate, and a v0.3 client
++ * blocks in dequeueBuffer once all its buffers are busy — clamped to
++ * the display for free. Clients slower than the display never find a
++ * callback outstanding, so they keep the direct-commit latency.
++ *
++ * The compositor only sends frame callbacks for visible windows. For a
++ * hidden window the queue caps at TAWC_MAX_QUEUED and the oldest entry
++ * is dropped *without* a BufferRelease: a v0.3 client then throttles on
++ * its own 500ms force-free fallback instead of free-running against a
++ * window nobody can see (pre-0.3 clients ignore releases either way).
++ * The dropped trio is destroyed, so server-side fds stay bounded. */
++#define TAWC_MAX_QUEUED 8
++
++static void tawc_frame_done(void *data, struct wl_callback *callback,
++                            uint32_t time);
++
++static const struct wl_callback_listener tawc_frame_listener = {
++    .done = tawc_frame_done,
++};
++
++/* Attach + commit now, and request the frame callback that paces the
++ * next commit. buf->buffer must exist (present creates it eagerly). */
++static void
++xwl_tawc_commit(struct xwl_window *xwl_window, struct xwl_tawc_buffer *buf)
++{
++    wl_surface_attach(xwl_window->surface, buf->buffer, 0, 0);
++    wl_surface_damage(xwl_window->surface, 0, 0, buf->width, buf->height);
++    xwl_window->tawc_frame_callback = wl_surface_frame(xwl_window->surface);
++    wl_callback_add_listener(xwl_window->tawc_frame_callback,
++                             &tawc_frame_listener, xwl_window);
++    wl_surface_commit(xwl_window->surface);
++}
++
++static struct xwl_tawc_buffer *
++tawc_queue_pop(struct xwl_window *xwl_window)
++{
++    struct xwl_tawc_buffer *buf = xwl_window->tawc_queue_head;
++
++    if (!buf)
++        return NULL;
++    xwl_window->tawc_queue_head = buf->queue_next;
++    if (!xwl_window->tawc_queue_head)
++        xwl_window->tawc_queue_tail = NULL;
++    xwl_window->tawc_queue_len--;
++    buf->queue_next = NULL;
++    return buf;
++}
++
++static void
++tawc_frame_done(void *data, struct wl_callback *callback, uint32_t time)
++{
++    struct xwl_window *xwl_window = data;
++    struct xwl_tawc_buffer *buf;
++
++    (void) time;
++    wl_callback_destroy(callback);
++    xwl_window->tawc_frame_callback = NULL;
++
++    buf = tawc_queue_pop(xwl_window);
++    if (buf)
++        xwl_tawc_commit(xwl_window, buf);
++}
++
++void
++xwl_tawc_window_teardown(struct xwl_window *xwl_window)
++{
++    struct xwl_tawc_buffer *buf;
++
++    if (xwl_window->tawc_frame_callback) {
++        wl_callback_destroy(xwl_window->tawc_frame_callback);
++        xwl_window->tawc_frame_callback = NULL;
++    }
++    while ((buf = tawc_queue_pop(xwl_window))) {
++        /* Never committed, so no compositor release will come; free the
++         * client's slot ourselves so it isn't stranded until its 500ms
++         * fallback. */
++        tawc_dri_send_buffer_release(buf->window_id, buf->client_mask,
++                                     buf->serial);
++        xwl_tawc_buffer_destroy(buf);
++    }
++}
++
 +/* TAWC-DRI step 3: client-shipped native_handle → AHB → wl_buffer →
-+ * direct attach + commit on the X11 window's wl_surface.
++ * direct attach + commit on the X11 window's wl_surface, paced by
++ * wl_surface.frame (see the frame-pacing block above).
 + *
 + * This bypasses the X server's normal pixmap flow: rather than wrap the
 + * AHB as an X pixmap and let xwl_window_present_pixmap handle the
@@ -1471,11 +1565,24 @@ index 000000000..19970579e
 +     * leak an FD per present. See `buffer_release_listener` block. */
 +    wl_buffer_add_listener(wlbuf, &buffer_release_listener, buf);
 +
-+    /* Direct wl_surface attach — bypasses the X-side pixmap flow. See
-+     * the comment above this function. */
-+    wl_surface_attach(xwl_window->surface, wlbuf, 0, 0);
-+    wl_surface_damage(xwl_window->surface, 0, 0, width, height);
-+    wl_surface_commit(xwl_window->surface);
++    /* Direct wl_surface attach — bypasses the X-side pixmap flow (see
++     * the comment above this function) — paced by wl_surface.frame (see
++     * the frame-pacing block). */
++    if (xwl_window->tawc_frame_callback) {
++        if (xwl_window->tawc_queue_len >= TAWC_MAX_QUEUED) {
++            /* Callbacks aren't flowing (hidden window) or the client
++             * outruns even the queue; drop the oldest, silently. */
++            xwl_tawc_buffer_destroy(tawc_queue_pop(xwl_window));
++        }
++        if (xwl_window->tawc_queue_tail)
++            xwl_window->tawc_queue_tail->queue_next = buf;
++        else
++            xwl_window->tawc_queue_head = buf;
++        xwl_window->tawc_queue_tail = buf;
++        xwl_window->tawc_queue_len++;
++    }
++    else
++        xwl_tawc_commit(xwl_window, buf);
 +
 +    /* The compositor side logs `wlegl: create_buffer ...` and
 +     * `wlegl: imported ANativeWindowBuffer as texture ...` per AHB
@@ -1492,10 +1599,10 @@ index 000000000..19970579e
 +}
 diff --git a/hw/xwayland/xwayland-tawc.h b/hw/xwayland/xwayland-tawc.h
 new file mode 100644
-index 000000000..5f38b6852
+index 000000000..1c2e584b9
 --- /dev/null
 +++ b/hw/xwayland/xwayland-tawc.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,99 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + *
@@ -1521,6 +1628,7 @@ index 000000000..5f38b6852
 +struct AHardwareBuffer;
 +struct wl_buffer;
 +struct xwl_screen;
++struct xwl_window;
 +
 +/* AHB-backed buffer + lazily-created wl_buffer. xwl_tawc_present_native_handle
 + * allocates one per TAWC-DRI present and ties its lifetime to the
@@ -1541,6 +1649,9 @@ index 000000000..5f38b6852
 +    uint32_t window_id;
 +    uint32_t client_mask;
 +    uint32_t serial;
++    /* Link in xwl_window's frame-pacing FIFO while the present waits
++     * for a wl_surface.frame callback slot. NULL once committed. */
++    struct xwl_tawc_buffer *queue_next;
 +};
 +
 +/* Tear down: destroys the wl_buffer (if any), releases the AHB, frees
@@ -1561,8 +1672,10 @@ index 000000000..5f38b6852
 +
 +/* TAWC-DRI entry point. Reconstructs an AHardwareBuffer from a
 + * client-shipped native_handle (numFds fds + numInts ints), wraps it
-+ * as an xwl_tawc_buffer, attaches the resulting wl_buffer directly to
-+ * the X11 window's wl_surface, and commits. Takes ownership of the
++ * as an xwl_tawc_buffer, and attaches + commits the resulting
++ * wl_buffer directly on the X11 window's wl_surface — immediately if
++ * the surface is idle, else queued behind the pending wl_surface.frame
++ * callback (one commit per display frame). Takes ownership of the
 + * fds in `fds[0..num_fds]` on success (closes them on failure too —
 + * AHardwareBuffer_createFromHandle's REGISTER mode owns them on success
 + * via the AHB; on failure we close ourselves).
@@ -1582,7 +1695,67 @@ index 000000000..5f38b6852
 +                                   uint32_t client_mask,
 +                                   uint32_t serial);
 +
++/* Free the window's frame-pacing state: cancel the pending
++ * wl_surface.frame callback and drop queued presents (their clients
++ * get BufferRelease so the buffer slots aren't stranded). Called from
++ * xwl_window_dispose before the wl_surface goes away. */
++void xwl_tawc_window_teardown(struct xwl_window *xwl_window);
++
 +#endif /* XWAYLAND_TAWC_H */
+diff --git a/hw/xwayland/xwayland-window.c b/hw/xwayland/xwayland-window.c
+index 4a9a58a2f..b53421d94 100644
+--- a/hw/xwayland/xwayland-window.c
++++ b/hw/xwayland/xwayland-window.c
+@@ -48,6 +48,9 @@
+ #include "xwayland-window-buffers.h"
+ #include "xwayland-shm.h"
+ #include "xwayland-dmabuf.h"
++#ifdef TAWC
++#include "xwayland-tawc.h"
++#endif
+ 
+ #include "linux-dmabuf-unstable-v1-client-protocol.h"
+ #include "tearing-control-v1-client-protocol.h"
+@@ -1730,6 +1733,9 @@ xwl_window_dispose(struct xwl_window *xwl_window)
+     if (xwl_window->surface_sync)
+         wp_linux_drm_syncobj_surface_v1_destroy(xwl_window->surface_sync);
+ 
++#ifdef TAWC
++    xwl_tawc_window_teardown(xwl_window);
++#endif
+     release_wl_surface_for_window(xwl_window);
+     xorg_list_del(&xwl_window->link_damage);
+     xorg_list_del(&xwl_window->link_window);
+diff --git a/hw/xwayland/xwayland-window.h b/hw/xwayland/xwayland-window.h
+index ac3ce5034..b16f4bd38 100644
+--- a/hw/xwayland/xwayland-window.h
++++ b/hw/xwayland/xwayland-window.h
+@@ -43,6 +43,8 @@
+ #include "xwayland-types.h"
+ #include "xwayland-dmabuf.h"
+ 
++struct xwl_tawc_buffer;
++
+ struct xwl_wl_surface {
+     OsTimerPtr wl_surface_destroy_timer;
+     struct wl_surface *wl_surface;
+@@ -106,6 +108,16 @@ struct xwl_window {
+     struct wp_fractional_scale_v1 *fractional_scale;
+     int fractional_scale_numerator;
+     struct wp_linux_drm_syncobj_surface_v1 *surface_sync;
++
++    /* TAWC-DRI frame pacing (hw/xwayland/xwayland-tawc.c): commits are
++     * throttled to the compositor's wl_surface.frame cadence. While a
++     * callback is outstanding, presents queue FIFO here; one is
++     * committed per callback. All NULL/0 unless the window receives
++     * TAWC-DRI presents; torn down in xwl_window_dispose. */
++    struct wl_callback *tawc_frame_callback;
++    struct xwl_tawc_buffer *tawc_queue_head;
++    struct xwl_tawc_buffer *tawc_queue_tail;
++    int tawc_queue_len;
+ };
+ 
+ struct xwl_window *xwl_window_get(WindowPtr window);
 diff --git a/include/extinit.h b/include/extinit.h
 index 59d18962f..10863ee4d 100644
 --- a/include/extinit.h
