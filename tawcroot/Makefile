@@ -435,6 +435,24 @@ $(OUT)/programs/static_check_ids_exit42: $(SRC_TS)/integration/programs/static_c
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 
+# static_drop_ids_devnull_eperm: privilege-gated chmod/chown against a
+# root-owned /dev/null (needs a /dev bind) — faked success at virtual
+# root, real EPERM/EACCES after a genuine drop. Guest-observable port
+# of the smoke's dropped-identity checks; the tawcroot prod-env device
+# suite runs it as the real app uid on both targets.
+$(OUT)/programs/static_drop_ids_devnull_eperm: $(SRC_TS)/integration/programs/static_drop_ids_devnull_eperm_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
+# static_link_publish_argv12: the hardlink publish idiom (git's
+# object/pack finalize shape) as a guest program: link(src, dst),
+# EEXIST on re-link, unlink(src), content survives at dst. On-device
+# under untrusted_app this exercises the SELinux v1 rename+symlink
+# fallback end to end.
+$(OUT)/programs/static_link_publish_argv12: $(SRC_TS)/integration/programs/static_link_publish_argv12_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
 # static_io_uring_deny: probe io_uring_setup, io_uring_enter, and
 # io_uring_register; expect -ENOSYS from each. Validates the
 # defense-in-depth deny that closes the inheritance edge case in

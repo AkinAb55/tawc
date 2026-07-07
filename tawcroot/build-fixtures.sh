@@ -120,6 +120,8 @@ build_static  static_check_proc_exe_argv0
 build_static  static_io_uring_deny
 build_static  static_drop_ids_execve
 build_static  static_check_ids_exit42
+build_static  static_drop_ids_devnull_eperm
+build_static  static_link_publish_argv12
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
 build_dynamic_big_stack

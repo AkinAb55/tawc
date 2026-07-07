@@ -222,6 +222,59 @@ observation. Only `src/arch/*.S` stays freestanding-only.
   including a `pacman -Syu`. This is where we measure the perf
   win as a regression test, not just a bench number.
 
+### Prod-env device layer (broker / `untrusted_app`)
+
+`tests/integration/tests/tawcroot_prodenv.rs` (staging/spawn helpers
+in `tests/integration/src/tawcroot_prodenv.rs`) runs **production
+`libtawcroot.so` in the real production sandbox** — app uid,
+`untrusted_app`, the zygote-installed seccomp filter — by exec'ing it
+through the exec broker's ARGV form, the same way production launches
+work. Part of `scripts/run-integration-tests.sh` (filter:
+`tawcroot_prodenv::`).
+
+No test binary touches the device: `libtawcroot.so` is already in the
+APK's `nativeLibraryDir` (execve-able by the app), and the guest
+programs + fake rootfs are pure data mmap'd by the manual ELF loader.
+The rootfs is staged into app-private cache
+(`/data/data/me.phie.tawc/cache/tawcroot-prodtest/`) via broker
+`sh -c 'cat > …'` per file; guest programs are the layer-3 NDK
+cross-builds from `build/tawcroot-<abi>/programs/`
+(`ensure_tawcroot_device_tests` in run-integration-tests.sh builds
+them). The host learns `nativeLibraryDir` from the broker `app-info`
+action.
+
+What this layer newly covers:
+
+- **Ground truth for the synthesized androidfilter**: guests run under
+  the filter zygote actually installs, on both targets. Drift between
+  the synth (`tests/handler/androidfilter/wrap.c`) and reality becomes
+  a test failure.
+- **Production SELinux interactions in the production domain**: e.g.
+  hardlink denial → v1 rename+symlink fallback
+  (`static_link_publish_argv12`), AF_UNIX bind in app data
+  (`static_unix_bind_argv1` — the adb-shell suite must skip that one
+  on `shell_data_file`).
+- **No adbd-mode variance**: broker children are never real root, so
+  the rooted-adbd euid-0 skip class (see "Device-environment
+  sensitivities" below) cannot recur here.
+  `static_drop_ids_devnull_eperm` is the guest-observable port of the
+  dropped-identity EPERM/EACCES smoke steps.
+
+**Test placement rule: anything fully testable in prod-env is tested
+in prod-env.** Do not duplicate a check between prod-env and the
+adb-shell cleat device suite unless the duplicate genuinely adds
+coverage (and say why where the duplicate lives). Concretely:
+
+- New device-relevant checks that a guest program can observe (path
+  translation results, errno surfaces, identity illusion,
+  linkat/O_TMPFILE behavior) go into prod-env guest programs, not
+  testhost smoke steps.
+- What stays testhost-only, by construction: trap contract, filter
+  install, stub IP allowlisting, `--exec-child` re-exec plumbing,
+  loader diagnostics — anything that must *be* the supervisor or issue
+  pre-filter raw syscalls. `tawcroot/test.sh --device` remains as-is
+  for those (its documented environment sensitivities included).
+
 ### What needs Android, end to end (small list)
 
 Not part of the standing test loop — these run by hand once when
@@ -229,7 +282,8 @@ wiring things up, plus periodically as smoke:
 
 1. APK plumbing (`TawcrootMethod`, jniLib packaging, wrapper
    script generation, dispatch in `rootfs-run`).
-2. SELinux execve-from-`nativeLibraryDir` smoke.
+2. SELinux execve-from-`nativeLibraryDir` smoke — now standing
+   coverage: every prod-env test run (above) is exactly this.
 3. Final perf comparison vs proot in the real deployment.
 4. libhybris/AHB syscall coverage check on a real device.
 
@@ -256,9 +310,10 @@ libhybris/AHB syscall coverage.
   pre-filter and `tawc_io_skip`s those steps under real root.
 - **Unrooted device shell (physical)**: host `link(2)` is
   SELinux-denied, so linkat surfaces that pass through untouched on
-  host/rooted devices actually engage emulation here — this is the
-  only standing environment that exercises the v1 rename+symlink
-  fallback end-to-end. Two consequences already burned in:
+  host/rooted devices actually engage emulation here — formerly the
+  only standing environment that exercised the v1 rename+symlink
+  fallback end-to-end (the prod-env layer now does, deliberately, on
+  both targets). Two consequences already burned in:
   `test_linkat_happy_path` must restore `/etc/probe` v1-aware (v1
   leaves a back-symlink at the OLD name; unlinking the NEW name
   dangles it, and the smoke fixture is shared by every later step
@@ -267,4 +322,11 @@ libhybris/AHB syscall coverage.
   magic-link publish returns the emulation's anonymous-source EXDEV
   instead of the kernel's nlink-0 ENOENT (the SELinux denial fires
   before the kernel's nlink check).
+
+Both variance classes are artifacts of *where the adb-shell suite
+runs*, not of production. The prod-env layer (above) runs the same
+behaviors as `untrusted_app` on both targets — never real root, and
+with the production hardlink denial — so device-relevant assertions
+belong there per the placement rule; these accommodations stay only
+for the smoke steps the adb-shell run keeps.
 

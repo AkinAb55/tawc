@@ -60,7 +60,13 @@ UTF-8, LF-terminated lines, terminated by an empty line. Three
 mutually exclusive header forms — pick one:
 
 **ARGV form** — fork-exec a child process. Used for raw command exec
-(file copies, `cat /proc/foo`, etc.).
+(file copies, `cat /proc/foo`, etc.), and by the tawcroot prod-env
+device tests (`tests/integration/tests/tawcroot_prodenv.rs`), which
+ARGV-exec production `libtawcroot.so` from the APK's
+`nativeLibraryDir`: the child forks from the app process, so it
+inherits uid, `untrusted_app`, and the real zygote seccomp filter —
+bit-for-bit the production launch condition (see
+notes/tawcroot/testing.md "Prod-env device layer").
 
 ```
 TAWCEXEC 1
@@ -312,6 +318,7 @@ arrives.
 |--------|--------|---------|
 | `install` | InstallActions | Run the install state machine; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. Use `--foreground-app`. |
 | `uninstall` | InstallActions | Same shape, opposite direction. Use `--foreground-app`. |
+| `app-info` | InputActions | Prints `nativeLibraryDir=<path>` — where the APK's jniLibs landed on this device. The tawcroot prod-env tests exec `libtawcroot.so` from there (the one app-readable location `untrusted_app` may execve). kv lines, extensible. |
 | `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` and prints a one-line `key=value` compositor-thread snapshot on stdout: client/toplevel/surface counts, frame + wlegl debug counters, output geometry, `xwayland_running`, and `xwayland_pids` (comma-separated live uid-owned Xwayland pids, zombies excluded). Schema lives in the format string in `compositor/src/event_loop.rs` and the parser in `tests/integration/src/compositor.rs`; unknown keys are ignored, so adding fields is backward-compatible. Observational only — doesn't change input state. Needs no focused activity. |
 | `test-init` | InputActions | Per-test reset: swap `Settings` to an in-memory factory-default store, push live runtime settings, swap `NativeBridge.imeOutput` to a fresh `RecordingImeOutput`, clear the active IC, finish any lingering `LogScreenActivity` left by broker install/uninstall/run actions (restoring whatever was beneath, normally MainActivity), and ask attached Wayland/XWayland client windows to close. Prints `closed=N`; the Rust harness waits for a clean compositor only when `N > 0`, so the normal no-client path stays fast. Does not write `SharedPreferences`; app process death discards it. |
 | `input-ready` | InputActions | Succeeds only when the focused `CompositorActivity` has an active `TawcInputConnection` for its own `SurfaceView`. Used by tests after `onShowKeyboard` so the first `ic-*` action cannot race IC creation. |

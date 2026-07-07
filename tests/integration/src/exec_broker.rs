@@ -254,6 +254,32 @@ pub fn run_capture(invocation: Invocation) -> io::Result<Output> {
     })
 }
 
+/// Like [run_capture], but feed `input` to the child's stdin first
+/// (stdin frames, then EOF). Used to deliver file contents to the
+/// device through the broker (`sh -c 'cat > path'`) without adb push —
+/// the write lands as the app uid, so the file is app-owned.
+///
+/// All input is written before any output is read, so this is only for
+/// children that don't produce output until stdin is drained (`cat`,
+/// `tar -x`); a chatty child could fill the socket buffers and deadlock.
+pub fn run_capture_with_input(invocation: Invocation, input: &[u8]) -> io::Result<Output> {
+    let (mut sock, _fwd) = connect(&invocation)?;
+    for chunk in input.chunks(65536) {
+        let mut frame = Vec::with_capacity(5 + chunk.len());
+        frame.push(STREAM_STDIN);
+        frame.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        frame.extend_from_slice(chunk);
+        sock.write_all(&frame)?;
+    }
+    // pump_capture sends the stdin EOF frame before reading.
+    let (code, stdout, stderr) = pump_capture(sock)?;
+    Ok(Output {
+        status: exit_status_from_broker(code),
+        stdout,
+        stderr,
+    })
+}
+
 pub type BrokerPipe = UnixStream;
 
 pub struct BrokerChild {

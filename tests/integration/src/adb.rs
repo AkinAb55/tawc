@@ -643,6 +643,21 @@ pub fn query_state() -> io::Result<Output> {
     broker_action("query-state", &[])
 }
 
+/// The app's `nativeLibraryDir` (where the APK's jniLibs land on this
+/// device), via the broker `app-info` action. The tawcroot prod-env
+/// tests exec `libtawcroot.so` from there — the one app-readable
+/// location `untrusted_app` may execve.
+pub fn native_lib_dir() -> io::Result<String> {
+    let output = broker_action("app-info", &[])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("nativeLibraryDir="))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| io::Error::other(format!("app-info missing nativeLibraryDir: {stdout:?}")))
+}
+
 /// Dynamically update the compositor output scale through the same broker
 /// action used by Settings tests. Value is snapped by the app to 0.25x.
 pub fn set_output_scale(scale: f32) -> io::Result<Output> {

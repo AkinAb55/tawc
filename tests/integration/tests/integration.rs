@@ -9,6 +9,7 @@ mod libhybris_zink;
 mod rendering;
 mod settings;
 mod tawcroot;
+mod tawcroot_prodenv;
 mod text_input;
 mod uninstall_wipe;
 mod touch_input;

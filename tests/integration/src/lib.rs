@@ -5,6 +5,7 @@ pub mod exec_broker;
 pub mod helpers;
 pub mod rootfs;
 pub mod rootfs_process;
+pub mod tawcroot_prodenv;
 
 use std::sync::OnceLock;
 

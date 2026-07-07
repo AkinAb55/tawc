@@ -94,6 +94,7 @@ import me.phie.tawc.tasks.ProcessScanner
  * | Action | Calls |
  * |--------|-------|
  * | `query-state` | `NativeBridge.nativeQueryState()` (no main-loop hop, no focused activity required) |
+ * | `app-info` | prints `nativeLibraryDir=<path>` (host-side tawcroot prod-env tests exec `libtawcroot.so` from there) |
  */
 internal object InputActions {
     fun registerAll() {
@@ -115,6 +116,7 @@ internal object InputActions {
         ActionRegistry.register("inject-touch", InjectTouchAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
+        ActionRegistry.register("app-info", AppInfoAction)
         ActionRegistry.register("input-ready", InputReadyAction)
         ActionRegistry.register("focused-editor-info", FocusedEditorInfoAction)
         ActionRegistry.register("focused-activity-id", FocusedActivityIdAction)
@@ -456,6 +458,20 @@ internal object InputActions {
             val state = NativeBridge.nativeQueryState()
                 ?: return ctx.fail("query-state: compositor did not return state")
             ctx.out(state)
+            return 0
+        }
+    }
+
+    /**
+     * `app-info` — static app facts the host can't cheaply learn via adb.
+     * `nativeLibraryDir` is where the APK's jniLibs land on this device
+     * (ABI-dependent); the tawcroot prod-env integration tests exec
+     * `libtawcroot.so` from there through the broker. kv lines so more
+     * fields can be added without breaking parsers.
+     */
+    private object AppInfoAction : BrokerAction {
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            ctx.out("nativeLibraryDir=${ctx.appContext.applicationInfo.nativeLibraryDir}")
             return 0
         }
     }
