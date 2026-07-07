@@ -26,6 +26,7 @@ static_vfork_exec_then_fork_exec_argv1
 static_fexecve_argv1
 static_unix_bind_argv1
 static_check_proc_self_fd
+static_getdents_legacy_check
 static_check_proc_exe_argv0
 static_io_uring_deny
 static_drop_ids_execve
@@ -36,3 +37,4 @@ static_mknod_chr_fake
 dynamic_exit42
 dynamic_argv_check
 dynamic_big_stack
+dynamic_legacy_nr_probe

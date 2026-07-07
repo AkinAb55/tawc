@@ -116,6 +116,7 @@ build_static  static_vfork_exec_then_fork_exec_argv1
 build_static  static_fexecve_argv1
 build_static  static_unix_bind_argv1
 build_static  static_check_proc_self_fd
+build_static  static_getdents_legacy_check
 build_static  static_check_proc_exe_argv0
 build_static  static_io_uring_deny
 build_static  static_drop_ids_execve
@@ -125,6 +126,7 @@ build_static  static_link_publish_argv12
 build_static  static_mknod_chr_fake
 build_dynamic dynamic_exit42
 build_dynamic dynamic_argv_check
+build_dynamic dynamic_legacy_nr_probe
 build_dynamic_big_stack
 build_wrap
 

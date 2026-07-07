@@ -371,17 +371,24 @@ covered by unit/hosted/smoke tests.)
   declared unsupported under tawcroot.
 - **x86_64-only legacy syscalls missing from the dispatch table fall
   through to `-ENOSYS`.** Bionic never issues them, so Android's
-  seccomp allowlist RET_TRAPs them; x86_64 glibc occasionally does.
-  Observed instance: `getpgrp` (NR 111) broke bash job control —
-  fixed by forwarding to `getpgid(0)` in syscalls_control.c.
-  Speculative same-class candidates, flagged in review but never
-  observed: `pause` (34) (an -ENOSYS pause() returns immediately —
-  busy loops, broken signal waits) and `alarm` (37) (silently dropped
-  SIGALRM timers). Emulator-only; aarch64 never allocated these
-  numbers. If odd timing/signal bugs appear on the x86_64 emulator,
-  check TAWCROOT_TRACE `[t] nr=...` output for unhandled legacy
-  numbers first; the fix pattern is a small forwarding handler plus a
-  hosted test.
+  seccomp allowlist RET_TRAPs them; x86_64 glibc/musl/raw callers do.
+  The trap set was audited empirically against the real emulator
+  zygote filter (prod-env `test_prodenv_legacy_nr_trapset_audit`, from
+  `dynamic_legacy_nr_probe`) — the authoritative way, since the kernel
+  lacks `CONFIG_CHECKPOINT_RESTORE` so the filter can't be dumped.
+  Handled forwarding redirects, each to its allowlisted modern sibling:
+  `getpgrp`→getpgid(0), `time`→clock_gettime, `alarm`→setitimer
+  (syscalls_control.c); `select`→pselect6, `pipe`→pipe2,
+  `eventfd`→eventfd2, `signalfd`→signalfd4, `epoll_create`→epoll_create1,
+  `inotify_init`→inotify_init1 (syscalls_fd.c); plus the older
+  `poll`→ppoll, `dup2`→dup3, `epoll_wait`→epoll_pwait, `getdents`
+  repack, and the *at-routed path family. Only `pause` (34) is
+  knowingly unhandled — a raw pause(2) would -ENOSYS, but glibc routes
+  pause/alarm through setitimer so no real caller hits it; add a
+  handler if one ever surfaces. Emulator-only; aarch64 never allocated
+  these numbers. If odd behavior appears on the x86_64 emulator, the
+  prod-env probe is the first place to extend; the fix pattern is a
+  small forwarding handler + a hosted test + a probe-table row.
 
 ## Future work
 

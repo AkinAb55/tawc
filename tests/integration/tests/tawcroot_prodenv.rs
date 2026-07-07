@@ -203,3 +203,27 @@ fn test_prodenv_dynamic_exit42() {
     .expect("broker spawn");
     assert_guest_exit("dynamic_exit42", &out, 42);
 }
+
+/// Legacy-NR trap-set audit (issues/tawcroot-x86_64-legacy-trapset-
+/// audit.md). Under the REAL zygote filter, a guest can only see
+/// -ENOSYS from a kernel-implemented legacy NR if Android trapped it
+/// and tawcroot has no handler — the trapped-but-unhandled gap. The
+/// probe issues a table of legacy NRs with benign args and exits 42
+/// iff no gap (and its controls hold). x86_64-only; on aarch64 the
+/// fixture is a no-op that also exits 42. Full per-NR table prints to
+/// stdout — run with `--nocapture` to read it.
+#[test]
+fn test_prodenv_legacy_nr_trapset_audit() {
+    test_init();
+    let out = run_guest(
+        &["/system:/system", "/apex:/apex"],
+        &["/bin/dynamic_legacy_nr_probe"],
+        &[],
+    )
+    .expect("broker spawn");
+    println!(
+        "----- dynamic_legacy_nr_probe stdout -----\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_guest_exit("dynamic_legacy_nr_probe", &out, 42);
+}

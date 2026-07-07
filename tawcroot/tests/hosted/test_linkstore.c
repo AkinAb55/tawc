@@ -518,6 +518,51 @@ test(linkstore_dirent_dtype_rewrite)
 	th_teardown(&v);
 }
 
+#if defined(__x86_64__)
+test(linkstore_dirent_dtype_rewrite_legacy_getdents)
+{
+	th_view v;
+	th_setup(&v, "ls-ldtype");
+	store_setup(&v);
+
+	/* Same contract as linkstore_dirent_dtype_rewrite, through legacy
+	 * getdents(2): the DT flip must survive the repack into legacy
+	 * layout, where d_name starts at 18 and d_type is the record's
+	 * LAST byte. Regression for the untrapped-NR-78 gap (emulated
+	 * hardlinks advertised DT_LNK to legacy callers). */
+	write_file(test_ctx, "/run/f", "t\n");
+	write_file(test_ctx, "/run/regular", "r\n");
+	make_pair(test_ctx, "/run/f", "/run/l1");
+
+	long dfd = th_sys(TAWC_SYS_openat, AT_FDCWD, "/run",
+			  O_RDONLY | O_DIRECTORY, 0, 0, 0);
+	test_true(dfd >= 0);
+	unsigned char buf[4096];
+	long n = th_sys(TAWC_SYS_getdents, dfd, buf, sizeof buf, 0, 0, 0);
+	test_true(n > 0);
+	test_int_eq(close((int)dfd), 0);
+
+	int saw_l1 = 0, saw_reg = 0;
+	long in = 0;
+	while (in < n) {
+		unsigned short reclen;
+		memcpy(&reclen, buf + in + 16, 2);
+		test_true(reclen > 18 && in + reclen <= n);
+		const char *name = (const char *)(buf + in + 18);
+		unsigned char d_type = buf[in + reclen - 1];
+		if (strcmp(name, "l1") == 0)      { saw_l1 = 1;  test_int_eq(d_type, 0); }
+		if (strcmp(name, "f") == 0)       test_int_eq(d_type, 0);
+		if (strcmp(name, "regular") == 0) { saw_reg = 1; test_int_eq(d_type, DT_REG); }
+		in += reclen;
+	}
+	test_true(saw_l1);
+	test_true(saw_reg);
+
+	store_teardown();
+	th_teardown(&v);
+}
+#endif
+
 test(linkstore_dirent_dtype_rewrite_in_bind)
 {
 	th_view v;

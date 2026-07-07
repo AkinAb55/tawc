@@ -29,6 +29,7 @@
 #include "raw_sys.h"
 #include "sysnr.h"
 #include "tawc_string.h"
+#include "usercopy.h"
 #include "tawc_uapi.h"
 #include "usercopy.h"
 
@@ -330,6 +331,88 @@ static long handle_epoll_wait(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return TAWC_RAW(TAWC_SYS_epoll_pwait,
 	                args->a, args->b, args->c, args->d, 0, 8);
 }
+
+/* Legacy getdents(2) (NR 78). Unlike poll/dup2/epoll_wait above,
+ * Android's filter ALLOWS this one — untrapped it went raw to the
+ * kernel, so legacy callers saw reserved fds in /proc/self/fd again
+ * and emulated hardlinks as DT_LNK. Trap it ourselves and route
+ * through handle_getdents64 (same arg shape: fd, buf, count), then
+ * repack the records into legacy layout in place. In-place works
+ * because both layouts give identical reclen for the same name and
+ * legacy d_ino/d_off are 64-bit on x86_64; see
+ * tawcroot_dirent_filter_repack_legacy. */
+static long handle_getdents(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	long n = handle_getdents64(args, uc);
+	if (n <= 0) return n;
+	return tawcroot_dirent_filter_repack_legacy(
+		(void *)(uintptr_t)args->b, n);
+}
+
+/* The legacy fd/poll-family redirects. Each was confirmed RET_TRAPped
+ * by the real emulator filter (issues/tawcroot-x86_64-legacy-trapset-
+ * audit.md) — Android allowlists only the flags-taking modern variant.
+ * Untrapped they'd -ENOSYS. Same stub-reissue rule as handle_poll: a
+ * raw legacy re-issue would re-trap and nest SIGSYS, so we issue the
+ * MODERN sibling, which the filter allows. */
+
+/* select(nfds,r,w,e,timeval*) → pselect6(nfds,r,w,e,timespec*,NULL).
+ * The fd-set pointers pass straight to the kernel. Timeout differs in
+ * both type (timeval→timespec) and write-back: legacy select updates
+ * *timeout with the unslept remainder; pselect6 does not, and — as in
+ * handle_poll — we intentionally drop that write-back. The 6th arg is
+ * a {sigset*, size} pointer, NULL here (no signal mask). */
+static long handle_select(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	if (args->e == 0)
+		return TAWC_RAW(TAWC_SYS_pselect6, args->a, args->b,
+		                args->c, args->d, 0, 0);
+	struct { long tv_sec; long tv_usec; } tv;
+	long cr = tawc_copy_from_guest(&tv, sizeof tv, (const void *)args->e);
+	if (cr < 0) return cr;
+	struct { long tv_sec; long tv_nsec; } ts = {
+		tv.tv_sec, tv.tv_usec * 1000L,
+	};
+	return TAWC_RAW(TAWC_SYS_pselect6, args->a, args->b, args->c,
+	                args->d, (long)&ts, 0);
+}
+
+static long handle_pipe(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	return TAWC_RAW(TAWC_SYS_pipe2, args->a, 0, 0, 0, 0, 0);
+}
+
+static long handle_eventfd(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	return TAWC_RAW(TAWC_SYS_eventfd2, args->a, 0, 0, 0, 0, 0);
+}
+
+static long handle_signalfd(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	return TAWC_RAW(TAWC_SYS_signalfd4, args->a, args->b, args->c,
+	                0, 0, 0);
+}
+
+static long handle_epoll_create(const tawcroot_syscall_args *args,
+                                ucontext_t *uc)
+{
+	(void)args;
+	(void)uc;
+	/* Legacy `size` hint is meaningless to the modern call. */
+	return TAWC_RAW(TAWC_SYS_epoll_create1, 0, 0, 0, 0, 0, 0);
+}
+
+static long handle_inotify_init(const tawcroot_syscall_args *args,
+                                ucontext_t *uc)
+{
+	(void)args;
+	(void)uc;
+	return TAWC_RAW(TAWC_SYS_inotify_init1, 0, 0, 0, 0, 0, 0);
+}
 #endif
 
 /* ioctl translation, primarily for the {TC,GET,SET}S2 family.
@@ -457,5 +540,12 @@ void tawcroot_fd_register(void)
 	tawcroot_dispatch_install(TAWC_SYS_dup2,        handle_dup2);
 	tawcroot_dispatch_install(TAWC_SYS_poll,        handle_poll);
 	tawcroot_dispatch_install(TAWC_SYS_epoll_wait,  handle_epoll_wait);
+	tawcroot_dispatch_install(TAWC_SYS_getdents,    handle_getdents);
+	tawcroot_dispatch_install(TAWC_SYS_select,        handle_select);
+	tawcroot_dispatch_install(TAWC_SYS_pipe,          handle_pipe);
+	tawcroot_dispatch_install(TAWC_SYS_eventfd,       handle_eventfd);
+	tawcroot_dispatch_install(TAWC_SYS_signalfd,      handle_signalfd);
+	tawcroot_dispatch_install(TAWC_SYS_epoll_create,  handle_epoll_create);
+	tawcroot_dispatch_install(TAWC_SYS_inotify_init,  handle_inotify_init);
 #endif
 }

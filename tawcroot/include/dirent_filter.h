@@ -51,3 +51,15 @@ long tawcroot_dirent_filter_compact(void *buf, long n,
  * the accepted cost. Same malformed-record bail as compact, except no
  * bytes ever move, so the return is always `n`. */
 long tawcroot_dirent_filter_delink_types(void *buf, long n);
+
+/* Repack a linux_dirent64 buffer into legacy x86_64 linux_dirent
+ * layout, in place (legacy getdents(2) emulation). Works because both
+ * layouts yield the same reclen for the same name — ALIGN(20+namelen,8)
+ * — and legacy d_ino/d_off are 64-bit on x86_64, so only the tail of
+ * each record changes: the name region shifts left one byte (19 → 18)
+ * and d_type moves to the record's LAST byte (reclen-1). Malformed-
+ * record bail: already-converted records ARE valid legacy records, but
+ * the remaining tail is still 64-layout, so the converted prefix
+ * length is returned and the tail dropped (0 if the first record is
+ * malformed). */
+long tawcroot_dirent_filter_repack_legacy(void *buf, long n);

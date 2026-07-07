@@ -203,6 +203,11 @@
 # define TAWC_SYS_dup3          292
 # define TAWC_SYS_close_range   436
 # define TAWC_SYS_getdents64    217
+/* Legacy getdents(2): unlike the pairs below, Android's filter ALLOWS
+ * it — we trap it ourselves so legacy callers get the same reserved-fd
+ * hiding and DT_LNK rewrite as getdents64 (handle_getdents repacks the
+ * getdents64 records into legacy layout in place). */
+# define TAWC_SYS_getdents       78
 # define TAWC_SYS_ioctl          16
 /* Legacy syscalls Android's untrusted_app filter RET_TRAPs on x86_64 —
  * we route them through *at variants in the handler. They don't exist
@@ -271,6 +276,30 @@
 # define TAWC_SYS_ppoll           271
 # define TAWC_SYS_epoll_wait      232
 # define TAWC_SYS_epoll_pwait     281
+/* Same legacy→modern redirect class, confirmed RET_TRAPped by the real
+ * emulator filter (issues/tawcroot-x86_64-legacy-trapset-audit.md):
+ * Android allowlists only the flags-taking modern variant, so the
+ * legacy NR traps and would -ENOSYS without a handler. Each routes to
+ * its modern sibling with flags=0. aarch64 has no legacy NR in any
+ * pair. */
+# define TAWC_SYS_select           23
+# define TAWC_SYS_pselect6        270
+# define TAWC_SYS_pipe             22
+# define TAWC_SYS_pipe2           293
+# define TAWC_SYS_eventfd        284
+# define TAWC_SYS_eventfd2       290
+# define TAWC_SYS_signalfd       282
+# define TAWC_SYS_signalfd4      289
+# define TAWC_SYS_epoll_create   213
+# define TAWC_SYS_epoll_create1  291
+# define TAWC_SYS_inotify_init   253
+/* inotify_init1 (294) already defined above. */
+/* time→clock_gettime, alarm→setitimer: also legacy, also RET_TRAPped;
+ * no 1:1 modern syscall, so emulated in the handler. clock_gettime
+ * (228) is defined above. */
+# define TAWC_SYS_time           201
+# define TAWC_SYS_alarm           37
+# define TAWC_SYS_setitimer       38
 /* chroot has its own handler in src/chroot.c that swaps the rootfs
  * view bookkeeping. The other five trap to -EPERM (defense-in-depth;
  * see fake_eperm in src/syscalls_control.c). */

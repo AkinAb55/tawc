@@ -10,6 +10,7 @@
 
 #include <cleat/test.h>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
@@ -233,3 +234,134 @@ test(hosted_getdents64_non_proc_dir_unfiltered)
 	test_int_eq(close((int)dfd), 0);
 	th_teardown(&v);
 }
+
+#if defined(__x86_64__)
+/* Legacy getdents(2) must apply the same reserved-fd filter AND hand
+ * back legacy-layout records (d_name at 18, d_type in the record's
+ * last byte). Regression for the untrapped-NR-78 gap: raw kernel
+ * dirents leaked reserved fds to legacy callers. x86_64-only — the NR
+ * doesn't exist on aarch64. */
+test(hosted_legacy_getdents_hides_reserved_fds_and_repacks)
+{
+	th_view v;
+	th_setup(&v, "fd-ldents");
+	th_add_bind(&v, "/mnt/host");  /* a second reserved fd */
+
+	int pfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	test_true(pfd >= 0);
+
+	char names[4096];
+	size_t names_n = 0;
+	unsigned char buf[512];
+	for (;;) {
+		long n = th_sys(TAWC_SYS_getdents, pfd, buf, sizeof buf,
+				0, 0, 0);
+		test_true(n >= 0);
+		if (n == 0) break;
+		long i = 0;
+		while (i < n) {
+			uint16_t reclen;
+			memcpy(&reclen, buf + i + 16, 2);
+			test_true(reclen > 18 && i + reclen <= n);
+			const char *name = (const char *)(buf + i + 18);
+			/* /proc/<pid>/fd entries are symlinks → legacy
+			 * d_type (last byte) must say DT_LNK, proving the
+			 * repack moved it there ("." and ".." are DT_DIR). */
+			size_t len = strlen(name);
+			if (name[0] != '.')
+				test_int_eq(buf[i + reclen - 1], DT_LNK);
+			test_true(names_n + len + 2 < sizeof names);
+			memcpy(names + names_n, name, len);
+			names[names_n + len] = '\n';
+			names_n += len + 1;
+			i += reclen;
+		}
+	}
+	names[names_n] = 0;
+
+	for (size_t i = 0; i < tawcroot_n_reserved_fds; i++) {
+		char needle[16];
+		snprintf(needle, sizeof needle, "%d\n",
+			 tawcroot_reserved_fds[i]);
+		test_null(strstr(names, needle));
+	}
+	char self_needle[16];
+	snprintf(self_needle, sizeof self_needle, "%d\n", pfd);
+	test_nonnull(strstr(names, self_needle));
+
+	test_int_eq(close(pfd), 0);
+	th_teardown(&v);
+}
+
+/* --- legacy fd/poll-family → modern-sibling redirects ------------------ */
+/* Each legacy NR is RET_TRAPped by the real emulator filter
+ * (issues/tawcroot-x86_64-legacy-trapset-audit.md); the handler routes
+ * it to the flags-taking modern syscall. th_sys drives the handler,
+ * which issues the modern call against the real host kernel — so a
+ * sane result (not -ENOSYS) proves the redirect. Every created fd is
+ * closed so th_teardown's no-leak assert holds. */
+
+test(hosted_legacy_select_routes_to_pselect6)
+{
+	th_view v;
+	th_setup(&v, "fd-select");
+	/* nfds=0 + zero timeout returns 0 immediately (no fds ready). */
+	struct { long tv_sec; long tv_usec; } tv = { 0, 0 };
+	test_int_eq(th_sys(TAWC_SYS_select, 0, 0, 0, 0, (long)&tv, 0), 0);
+	th_teardown(&v);
+}
+
+test(hosted_legacy_pipe_routes_to_pipe2)
+{
+	th_view v;
+	th_setup(&v, "fd-pipe");
+	int fds[2] = { -1, -1 };
+	test_int_eq(th_sys(TAWC_SYS_pipe, (long)fds, 0, 0, 0, 0, 0), 0);
+	test_true(fds[0] >= 0 && fds[1] >= 0);
+	test_int_eq(close(fds[0]), 0);
+	test_int_eq(close(fds[1]), 0);
+	th_teardown(&v);
+}
+
+test(hosted_legacy_eventfd_routes_to_eventfd2)
+{
+	th_view v;
+	th_setup(&v, "fd-eventfd");
+	long fd = th_sys(TAWC_SYS_eventfd, 0, 0, 0, 0, 0, 0);
+	test_true(fd >= 0);
+	test_int_eq(close((int)fd), 0);
+	th_teardown(&v);
+}
+
+test(hosted_legacy_signalfd_routes_to_signalfd4)
+{
+	th_view v;
+	th_setup(&v, "fd-signalfd");
+	unsigned long mask = 0;  /* empty sigset; sizemask = 8 (kernel) */
+	long fd = th_sys(TAWC_SYS_signalfd, -1, (long)&mask, 8, 0, 0, 0);
+	test_true(fd >= 0);
+	test_int_eq(close((int)fd), 0);
+	th_teardown(&v);
+}
+
+test(hosted_legacy_epoll_create_routes_to_epoll_create1)
+{
+	th_view v;
+	th_setup(&v, "fd-epcreate");
+	/* Legacy size hint (1) is ignored by the modern call. */
+	long fd = th_sys(TAWC_SYS_epoll_create, 1, 0, 0, 0, 0, 0);
+	test_true(fd >= 0);
+	test_int_eq(close((int)fd), 0);
+	th_teardown(&v);
+}
+
+test(hosted_legacy_inotify_init_routes_to_inotify_init1)
+{
+	th_view v;
+	th_setup(&v, "fd-inotify");
+	long fd = th_sys(TAWC_SYS_inotify_init, 0, 0, 0, 0, 0, 0);
+	test_true(fd >= 0);
+	test_int_eq(close((int)fd), 0);
+	th_teardown(&v);
+}
+#endif

@@ -76,6 +76,9 @@
 #ifndef TAWCROOT_STATIC_CHECK_PROC_SELF_FD_BIN
 # error "TAWCROOT_STATIC_CHECK_PROC_SELF_FD_BIN must be defined"
 #endif
+#ifndef TAWCROOT_STATIC_GETDENTS_LEGACY_CHECK_BIN
+# error "TAWCROOT_STATIC_GETDENTS_LEGACY_CHECK_BIN must be defined"
+#endif
 #ifndef TAWCROOT_STATIC_IO_URING_DENY_BIN
 # error "TAWCROOT_STATIC_IO_URING_DENY_BIN must be defined"
 #endif
@@ -103,6 +106,8 @@ static bool build_rootfs(void)
 		  "static_unix_bind_argv1" },
 		{ TAWCROOT_STATIC_CHECK_PROC_SELF_FD_BIN,
 		  "static_check_proc_self_fd" },
+		{ TAWCROOT_STATIC_GETDENTS_LEGACY_CHECK_BIN,
+		  "static_getdents_legacy_check" },
 		{ TAWCROOT_STATIC_FORK_OPEN_ARGV1_BIN,
 		  "static_fork_open_argv1" },
 		{ TAWCROOT_STATIC_SMALL_STACK_OPEN_ARGV1_BIN,
@@ -263,6 +268,30 @@ test(prod_proc_self_fd_hides_reserved)
 
 	rh_rmrf(FAKE_ROOTFS);
 }
+
+#if defined(__x86_64__)
+/* Same contract as prod_proc_self_fd_hides_reserved, but through the
+ * LEGACY getdents(2) (NR 78) — end-to-end under the real seccomp
+ * filter. This is the test that fails if NR 78 drops out of the trap
+ * set: the fixture then reads raw kernel dirents (64-layout, reserved
+ * fds visible) and exits 94/95 instead of 42. x86_64-only; the
+ * aarch64 fixture twin exits 96 unconditionally. */
+test(prod_legacy_getdents_hides_reserved_and_repacks)
+{
+	rh_rmrf(FAKE_ROOTFS);
+	test_true(build_rootfs());
+
+	const char *args[] = {
+		"-r", FAKE_ROOTFS,
+		"-b", "/proc:proc",
+		"--",
+		"/bin/static_getdents_legacy_check", NULL
+	};
+	test_int_eq(run_with(args), 42);
+
+	rh_rmrf(FAKE_ROOTFS);
+}
+#endif
 
 test(prod_execveat_empty_path_execs_fd)
 {

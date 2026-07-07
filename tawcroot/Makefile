@@ -311,6 +311,15 @@ $(OUT)/programs/dynamic_argv_check: $(SRC_TS)/integration/programs/dynamic_argv_
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -Wl,--build-id=none $< -o $@
 
+# dynamic_legacy_nr_probe: prod-env audit fixture — issues legacy
+# x86_64 NRs with benign args and reports which return -ENOSYS (the
+# trapped-but-unhandled gap). Used by the tawcroot_prodenv Rust layer;
+# no host cleat test references it, but programs.list drives the host
+# `fixtures` target so it needs a rule here too.
+$(OUT)/programs/dynamic_legacy_nr_probe: $(SRC_TS)/integration/programs/dynamic_legacy_nr_probe.c | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -Wl,--build-id=none $< -o $@
+
 # static_execve_exit42: a static fixture that issues execve("/bin/static_exit42")
 # from inside its own _start. Used by the phase 2g multi-process smoke
 # (test_prod_rootfs.c::prod_rootfs_guest_does_execve) — the handler
@@ -411,6 +420,14 @@ $(OUT)/programs/static_unix_bind_argv1: $(SRC_TS)/integration/programs/static_un
 # and check no d_name == "1000" appears. Validates handle_getdents64's
 # dirent_filter against the closefrom death-spiral regression.
 $(OUT)/programs/static_check_proc_self_fd: $(SRC_TS)/integration/programs/static_check_proc_self_fd_x86_64.S | $(OUT)
+	@mkdir -p $(dir $@)
+	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
+
+# static_getdents_legacy_check: like static_check_proc_self_fd but via
+# LEGACY getdents(2) (NR 78), also asserting the buffer came back in
+# legacy linux_dirent layout. Validates the NR-78 trap + in-place
+# repack (handle_getdents).
+$(OUT)/programs/static_getdents_legacy_check: $(SRC_TS)/integration/programs/static_getdents_legacy_check_x86_64.S | $(OUT)
 	@mkdir -p $(dir $@)
 	$(CC) -static -nostdlib -O2 -Wl,--build-id=none $< -o $@
 

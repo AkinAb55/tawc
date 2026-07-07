@@ -2,6 +2,8 @@
 
 #include <cleat/test.h>
 
+#include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "hosted.h"
@@ -22,6 +24,49 @@ test(hosted_getpgrp_routes_to_getpgid)
 	test_int_eq(th_sys(TAWC_SYS_getpgrp, 0, 0, 0, 0, 0, 0),
 		    (long)getpgid(0));
 
+	th_teardown(&v);
+}
+
+/* Legacy time(2) → clock_gettime(CLOCK_REALTIME). Both RET_TRAPped by
+ * the real emulator filter (issues/tawcroot-x86_64-legacy-trapset-
+ * audit.md); clock_gettime is allowlisted. Return value and the *tloc
+ * write-back must both match wall clock. */
+test(hosted_legacy_time_routes_to_clock_gettime)
+{
+	th_view v;
+	th_setup(&v, "ctl-time");
+
+	time_t ref = time(NULL);
+	long rv = th_sys(TAWC_SYS_time, 0, 0, 0, 0, 0, 0);
+	test_true(rv >= (long)ref && rv <= (long)ref + 2);
+
+	/* With a tloc pointer the same value is copied back to the guest. */
+	long tloc = 0;
+	long rv2 = th_sys(TAWC_SYS_time, (long)&tloc, 0, 0, 0, 0, 0);
+	test_int_eq(rv2, tloc);
+	test_true(tloc >= (long)ref);
+
+	th_teardown(&v);
+}
+
+/* Legacy alarm(2) → setitimer(ITIMER_REAL). Returns the whole seconds
+ * left on the previous timer (partial second rounded up). Ignore
+ * SIGALRM so the armed timer can't kill the test if it ever fires. */
+test(hosted_legacy_alarm_routes_to_setitimer)
+{
+	th_view v;
+	th_setup(&v, "ctl-alarm");
+
+	struct sigaction old_sa, ign = { 0 };
+	ign.sa_handler = SIG_IGN;
+	sigaction(SIGALRM, &ign, &old_sa);
+
+	/* No prior timer → 0. Arm a large value so the disarm can't race. */
+	test_int_eq(th_sys(TAWC_SYS_alarm, 1000, 0, 0, 0, 0, 0), 0);
+	/* Disarm; the ~999.99s remainder rounds up to 1000. */
+	test_int_eq(th_sys(TAWC_SYS_alarm, 0, 0, 0, 0, 0, 0), 1000);
+
+	sigaction(SIGALRM, &old_sa, NULL);
 	th_teardown(&v);
 }
 #endif

@@ -50,6 +50,7 @@ const STAGED_PROGRAMS: &[&str] = &[
     "static_link_publish_argv12",
     "static_mknod_chr_fake",
     "dynamic_exit42",
+    "dynamic_legacy_nr_probe",
 ];
 
 pub struct ProdEnv {

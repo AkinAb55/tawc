@@ -366,3 +366,107 @@ test(compact_malformed_after_drop_returns_compacted_prefix)
 	collect_names(buf, out_n, names);
 	test_str_eq(names, "5");
 }
+
+/* --- repack_legacy: linux_dirent64 → legacy linux_dirent in place ---- */
+
+/* Legacy layout: d_ino(8) d_off(8) d_reclen(2) d_name[]... d_type in
+ * the record's LAST byte. Same reclen as the 64 record for the same
+ * name — that identity is what makes in-place repack legal, so the
+ * tests assert it stays true. */
+#define DIRENT_LEGACY_NAME_OFF 18
+
+test(repack_legacy_moves_name_and_type)
+{
+	unsigned char buf[512];
+	long n = 0;
+	n = emit_dirent(buf, n, ".");
+	n = emit_dirent(buf, n, "some-longer-name.txt");
+	n = emit_dirent(buf, n, "5");
+	/* Distinct types per record to catch offset mixups. */
+	buf[0 + 18] = 4;   /* DT_DIR */
+	unsigned char rec1_off = 24;  /* "." → ALIGN(20+1,8) = 24 */
+	buf[rec1_off + 18] = 8;  /* DT_REG */
+	long rec2_off = rec1_off + ((20 + 20 + 7) & ~7); /* 20-char name */
+	buf[rec2_off + 18] = 10; /* DT_LNK */
+
+	uint64_t ino_before, off_before;
+	memcpy(&ino_before, buf + rec2_off + 0, 8);
+	memcpy(&off_before, buf + rec2_off + 8, 8);
+
+	long out_n = tawcroot_dirent_filter_repack_legacy(buf, n);
+	test_int_eq(out_n, n);
+
+	/* Walk as legacy records. */
+	long in = 0;
+	const char *want_names[] = { ".", "some-longer-name.txt", "5" };
+	unsigned char want_types[] = { 4, 8, 10 };
+	for (int i = 0; i < 3; i++) {
+		test_true(in < n);
+		uint16_t reclen;
+		memcpy(&reclen, buf + in + 16, 2);
+		test_str_eq((const char *)(buf + in + DIRENT_LEGACY_NAME_OFF),
+		            want_names[i]);
+		test_int_eq(buf[in + reclen - 1], want_types[i]);
+		in += reclen;
+	}
+	test_int_eq(in, n);
+
+	/* d_ino/d_off/d_reclen untouched. */
+	uint64_t ino_after, off_after;
+	memcpy(&ino_after, buf + rec2_off + 0, 8);
+	memcpy(&off_after, buf + rec2_off + 8, 8);
+	test_true(ino_before == ino_after);
+	test_true(off_before == off_after);
+}
+
+test(repack_legacy_exact_fit_name_keeps_nul)
+{
+	/* namelen 4: 64-record reclen = ALIGN(19+4+1,8) = 24, exactly
+	 * packed. After the shift the NUL sits at 18+4=22 and d_type at
+	 * 23 — the type byte must not clobber the terminator. */
+	unsigned char buf[64];
+	long n = emit_dirent(buf, 0, "abcd");
+	test_int_eq(n, 24);
+	buf[18] = 8; /* DT_REG */
+
+	test_int_eq(tawcroot_dirent_filter_repack_legacy(buf, n), n);
+	test_str_eq((const char *)(buf + DIRENT_LEGACY_NAME_OFF), "abcd");
+	test_int_eq(buf[22], 0);
+	test_int_eq(buf[23], 8);
+}
+
+test(repack_legacy_null_and_empty_are_identity)
+{
+	test_int_eq(tawcroot_dirent_filter_repack_legacy(NULL, 100), 100);
+	unsigned char buf[8];
+	test_int_eq(tawcroot_dirent_filter_repack_legacy(buf, 0), 0);
+}
+
+test(repack_legacy_malformed_first_record_returns_zero)
+{
+	/* Zero reclen up front: nothing converted, nothing usable —
+	 * the caller gets an empty (but well-formed) legacy buffer. */
+	unsigned char buf[64];
+	memset(buf, 0, sizeof buf);
+	test_int_eq(tawcroot_dirent_filter_repack_legacy(buf, 32), 0);
+}
+
+test(repack_legacy_malformed_tail_returns_converted_prefix)
+{
+	/* One good record then garbage: the good record must come back
+	 * converted, the 64-layout tail dropped (it would misparse as
+	 * legacy records). */
+	unsigned char buf[128];
+	long good = emit_dirent(buf, 0, "keep");
+	buf[18] = 8; /* DT_REG */
+	long n = good;
+	memset(buf + n, 0, 24);
+	uint16_t huge = 500;
+	memcpy(buf + n + 16, &huge, 2);
+	n += 24;
+
+	long out_n = tawcroot_dirent_filter_repack_legacy(buf, n);
+	test_int_eq(out_n, good);
+	test_str_eq((const char *)(buf + DIRENT_LEGACY_NAME_OFF), "keep");
+	test_int_eq(buf[good - 1], 8);
+}

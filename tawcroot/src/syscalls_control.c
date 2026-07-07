@@ -272,6 +272,47 @@ static long handle_getpgrp(const tawcroot_syscall_args *args, ucontext_t *uc)
 	(void)uc;
 	return TAWC_RAW(TAWC_SYS_getpgid, 0, 0, 0, 0, 0, 0);
 }
+
+/* time(tloc) → clock_gettime(CLOCK_REALTIME). Legacy time(2) is
+ * RET_TRAPped by the real emulator filter (issues/tawcroot-x86_64-
+ * legacy-trapset-audit.md); clock_gettime is allowlisted. Return
+ * tv_sec, and mirror it into *tloc when non-NULL (via the guarded
+ * copy — tloc is an untrusted guest pointer). */
+static long handle_time(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	struct { long tv_sec; long tv_nsec; } ts;
+	long r = TAWC_RAW(TAWC_SYS_clock_gettime, 0 /*CLOCK_REALTIME*/,
+	                  (long)&ts, 0, 0, 0, 0);
+	if (r < 0) return r;
+	if (args->a != 0) {
+		long cr = tawc_copy_to_guest((void *)args->a, &ts.tv_sec,
+		                             sizeof ts.tv_sec);
+		if (cr < 0) return cr;
+	}
+	return ts.tv_sec;
+}
+
+/* alarm(seconds) → setitimer(ITIMER_REAL). glibc's alarm(3) already
+ * routes through setitimer so this only fires for programs issuing the
+ * raw legacy NR, but the real filter RET_TRAPs it, so without this it
+ * -ENOSYSes. Contract: arm a one-shot ITIMER_REAL for `seconds` (0
+ * disarms) and return the whole seconds left on the previous timer,
+ * rounding a partial second up as the man page specifies. */
+static long handle_alarm(const tawcroot_syscall_args *args, ucontext_t *uc)
+{
+	(void)uc;
+	struct itv { long sec; long usec; };
+	struct { struct itv interval; struct itv value; } nv = {
+		{ 0, 0 }, { (long)args->a, 0 },
+	}, ov;
+	long r = TAWC_RAW(TAWC_SYS_setitimer, 0 /*ITIMER_REAL*/,
+	                  (long)&nv, (long)&ov, 0, 0, 0);
+	if (r < 0) return r;
+	long rem = ov.value.sec;
+	if (ov.value.usec != 0) rem++;
+	return rem;
+}
 #endif
 
 void tawcroot_control_register(void)
@@ -315,6 +356,8 @@ void tawcroot_control_register(void)
 
 #if defined(__x86_64__)
 	tawcroot_dispatch_install(TAWC_SYS_getpgrp,         handle_getpgrp);
+	tawcroot_dispatch_install(TAWC_SYS_time,            handle_time);
+	tawcroot_dispatch_install(TAWC_SYS_alarm,           handle_alarm);
 #endif
 
 	/* Defense-in-depth denials. Trapped so the guest can't mutate kernel

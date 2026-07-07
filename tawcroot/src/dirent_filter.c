@@ -124,3 +124,30 @@ long tawcroot_dirent_filter_delink_types(void *buf, long n)
 	}
 	return n;
 }
+
+long tawcroot_dirent_filter_repack_legacy(void *buf, long n)
+{
+	if (!buf || n <= 0) return n;
+	unsigned char *p = (unsigned char *)buf;
+	long in = 0;
+	while (in < n) {
+		unsigned short reclen;
+		__builtin_memcpy(&reclen, p + in + DIRENT64_RECLEN_OFF, 2);
+		/* Guest memory: bail on a malformed record. Converted
+		 * records are valid legacy dirents; the unconverted tail
+		 * would misparse as legacy, so drop it. */
+		if (reclen < DIRENT64_NAME_OFF + 1 || in + (long)reclen > n)
+			return in;
+		unsigned char d_type = p[in + DIRENT64_TYPE_OFF];
+		/* Shift name+NUL+padding left one byte, then plant d_type
+		 * in the last byte. The kernel's reclen (≥ 20+namelen for
+		 * the 64 layout) guarantees the name's NUL lands at or
+		 * before reclen-2, so the type byte never clobbers it. */
+		__builtin_memmove(p + in + DIRENT64_TYPE_OFF,
+		                  p + in + DIRENT64_NAME_OFF,
+		                  (size_t)reclen - DIRENT64_NAME_OFF);
+		p[in + reclen - 1] = d_type;
+		in += reclen;
+	}
+	return n;
+}
