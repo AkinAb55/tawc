@@ -1,5 +1,27 @@
 # Rendering, Window Management, and Coordinate System
 
+## Emulator shader translator quirk (dead `samplerExternalOES` text)
+
+The x86_64 emulator's guest GL driver ("Android Emulator OpenGL ES
+Translator") scans shader source textually without honouring the
+preprocessor: a `uniform samplerExternalOES tex;` declaration inside a
+*disabled* `#if defined(EXTERNAL)` branch makes it treat `tex` as an
+external sampler. The non-external texture program variants then sample
+the unbound external target and draw opaque black — SHM surfaces
+rendered black while AHB/external surfaces worked, with zero GL errors
+(upload, FBO readback, and completeness all checked out; only in-shader
+sampling failed). It reproduces in the app process but not in a minimal
+standalone binary using identical GL calls, so probe results can mislead.
+
+This is an emulator driver bug, and tawc currently ships no workaround
+— SHM surfaces are known-black on the emulator and the affected tests
+fail there. A verified fix (resolving `#if defined(X)` blocks against
+each variant's define list in the smithay fork's `texture_program`
+before the source reaches the driver) is written up in
+[issues/emulator-shm-black-shader-translator.md](../issues/emulator-shm-black-shader-translator.md)
+if it ever needs applying. Until then, avoid dead `samplerExternalOES`
+text in any new shader that must work on the emulator.
+
 ## Background Color
 
 The compositor clears every frame to a flat color matching the rest of the app UI. Keep Rust `BACKGROUND_COLOR` in `render.rs` and Android resource `tawc_window_bg` (`#1B1B22` in dark mode) in sync.
