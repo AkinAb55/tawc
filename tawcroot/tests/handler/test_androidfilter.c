@@ -199,6 +199,20 @@ register_dynamic_tests
 	steps_register_from_testhost_prefixed(c_sv("androidfilter"),
 	                                      prefix_default, args);
 
+	/* Each testhost run mutates the fixture (linkat/rename/truncate
+	 * tests). Rebuild between runs so one suite's leftovers — or a
+	 * cleanup bug — can't cascade into the next suite's results. */
+#define REBUILD_FIXTURE_OR_RETURN() do { \
+		rmrf(FAKE_ROOTFS); \
+		if (!build_fake_rootfs(FAKE_ROOTFS)) { \
+			register_test_problem( \
+				c_sv("androidfilter"), c_sv("fake_rootfs_rebuild"), \
+				cstr_from_fmt("failed to rebuild fake rootfs at %s: %s", \
+					      FAKE_ROOTFS, strerror(errno))); \
+			return; \
+		} \
+	} while (0)
+
 #if defined(__x86_64__)
 	/* On x86_64, also run with the legacy lp64-Android trap set
 	 * enabled. tawcroot's legacy wrappers must route every legacy NR
@@ -209,6 +223,7 @@ register_dynamic_tests
 		"--",
 		NULL,
 	};
+	REBUILD_FIXTURE_OR_RETURN();
 	steps_register_from_testhost_prefixed(c_sv("androidfilter_legacy"),
 	                                      prefix_legacy, args);
 #endif
@@ -228,8 +243,10 @@ register_dynamic_tests
 		"--",
 		NULL,
 	};
+	REBUILD_FIXTURE_OR_RETURN();
 	steps_register_from_testhost_prefixed(c_sv("androidfilter_xperm"),
 	                                      prefix_xperm, args);
+#undef REBUILD_FIXTURE_OR_RETURN
 
 	rmrf(FAKE_ROOTFS);
 	rmrf(FAKE_ROOTFS_SIBLING);

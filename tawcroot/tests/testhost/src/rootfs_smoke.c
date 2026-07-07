@@ -85,6 +85,13 @@
 # error "unsupported arch"
 #endif
 
+/* Real euid, captured before the seccomp filter goes up (afterwards
+ * getuid answers from the virtual identity). Rooted adbd runs the
+ * testhost as real root, where the "dropped identity -> real
+ * EPERM/EACCES" expectations cannot hold: the drop is virtual-only
+ * and real root's chmod/chown of /dev/null succeed. */
+static long smoke_real_euid = -1;
+
 static long inline_getuid(void)
 { long rv; INLINE_SYS6(TAWC_SYS_getuid, 0, 0, 0, 0, 0, 0, rv); return rv; }
 
@@ -408,26 +415,45 @@ static int test_identity_dropped_chmod_chown_real_errors(void)
 	INLINE_SYS6(TAWC_SYS_setresuid, 994, 994, 994, 0, 0, 0, rv);
 	fails += tawc_io_step("drop uids to 994", rv == 0);
 
-	INLINE_SYS6(TAWC_SYS_fchmodat, AT_FDCWD, "/dev/null",
-		    0666, 0, 0, 0, rv);
-	fails += tawc_io_step(
-		"dropped fchmodat(/dev/null) -> real EPERM/EACCES",
-		rv == TAWC_EPERM || rv == TAWC_EACCES);
-	tawc_io_kv_dec("    rv", rv);
-	INLINE_SYS6(TAWC_SYS_fchownat, AT_FDCWD, "/dev/null",
-		    0, 0, 0, 0, rv);
-	fails += tawc_io_step(
-		"dropped fchownat(/dev/null) -> real EPERM/EACCES",
-		rv == TAWC_EPERM || rv == TAWC_EACCES);
-	tawc_io_kv_dec("    rv", rv);
+	/* Under rooted adbd (emulator default) the process is REAL root:
+	 * the drop above is virtual-only, so the host happily chmods/
+	 * chowns root-owned /dev/null and no real error can surface. */
+	int real_root = (smoke_real_euid == 0);
+	if (real_root) {
+		tawc_io_skip(
+			"dropped fchmodat(/dev/null) -> real EPERM/EACCES",
+			"real euid 0 (rooted adbd): drop is virtual-only");
+		tawc_io_skip(
+			"dropped fchownat(/dev/null) -> real EPERM/EACCES",
+			"real euid 0 (rooted adbd): drop is virtual-only");
+	} else {
+		INLINE_SYS6(TAWC_SYS_fchmodat, AT_FDCWD, "/dev/null",
+			    0666, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"dropped fchmodat(/dev/null) -> real EPERM/EACCES",
+			rv == TAWC_EPERM || rv == TAWC_EACCES);
+		tawc_io_kv_dec("    rv", rv);
+		INLINE_SYS6(TAWC_SYS_fchownat, AT_FDCWD, "/dev/null",
+			    0, 0, 0, 0, rv);
+		fails += tawc_io_step(
+			"dropped fchownat(/dev/null) -> real EPERM/EACCES",
+			rv == TAWC_EPERM || rv == TAWC_EACCES);
+		tawc_io_kv_dec("    rv", rv);
+	}
 
 	long fd = inline_openat(AT_FDCWD, "/dev/null", O_RDONLY, 0);
 	fails += tawc_io_step("open /dev/null for dropped fchown", fd >= 0);
 	if (fd >= 0) {
-		INLINE_SYS6(TAWC_SYS_fchown, fd, 0, 0, 0, 0, 0, rv);
-		fails += tawc_io_step(
-			"dropped fchown(/dev/null fd) -> real EPERM/EACCES",
-			rv == TAWC_EPERM || rv == TAWC_EACCES);
+		if (real_root) {
+			tawc_io_skip(
+				"dropped fchown(/dev/null fd) -> real EPERM/EACCES",
+				"real euid 0 (rooted adbd): drop is virtual-only");
+		} else {
+			INLINE_SYS6(TAWC_SYS_fchown, fd, 0, 0, 0, 0, 0, rv);
+			fails += tawc_io_step(
+				"dropped fchown(/dev/null fd) -> real EPERM/EACCES",
+				rv == TAWC_EPERM || rv == TAWC_EACCES);
+		}
 		INLINE_SYS6(TAWC_SYS_close, fd, 0, 0, 0, 0, 0, rv);
 	}
 
@@ -1892,9 +1918,30 @@ static int test_linkat_happy_path(void)
 			      "\"/etc/probe-link2\") -> 0",
 			      rv == 0);
 	tawc_io_kv_dec("    rv", rv);
-	/* clean up */
-	INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD,
-		    "/etc/probe-link2", 0, 0, 0, 0, rv);
+	/* Clean up. With a real hardlink or full store emulation,
+	 * unlinking the new name leaves /etc/probe intact. Under the v1
+	 * fallback the real file now lives at the NEW name and
+	 * /etc/probe is a back-symlink (documented deviation: unlinking
+	 * the destination dangles the source) — rename the file back
+	 * instead, or every later /etc/probe test in this fixture fails. */
+	struct stat st;
+	long sr;
+	INLINE_SYS6(TAWC_SYS_fstatat, AT_FDCWD, "/etc/probe",
+		    &st, AT_SYMLINK_NOFOLLOW, 0, 0, sr);
+	if (sr == 0 && S_ISLNK(st.st_mode)) {
+		INLINE_SYS6(TAWC_SYS_renameat2, AT_FDCWD, "/etc/probe-link2",
+			    AT_FDCWD, "/etc/probe", 0, 0, rv);
+	} else {
+		INLINE_SYS6(TAWC_SYS_unlinkat, AT_FDCWD,
+			    "/etc/probe-link2", 0, 0, 0, 0, rv);
+	}
+	/* Post-condition: the fixture survived. A cleanup regression
+	 * here otherwise surfaces dozens of steps later as unrelated
+	 * /etc/probe ENOENTs. */
+	long pfd = inline_openat(AT_FDCWD, "/etc/probe", O_RDONLY, 0);
+	fails += tawc_io_step("/etc/probe intact after linkat cleanup",
+			      pfd >= 0);
+	if (pfd >= 0) tawc_close((int)pfd);
 	return fails;
 }
 
@@ -4831,6 +4878,11 @@ int tawcroot_rootfs_smoke_main(const char *rootfs)
 		(void)TAWC_RAW(TAWC_SYS_rt_sigprocmask, 1 /*SIG_UNBLOCK*/,
 		               (long)&bit_sigsys, 0, 8, 0, 0);
 	}
+
+	/* Last chance to see the real identity: once the filter is up,
+	 * geteuid answers from the virtual shadow. */
+	smoke_real_euid = TAWC_RAW(TAWC_SYS_geteuid, 0, 0, 0, 0, 0, 0);
+	tawc_io_kv_dec("    real euid", smoke_real_euid);
 
 	int trap_nrs[256];
 	const size_t trap_cap = sizeof trap_nrs / sizeof trap_nrs[0];

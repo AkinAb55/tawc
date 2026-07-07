@@ -247,3 +247,24 @@ new test logic. The emulator covers the lp64 `access`-on-x86_64
 case under the synthesized Android filter, and the device covers
 libhybris/AHB syscall coverage.
 
+### Device-environment sensitivities (learned the hard way)
+
+- **Rooted adbd (emulator default)**: the testhost runs as real
+  uid 0, so the "dropped identity → real EPERM/EACCES" smoke steps
+  can't hold — the drop is virtual-only and real root chmods/chowns
+  root-owned `/dev/null` fine. The smoke captures the real euid
+  pre-filter and `tawc_io_skip`s those steps under real root.
+- **Unrooted device shell (physical)**: host `link(2)` is
+  SELinux-denied, so linkat surfaces that pass through untouched on
+  host/rooted devices actually engage emulation here — this is the
+  only standing environment that exercises the v1 rename+symlink
+  fallback end-to-end. Two consequences already burned in:
+  `test_linkat_happy_path` must restore `/etc/probe` v1-aware (v1
+  leaves a back-symlink at the OLD name; unlinking the NEW name
+  dangles it, and the smoke fixture is shared by every later step
+  and, in `test_androidfilter.c`, later suite variants — which now
+  also rebuild the fixture between runs), and the O_TMPFILE|O_EXCL
+  magic-link publish returns the emulation's anonymous-source EXDEV
+  instead of the kernel's nlink-0 ENOENT (the SELinux denial fires
+  before the kernel's nlink check).
+

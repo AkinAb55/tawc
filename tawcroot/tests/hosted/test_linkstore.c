@@ -1349,16 +1349,27 @@ test(linkstore_tmpfile_excl_passthrough)
 	/* No store entry was created (the store may not even exist). */
 	test_true(store_tmp_entries() <= 0);
 
-	/* The magic-link publish spelling fails in-kernel like the real
-	 * thing (nlink 0, not linkable → ENOENT). */
+	/* The magic-link publish spelling fails. Where the host kernel
+	 * gets to judge the linkat (host / rooted device), it's the real
+	 * thing's ENOENT (nlink 0, not linkable). Where SELinux denies
+	 * link outright (unrooted device shell), the denial fires before
+	 * the nlink check, emulation engages, and the source is nameless
+	 * → the documented anonymous-source EXDEV. Both are honest
+	 * "cannot publish" errors; accept either. */
 	char spell[64];
 	snprintf(spell, sizeof spell, "/proc/self/fd/%ld", fd);
-	test_int_eq(th_sys(TAWC_SYS_linkat, AT_FDCWD, spell,
-			   AT_FDCWD, "/run/out", 0x400, 0), TAWC_ENOENT);
+	long prv = th_sys(TAWC_SYS_linkat, AT_FDCWD, spell,
+			  AT_FDCWD, "/run/out", 0x400, 0);
+	test_true(prv == TAWC_ENOENT || prv == TAWC_EXDEV);
 	/* AT_EMPTY_PATH lands on the documented anonymous-source EXDEV. */
 	test_int_eq(th_sys(TAWC_SYS_linkat, fd, "",
 			   AT_FDCWD, "/run/out", AT_EMPTY_PATH, 0),
 		    TAWC_EXDEV);
+	/* Whichever way the publishes failed, they must not have planted
+	 * anything at the destination. */
+	struct stat ost;
+	test_int_eq(th_sys(TAWC_SYS_fstatat, AT_FDCWD, "/run/out",
+			   &ost, AT_SYMLINK_NOFOLLOW, 0, 0), TAWC_ENOENT);
 	test_int_eq(close((int)fd), 0);
 
 	store_teardown();

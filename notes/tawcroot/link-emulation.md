@@ -82,7 +82,10 @@ form and keep behaving as plain symlinks; no migration.
 
 - `O_TMPFILE|O_EXCL` ("will never link"): pure passthrough — anon file
   creation is allowed, fstat nlink 0 exact, publish attempts fail
-  in-kernel (ENOENT) like the real thing.
+  in-kernel (ENOENT) like the real thing. Where SELinux denies link
+  outright (unrooted device shell) the denial beats the kernel's
+  nlink-0 check, emulation engages, and the nameless source gets the
+  anonymous-source EXDEV instead — accepted deviation.
 - `O_TMPFILE` without O_EXCL: the file is created at `tmp/<ino>` (a
   letter-prefixed unique name renamed to the inode decimal) and its fd
   returned. Publish linkat — either `linkat(fd, "", dst, AT_EMPTY_PATH)`
