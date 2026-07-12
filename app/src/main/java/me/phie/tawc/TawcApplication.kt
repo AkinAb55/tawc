@@ -11,20 +11,15 @@ import me.phie.tawc.ops.OperationsNotificationCenter
 import me.phie.tawc.util.AppLogger
 import kotlin.concurrent.thread
 
-/**
- * Process-wide entry point.
- */
 class TawcApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
 
-        // Инициализация внутренней системы логов (должна быть первой)
+        // Инициализация системы логов
         AppLogger.init(this)
 
-        // Bind the SharedPreferences instance early
         Settings.init(this)
-
         OperationsNotificationCenter.start(this)
 
         thread(name = "tawc-startup", isDaemon = true) {
