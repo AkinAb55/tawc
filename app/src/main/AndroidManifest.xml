@@ -3,37 +3,13 @@
 
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
 
-    <!-- Bootstrap tarballs are downloaded directly by the install package. -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- CompositorService keeps the compositor thread + Wayland socket
-         alive across Activity lifecycles; specialUse is the correct
-         foregroundServiceType for a desktop compositor on Android 14+
-         (none of the standard types fit). InstallationService runs the
-         long-running install/uninstall flow as dataSync. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- All-files access backs the external-storage bind feature
-         (notes/external-binds.md): the user binds e.g.
-         /storage/emulated/0 into a rootfs as /home/android so Linux
-         apps see shared storage directly. Google Play treats this as a
-         sensitive permission; `-PtawcAllFilesAccess=false` strips it at
-         build time (see app/build.gradle.kts) and the app then hides
-         the binds UI (AllFilesAccess.declared). -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!--
-      extractNativeLibs="true": the rootless install method ships proot
-      as jniLibs/<abi>/libproot.so and exec's it from nativeLibraryDir.
-      execve needs a real on-disk inode, which only happens when the OS
-      extracts native libs out of the APK. Without this attribute, AGP
-      defaults to page-aligned-in-APK loading (good for dlopen, useless
-      for exec). Same applies to libcompositor.so today (it's dlopen'd
-      via System.loadLibrary so it'd work either way), but we don't want
-      the default to ever shadow the proot binary's executability.
-    -->
     <application
         android:name=".TawcApplication"
         android:allowBackup="false"
@@ -54,15 +30,6 @@
             </intent-filter>
         </activity>
 
-        <!-- CompositorActivity hosts one window. The combination of
-             documentLaunchMode="intoExisting", taskAffinity="" and a
-             unique tawc://activity/<id> URI per launch makes Android
-             treat each activityId as its own "document," giving each
-             window a separate card in recents. The only launch path is
-             the reverse-JNI spawnActivity callback in NativeBridge.kt,
-             which uses an explicit Intent(ctx, CompositorActivity)
-             with the URI as data — no intent-filter or exported needed.
-             See notes/multi-activity.md. -->
         <activity
             android:name=".compositor.CompositorActivity"
             android:exported="false"
@@ -116,32 +83,21 @@
             android:exported="false"
             android:label="@string/title_settings" />
 
-        <!-- Generic per-operation log viewer. Pure viewer: opening it
-             never triggers any operation. Exported=true so an
-             am start with operationId from adb can attach to a running
-             op (e.g. one started via the dev exec broker). -->
+        <!-- Новая Activity для просмотра логов -->
+        <activity
+            android:name=".LogActivity"
+            android:exported="false"
+            android:label="TAWC Logs" />
+
         <activity
             android:name=".ops.LogScreenActivity"
             android:exported="true"
             android:label="@string/title_operation_log" />
 
-        <!-- Notification "Cancel" action target. Looks up the named op
-             in OperationsRegistry and calls Operation.cancel(). Bypasses
-             cancelConfirmation — a notification-action tap is itself the
-             deliberate decision. PendingIntents target this receiver via
-             explicit ComponentName, so no intent-filter is needed. -->
         <receiver
             android:name=".ops.CancelOperationReceiver"
             android:exported="false" />
 
-        <!-- In-app terminal, one per distro. Same document trick as
-             CompositorActivity: documentLaunchMode="intoExisting" +
-             taskAffinity="" + a unique tawc://terminal/<id> data URI
-             gives each distro's terminal its own recents card and
-             reuses the existing instance on relaunch. The shell session
-             itself lives in TerminalSessions, so relaunch/rotation
-             reattaches instead of respawning. adjustResize so the soft
-             keyboard resizes the terminal grid. -->
         <activity
             android:name=".terminal.TerminalActivity"
             android:exported="false"
@@ -150,9 +106,6 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- Launch-failure dialog. Started from the application context
-             by LauncherActivity's fire-and-forget failure handler (the
-             launcher itself is finished by then). -->
         <activity
             android:name=".launcher.LaunchErrorActivity"
             android:exported="false"
@@ -167,21 +120,11 @@
             android:theme="@style/Theme.Tawc.Launcher"
             android:windowSoftInputMode="stateVisible|adjustResize" />
 
-        <!-- Personal .desktop editor for the managed dir
-             (root/.local/share/applications). Launched for result by
-             LauncherActivity; RESULT_OK triggers a rescan. -->
         <activity
             android:name=".launcher.DesktopFileEditorActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- Trampoline behind pinned home-screen shortcuts
-             (EntryShortcuts). Pinned-shortcut intents may target
-             non-exported components of the publishing app, so no new
-             attack surface. taskAffinity="" + noHistory +
-             excludeFromRecents: a shortcut tap resolves and launches
-             without yanking the main tawc task forward or leaving a
-             card in recents. -->
         <activity
             android:name=".launcher.ShortcutLaunchActivity"
             android:exported="false"
