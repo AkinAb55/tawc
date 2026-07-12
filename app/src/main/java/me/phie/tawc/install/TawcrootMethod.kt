@@ -7,9 +7,6 @@ import me.phie.tawc.Settings
 import java.io.File
 import java.io.IOException
 
-/**
- * Rootless implementation of [InstallationMethod] using tawcroot.
- */
 class TawcrootMethod(context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
     private val tawcShare: String = appPaths.shareDir.absolutePath
@@ -27,10 +24,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         return f.exists() && f.canExecute()
     }
 
-    override fun runOutside(
-        script: String,
-        onLine: ((String) -> Unit)?,
-    ): MethodResult =
+    override fun runOutside(script: String, onLine: ((String) -> Unit)?): MethodResult =
         Sh.run("set -eu\n$script", onLine)
 
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
@@ -53,7 +47,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             .directory(File(tmpdir))
             .also {
                 it.environment().clear()
-                // Исправление: TMPDIR внутри rootfs (безопасное место)
                 it.environment()["TMPDIR"] = "$rootfs/tmp"
                 it.environment()["TEMP"] = "$rootfs/tmp"
                 it.environment()["TMP"] = "$rootfs/tmp"
@@ -84,11 +77,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         
         return PtyExec(
             argv,
-            listOf(
-                "TMPDIR=$rootfs/tmp",
-                "TEMP=$rootfs/tmp",
-                "TMP=$rootfs/tmp"
-            ),
+            listOf("TMPDIR=$rootfs/tmp", "TEMP=$rootfs/tmp", "TMP=$rootfs/tmp"),
             tmpdir
         )
     }
@@ -103,15 +92,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         }
         File(tawcShare).mkdirs()
         File("$tawcShare/xtmp/.X11-unix").mkdirs()
-        
         val tmpdir = "$rootfs/tmp"
         File(tmpdir).mkdirs()
-        
-        // Дополнительная защита: очищаем старые tmp файлы
-        try {
-            File(tmpdir).listFiles()?.forEach { it.deleteRecursively() }
-        } catch (_: Exception) {}
-        
         return tmpdir
     }
 
@@ -130,19 +112,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     private fun externalBindsFor(rootfs: String): List<ExternalBind> {
         val id = store.idForRootfs(rootfs) ?: return emptyList()
-        val binds = store.load(id)?.externalBinds ?: emptyList()
-        for (bind in binds) {
-            bind.validationError()?.let {
-                throw IOException("external bind ${bind.guestPath}: $it")
-            }
-            if (AllFilesAccess.requiresGrant(bind.hostPath) && !AllFilesAccess.granted()) {
-                throw IOException("external bind ${bind.guestPath}: needs all-files access")
-            }
-            if (!File(bind.hostPath).isDirectory) {
-                throw IOException("external bind ${bind.guestPath}: host dir does not exist")
-            }
-        }
-        return binds
+        return store.load(id)?.externalBinds ?: emptyList()
     }
 
     private fun bindSpecs(
@@ -163,7 +133,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         const val KEY = "tawcroot"
         const val GUEST_TAWC_SHARE_DIR = "/usr/share/tawc"
         const val GUEST_ANDO_DIR = "/run/tawc-ando"
-
         val LIBHYBRIS_BIND_DIRS: List<String> = listOf(
             "/apex", "/vendor", "/system", "/system_ext", "/linkerconfig"
         ).filter { File(it).exists() }
