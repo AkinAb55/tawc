@@ -2,6 +2,7 @@ package me.phie.tawc.install
 
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -15,6 +16,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.MaterialColors
@@ -26,6 +28,7 @@ import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
+import me.phie.tawc.util.AppLogger
 
 /**
  * "Install new distro" screen. Form-only: distro / label / method /
@@ -41,7 +44,6 @@ import me.phie.tawc.ui.verticalLp
  * `install-uninstall-trigger-via-activity-launch` issue's resolution.
  */
 class InstallActivity : AppCompatActivity() {
-
     private val store by lazy { InstallationStore(this) }
     private var selectedMethod: String? = null
     private var selectedDistro: String? = null
@@ -57,8 +59,9 @@ class InstallActivity : AppCompatActivity() {
     private val pendingBinds = mutableListOf<ExternalBind>()
     private var bindsRow: LinearLayout? = null
     private var bindsCountLabel: TextView? = null
+    
     private val manageBinds = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val json = result.data?.getStringExtra(ManageBindsActivity.EXTRA_BINDS)
         if (result.resultCode == RESULT_OK && json != null) {
@@ -73,14 +76,14 @@ class InstallActivity : AppCompatActivity() {
 
     /**
      * Tri-state for the "Use cache proxy" checkbox:
-     *   - null: not yet initialised (will be seeded from build type).
-     *   - true / false: user-overridden value, persisted across rotations.
+     * - null: not yet initialised (will be seeded from build type).
+     * - true / false: user-overridden value, persisted across rotations.
      */
     private var useCacheProxy: Boolean? = null
     private lateinit var cacheProxyCheckbox: CheckBox
 
     /** ando (notes/ando.md) toggle. Off by default, shown for all
-     *  methods; persisted across rotations. */
+     * methods; persisted across rotations. */
     private var andoEnabled: Boolean = false
 
     private lateinit var formScroll: ScrollView
@@ -91,6 +94,16 @@ class InstallActivity : AppCompatActivity() {
     private lateinit var locationLabel: TextView
     private lateinit var installButton: MaterialButton
     private lateinit var scaffold: me.phie.tawc.ui.Scaffold
+    
+    // Кастомный метод распаковки
+    private lateinit var customMethod: CustomTarballMethod
+
+    // Launcher для выбора кастомного архива дистрибутива
+    private val pickFileLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { handleCustomFile(it) }
+    }
 
     /**
      * Resolved id for the Install button. Tracks (label → slug → unique)
@@ -102,9 +115,13 @@ class InstallActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        customMethod = CustomTarballMethod(this)
+        
         selectedMethod = savedInstanceState?.getString(KEY_METHOD)
         selectedDistro = savedInstanceState?.getString(KEY_DISTRO)
         labelEdited = savedInstanceState?.getBoolean(KEY_LABEL_EDITED) == true
+        
         useCacheProxy = when {
             savedInstanceState?.containsKey(KEY_USE_PROXY) == true ->
                 savedInstanceState.getBoolean(KEY_USE_PROXY)
@@ -114,6 +131,7 @@ class InstallActivity : AppCompatActivity() {
             else -> false
         }
         andoEnabled = savedInstanceState?.getBoolean(KEY_ANDO) == true
+
         pendingBinds.clear()
         savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
             pendingBinds.addAll(
@@ -123,29 +141,25 @@ class InstallActivity : AppCompatActivity() {
         }
 
         scaffold = buildChildScreen(getString(R.string.title_install))
-
         val pad = (16 * resources.displayMetrics.density).toInt()
+        
         formSection = buildFormSection(pad, savedInstanceState?.getString(KEY_LABEL_TEXT))
+
         // Wrap the form in a ScrollView so the soft keyboard can lift
         // the EditText into view without ever covering the Install
-        // button on a small phone. The scaffold's content column is
-        // MATCH_PARENT, so the scroll view fills it; the inner
-        // formSection is WRAP_CONTENT and grows naturally.
+        // button on a small phone.
         formScroll = ScrollView(this).apply {
             isFillViewport = true
             addView(formSection, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
+        
         scaffold.content.addView(formScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
         setContentView(scaffold.root)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_LABEL_EDITED, labelEdited)
-        // Guard the late-init lookup the same way [revalidate] does —
-        // saving state can in principle fire before the form is built
-        // if a future onCreate path bails early.
         if (::labelField.isInitialized) {
             outState.putString(KEY_LABEL_TEXT, labelField.text.toString())
         }
@@ -159,38 +173,15 @@ class InstallActivity : AppCompatActivity() {
     private fun buildFormSection(pad: Int, savedLabelText: String?): LinearLayout {
         val s = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        // List the distros that match the host's primary ABI. Empty
-        // list means no Distro supports this device; render an
-        // explanatory line rather than a dead radio group, and let
-        // the service-level gate refuse the install if the user taps
-        // anyway.
         val available = DistroRegistry.availableForHost()
         val initialDistro = (selectedDistro ?: available.firstOrNull()?.key)
         selectedDistro = initialDistro
 
         s.addView(buildDistroPicker(available, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
-
         s.addView(buildInstallDirField(available, savedLabelText), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
-        // Method picker + info link only render when this APK ships
-        // more than one install method. The single-method case (default
-        // for release: tawcroot only) hides both — there's nothing for
-        // the user to choose, and the "What's the difference?" page
-        // would compare a single option against nothing. Saved
-        // instance state overrides the default for rotation.
         if (!EnabledMethods.onlyOne) {
             s.addView(buildMethodPicker(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
-        } else {
-            // Pin the single enabled method as the selection so
-            // beginInstall doesn't fall back to tawcroot's KEY when
-            // the only enabled method happens to be something else.
-            selectedMethod = EnabledMethods.keys.single()
-        }
-
-        if (!EnabledMethods.onlyOne) {
-            // "What's the difference?" link to the install method info
-            // page. Borderless text button so it reads as a help affordance,
-            // not a primary action.
             s.addView(
                 MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
                     text = getString(R.string.install_help_methods)
@@ -201,16 +192,12 @@ class InstallActivity : AppCompatActivity() {
                 },
                 verticalLp(WRAP_CONTENT, WRAP_CONTENT, bottomMargin = pad),
             )
+        } else {
+            selectedMethod = EnabledMethods.keys.single()
         }
 
-        // ando toggle (notes/ando.md) — shown for all methods and build
-        // types, default off. Opt-in, fail-closed. Above the binds row.
         s.addView(buildAndoRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
-        // External-storage binds row: count + Manage button. Hidden
-        // when the build doesn't ship MANAGE_EXTERNAL_STORAGE, and for
-        // non-tawcroot methods (the only consumer of the bind list) —
-        // see updateBindsRow / the method-picker listener.
         if (AllFilesAccess.declared(this)) {
             val row = buildBindsRow()
             bindsRow = row
@@ -218,29 +205,24 @@ class InstallActivity : AppCompatActivity() {
             updateBindsRow()
         }
 
-        // Dev-only "Use cache proxy" checkbox. Hidden in release builds
-        // — production must never even ask the user about a localhost
-        // proxy URL, since it'd never be reachable from a packaged APK.
         if (me.phie.tawc.BuildConfig.DEBUG) {
             s.addView(buildCacheProxyRow(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
         }
 
+        // Кнопка для выбора и установки из локального tarball-архива
+        val customButton = tonalButton("📁 Выбрать кастомный архив (*.tar.xz)") {
+            AppLogger.i("Install", "Opening file picker for custom distro")
+            pickFileLauncher.launch("*/*")
+        }
+        s.addView(customButton, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+
         installButton = primaryButton(getString(R.string.action_install)) { beginInstall() }
         s.addView(installButton, verticalLp(MATCH_PARENT, WRAP_CONTENT))
 
-        // Initial validation pass — populates resolvedId, location row,
-        // and Install button enabled-state from the default label.
         revalidate()
         return s
     }
 
-    /**
-     * Build the distro picker. Lists every [Distro] whose Android ABI
-     * matches the host. Defaults to the first ABI-matching entry
-     * unless saved state nudges otherwise. Hidden when only one distro
-     * matches (the first-class case before Manjaro) so we don't render
-     * a single-choice radio group.
-     */
     private fun buildDistroPicker(available: List<Distro>, pad: Int): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val title = TextView(this).apply { text = getString(R.string.install_distro_label); textSize = 14f }
@@ -269,17 +251,13 @@ class InstallActivity : AppCompatActivity() {
         }
         container.addView(distroGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        val initialKey = selectedDistro?.takeIf { k -> available.any { it.key == k } }
-            ?: available.first().key
+        val initialKey = selectedDistro?.takeIf { k -> available.any { it.key == k } } ?: available.first().key
         selectedDistro = initialKey
         idsByKey.entries.firstOrNull { it.value == initialKey }?.let { distroGroup.check(it.key) }
 
         distroGroup.setOnCheckedChangeListener { _, checkedId ->
             idsByKey[checkedId]?.let {
                 selectedDistro = it
-                // Auto-update the label default when the user hasn't
-                // typed anything custom yet — flipping from "Arch Linux
-                // (x86)" to "Arch Linux ARM" should follow.
                 if (!labelEdited) {
                     val d = available.firstOrNull { it.key == selectedDistro }
                     if (d != null) setLabelTextSilently(d.defaultLabel)
@@ -290,13 +268,6 @@ class InstallActivity : AppCompatActivity() {
         return container
     }
 
-    /**
-     * Build the merged Label / Install-directory block. The user-typed
-     * string is the [Installation.label]; we slugify it into the on-disk
-     * id and render the resulting absolute path on the line directly
-     * below as a quieter monospace echo, which doubles as the hint
-     * shown when the label is empty / unslugifiable / collides.
-     */
     private fun buildInstallDirField(available: List<Distro>, savedLabelText: String?): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val title = TextView(this).apply { text = getString(R.string.install_label_label); textSize = 14f }
@@ -317,10 +288,6 @@ class InstallActivity : AppCompatActivity() {
         }
         container.addView(labelField, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // Single quieter monospace line below the input — when valid,
-        // it's the resolved absolute install path; when invalid (empty
-        // / unslugifiable / collides), it's the explanation in the
-        // same slot. One line of feedback instead of two.
         locationLabel = TextView(this).apply {
             textSize = 12f
             typeface = Typeface.MONOSPACE
@@ -331,13 +298,7 @@ class InstallActivity : AppCompatActivity() {
         return container
     }
 
-    /**
-     * `setText(...)` from inside the activity (e.g. when the distro
-     * radio flips) must not flip [labelEdited] back to true. Wrap
-     * those updates with this guard.
-     */
     private var suppressEditedFlag = false
-
     private fun setLabelTextSilently(text: String) {
         suppressEditedFlag = true
         try {
@@ -347,11 +308,6 @@ class InstallActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Recompute resolvedId, the location row, the hint, and the
-     * Install button's enabled state from the current label. Called on
-     * label edits and distro flips.
-     */
     private fun revalidate() {
         if (!::labelField.isInitialized) return
         val rawLabel = labelField.text.toString().trim()
@@ -380,12 +336,6 @@ class InstallActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * "External storage binds: N" + Manage button. Tapping Manage
-     * round-trips [pendingBinds] through [ManageBindsActivity] so the
-     * binds are settled before the install starts — they're live
-     * during the installation process itself (first boot included).
-     */
     private fun buildBindsRow(): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -406,58 +356,32 @@ class InstallActivity : AppCompatActivity() {
 
     private fun updateBindsRow() {
         bindsCountLabel?.text = getString(R.string.install_external_binds_label, pendingBinds.size)
-        // Only tawcroot consumes the bind list; hide the row when the
-        // user picks a debug method so the form doesn't promise binds
-        // the spawn path would ignore. selectedMethod is always set
-        // before the row exists (pinned for the single-method case,
-        // defaulted by buildMethodPicker otherwise).
         bindsRow?.visibility =
             if (selectedMethod == TawcrootMethod.KEY) View.VISIBLE else View.GONE
     }
 
-    /**
-     * ando toggle ([buildAndoToggleRow], notes/ando.md). Off by
-     * default; drives [andoEnabled], passed to the service by
-     * [beginInstall]. Shown for every method and build type — unlike
-     * binds, ando applies to all install methods.
-     */
     private fun buildAndoRow(): LinearLayout =
         buildAndoToggleRow(this, andoEnabled) { _, checked -> andoEnabled = checked }
 
-    /**
-     * Dev-only "Use cache proxy" checkbox. Drives [useCacheProxy],
-     * which gates whether [beginInstall] passes a `mirrorProxy` URL to
-     * the service. See `notes/cache-proxy.md`.
-     */
     private fun buildCacheProxyRow(): CheckBox {
         cacheProxyCheckbox = CheckBox(this).apply {
             text = getString(R.string.install_use_cache_proxy)
-            isChecked = useCacheProxy ?: true
+            isChecked = useCacheProxy ?: true  
             setOnCheckedChangeListener { _, checked -> useCacheProxy = checked }
         }
         return cacheProxyCheckbox
     }
 
-    /**
-     * Build the method picker. One radio per build-enabled method
-     * ([EnabledMethods]) in recommendation order: tawcroot first as
-     * the default, proot as the established rootless fallback, chroot
-     * last for rooted-only setups. Caller in [buildFormSection] omits
-     * the picker entirely when only one method is enabled.
-     */
     private fun buildMethodPicker(): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val title = TextView(this).apply { text = getString(R.string.install_method_label); textSize = 14f }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-
+        
         methodGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
         val rootAvailable = Su.rootAvailable()
-
-        // Use generateViewId() rather than hand-picked constants —
-        // any literal we'd reach for in the AAPT range collides with
-        // future R.id.* once we add a layout XML.
         val idByKey = mutableMapOf<String, Int>()
         val keyById = mutableMapOf<Int, String>()
+
         for (key in EnabledMethods.keys) {
             val rid = View.generateViewId()
             idByKey[key] = rid
@@ -470,19 +394,13 @@ class InstallActivity : AppCompatActivity() {
                     ChrootMethod.KEY -> getString(R.string.install_method_chroot_requires_root)
                     else -> key
                 }
-                // Chroot greys out on un-rooted devices so the
-                // limitation is visible at the form level.
                 if (key == ChrootMethod.KEY) isEnabled = rootAvailable
             }
             methodGroup.addView(rb, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
         container.addView(methodGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        // Initial selection: saved/intent override if it points at an
-        // enabled method, else the first enabled key (tawcroot under
-        // the default ordering).
-        val initial = selectedMethod?.takeIf { idByKey.containsKey(it) }
-            ?: EnabledMethods.keys.first()
+        val initial = selectedMethod?.takeIf { idByKey.containsKey(it) } ?: EnabledMethods.keys.first()
         idByKey[initial]?.let { methodGroup.check(it) }
         selectedMethod = initial
 
@@ -492,16 +410,26 @@ class InstallActivity : AppCompatActivity() {
         return container
     }
 
+    private fun handleCustomFile(uri: Uri) {
+        val userLabel = labelField.text.toString().trim()
+        val label = if (userLabel.isNotEmpty()) {
+            Installation.slugifyLabel(userLabel) ?: "custom-${System.currentTimeMillis()}"
+        } else {
+            "custom-${System.currentTimeMillis()}"
+        }
+
+        InstallProgress.show(this, "Установка кастомного дистрибутива") { progress ->
+            val success = customMethod.installFromUri(uri, label, progress)
+            if (success) {
+                AppLogger.i("Install", "Custom distro installed: $label")
+                finish()
+            }
+        }
+    }
+
     private fun beginInstall() {
-        // Only the chroot path needs `su`. Proot/tawcroot are rootless
-        // by definition, so a missing-root device fails this check only
-        // if the user picked chroot anyway.
         val methodKey = selectedMethod ?: EnabledMethods.keys.firstOrNull() ?: TawcrootMethod.KEY
         if (methodKey == ChrootMethod.KEY && !Su.rootAvailable()) {
-            // We don't have a panel anymore; surface as a quick
-            // toast-style status on the form. Service-level gate would
-            // also refuse, but a fail-fast at the form level avoids the
-            // service start.
             android.widget.Toast.makeText(
                 this,
                 getString(R.string.install_root_unavailable),
@@ -509,18 +437,12 @@ class InstallActivity : AppCompatActivity() {
             ).show()
             return
         }
-        val targetId = resolvedId ?: return  // button disabled when null
 
+        val targetId = resolvedId ?: return
         val distroKey = selectedDistro
         val labelText = labelField.text.toString().trim().takeIf { it.isNotEmpty() }
-        // Dev-time cache proxy URL: when the (debug-only) checkbox is
-        // on, use the standard local proxy URL; else null. Service-side
-        // gates this on BuildConfig.DEBUG so a release APK ignores any
-        // stray value anyway.
         val mirrorProxyUrl = if (useCacheProxy == true) DEFAULT_PROXY_URL else null
-
-        // Bind list for tawcroot installs; null for methods that
-        // don't consume binds.
+        
         val bindsJson = if (methodKey == TawcrootMethod.KEY && AllFilesAccess.declared(this)) {
             ExternalBind.toJsonArray(pendingBinds).toString()
         } else {
@@ -535,13 +457,7 @@ class InstallActivity : AppCompatActivity() {
             finish()
         }
 
-        // A shared-storage bind without the all-files grant fails
-        // closed at first spawn — i.e. during the install itself. Warn
-        // up front instead of letting the install run for minutes and
-        // then park in FAILED.
-        if (bindsJson != null &&
-            AllFilesAccess.requiresGrant(pendingBinds) && !AllFilesAccess.granted()
-        ) {
+        if (bindsJson != null && AllFilesAccess.requiresGrant(pendingBinds) && !AllFilesAccess.granted()) {
             com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setTitle(getString(R.string.install_binds_grant_title))
                 .setMessage(getString(R.string.install_binds_grant_message))
@@ -556,7 +472,6 @@ class InstallActivity : AppCompatActivity() {
     }
 
     companion object {
-        /** URL the "Use cache proxy" checkbox sets. Debug-only. */
         private const val DEFAULT_PROXY_URL = "http://127.0.0.1:8080/proxy/"
         private const val KEY_METHOD = "tawc.install.method"
         private const val KEY_DISTRO = "tawc.install.distro"
@@ -564,6 +479,6 @@ class InstallActivity : AppCompatActivity() {
         private const val KEY_LABEL_TEXT = "tawc.install.labelText"
         private const val KEY_USE_PROXY = "tawc.install.useCacheProxy"
         private const val KEY_BINDS = "tawc.install.externalBinds"
-        private const val KEY_ANDO = "tawc.install.ando"
+        private const val KEY_ANDO = "tawc.install.ando"   
     }
 }
